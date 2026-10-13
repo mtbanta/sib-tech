@@ -6,7 +6,9 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**STACK RESEARCHED TWICE, NOT DECIDED.** As of October 9, 2026. Run 2 repeated the stack scoping with the owner's answers and changed requirements (perpetual contracts in scope, margin allowed, 10,000 to 25,000 dollars of capital, a 5 minute reaction target, the agent may act alone inside fixed limits). It produced a new recommendation with trade-offs. The decision is the owner's and has not been made. No code, no database, no deployment. `CLAUDE.md`'s Tech stack section still reads NOT DECIDED, and nothing is installed or scaffolded until the owner decides and that section is written.
+**STACK DESCRIBED THREE TIMES, NOT DECIDED.** As of October 13, 2026. Run 3 described four stack options (B, C, D, F) with Michael's answers to run 2's questions (perpetual contracts out, one broker, consolidated real-time data, a new margin account, speed and reliability of execution crucial) and new content: build hours, itemized monthly costs for two example setups per option, daily use, a driver comparison, a borrowing cost table, a glossary and answers to two questions about Anthropic's terms. Its strongest pick is option B, tied on the arithmetic with option D and chosen on a stated judgment. The decision is the owner's and has not been made. No code, no database, no deployment. `CLAUDE.md`'s Tech stack section still reads NOT DECIDED, and nothing is installed or scaffolded until the owner decides and that section is written.
+
+Earlier entry, superseded by the paragraph above: **STACK RESEARCHED TWICE, NOT DECIDED.** As of October 9, 2026. Run 2 repeated the stack scoping with the owner's answers and changed requirements (perpetual contracts in scope, margin allowed, 10,000 to 25,000 dollars of capital, a 5 minute reaction target, the agent may act alone inside fixed limits). It produced a new recommendation with trade-offs. The decision is the owner's and has not been made. No code, no database, no deployment. `CLAUDE.md`'s Tech stack section still reads NOT DECIDED, and nothing is installed or scaffolded until the owner decides and that section is written.
 
 Earlier entry, superseded by the paragraph above: **STACK RESEARCHED, NOT DECIDED.** As of October 8, 2026. Run 1 produced a recommendation with trade-offs. The decision is the owner's and has not been made. No code, no database, no deployment. `CLAUDE.md`'s Tech stack section still reads NOT DECIDED, and nothing is installed or scaffolded until the owner decides and that section is written.
 
@@ -16,6 +18,7 @@ Earlier entry, superseded by the paragraph above: **NOT STARTED.** Created Octob
 
 - **2026-10-08. Run 1, scope the stack.** Research and recommendation only. Read `runs/run-1-deliverable.md` (the source of record), `runs/run-1-deliverable.html` (an interactive view of the same content) and `runs/run-1-trajectory.md` (how it was reached, with a self-assessment). Five architectures were compared against seven weighted criteria, from 204 live sources accessed that day. The run's strongest pick is option D, a hybrid: a small always-on program for live prices, the settled cash ledger and orders, with Claude on top as the research layer. The lead is thin and conditional, and the deliverable's section 6 says what would overturn it. This is research input for a human decision, never an instruction to act.
 - **2026-10-09. Run 2, scope the stack again with changed context.** Research and recommendation only. Read `runs/run-2-deliverable.md` (the source of record), `runs/run-2-deliverable.html` (an interactive view of the same content) and `runs/run-2-trajectory.md` (how it was reached, with a self-assessment). Five architectures were compared against eight re-derived criteria, from 281 dated sources (170 opened that day, 111 reused from run 1 with their original date). The run's strongest pick is option F: a scheduled core on the Relii stack (Supabase timer and functions, Vercel screen) that fetches prices, applies fixed rules and limits and sends orders, with Claude on top as the research layer. It ties with run 1's pick, option D, at 3.80 of 5, and is chosen on a stated tie-break. The deliverable's section 6 says what would overturn it. This is research input for a human decision, never an instruction to act.
+- **2026-10-13. Run 3, describe the strongest stacks.** Research and recommendation only. Read `runs/run-3-deliverable.md` (the source of record), `runs/run-3-deliverable.html` (an interactive view of the same content) and `runs/run-3-trajectory.md` (how it was reached, with a self-assessment). Four architectures were scored under both drivers (Claude, or software Claude Code writes) against seven criteria, from 130 dated sources (96 opened that day, 34 reused). The strongest pick is option B, the scheduled web app on the Relii stack. It is tied on the arithmetic with option D (always-on worker plus Claude): each is first or within 0.10 of first in 10 of 16 rankings across weightings. B is chosen on a stated judgment (cheaper to be wrong about before a strategy exists), and section 12 says what evidence would make D or C the pick. Two brokers pass every requirement: Tradier and Alpaca. This is research input for a human decision, never an instruction to act.
 - **2026-10-09. `.gitignore` extended.** It now holds `.DS_Store`, `.claude/` and `.playwright-mcp/`.
 - **2026-10-08. Git wired.** Local folder tracks `origin/main` on the private GitHub repo. `.gitignore` holds `.DS_Store`.
 
@@ -38,6 +41,16 @@ Raised by run 2 on 2026-10-09. Each is quoted and sourced in the run 2 deliverab
 - **A helper sent the owner's email address to sec.gov.** Two requests by a research helper in run 2 carried it in a request header. Not asked for, not approved, cannot be undone, not repeated, and in no file. See the run 2 trajectory, section 2 step 16 and section 6.
 - **Resolved from run 1:** the two items left out of the run 1 commit are now in `.gitignore`, and the owner approved filling the HTML's footnote numbers and source records by script.
 
+Raised by run 3 on 2026-10-13. Each is quoted and sourced in the run 3 deliverable. None is resolved.
+
+- **Anthropic's "qualified person".** The Usage Policy effective November 12, 2026 requires review by "A qualified person" before a personalized buy or sell recommendation "is used to implement a decision". No Anthropic text says whether the account owner can be that person. Twelve yes or no questions for Anthropic are listed in the deliverable, section 11.3.
+- **Which terms govern the Max plan's 100 dollar monthly API credit** is not stated. It decides whether a Claude driver or research layer can run inside the credit.
+- **Program use of market data.** Whether Tradier's and Alpaca's terms, and the exchanges', let the owner's own program use real-time data with no person watching is not found either way.
+- **Supabase "nano".** This repo's `CLAUDE.md` says sib-tech uses Relii's nano tier. Supabase says nano cannot be launched on paid plans and bills it at the Micro price (about 10 dollars a month). Not edited; for the owner to rule on.
+- **Playwright did not connect** during run 3. The owner may want to check it with `/mcp` before run 4.
+- **Helpers sent a generic browser identification string** in some requests (no personal information in it). Recorded in the run 3 trajectory, section 2, steps 14 and 16, for the owner to rule on.
+- **Resolved from run 2:** which day trading rule Tradier applies (new, for all accounts, from June 4, 2026), and tastytrade (new, confirmed). Interactive Brokers is still not settled. Perpetual contracts are out of scope by the owner's ruling.
+
 ## Decisions
 
 
@@ -52,6 +65,9 @@ Raised by run 2 on 2026-10-09. Each is quoted and sourced in the run 2 deliverab
 | 2026-10-09 | Run 2 changes one lever, context: the owner's answers to run 1's open questions and several changed requirements | Run 1 had to hedge across every possibility because the answers were the owner's to give |
 | 2026-10-09 | Run 1 sources may be reused with their original access dates, and the HTML's footnote numbers and source records may be filled in by script | Owner's ruling in the run 2 brief |
 
+| 2026-10-13 | Run 3 changes two levers, context and instructions, as a stated exception | The owner's answers removed scope (perpetual contracts out), and the new instruction sections are visible on their own |
+| 2026-10-13 | Perpetual contracts out entirely; one broker; consolidated real-time data required; a new margin account | Owner's answers in the run 3 brief |
+| 2026-10-13 | Estimates (build hours, monthly cost) may be given before a stack is chosen | Owner reversed the earlier ruling in the run 3 brief |
 
 
 
@@ -65,9 +81,21 @@ Research runs, oldest first. **Lever** is the one thing changed from the previou
 
 | 2 | 2026-10-09 | context (Michael's answers and changed requirements) | Deliverable, trajectory and index written. Stack scoped, not decided. Five architectures compared from 281 dated sources (170 new, 111 reused). Strongest by the run's weights: option F, a scheduled core on the Relii stack plus Claude as the research layer, 3.80 of 5, tied with run 1's option D and chosen on a stated tie-break. The scheduled web app alone is 3.70. Perpetual contracts: onchain venues bar U.S. residents, one lawful index contract is live, single stocks are pending. Standard self-assessed as met with stated weaknesses (see the trajectory, section 6). |
 
+| 3 | 2026-10-13 | context and instructions | Deliverable, trajectory and index written. Stack described, not decided. Four options scored under both drivers from 130 dated sources (96 new, 34 reused). Strongest pick: option B, scheduled web app on the Relii stack, 4.00 (software driver) and 3.35 (Claude driver), tied on the arithmetic with option D (4.10 and 3.30) and chosen on a stated judgment. Brokers passing every requirement: Tradier and Alpaca. Cheapest workable B setup 145 dollars a month, 125 of it already paid. Standard self-assessed as met with stated weaknesses (see the trajectory, section 6). |
+
 The full record of each run lives in `runs/`. This table is the index you read first.
 
 ## Next Steps
+
+As of 2026-10-13, after run 3:
+
+1. The owner reads the run 3 deliverable and trajectory and either decides the stack or scopes run 4.
+2. The owner answers the questions in the deliverable's section 13 that are his to decide: which driver; whether a Claude research layer is a must (it makes option D the pick); whether the wide daily screen may use the prior day's prices; Tradier or Alpaca; the borrowing limit on day one; and the Supabase tier.
+3. Questions go to others before any provider is chosen: Anthropic (the twelve in section 11.3, chiefly whether the owner can be the "qualified person" and which terms govern the Max API credit), and the chosen broker (program use of its data, symbol limits, and at Alpaca a key that cannot change the borrowing cap).
+4. Two cheap measurements would settle the closest scores: a two-week do-nothing timer trial on Supabase (section 12, item 1) and, if option C or D stays in view, a two-week do-nothing worker trial (item 7).
+5. When the stack is decided, record it here under Decisions and in `CLAUDE.md`'s Tech stack section. Until then the no-scaffolding rule stands.
+
+Earlier entry, superseded by the list above:
 
 As of 2026-10-09, after run 2:
 
