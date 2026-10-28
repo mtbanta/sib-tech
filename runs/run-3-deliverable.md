@@ -1,5 +1,22 @@
 # Run 3 deliverable: the strongest stacks, described
 
+## Update, run 4, 2026-10-28
+
+**Key point: run 4 compared four messaging apps and picked Discord over Telegram. Every place this document named Telegram as the alert or command app now names Discord. Costs, scores, hours and the pick (option C) are unchanged.**
+
+- **Why.** Discord scored 4.53 of 5 against Telegram's 4.28. Both are free with no history limit found, but Telegram discards a bot's unread messages after 24 hours, so a stop sent while a stack sleeps can vanish, and a Telegram account can only be tied to a phone number, not a sib-tech email. The full comparison is in `runs/run-4-deliverable.md`.
+- **What changed here, item by item.**
+  - Section 3.1, cost band 0: "Telegram alerts" became "Discord alerts and commands".[^131]
+  - Option B's "Categories, candidates, coverage and cost bands" table: the alerts row names Discord (free).
+  - Tool tables: both example setups of options B and C, and setup 1 of options D and F. Telegram became Discord, plan "Free", 0.00 dollars, citing footnote 131. Setup 2 of D and F ("As option C", "As option B") changed the same way.
+  - Every monthly total is unchanged, because both apps cost 0.00.
+  - Option B's build hours, step 0: "set up the Telegram bot and heartbeat" became "set up the Discord server, bot and heartbeat", still 0.5 hours (an estimate, my judgment).
+  - Option B's cheapest setup note: Michael stops the agent from Discord.
+  - Option C's run mode "On demand" and build pieces: Telegram became Discord.
+  - "How Michael uses it", options B, C, D and F: each Telegram post, stop command and alert now names Discord.[^133] The stop is read at the next run even if it was sent while the stack slept. Options B and C add a one-time test of whether Discord holds phone alerts while its desktop app is open.
+  - Healthchecks.io alerts in options B and C now say they arrive through Discord.[^132]
+  - Section 14: footnotes 131 to 133 added, dated 2026-10-28. Footnote 10 (Telegram) is kept for the record and marked no longer cited.
+
 ## Correction, 2026-10-28
 
 **Key point: the pick changes from B to C, the always-on worker. Run 3 scored C's "On demand" mode 3 while giving B, D and F a 5 for the same fact. Scored consistently, C is first under both drivers by more than the 0.10 tie rule.**
@@ -150,7 +167,7 @@ Per month, in U.S. dollars. "What it typically buys" is drawn from the prices in
 
 | Band | Range | What that level of spending typically buys here |
 | :-- | :-- | :-- |
-| 0 | Free | Telegram alerts,[^10] Healthchecks.io's free heartbeats,[^11] GitHub's free plan,[^12] Tradier's included data,[^13] Alpaca's single-exchange data[^2] |
+| 0 | Free | Discord alerts and commands,[^131] Healthchecks.io's free heartbeats,[^11] GitHub's free plan,[^12] Tradier's included data,[^13] Alpaca's single-exchange data[^2] |
 | 1 | 1 to 25 | A Supabase project (10),[^14] Tradier Pro (10),[^15] a small always-on server (2.19 to 6.70),[^16] Vercel Pro (20),[^17] a Claude driver on Haiku (about 4.50, estimate)[^18] |
 | 2 | 26 to 100 | Consolidated real-time data for a program (Alpaca, 99),[^2] the Max plan (100),[^19] a Claude driver on Sonnet (about 90, estimate)[^18] |
 | 3 | 101 to 300 | Professional-scale data such as Databento's or Massive's top retail plans (199),[^20][^2] a Claude driver on Opus (about 180, estimate)[^18] |
@@ -532,7 +549,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 | Where it runs | Supabase timer and functions in an additional project, about 10 a month.[^105][^14] Optional Vercel Pro screen, 20[^17] | 1 |
 | Memory | The same Supabase database[^105] | Inside the above |
 | Price data | The broker's own consolidated data (Tradier, included),[^13] or Alpaca's Algo Trader Plus (99)[^2] | 0 or 2 |
-| Alerts and heartbeat | Telegram (free),[^10] Healthchecks.io (free for 20 checks),[^11] Pushover (4.99 once)[^106] | 0 |
+| Alerts and heartbeat | Discord (free),[^131] Healthchecks.io (free for 20 checks),[^11] Pushover (4.99 once)[^106] | 0 |
 | Brokerage | Tradier or Alpaca (section 7.4) | 0 to 1 |
 
 - **Universe coverage.** Both data sources cover every U.S. exchange.[^13][^2] A wide daily screen of thousands of names fits Alpaca's 10,000 data calls a minute.[^2] At Tradier the per-request symbol limit is not published and Tradier warns against "asking for an entire exchange's worth of symbols", so the wide screen should be tested gently or drawn from prior-day data.[^71]
@@ -580,7 +597,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 
 | Phase | What Michael does | Hours, software driver | Hours, Claude driver |
 | :-- | :-- | :-- | :-- |
-| 0. Decide and set up accounts | Read and decide (2), open and fund the margin account and get the API token (2), create the Supabase project (0.5), set up the Telegram bot and heartbeat (0.5). Claude driver: open the Anthropic Console organization (0.5) | 5.0 | 5.5 |
+| 0. Decide and set up accounts | Read and decide (2), open and fund the margin account and get the API token (2), create the Supabase project (0.5), set up the Discord server, bot and heartbeat (0.5). Claude driver: open the Anthropic Console organization (0.5) | 5.0 | 5.5 |
 | 1. Build pieces | 8 pieces: database and limits; broker connection in practice mode; prices (daily screen and live list); decision rules (or the Claude decision step); limit checks and order sending with broker-held stops; timer, run log and end-of-day close-out; alerts, heartbeat and off switch; a rehearsal on a recorded day. Three touch money (2.5 hours each), five do not (1.5 each). Claude driver: the decision step also touches money. The recommended setup adds a screen (1.5) | 15.0 (16.5 with the screen) | 16.0 (17.5) |
 | 2. Practice trading | Two weeks: 15 minutes a session reading the log, one review hour a week. Claude driver: one more review hour reading the model's decisions | 4.5 | 5.5 |
 | 3. First live week | 30 minutes a session, plus a review | 3.0 | 3.0 |
@@ -597,14 +614,14 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 | Supabase | Pro organization | Holds the projects. **Already paid** | 25.00 | Published | [^105] |
 | Supabase | Additional project, Micro compute | Database, timer, functions, run log, limits | 10.00 | Published | [^14] |
 | Tradier | Pro plan | Broker: margin account, orders, broker-held stops, consolidated real-time data included | 10.00 | Published | [^15][^13] |
-| Telegram | Bot platform | Alerts, and a stop command | 0.00 | Published | [^10] |
+| Discord | Free | Alerts, and a stop command | 0.00 | Published | [^131] |
 | Healthchecks.io | Hobbyist | Heartbeat: alerts when a run is missed | 0.00 | Published | [^11] |
 | GitHub | Free | Stores the code. **Already paid (free tier)** | 0.00 | Published | [^12] |
 | Claude API | Haiku 5.5, pay as you go | **Claude driver only:** decides each trade, one call every 5 minutes | 4.50, estimate | Estimate on published prices | [^18][^44] |
 
 - **Monthly total, software driver: 145.00 dollars.** New spending: 20.00.
 - **Monthly total, Claude driver: 149.50 dollars (estimate).** New spending: 24.50, or 20.00 if the Max plan's 100 dollar API credit covers the model calls, which depends on which terms govern that credit (section 11).[^3][^48]
-- No screen: Vercel Hobby is "non-commercial personal use only", and a trading dashboard sits near that line, so this setup leaves it out.[^17] Michael looks at the log through Claude or the Supabase dashboard, and stops the agent from Telegram or the broker's own app.
+- No screen: Vercel Hobby is "non-commercial personal use only", and a trading dashboard sits near that line, so this setup leaves it out.[^17] Michael looks at the log through Claude or the Supabase dashboard, and stops the agent from Discord or the broker's own app.
 - Trading costs are extra: Tradier Pro charges 0 a stock trade, with regulatory pass-through fees on sales.[^94] Lite is 0 a month and 0.35 a trade, cheaper below about 29 trades a month (my arithmetic).[^15]
 - Borrowing is priced separately (section 8).
 - **Gap in this setup: the wide morning screen.** Tradier does not publish how many symbols one quote request may carry, and warns against "asking for an entire exchange's worth of symbols".[^71] The fallback, Alpaca's free prior-day history, needs an Alpaca account, and whether a data-only account is possible was not verified.[^2] So this setup meets the live-list requirement on published facts, and the wide screen only on a gentle test (my judgment).
@@ -619,7 +636,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 | Vercel | Pro | A screen with positions, limits, the log and an off switch, pinned to Oregon | 20.00 | Published | [^17][^42] |
 | Alpaca | Brokerage account | Broker: margin account, orders, brackets and trailing stops held at the broker, a borrowing cap Michael sets | 0.00 (no commission) | Published | [^95][^30][^22] |
 | Alpaca | Algo Trader Plus | Real-time data from all U.S. exchanges, unlimited streaming symbols, 10,000 data calls a minute | 99.00 | Published | [^2] |
-| Telegram | Bot platform | Alerts, and a stop command | 0.00 | Published | [^10] |
+| Discord | Free | Alerts, and a stop command | 0.00 | Published | [^131] |
 | Healthchecks.io | Hobbyist | Heartbeat | 0.00 | Published | [^11] |
 | Pushover | Individual | A second alert route to the phone. 4.99 once per platform, not monthly | 0.00 | Published | [^106] |
 | GitHub | Free | Stores the code. **Already paid (free tier)** | 0.00 | Published | [^12] |
@@ -633,8 +650,8 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 **How Michael uses it.**
 
 - **A day with this stack.**
-  - Before the open: the screen run picks the day's live list and posts it to Telegram. Michael glances at it on his phone.
-  - During the session: nothing to do. Every minute a run checks prices and acts inside the limits. Each order and each fill posts to Telegram.
+  - Before the open: the screen run picks the day's live list and posts it to the stack's Discord server. Michael glances at it on his phone.
+  - During the session: nothing to do. Every minute a run checks prices and acts inside the limits. Each order and each fill posts to Discord.
   - After the close: the close-out run confirms nothing borrowed is held overnight beyond the limit, and posts a summary of the day.
 - **What he checks.**
   - The end-of-day summary: trades, profit or loss, borrowing used, any refused orders.
@@ -645,12 +662,13 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
   - The rules themselves, or the Claude driver's instructions: only through a new Claude Code build piece, tested in practice mode first.
   - At Alpaca, the borrowing cap of 1, 2 or 4 in the account settings.[^22]
 - **How he stops it.**
-  - A stop command in Telegram, or the off switch on the screen, which sets a flag every run checks first.
+  - A stop typed in the stack's Discord command channel, or the off switch on the screen. Either sets a flag every run checks first, and the next run reads the stop even if it was sent while the stack slept.[^133]
   - At Alpaca, the "suspend_trade" switch blocks all new orders at the broker.[^22]
   - In any case, the broker's own app can cancel orders and close positions.
 - **What alerts he gets, and how.**
-  - Telegram: every order and fill, every refused order, the daily summary, any error.
-  - Healthchecks.io: an alert through Telegram or Pushover when a run is missed.[^11]
+  - Discord: every order and fill, every refused order, the daily summary, any error.
+  - Healthchecks.io: an alert through Discord or Pushover when a run is missed.[^11][^132]
+  - Users report that Discord can hold phone alerts while its desktop app is open. This is unconfirmed, so Michael tests it once and closes the desktop app during market hours if needed (run 4 deliverable, section 6, item 1).
   - Pushover (recommended setup): urgent alerts only, such as a daily loss stop or a margin warning.
 
 **Pros.**
@@ -734,7 +752,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 | On a schedule | 5 | Any interval (my inference: a running program keeps its own clock) |
 | Event, callback | 4 | A running server can receive web requests (my inference) |
 | Event, price event | 5 | Seconds. Its purpose |
-| On demand | 5 | Ask Claude, which reads the database, as in option B (corrected). Telegram commands could add a way to start a run (my judgment) |
+| On demand | 5 | Ask Claude, which reads the database, as in option B (corrected). Discord commands could add a way to start a run (my judgment) |
 | Memory kept across runs | 5 | The database |
 | Each run independent | 4 | Possible by design, though a long-running program naturally carries state |
 
@@ -743,7 +761,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 | Phase | What Michael does | Hours, software driver | Hours, Claude driver |
 | :-- | :-- | :-- | :-- |
 | 0. Decide and set up accounts | As option B, plus a Fly.io account (0.5) | 5.5 | 6.0 |
-| 1. Build pieces | 9 pieces: database; broker connection in practice mode; the worker on Fly.io with its restart policy; the live stream with reconnection, plus the daily screen; decision rules (or the Claude step); limit checks and order sending; end-of-day close-out; alerts, heartbeat and Telegram stop command; a rehearsal on a recorded day. Three touch money (2.5 each), six do not (1.5 each) | 16.5 | 17.5 |
+| 1. Build pieces | 9 pieces: database; broker connection in practice mode; the worker on Fly.io with its restart policy; the live stream with reconnection, plus the daily screen; decision rules (or the Claude step); limit checks and order sending; end-of-day close-out; alerts, heartbeat and Discord stop command; a rehearsal on a recorded day. Three touch money (2.5 each), six do not (1.5 each) | 16.5 | 17.5 |
 | 2. Practice trading | As option B | 4.5 | 5.5 |
 | 3. First live week | As option B | 3.0 | 3.0 |
 | **Total** | | **29.5** | **32.0** |
@@ -759,7 +777,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 | Supabase | Additional project, Micro compute | Memory: positions, limits, the run log | 10.00 | Published | [^14] |
 | Fly.io | shared-cpu-1x, 256 MB, always on | Runs the worker all session | 2.19 | Published | [^16] |
 | Tradier | Pro plan | Broker, broker-held stops, consolidated real-time data and stream included | 10.00 | Published | [^15][^13] |
-| Telegram | Bot platform | Alerts, and a stop command | 0.00 | Published | [^10] |
+| Discord | Free | Alerts, and a stop command | 0.00 | Published | [^131] |
 | Healthchecks.io | Hobbyist | Heartbeat: alerts when the worker stops pinging | 0.00 | Published | [^11] |
 | GitHub | Free | Stores the code. **Already paid (free tier)** | 0.00 | Published | [^12] |
 | Claude API | Haiku 5.5 | **Claude driver only:** one decision call every 5 minutes | 4.50, estimate | Estimate on published prices | [^18][^44] |
@@ -779,7 +797,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 | Fly.io | shared-cpu-1x, 1 GB, always on | Runs the worker with memory headroom | 6.70 | Published | [^16] |
 | Alpaca | Brokerage account | Broker, brackets and trailing stops held at the broker, a borrowing cap | 0.00 (no commission) | Published | [^95][^30][^22] |
 | Alpaca | Algo Trader Plus | Consolidated real-time stream, unlimited symbols | 99.00 | Published | [^2] |
-| Telegram | Bot platform | Alerts, and a stop command | 0.00 | Published | [^10] |
+| Discord | Free | Alerts, and a stop command | 0.00 | Published | [^131] |
 | Healthchecks.io | Hobbyist | Heartbeat | 0.00 | Published | [^11] |
 | Pushover | Individual | Second alert route. 4.99 once per platform | 0.00 | Published | [^106] |
 | GitHub | Free | **Already paid (free tier)** | 0.00 | Published | [^12] |
@@ -792,7 +810,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 **How Michael uses it.**
 
 - **A day with this stack.**
-  - Before the open: the worker wakes, screens the universe, posts the live list to Telegram.
+  - Before the open: the worker wakes, screens the universe, posts the live list to Discord.
   - During the session: nothing to do. The worker reacts to each price change within seconds and posts each order and fill.
   - After the close: the close-out step confirms positions are within the overnight limit, posts the day's summary, and the worker idles until the next morning.
 - **What he checks.**
@@ -800,16 +818,17 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
   - Weekly: the broker's statement against the log.
   - Anything else, by asking Claude, which reads the run log and positions in the database, as in option B.
 - **What he can change, and how.**
-  - Limits: in a settings table, by asking Claude Code, or (if built) by a Telegram command.
+  - Limits: in a settings table, by asking Claude Code, or (if built) by a Discord command.
   - Rules or Claude's instructions: a new Claude Code build piece, tested in practice mode first.
   - At Alpaca, the borrowing cap of 1, 2 or 4.[^22]
 - **How he stops it.**
-  - A Telegram stop command, which the worker checks before every order.
+  - A stop typed in the stack's Discord command channel, which the worker reads before every order.[^133]
   - At Alpaca, the "suspend_trade" switch.[^22] At either broker, the broker's own app.
   - Stopping the server itself from the Fly.io dashboard (my inference; not documented in the pages read).
 - **What alerts he gets, and how.**
-  - Telegram: orders, fills, refusals, errors, the daily summary, a "stream reconnected" notice.
-  - Healthchecks.io: an alert when the worker stops pinging, which is how a stuck worker shows up.[^11]
+  - Discord: orders, fills, refusals, errors, the daily summary, a "stream reconnected" notice.
+  - Healthchecks.io: an alert through Discord when the worker stops pinging, which is how a stuck worker shows up.[^11][^132]
+  - As option B: test once whether Discord holds phone alerts while its desktop app is open.
 
 **Pros.**
 
@@ -909,7 +928,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 | Supabase | Additional project, Micro compute | Shared memory for both layers | 10.00 | Published | [^14] |
 | Fly.io | shared-cpu-1x, 256 MB | The worker | 2.19 | Published | [^16] |
 | Tradier | Pro plan | Broker and consolidated real-time data | 10.00 | Published | [^15][^13] |
-| Telegram | Bot platform | Alerts, and a stop command | 0.00 | Published | [^10] |
+| Discord | Free | Alerts, and a stop command | 0.00 | Published | [^131] |
 | Healthchecks.io | Hobbyist | Heartbeat for the worker and for the research run | 0.00 | Published | [^11] |
 | GitHub | Free | **Already paid (free tier)** | 0.00 | Published | [^12] |
 | Claude API | Research layer runs, inside the Max credit | Morning research and the live list | 0.00 within the credit, estimate | Estimate | [^3] |
@@ -931,7 +950,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 | Fly.io | shared-cpu-1x, 1 GB | The worker | 6.70 | Published | [^16] |
 | Alpaca | Brokerage account | Broker, broker-held brackets and trailing stops, borrowing cap | 0.00 (no commission) | Published | [^95][^30][^22] |
 | Alpaca | Algo Trader Plus | Consolidated real-time stream | 99.00 | Published | [^2] |
-| Telegram, Healthchecks.io, Pushover | As option C | Alerts and heartbeats | 0.00 | Published | [^10][^11][^106] |
+| Discord, Healthchecks.io, Pushover | As option C | Alerts and heartbeats | 0.00 | Published | [^131][^11][^106] |
 | GitHub | Free | **Already paid (free tier)** | 0.00 | Published | [^12] |
 | Claude API | Sonnet 5.5 | **Claude driver only:** one decision call every 5 minutes | 90.00, estimate | Estimate on published prices | [^18][^44] |
 
@@ -941,7 +960,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 **How Michael uses it.**
 
 - **A day with this stack.**
-  - Before the open: the Claude research run reads filings and news, writes notes and the live list to the database, and posts a short briefing to Telegram. The worker picks the list up.
+  - Before the open: the Claude research run reads filings and news, writes notes and the live list to the database, and posts a short briefing to Discord. The worker picks the list up.
   - During the session: nothing to do. The worker acts in seconds and posts each order and fill. Michael can ask Claude, at any time, "what did it do and why?"
   - After the close: the worker's close-out runs, and Claude can write a short review of the day.
 - **What he checks.**
@@ -952,10 +971,10 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
   - What the research layer looks at: its instructions file, changed through Claude Code.
   - The worker's rules: a new build piece, tested in practice mode.
 - **How he stops it.**
-  - A Telegram stop command for the worker. Pausing the research layer's schedule stops the morning list.
+  - A Discord stop command for the worker.[^133] Pausing the research layer's schedule stops the morning list.
   - At Alpaca, "suspend_trade".[^22] At either broker, the broker's own app.
 - **What alerts he gets, and how.**
-  - Telegram: as option C, plus the morning briefing.
+  - Discord: as option C, plus the morning briefing.
   - Healthchecks.io: a missing worker ping or a research run that did not report.
 
 **Pros.**
@@ -1052,7 +1071,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 | Supabase | Pro organization | **Already paid** | 25.00 | Published | [^105] |
 | Supabase | Additional project, Micro compute | Shared database, timer, functions | 10.00 | Published | [^14] |
 | Tradier | Pro plan | Broker and consolidated real-time data | 10.00 | Published | [^15][^13] |
-| Telegram | Bot platform | Alerts, briefing, stop command | 0.00 | Published | [^10] |
+| Discord | Free | Alerts, briefing, stop command | 0.00 | Published | [^131] |
 | Healthchecks.io | Hobbyist | Heartbeats for the core and the research run | 0.00 | Published | [^11] |
 | GitHub | Free | **Already paid (free tier)** | 0.00 | Published | [^12] |
 | Claude API | Research layer runs, inside the Max credit | Morning research and the live list | 0.00 within the credit, estimate | Estimate | [^3] |
@@ -1072,7 +1091,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 | Vercel | Pro | Screen and off switch, pinned to Oregon | 20.00 | Published | [^17][^42] |
 | Alpaca | Brokerage account | Broker, broker-held brackets and trailing stops, borrowing cap | 0.00 (no commission) | Published | [^95][^30][^22] |
 | Alpaca | Algo Trader Plus | Consolidated real-time data | 99.00 | Published | [^2] |
-| Telegram, Healthchecks.io, Pushover | As option B | Alerts and heartbeats | 0.00 | Published | [^10][^11][^106] |
+| Discord, Healthchecks.io, Pushover | As option B | Alerts and heartbeats | 0.00 | Published | [^131][^11][^106] |
 | GitHub | Free | **Already paid (free tier)** | 0.00 | Published | [^12] |
 | Claude API | Sonnet 5.5 | **Claude driver only:** one decision call every 5 minutes | 90.00, estimate | Estimate on published prices | [^18][^44] |
 
@@ -1082,8 +1101,8 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 **How Michael uses it.**
 
 - **A day with this stack.**
-  - Before the open: the research run writes notes and the live list, and posts a briefing to Telegram.
-  - During the session: nothing to do. Every minute the core checks the list and acts inside the limits. Orders and fills post to Telegram.
+  - Before the open: the research run writes notes and the live list, and posts a briefing to Discord.
+  - During the session: nothing to do. Every minute the core checks the list and acts inside the limits. Orders and fills post to Discord.
   - After the close: the core's close-out run, and an optional Claude review of the day.
 - **What he checks.** The briefing, the evening summary, the screen (recommended setup), and that the heartbeats stayed quiet.
 - **What he can change, and how.**
@@ -1091,7 +1110,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
   - The research layer's instructions, through Claude Code.
   - The rules: a new build piece, tested in practice mode.
   - At Alpaca, the borrowing cap.[^22]
-- **How he stops it.** The screen's off switch or a Telegram command; pausing the research schedule; at Alpaca, "suspend_trade";[^22] the broker's own app.
+- **How he stops it.** The screen's off switch or a Discord command;[^133] pausing the research schedule; at Alpaca, "suspend_trade";[^22] the broker's own app.
 - **What alerts he gets, and how.** As option B, plus the morning briefing.
 
 **Pros.**
@@ -1338,7 +1357,9 @@ Each is a yes or no question Michael could send to Anthropic. The texts read lea
 
 ## 14. Sources
 
-130 sources. 96 were opened in run 3 and carry the access date 2026-10-13. 34 are reused from runs 1 and 2 with their original access dates and labels, as the brief allows. Strength labels and price labels are defined in section 5. The register ID at the end of each entry points to the fuller note, with a quote, in the named file.
+133 sources. 96 were opened in run 3 (dated 2026-10-13), three were added by run 4 (131 to 133, dated 2026-10-28), and 34 are reused from runs 1 and 2 with their original access dates and labels, as the brief allows.
+
+Strength labels and price labels are defined in section 5. The register ID at the end of each entry points to the fuller note, with a quote, in the named file.
 
 [^1]: "What are the Pattern Day Trading rules that apply to margin accounts?" (Tradier support), "FAQ" and "Market Data" (Tradier API docs), main-session check. https://support.tradier.com/kb/guide/en/general-trading-faq-QgwvDZHiwB/Steps/4532869 . Accessed 2026-10-13. Strength A. Register ID R3-S11 in `runs/run-3-trajectory.md`.
 [^2]: "About Market Data API" (Alpaca docs); "Market Data Terms of Service" (Massive); "Compute and Disk" (Supabase docs), main-session check. https://docs.alpaca.markets/docs/about-market-data-api.md . Accessed 2026-10-13. Strength A. Price label: published. Register ID R3-S10 in `runs/run-3-trajectory.md`.
@@ -1349,7 +1370,7 @@ Each is a yes or no question Michael could send to Anthropic. The texts read lea
 [^7]: "Market Data API Overview" (Webull developer docs) and "Open API" (Webull). https://developer.webull.com/apis/docs/market-data-api/overview/ . Accessed 2026-10-13. Strength A. Price label: published as "Free Level 1" on the marketing page; subscription screen gated and unverified (login). Register ID BK-34 in `runs/run-3-notes-brokers.md`.
 [^8]: "Authorities and Quota" (moomoo API docs). https://openapi.moomoo.com/moomoo-api-doc/en/intro/authority.html . Accessed 2026-10-13. Strength A. Register ID BK-40 in `runs/run-3-notes-brokers.md`.
 [^9]: 2026 Usage Policy update (Anthropic news, dated Oct 8, 2026). https://www.anthropic.com/news/2026-usage-policy-update . Accessed 2026-10-13. Strength A. Register ID AN-31 in `runs/run-3-notes-anthropic.md`.
-[^10]: Telegram Bot Platform; Bots FAQ. https://core.telegram.org/bots . Accessed 2026-10-13. Strength A. Price label: published (free). Register ID PX-31 in `runs/run-3-notes-prices.md`.
+[^10]: Telegram Bot Platform; Bots FAQ. https://core.telegram.org/bots . Accessed 2026-10-13. Strength A. Price label: published (free). Register ID PX-31 in `runs/run-3-notes-prices.md`. No longer cited: run 4 replaced Telegram with Discord (see the Update, run 4 block at the top).
 [^11]: Plans and Pricing - Healthchecks.io; Healthchecks.io home page. https://healthchecks.io/pricing/ . Accessed 2026-10-13. Strength A. Price label: published. Register ID PX-37 in `runs/run-3-notes-prices.md`.
 [^12]: "Pricing" (GitHub). https://github.com/pricing . Accessed 2026-10-13. Strength A. Price label: published. Register ID R3-S13 in `runs/run-3-trajectory.md`.
 [^13]: "Market Data" (Tradier API docs, updatedAt 2026-02-05) and "FAQ" (Tradier API docs). https://docs.tradier.com/docs/market-data.md . Accessed 2026-10-13. Strength A. Price label: published (included with the account; no data fee is named on the docs pages or the pricing page). Register ID BK-04 in `runs/run-3-notes-brokers.md`.
@@ -1470,3 +1491,6 @@ Each is a yes or no question Michael could send to Anthropic. The texts read lea
 [^128]: Usage Policy (archived version), section "Additional Use Case Guidelines". https://www.anthropic.com/legal/archive/22742366-2ef0-4c7a-a833-6523f10d3944 . Accessed 2026-10-13. Strength A. Register ID AN-04 in `runs/run-3-notes-anthropic.md`.
 [^129]: Usage Policy, section "Additional Use Case Guidelines". https://www.anthropic.com/legal/aup . Accessed 2026-10-13. Strength A. Register ID AN-11 in `runs/run-3-notes-anthropic.md`.
 [^130]: Pricing (claude.com); "I have a paid Claude subscription ... Why is Claude API usage billed separately from my paid Claude plan?" (Claude Help Center). https://claude.com/pricing . Accessed 2026-10-13. Strength A. Register ID AN-37 in `runs/run-3-notes-anthropic.md`.
+[^131]: Getting Started (Discord support): "You can download Discord for free". Run 4's comparison of Telegram, Discord, Slack and Matrix is in `runs/run-4-deliverable.md`. https://support.discord.com/hc/en-us/articles/360033931551-Getting-Started . Accessed 2026-10-28. Strength A. Price label: published (free). Register ID DC-26 in `runs/run-4-trajectory.md`.
+[^132]: Healthchecks.io home page, Integrations list (Discord, Telegram, Slack, Matrix and others) and its Discord setup template ("will send a notification to a Discord channel when a check goes up or down"). https://healthchecks.io/ . Accessed 2026-10-28. Strength A. Register IDs HC-02 and HC-09 in `runs/run-4-trajectory.md`.
+[^133]: Message resource (Discord developer docs): Get Channel Messages, up to 100 per call; the bot reads message text after "Message Content" is switched on (What are Privileged Intents). https://docs.discord.com/developers/resources/message . Accessed 2026-10-28. Strength A. Register IDs DC-07 and DC-08 in `runs/run-4-trajectory.md`.
