@@ -98,7 +98,12 @@ Verbatim, also saved as `runs/run-3-correction-brief.md`.
 17. Consulted the advisor a second time, with every file written. Advice taken: the page's head to head, costs and daily use views still opened on B, so they now open on C (head to head shows C against D, the runner-up); the correction block now also lists the worst-gap change and what each section 12 item does to the pick, and points to section 7 of this file for the full old and new figures; run 3's footnote check rerun; PROJECT_STATE's Playwright issue marked resolved and the Micro compute ruling added to its Decisions table; the commit stages files by name.
 18. Re-rendered the page body from the corrected markdown, reran the footnote, dash and sentence checks, and re-tested the page in the browser (step 19).
 19. Re-tested in the browser after the re-render: all 16 preset rankings and all 20 item rankings again equal the markdown; head to head opens on C against D, costs on C, daily use on C (with the new "asking Claude" line); the overview's correction panel shows both tables (11 nodes) and the overview summary opens with C. The only console error was the local server's missing favicon. Closed the browser and stopped the server.
-20. Final act: one commit of the seven changed files, staged by name, and one push to `origin/main`. This file is part of that commit, so it cannot record the commit's own identifier.
+20. Final act: one commit of the seven changed files, staged by name, and one push to `origin/main`. This file is part of that commit, so it cannot record the commit's own identifier. Pushed as the first correction commit.
+21. Michael's ruling, given after that push, on the item 6 flag in decision C3: "apply it consistently. 'Hosted code proves hard to manage' lowers the ease-of-running score of every option that runs hosted code (B, C, D and F), not only B." He approved a second commit and push.
+22. Re-ranked item 6 by script with every option's operability lowered by one, floored at 1: software C 4.10, D 3.95, B 3.85, F 3.70; Claude C 3.45, D 3.45, B 3.20, F 3.05. D's Claude-driver operability was already 1, so it could not fall, and that is what brings D level with C under the Claude driver.
+23. Rewrote item 6 and its row in the full re-ranking table, added the ruling to the correction block ("What was wrong" and the item outcome table) and to the summary's list of what could change the pick, and noted items 5 and 6 as rewritten under "What else changed". The markdown check script, updated for the new item 6, again found 0 mismatches in sections 10 and 12; dash and sentence checks passed.
+24. Re-rendered the page body from the markdown and changed item 6's score changes in the page data to all four options under both drivers. Re-tested in Playwright: item 6's card and bars show the new figures and text, the other nine items and all 16 presets are unchanged, and the overview shows the ruling and the new item 6 row.
+25. Final act of this second piece: one commit and one push, approved by Michael.
 
 ## 3. Sources
 
@@ -120,11 +125,13 @@ No web source was opened. The brief ruled out re-research, and no fact in run 3'
   - Execution (one lower under the Claude driver everywhere), path (4 and 3 everywhere), safety (4 and 3 everywhere), cost (3 everywhere, every cheapest total 145.00 to 151.69) and operability (B 4, C and F 3, D 2, one lower under the Claude driver) each give the same fact the same score.
   - Run modes: schedule and price event split timer from worker consistently (4 and 5); "each run independent" splits fresh runs from a carried state consistently; callback is 4 for B and C (a web request wakes the program) and 5 for D and F (it can also start a Claude routine, a fact only they have).
   - B's software target of 4 against anchor 5's literal "every minute or faster": kept. Run 3 read anchor 5 as seconds-level ("Not 5: no live stream"), and C2 relies on that same reading, so changing B here would apply two readings of one anchor.
-  - Section 12 item 6 lowers only B's operability although C's worker is also hosted code. Kept, because the item's premise is B's functions and timer, and changing a falsifiability premise is beyond a score audit. Noted for the owner.
+  - Section 12 item 6 lowers only B's operability although C's worker is also hosted code. Kept, because the item's premise is B's functions and timer, and changing a falsifiability premise is beyond a score audit. Noted for the owner. Superseded by decision C8 on Michael's ruling.
 - **C4. Sentences changed.** The summary (rewritten for C); section 2's C, D and pick rows and its key point; option B's tie pro; option C's key point, software-driver note, a new "Asking it something" line, target and flexibility rows, on-demand row, "What he checks", pros and cons (the "no easy way to ask" con replaced by its upkeep cost); option D's key point, target row, total, pros and one new con; section 10's key point, totals, averages, score rows, sensitivity table and robustness bullets; section 12's key point, every item's re-ranking and outcome, item 5 rewritten as its inverse ("C is easy to ask through Claude"), and the full table; section 13, items 1, 2 and 6. Section 6 needed no change.
 - **C5. The pick: C.** Corrected base rankings: software C 4.25, D 4.10, B 4.00, F 3.85; Claude C 3.60, D 3.45, B 3.35, F 3.20. C leads by 0.15 under both drivers, outside the 0.10 tie rule. Run 3 used its "B is cheaper to be wrong about" judgment only to break a tie (D16), so it cannot override a clear lead. That argument stays in the summary, labelled as a tie-break that no longer decides.
 - **C6. The re-rankings, all by script.** Robustness across 16 rankings: C first or within 0.10 in 16, D 6, B 4, F 0; exact firsts C 12, B 2, D 2. Section 12: items 1, 2, 4, 6, 8, 9 and 10 keep C; item 3 gives D tied with C; item 5 (inverse) gives a three-way tie of D, C and B; item 7 makes B the pick, clearly. Full tables are in the deliverable's sections 10 and 12.
 - **C7. The page body was regenerated, not hand-edited**, because the renderer was first proven byte-identical on the original (step 11). Hand edits in the page were limited to its data object, two badges, the overview's correction panel and the header note.
+
+- **C8. Item 6 applied to every option, on Michael's ruling.** Every option runs hosted code, so "hosted code proves hard to manage" now lowers the operability of B, C, D and F by one, floored at 1 (D under the Claude driver stays at 1). Old outcome (run 3): D, with C tied. After the first correction: C stays the pick. Now: C stays first under the software driver (4.10 against D's 3.95), and ties with D under the Claude driver (both 3.45). The floor is a property of the 1 to 5 scale, not a judgment made here.
 
 ## 5. Dead ends
 
@@ -166,7 +173,7 @@ Every ranking below was computed by the scratch ranking script described in sect
 | Target raised to 25, operability cut to 5 | software | D 4.40, C 4.25, B 4.00, F 3.95 | C 4.45, D 4.40, B 4.00, F 3.95 |
 | Target raised to 25, operability cut to 5 | claude | D 3.60, B 3.45, C 3.45, F 3.40 | C 3.90, D 3.85, B 3.45, F 3.40 |
 
-**Section 12 items.** Item 5's old row is run 3's "C stays hard to ask" (C's flexibility raised to 5); its new row is the rewritten inverse (C's flexibility back to 3).
+**Section 12 items.** Item 5's old row is run 3's "C stays hard to ask" (C's flexibility raised to 5); its new row is the rewritten inverse (C's flexibility back to 3). Item 6's old row lowers only B's operability; its new row lowers every option's (decision C8).
 
 | Item | Driver | Old, first to last | New, first to last |
 | :-- | :-- | :-- | :-- |
@@ -180,8 +187,8 @@ Every ranking below was computed by the scratch ranking script described in sect
 | 4 | claude | C 3.28, B 3.17, D 3.11, F 3.00 | C 3.44, D 3.28, B 3.17, F 3.00 |
 | 5 | software | C 4.25, D 4.10, B 4.00, F 3.85 | D 4.10, C 4.05, B 4.00, F 3.85 |
 | 5 | claude | C 3.45, B 3.35, D 3.30, F 3.20 | D 3.45, C 3.40, B 3.35, F 3.20 |
-| 6 | software | D 4.10, C 4.05, B 3.85, F 3.85 | C 4.25, D 4.10, B 3.85, F 3.85 |
-| 6 | claude | D 3.30, C 3.25, B 3.20, F 3.20 | C 3.60, D 3.45, B 3.20, F 3.20 |
+| 6 | software | D 4.10, C 4.05, B 3.85, F 3.85 | C 4.10, D 3.95, B 3.85, F 3.70 |
+| 6 | claude | D 3.30, C 3.25, B 3.20, F 3.20 | C 3.45, D 3.45, B 3.20, F 3.05 |
 | 7 | software | B 4.00, F 3.85, D 3.60, C 3.55 | B 4.00, F 3.85, C 3.75, D 3.60 |
 | 7 | claude | B 3.35, F 3.20, D 2.95, C 2.75 | B 3.35, F 3.20, C 3.10, D 3.10 |
 | 8 | software | D 4.10, C 4.05, B 4.00, F 3.85 | C 4.25, D 4.10, B 4.00, F 3.85 |

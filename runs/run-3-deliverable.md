@@ -10,6 +10,7 @@
 - That 3 was C's only run mode below 4, so it held C's flexibility at 3 instead of 5.
 - A full audit of every score in sections 9 and 10 found one more fact scored two ways. Under the Claude driver, C's and D's target score fell from 5 to 4 because "the model call adds time", while B's and F's stayed level with the same call.
 - Section 6.1 already judged that call to be inside the 5 minute target, and its reliability cost is already taken off execution for every option. So the drop counted the same penalty twice, and C's and D's target under the Claude driver returns to 5.
+- Section 12, item 6 lowered only B's operability if hosted code proves hard to manage, although every option runs hosted code. On Michael's ruling it now lowers every option's (see the item table below).
 
 **Every value that changed.**
 
@@ -40,7 +41,7 @@
 | 3. Morning research by Claude stays optional | D, tied with F under the Claude driver | D, tied with C |
 | 4. The driver stays open, or Claude stays possible | C | C stays the pick |
 | 5. Rewritten: was "C stays hard to ask", now "C is easy to ask through Claude" | C | A three-way tie of D, C and B |
-| 6. A non-coder finds hosted code manageable | D, with C tied | C stays the pick |
+| 6. Rewritten: now lowers every option's operability, not only B's | D, with C tied | C under the software driver, tied with D under the Claude driver |
 | 7. A worker stays healthy | B's lead widens | B becomes the pick |
 | 8. Anthropic's answers | Unchanged (B, tied with D) | Unchanged (C) |
 | 9. Program use of the data is affordable | No new winner | No new winner |
@@ -53,7 +54,7 @@
 - C scores at least as high as D on every criterion. D's research layer earns points only in the weighting that values research, where D leads C by 0.06 to 0.07, a tie.
 - What would make B the pick again is a measurement: a two-week trial of a do-nothing worker that shows a hang the heartbeat missed, or one Michael could not resolve alone (section 12, item 7).
 
-**What else changed.** The summary, section 2, the text of options B, C and D, section 10, section 12 (every item re-ranked by script, item 5 rewritten) and section 13, items 1, 2 and 6. Facts, prices, hours and sources are unchanged, and nothing was re-researched. Git history keeps the original.
+**What else changed.** The summary, section 2, the text of options B, C and D, section 10, section 12 (every item re-ranked by script, items 5 and 6 rewritten) and section 13, items 1, 2 and 6. Facts, prices, hours and sources are unchanged, and nothing was re-researched. Git history keeps the original.
 
 Written 2026-10-13 (America/Chicago). Sources opened in run 3 carry that date. Sources reused from runs 1 and 2 carry their original dates, as the brief allows.
 
@@ -89,7 +90,7 @@ Written 2026-10-13 (America/Chicago). Sources opened in run 3 carry that date. S
   - A slightly longer build (29.5 hours of his time against 27.5, estimate) and slightly more new spending (22.19 dollars a month against 20.00 in the cheapest setup).
 - **What would change the pick.**
   - A two-week trial of a do-nothing worker that shows a hang the heartbeat missed, or one Michael could not resolve alone, makes B the pick (section 12, item 7).
-  - If Michael wants a Claude research layer as a must, D ties with C (item 3). If he weights upkeep far above execution, B ties with C (section 10).
+  - If Michael wants a Claude research layer as a must, D ties with C (item 3). If hosted code proves hard to manage, D ties with C under the Claude driver (item 6). If he weights upkeep far above execution, B ties with C (section 10).
   - Run 3's original reason for B, that it is cheaper to be wrong about before a strategy exists, was a tie-break and no longer decides. B is still a possible first stage that becomes C by adding a worker (my judgment).
 - **The two passing brokers are Tradier and Alpaca.** They are the only ones read that meet every requirement: consolidated real-time data, the new day trading rule, unattended orders, a lasting sign-in and plain requests.
   - Tradier includes the data with the account.[^1]
@@ -1265,10 +1266,10 @@ Each is a yes or no question Michael could send to Anthropic. The texts read lea
    - The evidence that overturns: a month of use shows that is not enough, because he needs to ask the running worker itself or start a run on demand, and no command interface is built. C's on-demand score and flexibility fall back to 3.
    - Re-ranked: software D 4.10, C 4.05, B 4.00. Claude D 3.45, C 3.40, B 3.35.
    - **The pick becomes a three-way tie of D, C and B** under both drivers. Run 3's original tie-break judgment, B, would then apply again.
-6. **A non-coder finds hosted code manageable.**
-   - The evidence: running B's functions and timer proves harder than expected, so B's operability falls to 3.
-   - Re-ranked: software C 4.25, D 4.10, B 3.85. Claude C 3.60, D 3.45, B 3.20.
-   - **The pick stays C.** This evidence moves only B.
+6. **A non-coder finds hosted code manageable.** Rewritten in the correction of 2026-10-28: run 3 lowered only B, but every option runs hosted code.
+   - The evidence: running hosted code (B's and F's functions and timer, C's and D's worker, every option's database) proves harder than expected. Every option's operability falls by one, except D's under the Claude driver, which is already 1, the lowest score.
+   - Re-ranked: software C 4.10, D 3.95, B 3.85. Claude C 3.45, D 3.45, B 3.20.
+   - **The pick stays C under the software driver, and ties with D under the Claude driver.** D catches up only because its score cannot fall below 1.
 7. **A worker stays healthy.** This is now the test that matters most.
    - The evidence that overturns: a two-week trial of a do-nothing worker under C shows a hang the heartbeat did not catch, or one Michael could not resolve without a Claude Code session. C's and D's execution, operability and safety fall by one.
    - Re-ranked: software B 4.00, F 3.85, C 3.75, D 3.60. Claude B 3.35, F 3.20, C 3.10, D 3.10.
@@ -1295,7 +1296,7 @@ Each is a yes or no question Michael could send to Anthropic. The texts read lea
 | 3. Morning research by Claude stays optional | D 4.19, C 4.13, F 3.97, B 3.90 | D 3.61, C 3.54, F 3.38, B 3.32 |
 | 4. The driver stays open (software only, flexibility not weighted) | C 4.17, D 4.00, B 3.89, F 3.72 | C 3.44, D 3.28, B 3.17, F 3.00 |
 | 5. C is easy to ask through Claude | D 4.10, C 4.05, B 4.00, F 3.85 | D 3.45, C 3.40, B 3.35, F 3.20 |
-| 6. A non-coder finds hosted code manageable | C 4.25, D 4.10, B 3.85, F 3.85 | C 3.60, D 3.45, B 3.20, F 3.20 |
+| 6. A non-coder finds hosted code manageable | C 4.10, D 3.95, B 3.85, F 3.70 | C 3.45, D 3.45, B 3.20, F 3.05 |
 | 7. A worker stays healthy | B 4.00, F 3.85, C 3.75, D 3.60 | B 3.35, F 3.20, C 3.10, D 3.10 |
 | 8. Anthropic's answers (yes) | C 4.25, D 4.10, B 4.00, F 3.85 | C 3.75, D 3.60, B 3.50, F 3.35 |
 | 9. Program use of the data is affordable | C 4.05, D 3.90, B 3.80, F 3.65 | C 3.40, D 3.25, B 3.15, F 3.00 |
