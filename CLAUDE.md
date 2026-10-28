@@ -39,7 +39,7 @@ The owner's root MEMORY.md lives outside this repo and you cannot read it. These
 - **The owner is a non-coder.** Write all code. Explain in plain English. Avoid unexplained jargon, and define any acronym the first time it appears.
 - Timezone is America/Chicago. Check the date with `date` before any claim that depends on it.
 - GitHub handle is `mtbanta`. Repos are private.
-- If this project uses Supabase, it uses the same region and compute tier as Relii: `us-west-2` (Oregon), nano.
+- If this project uses Supabase, it uses Micro compute in `us-west-2` (Oregon), Relii's region. Supabase bills Nano at the Micro price on paid plans, so Micro is the real tier.
 - **If this project deploys to Vercel, pin the function region to match the database region.** Relii learned this the expensive way: unpinned functions ran in Washington DC while the database sat in Oregon, and roughly 95 percent of every round trip was the journey between them.
 - One build piece equals one fresh session. Clear only at a clean boundary: built, tested, committed, pushed, PROJECT_STATE.md updated.
 - **Commits and pushes stay manual and ask-gated.** They are the checkpoint that catches accidental secrets, and a push triggers the deploy.

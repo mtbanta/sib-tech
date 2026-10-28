@@ -1,5 +1,60 @@
 # Run 3 deliverable: the strongest stacks, described
 
+## Correction, 2026-10-28
+
+**Key point: the pick changes from B to C, the always-on worker. Run 3 scored C's "On demand" mode 3 while giving B, D and F a 5 for the same fact. Scored consistently, C is first under both drivers by more than the 0.10 tie rule.**
+
+**What was wrong.**
+
+- Option B scored "On demand" 5 because Michael can ask Claude, which reads the Supabase database. Option C keeps its memory in the same kind of Supabase database, so the same route works. Yet C scored 3 ("nothing to ask unless an interface is built").
+- That 3 was C's only run mode below 4, so it held C's flexibility at 3 instead of 5.
+- A full audit of every score in sections 9 and 10 found one more fact scored two ways. Under the Claude driver, C's and D's target score fell from 5 to 4 because "the model call adds time", while B's and F's stayed level with the same call.
+- Section 6.1 already judged that call to be inside the 5 minute target, and its reliability cost is already taken off execution for every option. So the drop counted the same penalty twice, and C's and D's target under the Claude driver returns to 5.
+
+**Every value that changed.**
+
+| Value | Old | New |
+| :-- | :-- | :-- |
+| C, run mode "On demand" | 3 | 5 |
+| C, flexibility, software / Claude driver | 3 / 3 | 5 / 5 |
+| C, 5 minute target, Claude driver | 4 | 5 |
+| D, 5 minute target, Claude driver | 4 | 5 |
+| C, weighted total, software / Claude driver | 4.05 / 3.25 | 4.25 / 3.60 |
+| D, weighted total, software / Claude driver | 4.10 / 3.30 | 4.10 / 3.45 |
+| C, average of the two | 3.65 | 3.93 |
+| D, average of the two | 3.70 | 3.78 |
+| B and F | 4.00 / 3.35 and 3.85 / 3.20 | Unchanged |
+| Ranking, software driver | D 4.10, C 4.05, B 4.00, F 3.85 | C 4.25, D 4.10, B 4.00, F 3.85 |
+| Ranking, Claude driver | B 3.35, D 3.30, C 3.25, F 3.20 | C 3.60, D 3.45, B 3.35, F 3.20 |
+| First or within 0.10 of first, of 16 rankings | B 10, D 10, C 2, F 1 | C 16, D 6, B 4, F 0 |
+| Exact first places, of 16 rankings | B 9, D 8, C 0, F 0 | C 12, B 2, D 2, F 0 |
+| The pick | B, tied with D, chosen on a stated judgment | C, first under both drivers |
+| Worst gap behind first, across 16 rankings | B 0.40, D 0.45, C 0.36 | C 0.07, D 0.35, B 0.45 |
+
+**What each section 12 item now does to the pick.** The full old and new figures for all 16 weightings and all 20 item rankings are in `runs/run-3-correction-trajectory.md`, section 7.
+
+| Item | Old outcome | New outcome |
+| :-- | :-- | :-- |
+| 1. A timer fires reliably every minute | D, with C tied | C stays the pick |
+| 2. A minute is fast enough | D, with C tied | C stays the pick |
+| 3. Morning research by Claude stays optional | D, tied with F under the Claude driver | D, tied with C |
+| 4. The driver stays open, or Claude stays possible | C | C stays the pick |
+| 5. Rewritten: was "C stays hard to ask", now "C is easy to ask through Claude" | C | A three-way tie of D, C and B |
+| 6. A non-coder finds hosted code manageable | D, with C tied | C stays the pick |
+| 7. A worker stays healthy | B's lead widens | B becomes the pick |
+| 8. Anthropic's answers | Unchanged (B, tied with D) | Unchanged (C) |
+| 9. Program use of the data is affordable | No new winner | No new winner |
+| 10. At least one broker keeps passing | Order unchanged | Order unchanged |
+
+**Whether the pick changed: yes, from B to C.**
+
+- C now leads D by 0.15 and B by 0.25 under both drivers. Both gaps are outside the 0.10 tie rule.
+- Run 3 chose B on a judgment only because the arithmetic was a tie. A judgment breaks a tie but does not override a clear lead, so the same rule now gives C.
+- C scores at least as high as D on every criterion. D's research layer earns points only in the weighting that values research, where D leads C by 0.06 to 0.07, a tie.
+- What would make B the pick again is a measurement: a two-week trial of a do-nothing worker that shows a hang the heartbeat missed, or one Michael could not resolve alone (section 12, item 7).
+
+**What else changed.** The summary, section 2, the text of options B, C and D, section 10, section 12 (every item re-ranked by script, item 5 rewritten) and section 13, items 1, 2 and 6. Facts, prices, hours and sources are unchanged, and nothing was re-researched. Git history keeps the original.
+
 Written 2026-10-13 (America/Chicago). Sources opened in run 3 carry that date. Sources reused from runs 1 and 2 carry their original dates, as the brief allows.
 
 **What this document is.**
@@ -19,33 +74,34 @@ Written 2026-10-13 (America/Chicago). Sources opened in run 3 carry that date. S
 
 ## 1. Summary
 
-**Strongest option: B, the scheduled web app. On this run's arithmetic B and D are tied, and B is chosen on a stated judgment.**
+**Strongest option: C, the always-on worker. It is first under both drivers, by more than this run's 0.10 tie rule.** This replaces run 3's original pick, B tied with D (see the correction above).
 
-- **What it is.** A Supabase database whose built-in timer wakes a short program every minute during market hours.
-  - The program reads consolidated real-time prices for a short live list, decides, checks every order against fixed limits, and sends it to the broker.
-  - Before the open, a longer run screens the wide universe and picks the day's live list. Nothing stays running in between.
-- **Why it is a tie.**
+- **What it is.** One small program runs on a rented server through market hours and keeps live connections open to the price feed and the broker.
+  - It reacts to each price change within seconds, checks every order against fixed limits, and sends it to the broker.
+  - Before the open, the same program screens the wide universe and picks the day's live list. The server restarts it if it exits, and an outside heartbeat alerts Michael if it hangs.
+- **Why it is the pick.**
   - This run treats totals within 0.10 of each other as a tie, because one point on a weight-10 criterion moves a total by 0.10.
-  - On this run's weights, B, C and D are within 0.10 of each other under both drivers: software D 4.10, C 4.05, B 4.00; Claude B 3.35, D 3.30, C 3.25.
-  - Across eight weightings and both drivers (16 rankings), B and D are each first or within 0.10 of first in 10, C in 2, F in 1 (section 10).
-  - What splits B and D is one question: does connected execution count for more than upkeep? Weight execution up and D leads. Weight upkeep up and B leads.
-- **Why B, as my judgment.**
-  - No strategy is decided yet, and Michael said speed and reliability become crucial "once a strategy is decided". The measurements that would justify an always-on worker (section 12, items 1 and 2) do not exist yet.
-  - B is the cheaper option to be wrong about: it becomes C or D by adding an always-on worker, and keeps its database, limits and alerts.
-  - It has the easiest upkeep (no always-on part), the shortest build (27.5 hours of Michael's time, estimate) and the lowest new spending (20 dollars a month in the cheapest setup).
-  - It hosts either driver without a redesign: fixed rules, or a Claude call through the API.
-- **The equal alternative is D**, the always-on worker with Claude on top. It reacts in seconds and stays connected. If Michael values connected execution above upkeep, or wants a Claude research layer as a must, D is the pick (section 12).
+  - On this run's weights C leads under both drivers: software C 4.25, D 4.10, B 4.00, F 3.85; Claude C 3.60, D 3.45, B 3.35, F 3.20.
+  - Across eight weightings and both drivers (16 rankings), C is first or within 0.10 of first in all 16, D in 6, B in 4, F in none (section 10).
+  - C scores at least as high as D on every criterion, with one layer fewer to keep in step. It hosts either driver, and Michael asks it questions the same way as B: through Claude reading the shared database.
+- **What it costs Michael, compared with B.**
+  - A running part he cannot repair himself. A stuck worker means a Claude Code session, and upkeep is about 2 hours a month against B's 1 (estimates).
+  - A slightly longer build (29.5 hours of his time against 27.5, estimate) and slightly more new spending (22.19 dollars a month against 20.00 in the cheapest setup).
+- **What would change the pick.**
+  - A two-week trial of a do-nothing worker that shows a hang the heartbeat missed, or one Michael could not resolve alone, makes B the pick (section 12, item 7).
+  - If Michael wants a Claude research layer as a must, D ties with C (item 3). If he weights upkeep far above execution, B ties with C (section 10).
+  - Run 3's original reason for B, that it is cheaper to be wrong about before a strategy exists, was a tie-break and no longer decides. B is still a possible first stage that becomes C by adding a worker (my judgment).
 - **The two passing brokers are Tradier and Alpaca.** They are the only ones read that meet every requirement: consolidated real-time data, the new day trading rule, unattended orders, a lasting sign-in and plain requests.
   - Tradier includes the data with the account.[^1]
   - Alpaca needs its 99 dollar a month data plan.[^2]
-- **Costs, as examples.** The cheapest workable setup for B is 145 dollars a month, of which 125 is already paid (the Max plan and Supabase Pro). The recommended setup is 254. A Claude driver adds an estimated 4.50 (Haiku) to 90 (Sonnet) a month, possibly inside the Max plan's 100 dollar API credit.[^3]
+- **Costs, as examples.** The cheapest workable setup for C is 147.19 dollars a month, of which 125 is already paid (the Max plan and Supabase Pro). The recommended setup is 240.70. A Claude driver adds an estimated 4.50 (Haiku) to 90 (Sonnet) a month, possibly inside the Max plan's 100 dollar API credit.[^3]
 - **Anthropic's terms leave two decisive questions open.** Can Michael be the "qualified person" who must review a buy or sell recommendation, and does an agent's order count as being "used to implement a decision"? The texts do not say.[^4][^5] Only Anthropic can settle this in writing (section 11).
 
 **This is research input for a human decision, never an instruction to trade.**
 
 ## 2. What changed since run 2
 
-**Key point: the pick moved from F to B. Two levers changed at once, and the table says which one moved each score.**
+**Key point: the pick moved from F to C (corrected 2026-10-28; run 3 first said B, tied with D). Two levers changed at once, and the table says which one moved each score.**
 
 **Levers.**
 
@@ -70,10 +126,10 @@ Written 2026-10-13 (America/Chicago). Sources opened in run 3 carry that date. S
 | :-- | :-- | :-- | :-- | :-- |
 | A: Claude-native agent | 2.75 | Dropped | Michael dropped it. Claude as the driver now lives inside each option (section 6) | Instructions |
 | B: scheduled web app | 3.70 | 4.00 / 3.35 | Flexibility 3 to 5, because B can now host the Claude driver through an API call. The sweep risk shrank with the daily screen | Instructions (flexibility), context (screen) |
-| C: always-on worker | 3.65 | 4.05 / 3.25 | Execution 5 under the new criterion. Safety 3 to 4 and operability 2 to 3, because run 3's setups add an independent heartbeat and stops held at the broker | Context (execution weight); research and design (heartbeat, broker-held stops) |
-| D: worker plus Claude | 3.80 | 4.10 / 3.30 | As C, plus flexibility 5. Operability stays the lowest | Context; research and design |
+| C: always-on worker | 3.65 | 4.25 / 3.60 | Execution 5 under the new criterion. Safety 3 to 4 and operability 2 to 3, because run 3's setups add an independent heartbeat and stops held at the broker. Flexibility 5: both drivers, and Michael asks it through Claude reading the database, as in B (corrected) | Context (execution weight); research and design (heartbeat, broker-held stops); instructions (both drivers) |
+| D: worker plus Claude | 3.80 | 4.10 / 3.45 | As C, with one point less operability for the extra layer, which stays the lowest | Context; research and design |
 | F: scheduled core plus Claude | 3.80 | 3.85 / 3.20 | Its edge over B (both drivers) is gone, because B now has both. Its extra layer still costs a point of operability | Instructions |
-| **The pick** | **F** | **B, tied with D** | B now matches F's flexibility with one layer fewer. The execution weight lifts D to a tie with B. B is chosen on a stated judgment | Instructions (B's flexibility), context (the execution weight that makes it a tie) |
+| **The pick** | **F** | **C** | The execution weight lifts the worker options above B and F. C leads D because D's extra layer costs a point of operability and earns no score. Run 3 first said B, tied with D, from a mis-scored C | Context (the execution weight), instructions (both drivers in every option) |
 
 **Other changes since run 2.**
 
@@ -601,7 +657,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 - No always-on part to keep alive. Each run starts fresh.
 - The cheapest new spending of the four (20 dollars a month in the cheapest setup).
 - Works with either driver without changing the design.
-- Tied with D on this run's arithmetic: first or within 0.10 of first in 10 of 16 rankings across weightings and drivers (section 10).
+- Third under both drivers on this run's weights (4.00 and 3.35), 0.25 behind C. First or within 0.10 of first in 4 of 16 rankings, all of them weightings that raise operability (section 10).
 - Built on the stack Michael already uses for Relii (noted, not scored).
 
 **Cons.**
@@ -615,7 +671,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 
 ### 9.2 Option C: always-on worker
 
-**Key point: the fastest option. One program stays connected all session and reacts to prices in seconds, at the cost of a running part Michael cannot repair himself.**
+**Key point: the fastest option, and the pick (corrected 2026-10-28). One program stays connected all session and reacts to prices in seconds, at the cost of a running part Michael cannot repair himself.**
 
 **The architecture in plain English.**
 
@@ -627,7 +683,8 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 
 **Driver models in this option.**
 
-- **Software as the driver.** Fixed rules act on each price change.
+- **Software as the driver.** Fixed rules act on each price change. Claude can still be asked questions about what happened, by reading the same database, as in option B.
+- **Asking it something.** That route is Michael's own Claude Code session reading the database, not a part of the agent, so it adds no build piece. Options D and F list Claude's database access as a build piece because their research layer is part of the agent.
 - **Claude as the driver.** When the rules flag a candidate, the program asks Claude through the API for a decision, then checks the limits and sends or refuses. Under an API key: the Commercial Terms and the Usage Policy.[^32][^52]
 
 **Categories, candidates, coverage and cost bands.**
@@ -662,12 +719,12 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 | :-- | :-- | :-- | :-- |
 | Execution speed and reliability (25) | 5 | 4 | Stays connected, acts in seconds, restarts on exit,[^111] an independent heartbeat catches a hang.[^11] Claude driver: a best-effort model call before each order[^41] |
 | Unattended order path (15) | 4 | 3 | As option B |
-| 5 minute target on consolidated data (15) | 5 | 4 | A live stream on consolidated data, seconds.[^71][^2] Claude driver: the model call adds time |
+| 5 minute target on consolidated data (15) | 5 | 5 | A live stream on consolidated data, seconds.[^71][^2] Claude driver: the model call adds seconds, inside the 5 minute target (section 6.1). Its reliability cost is counted under execution (corrected) |
 | Operability (15) | 3 | 2 | One always-on part, restarted for him by the platform: the anchor for 3. Claude driver: a model service as well |
 | Safety (10) | 4 | 3 | Fixed checks, stops at the broker, a heartbeat. Claude driver: a model chooses |
-| Flexibility (10) | 3 | 3 | Both drivers, but on demand is weak: nothing to ask unless an interface is built |
+| Flexibility (10) | 5 | 5 | Both drivers, every run mode at 4 or 5 (corrected) |
 | Cost (10) | 3 | 3 | Cheapest total 147.19 (software) or 151.69 (Claude) |
-| **Weighted total** | **4.05** | **3.25** | |
+| **Weighted total** | **4.25** | **3.60** | |
 
 **Run modes and memory modes.**
 
@@ -676,7 +733,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 | On a schedule | 5 | Any interval (my inference: a running program keeps its own clock) |
 | Event, callback | 4 | A running server can receive web requests (my inference) |
 | Event, price event | 5 | Seconds. Its purpose |
-| On demand | 3 | Nothing to ask unless an interface is built. Telegram commands are the cheapest route (my judgment) |
+| On demand | 5 | Ask Claude, which reads the database, as in option B (corrected). Telegram commands could add a way to start a run (my judgment) |
 | Memory kept across runs | 5 | The database |
 | Each run independent | 4 | Possible by design, though a long-running program naturally carries state |
 
@@ -740,6 +797,7 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 - **What he checks.**
   - The daily summary and that the heartbeat stayed quiet.
   - Weekly: the broker's statement against the log.
+  - Anything else, by asking Claude, which reads the run log and positions in the database, as in option B.
 - **What he can change, and how.**
   - Limits: in a settings table, by asking Claude Code, or (if built) by a Telegram command.
   - Rules or Claude's instructions: a new Claude Code build piece, tested in practice mode first.
@@ -757,20 +815,21 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 - The fastest reaction: seconds, not a minute.
 - Restarts automatically if it exits.[^111]
 - Second-lowest new spending in the cheapest setup.
-- A strong runner-up under the software driver (4.05).
+- First under both drivers on this run's weights (4.25 and 3.60), and first or within 0.10 of first in all 16 rankings (section 10).
+- Michael can ask it questions through Claude reading the database, as in option B.
 
 **Cons.**
 
 - A running part Michael cannot diagnose himself. Every stuck worker means a Claude Code session.
 - A hang is not caught by the platform, only by the heartbeat (my reading of R3-S8).
-- No easy way to ask it a question unless an interface is built.
+- About twice B's upkeep: 2 hours a month against 1 (estimates).
 - The cheapest server's price is stated for East coast regions only, away from the Oregon database.[^16]
 
 **Failure mode: stuck, not stopped.** The program keeps running but stops acting, for example because a stream went quiet without an error. The platform does not restart it, because it never exited. The heartbeat alerts Michael within minutes, but he cannot tell what went wrong, and positions sit on whatever stops were already placed at the broker until a Claude Code session repairs it.
 
 ### 9.3 Option D: always-on worker plus Claude on top
 
-**Key point: option C's speed with a Claude research layer on top. Highest under the software driver by the weights (4.10), tied with B across weightings, but it has the most parts for a non-coder to keep in step.**
+**Key point: option C's speed with a Claude research layer on top. Second under both drivers (4.10 and 3.45): it matches C on every criterion except operability, where its extra layer costs a point. It leads only when a research layer is valued as a criterion of its own (corrected 2026-10-28).**
 
 **The architecture in plain English.**
 
@@ -810,12 +869,12 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 | :-- | :-- | :-- | :-- |
 | Execution speed and reliability (25) | 5 | 4 | As option C. The research layer is outside the order path |
 | Unattended order path (15) | 4 | 3 | As option C |
-| 5 minute target on consolidated data (15) | 5 | 4 | As option C |
+| 5 minute target on consolidated data (15) | 5 | 5 | As option C (corrected) |
 | Operability (15) | 2 | 1 | The most parts: a worker, a database, a Claude layer on its own schedule. Claude driver: a model in the order path as well |
 | Safety (10) | 4 | 3 | As option C. The Claude layer adds explanation, not a fixed check |
 | Flexibility (10) | 5 | 5 | Both drivers, every run mode at 4 or 5 |
 | Cost (10) | 3 | 3 | Cheapest total 147.19 (software) or 151.69 (Claude) |
-| **Weighted total** | **4.10** | **3.30** | |
+| **Weighted total** | **4.10** | **3.45** | |
 
 **Run modes and memory modes.**
 
@@ -900,13 +959,14 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 
 **Pros.**
 
-- The highest score under the software driver (4.10).
-- Seconds-level execution plus a research layer and a way to ask questions.
+- Second under both drivers (4.10 and 3.45), and first when a Claude research layer is valued at 10 (section 10).
+- Seconds-level execution plus a research layer that writes the morning list and briefing.
 - Either layer can be replaced without touching the other (my judgment).
 
 **Cons.**
 
 - The most parts, and the lowest operability score.
+- Scores no higher than C on any criterion, and one point lower on operability.
 - The longest build of the four (33 hours, estimate).
 - Two layers can disagree, and someone has to decide which is right.
 - Carries option C's stuck-worker risk.
@@ -1050,24 +1110,24 @@ The gates: (1) consolidated real-time data through the broker's own interface, (
 
 ## 10. Comparison across the four options
 
-**Key point: on this run's weights B, C and D are within 0.10 of each other under both drivers, which this run treats as a tie. Across 16 rankings, B and D are each first or within 0.10 of first in 10. The pick between them is a judgment (section 1).**
+**Key point: on this run's weights C is first under both drivers, 0.15 ahead of D and 0.25 ahead of B, which is outside the 0.10 tie rule. Across 16 rankings, C is first or within 0.10 of first in all 16 (corrected 2026-10-28).**
 
 | | B: scheduled web app | C: always-on worker | D: worker plus Claude | F: scheduled core plus Claude |
 | :-- | :-- | :-- | :-- | :-- |
-| **Weighted total, software driver** | 4.00 | 4.05 | **4.10** | 3.85 |
-| **Weighted total, Claude driver** | **3.35** | 3.25 | 3.30 | 3.20 |
-| Average of the two | 3.68 | 3.65 | 3.70 | 3.53 |
+| **Weighted total, software driver** | 4.00 | **4.25** | 4.10 | 3.85 |
+| **Weighted total, Claude driver** | 3.35 | **3.60** | 3.45 | 3.20 |
+| Average of the two | 3.68 | 3.93 | 3.78 | 3.53 |
 | Execution speed and reliability (25) | 4 / 3 | 5 / 4 | 5 / 4 | 4 / 3 |
 | Unattended order path (15) | 4 / 3 | 4 / 3 | 4 / 3 | 4 / 3 |
-| 5 minute target, consolidated data (15) | 4 / 4 | 5 / 4 | 5 / 4 | 4 / 4 |
+| 5 minute target, consolidated data (15) | 4 / 4 | 5 / 5 | 5 / 5 | 4 / 4 |
 | Operability (15) | 4 / 3 | 3 / 2 | 2 / 1 | 3 / 2 |
 | Safety (10) | 4 / 3 | 4 / 3 | 4 / 3 | 4 / 3 |
-| Flexibility (10) | 5 | 3 | 5 | 5 |
+| Flexibility (10) | 5 | 5 | 5 | 5 |
 | Cost (10) | 3 | 3 | 3 | 3 |
 | Run mode: schedule | 4 | 5 | 5 | 4 |
 | Run mode: event, callback | 4 | 4 | 5 | 5 |
 | Run mode: event, price event | 4 | 5 | 5 | 4 |
-| Run mode: on demand | 5 | 3 | 5 | 5 |
+| Run mode: on demand | 5 | 5 | 5 | 5 |
 | Memory kept across runs | 5 | 5 | 5 | 5 |
 | Each run independent | 5 | 4 | 4 | 5 |
 | **Build hours, software driver (estimate)** | 27.5 (29.0 with screen) | 29.5 | 33.0 | 31.0 (32.5 with screen) |
@@ -1089,20 +1149,21 @@ Monthly totals count the Max plan (100) and Supabase Pro (25) at their real pric
 
 | Weighting | Software driver, first to last | Claude driver, first to last |
 | :-- | :-- | :-- |
-| This run's weights | D 4.10, C 4.05, B 4.00, F 3.85 | B 3.35, D 3.30, C 3.25, F 3.20 |
-| All seven criteria equal | D and B 4.00, then C and F 3.86 | B 3.43, then D and F 3.29, C 3.14 |
-| Operability first (30), execution 15, target 10 | B 4.00, C 3.75, F 3.70, D 3.65 | B 3.30, F 3.00, C 2.95, D 2.85 |
-| Execution cut to 15, operability raised to 25 | B 4.00, C 3.85, D 3.80, F 3.75 | B 3.35, F 3.10, C 3.05, D 3.00 |
-| Close to run 2's weights (execution 10, path 20, flexibility 15) | B 4.05, D 4.00, F 3.89, C 3.84 | B 3.47, F 3.32, D 3.26, C 3.11 |
-| A Claude research layer valued at 10 (others scaled down) | D 4.19, F 3.97, C 3.95, B 3.90 | D 3.47, F 3.38, B 3.32, C 3.23 |
-| Execution raised to 35, operability cut to 5 | D 4.40, C 4.25, B 4.00, F 3.95 | D 3.60, C 3.45, B 3.35, F 3.30 |
-| Target raised to 25, operability cut to 5 | D 4.40, C 4.25, B 4.00, F 3.95 | D 3.60, C 3.45, B 3.45, F 3.40 |
+| This run's weights | C 4.25, D 4.10, B 4.00, F 3.85 | C 3.60, D 3.45, B 3.35, F 3.20 |
+| All seven criteria equal | C 4.14, then B and D 4.00, F 3.86 | C 3.57, then B and D 3.43, F 3.29 |
+| Operability first (30), execution 15, target 10 | B 4.00, C 3.95, F 3.70, D 3.65 | B 3.30, C 3.25, F 3.00, D 2.95 |
+| Execution cut to 15, operability raised to 25 | C 4.05, B 4.00, D 3.80, F 3.75 | C 3.40, B 3.35, D 3.15, F 3.10 |
+| Close to run 2's weights (execution 10, path 20, flexibility 15) | C 4.16, B 4.05, D 4.00, F 3.89 | C 3.58, B 3.47, D 3.42, F 3.32 |
+| A Claude research layer valued at 10 (others scaled down) | D 4.19, C 4.13, F 3.97, B 3.90 | D 3.61, C 3.54, F 3.38, B 3.32 |
+| Execution raised to 35, operability cut to 5 | C 4.45, D 4.40, B 4.00, F 3.95 | C 3.80, D 3.75, B 3.35, F 3.30 |
+| Target raised to 25, operability cut to 5 | C 4.45, D 4.40, B 4.00, F 3.95 | C 3.90, D 3.85, B 3.45, F 3.40 |
 
 - In the research row, D and F score 5 on the added research criterion and B and C score 3, because only D and F have a research layer (my judgment). The other seven weights are scaled to 90.
 - The last two rows mirror the two rows that weight operability up, so that execution and upkeep are each raised twice.
-- **Robustness count,** across these 16 rankings, using the same 0.10 tie rule as the pick: B and D are each first or within 0.10 of first in 10, C in 2, F in 1. Counting exact first places only: B 9 (one shared), D 8 (one shared), C and F none.
-- B's worst showing is 0.40 behind first (execution raised to 35). D's worst is 0.45 behind (operability first).
-- So the robustness count does not separate B and D. This run's first draft said it did, from a set of weightings that cut execution three times and raised it never (trajectory, decision D16).
+- **Robustness count,** across these 16 rankings, using the same 0.10 tie rule as the pick: C is first or within 0.10 of first in all 16, D in 6, B in 4, F in none. Counting exact first places only: C 12, B 2, D 2, F none, with no shared first places.
+- C's worst showing is 0.07 behind first (research layer valued, Claude driver). B's worst is 0.45 behind (execution or target raised, Claude driver). D's worst is 0.35 behind (operability first).
+- So C's lead does not depend on the weights chosen. Where C is not first, the leader is within 0.07 of it: B when operability is weighted first, D when a research layer is valued.
+- Run 3's original count (B and D at 10 each) rested on C's mis-scored on-demand mode and Claude-driver target (correction, 2026-10-28). Its first draft had already been corrected once, for weightings that cut execution three times and raised it never (trajectory, decision D16).
 
 ## 11. Answers to the two Anthropic questions
 
@@ -1180,45 +1241,45 @@ Each is a yes or no question Michael could send to Anthropic. The texts read lea
 
 ## 12. Falsifiability: what would overturn the pick
 
-**Key point: option B is the pick only while the evidence below holds. Each item names specific evidence and what the pick becomes, using the same 0.10 tie rule as the pick. Every item was re-ranked across all four options and both drivers by script.**
+**Key point: option C is the pick only while the evidence below holds. Each item names specific evidence and what the pick becomes, using the same 0.10 tie rule as the pick. Every item was re-ranked across all four options and both drivers by script (re-run for the correction of 2026-10-28).**
 
 1. **A timer fires reliably every minute.** This is B's weakest link, and it is not measured.
    - The test: a do-nothing scheduled job on Supabase that fetches the live list every minute for two weeks of sessions, logging how late each run starts and how many are missed.
-   - The evidence that overturns: more than one run in a hundred missed, or more than 30 seconds late. B's and F's execution scores then fall by one.
-   - Re-ranked: software D 4.10, C 4.05, B 3.75. Claude D 3.30, C 3.25, B 3.10.
-   - **The pick becomes the worker options: D, with C tied** (within 0.05 under both drivers). This trial is also what turns "about a minute" into a measurement.
+   - The evidence: more than one run in a hundred missed, or more than 30 seconds late. B's and F's execution scores then fall by one.
+   - Re-ranked: software C 4.25, D 4.10, B 3.75. Claude C 3.60, D 3.45, B 3.10.
+   - **The pick stays C, and B falls further behind.** This trial matters again only if item 7 brings B back, and it is what turns "about a minute" into a measurement.
 2. **A minute is fast enough.**
-   - The evidence that overturns: a month of practice signals, logged with the price at the signal and at the next whole minute, showing a material difference. B's and F's target scores fall to 3.
-   - Re-ranked: software D 4.10, C 4.05, B 3.85. Claude D 3.30, C 3.25, B 3.20.
-   - **The pick becomes D, with C tied.**
+   - The evidence: a month of practice signals, logged with the price at the signal and at the next whole minute, showing a material difference. B's and F's target scores fall to 3.
+   - Re-ranked: software C 4.25, D 4.10, B 3.85. Claude C 3.60, D 3.45, B 3.20.
+   - **The pick stays C.** This evidence would only widen its lead.
 3. **Morning research by Claude stays optional.**
    - The evidence that overturns: Michael says a Claude research layer is a must, worth 10 of 100.
-   - Re-ranked: D first under both drivers (4.19 and 3.47). F is within 0.10 under the Claude driver (3.38).
-   - **The pick becomes D**, clearly under the software driver, tied with F under the Claude driver.
+   - Re-ranked: D first under both drivers (4.19 and 3.61), with C within 0.10 under both (4.13 and 3.54).
+   - **The pick becomes D, tied with C.**
 4. **The driver stays open, or Claude stays possible.**
-   - The evidence that overturns: Michael decides on software only, so flexibility no longer earns points. Re-ranked: software C 4.17, D 4.00, B 3.89.
+   - The evidence: Michael decides on software only, so flexibility no longer earns points. Re-ranked: software C 4.17, D 4.00, B 3.89.
    - Or Anthropic says in writing that Claude may neither drive nor research for his own account. Every option drops to one driver: C 4.05, D 3.90, B 3.80.
-   - **The pick becomes C.**
-5. **C stays hard to ask.**
-   - C's flexibility is 3 only because it has no easy way to ask it something or start a run.
-   - The evidence that overturns: a small Telegram command interface proves enough (one build piece, then a week of use). C's flexibility rises to 5.
-   - Re-ranked: software C 4.25, D 4.10, B 4.00. Claude C 3.45, B 3.35.
-   - **The pick becomes C**, clearly under the software driver, tied with B under the Claude driver.
+   - **The pick stays C either way.** The driver no longer decides between the options.
+5. **C is easy to ask through Claude.** Rewritten in the correction of 2026-10-28, because run 3's version ("C stays hard to ask") assumed the score this correction removed.
+   - C's on-demand score of 5, and so its flexibility of 5, rests on Michael asking his own Claude Code session, which reads the database, as in option B.
+   - The evidence that overturns: a month of use shows that is not enough, because he needs to ask the running worker itself or start a run on demand, and no command interface is built. C's on-demand score and flexibility fall back to 3.
+   - Re-ranked: software D 4.10, C 4.05, B 4.00. Claude D 3.45, C 3.40, B 3.35.
+   - **The pick becomes a three-way tie of D, C and B** under both drivers. Run 3's original tie-break judgment, B, would then apply again.
 6. **A non-coder finds hosted code manageable.**
-   - The evidence that overturns: running B's functions and timer proves harder than expected, so B's operability falls to 3.
-   - Re-ranked: software D 4.10, C 4.05, B 3.85. Claude D 3.30, C 3.25, B 3.20.
-   - **The pick becomes D, with C tied.**
-7. **A worker stays healthy.** This test points the other way.
-   - The evidence: a two-week trial of a do-nothing worker under C shows a hang the heartbeat did not catch, or one Michael could not resolve without a Claude Code session. C's and D's execution, operability and safety fall by one.
-   - Re-ranked: software B 4.00, F 3.85, D 3.60.
-   - B's lead widens. This test confirms the pick rather than overturning it.
+   - The evidence: running B's functions and timer proves harder than expected, so B's operability falls to 3.
+   - Re-ranked: software C 4.25, D 4.10, B 3.85. Claude C 3.60, D 3.45, B 3.20.
+   - **The pick stays C.** This evidence moves only B.
+7. **A worker stays healthy.** This is now the test that matters most.
+   - The evidence that overturns: a two-week trial of a do-nothing worker under C shows a hang the heartbeat did not catch, or one Michael could not resolve without a Claude Code session. C's and D's execution, operability and safety fall by one.
+   - Re-ranked: software B 4.00, F 3.85, C 3.75, D 3.60. Claude B 3.35, F 3.20, C 3.10, D 3.10.
+   - **The pick becomes B**, clearly under both drivers. It is the cheapest measurement that could overturn the pick, so it is the one to run first (my judgment).
 8. **Anthropic's answers.**
    - If Anthropic confirms the owner can be the "qualified person" and a model may choose trades inside owner-set limits on a key, every Claude driver path score rises to 4.
-   - Re-ranked: Claude B 3.50, D 3.45, C 3.40. The tie and the pick are unchanged.
+   - Re-ranked: Claude C 3.75, D 3.60, B 3.50. The pick is unchanged.
    - If it says no, see item 4.
 9. **Program use of the data is affordable.**
    - The evidence that overturns: Tradier, Alpaca or the exchanges confirm that a personal program's use of real-time data is "non-display use" priced in band 4. Every option's cost falls to 1.
-   - Re-ranked: software D 3.90, C 3.85, B 3.80. Claude B 3.15, D 3.10. No new winner, because the cost falls on all four.
+   - Re-ranked: software C 4.05, D 3.90, B 3.80. Claude C 3.40, D 3.25. No new winner, because the cost falls on all four.
    - My judgment: **the architecture stands and the data category narrows.**
 10. **At least one broker keeps passing.**
     - The path score of 4 assumes Tradier or Alpaca.
@@ -1229,16 +1290,16 @@ Each is a yes or no question Michael could send to Anthropic. The texts read lea
 
 | Item | Software driver, first to last | Claude driver, first to last |
 | :-- | :-- | :-- |
-| 1. A timer fires reliably every minute | D 4.10, C 4.05, B 3.75, F 3.60 | D 3.30, C 3.25, B 3.10, F 2.95 |
-| 2. A minute is fast enough | D 4.10, C 4.05, B 3.85, F 3.70 | D 3.30, C 3.25, B 3.20, F 3.05 |
-| 3. Morning research by Claude stays optional | D 4.19, F 3.97, C 3.95, B 3.90 | D 3.47, F 3.38, B 3.32, C 3.23 |
-| 4. The driver stays open (software only, flexibility not weighted) | C 4.17, D 4.00, B 3.89, F 3.72 | C 3.28, B 3.17, D 3.11, F 3.00 |
-| 5. C stays hard to ask | C 4.25, D 4.10, B 4.00, F 3.85 | C 3.45, B 3.35, D 3.30, F 3.20 |
-| 6. A non-coder finds hosted code manageable | D 4.10, C 4.05, B 3.85, F 3.85 | D 3.30, C 3.25, B 3.20, F 3.20 |
-| 7. A worker stays healthy | B 4.00, F 3.85, D 3.60, C 3.55 | B 3.35, F 3.20, D 2.95, C 2.75 |
-| 8. Anthropic's answers (yes) | D 4.10, C 4.05, B 4.00, F 3.85 | B 3.50, D 3.45, C 3.40, F 3.35 |
-| 9. Program use of the data is affordable | D 3.90, C 3.85, B 3.80, F 3.65 | B 3.15, D 3.10, C 3.05, F 3.00 |
-| 10. At least one broker keeps passing | D 3.95, C 3.90, B 3.85, F 3.70 | B 3.20, D 3.15, C 3.10, F 3.05 |
+| 1. A timer fires reliably every minute | C 4.25, D 4.10, B 3.75, F 3.60 | C 3.60, D 3.45, B 3.10, F 2.95 |
+| 2. A minute is fast enough | C 4.25, D 4.10, B 3.85, F 3.70 | C 3.60, D 3.45, B 3.20, F 3.05 |
+| 3. Morning research by Claude stays optional | D 4.19, C 4.13, F 3.97, B 3.90 | D 3.61, C 3.54, F 3.38, B 3.32 |
+| 4. The driver stays open (software only, flexibility not weighted) | C 4.17, D 4.00, B 3.89, F 3.72 | C 3.44, D 3.28, B 3.17, F 3.00 |
+| 5. C is easy to ask through Claude | D 4.10, C 4.05, B 4.00, F 3.85 | D 3.45, C 3.40, B 3.35, F 3.20 |
+| 6. A non-coder finds hosted code manageable | C 4.25, D 4.10, B 3.85, F 3.85 | C 3.60, D 3.45, B 3.20, F 3.20 |
+| 7. A worker stays healthy | B 4.00, F 3.85, C 3.75, D 3.60 | B 3.35, F 3.20, C 3.10, D 3.10 |
+| 8. Anthropic's answers (yes) | C 4.25, D 4.10, B 4.00, F 3.85 | C 3.75, D 3.60, B 3.50, F 3.35 |
+| 9. Program use of the data is affordable | C 4.05, D 3.90, B 3.80, F 3.65 | C 3.40, D 3.25, B 3.15, F 3.00 |
+| 10. At least one broker keeps passing | C 4.10, D 3.95, B 3.85, F 3.70 | C 3.45, D 3.30, B 3.20, F 3.05 |
 
 **What would not overturn it:** a lower price from one data vendor, a new connector in Anthropic's directory, or a third broker confirming consolidated data. Those change which candidates fit, not which architecture is strongest.
 
@@ -1248,14 +1309,14 @@ Each is a yes or no question Michael could send to Anthropic. The texts read lea
 
 **For Michael to decide.**
 
-1. **Which driver, or both?** It decides between B and C (section 12, item 4).
-2. **Is a Claude research layer a must?** If yes, D becomes the pick (section 12, item 3).
+1. **Which driver, or both?** It no longer decides the pick, because C is first under both (section 12, item 4). It still decides the build hours, the monthly cost and which Anthropic terms apply.
+2. **Is a Claude research layer a must?** If yes, D ties with C (section 12, item 3).
 3. **May the wide daily screen use the prior day's prices?** This run reads it that way. If the screen must use real-time data too, Tradier's unpublished per-request limit matters, and Alpaca's 99 dollar plan becomes the safer data source.[^71][^2]
 4. **Tradier or Alpaca?** Tradier is cheaper (data included) but has no borrowing cap Michael can set and no trailing stop.[^13][^24][^29] Alpaca costs 99 a month for data, but has the cap, trailing stops and the lower margin rate.[^22][^30][^97]
 5. **What borrowing limit on day one?** At Alpaca a setting of 1 means no borrowing at all.[^22] At Tradier the limit lives in the agent's code only.[^24]
 6. **Is the Supabase tier in this repo's `CLAUDE.md` still right?** It says sib-tech uses Relii's "nano" tier.
    - Supabase says "You cannot launch Nano instances on paid plans" and bills Nano at the Micro price in paid organizations, about 10 dollars a month.[^14]
-   - This run did not edit `CLAUDE.md`.
+   - This run did not edit `CLAUDE.md`. The correction of 2026-10-28 changed it to Micro compute in `us-west-2` (Oregon), as that correction's brief asked.
 
 **For Anthropic, in writing.** The twelve questions in section 11.3. The three that decide the most: whether Michael can be the "qualified person" for his own account; whether an order placed by an agent is "used to implement a decision"; and which terms govern spending the Max plan's API credit.[^4][^48]
 
