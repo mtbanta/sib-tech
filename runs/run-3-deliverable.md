@@ -16,6 +16,7 @@
   - "How Michael uses it", options B, C, D and F: each Telegram post, stop command and alert now names Discord.[^133] The stop is read at the next run even if it was sent while the stack slept. Options B and C add a one-time test of whether Discord holds phone alerts while its desktop app is open.
   - Healthchecks.io alerts in options B and C now say they arrive through Discord.[^132]
   - Section 14: footnotes 131 to 133 added, dated 2026-10-28. Footnote 10 (Telegram) is kept for the record and marked no longer cited.
+- **Run 5, 2026-10-28.** Run 5 repeated the comparison with six apps, Signal and Google Chat added, every source read first hand. Discord stays the pick (4.50 against Telegram's 4.18), so nothing else here changed. See `runs/run-5-deliverable.md`.
 
 ## Correction, 2026-10-28
 
