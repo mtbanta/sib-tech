@@ -389,3 +389,32 @@ Settings loader with a paper-only guard, a logger and a redactor that hide secre
 
 ### Left open
 - **Discord desktop holdback test** needs Michael: desktop app open, then `node src/tools/post-test-alert.ts` from `stacks/cyrus/`, then whether the phone buzzed. Result to be appended here.
+
+(Note, 2026-10-30: piece 2's first push was refused by GitHub's own push protection because a made-up Discord-token-shaped test string matched its scanner. Michael approved amending the one unpushed commit. The fixture is now built at run time. The secret scan also gained a per-line marker, `scan-allow-fake`, honoured only in `test/` files and only for the pattern rules, never for the check against the real values in `.env.local`. Piece 2 is commit `ed166de`.)
+
+## Piece 4: Alpaca paper connection (touches money, reviewer required)
+
+Piece order changed from the plan: pieces 3 (database) waits on Michael's Supabase login, so piece 4 was built first. It needs no login.
+
+### Plan
+A trading client that can only reach Alpaca's paper host; account switches (long only, borrowing cap); orders that are safe to retry and always carry a protective stop at the broker; a read-only data client with the feed as a setting; a paper check tool.
+
+### Built (`stacks/cyrus/`)
+- `src/alpaca-trading.ts`:
+  - The address is a constant (`https://paper-api.alpaca.markets`), rebuilt and checked against the paper host before every call. A path that does not start with `/v2/` is refused.
+  - Reads (account, clock, settings, positions, orders) retry up to 3 times on a network error, 429 or a 5xx. Writes never retry blindly.
+  - `submitEntry` is the only way to open a position: a whole-share, long, market buy with a day time limit and a protective stop attached (Alpaca's "OTO" order, where the stop is created with the entry and held at Alpaca). Refused before sending: a quantity under 1 or not whole, a stop that is not below the reference price, a bad symbol, a bad order id. There is no sell entry and no short path.
+  - Safe retry: every entry carries a `client_order_id`. After a timeout, a 429, a 5xx or a "duplicate id" answer, the client asks Alpaca whether that id exists and returns that order; only if it does not exist does it send once more with the same id (which cannot create a second order).
+  - Bulk calls (cancel all orders, close all positions) come back as 207 with one result per item; a failed item is raised as an error instead of passing as success.
+  - `setAccountConfig` accepts only a borrowing cap of 1, 2 or 4. It does not decide whether to raise a cap: that gate belongs to the morning limits flow (piece 6) and Michael's approval.
+- `src/alpaca-data.ts`: latest trade, with the feed (`iex` or `sip`) taken from settings.
+- `src/tools/paper-check.ts`: the plumbing check below.
+
+### Tests
+29 tests pass (13 new for the client): paper host only, keys in headers only, hostile paths, read retries, no retry on 401/404, entry shape (long, OTO, stop, day), nine bad entries refused with nothing sent, timeout then lookup finds the order (one POST only), timeout then not found (same id sent again), duplicate id, refused order not retried, cap values, 207 failures, no key in error text.
+
+### Paper check against Alpaca's paper server (2026-10-30, 13:45 Central, market open)
+- Account ACTIVE, equity 20000. Starting settings: borrowing cap 4, shorting allowed.
+- **Set cap 1 and long only: both honoured and read back correct.** This answers piece 0's build-time question: Alpaca's paper server honours the borrowing cap setting (tested with 1, the safe value; 2 and 4 not tested because raising needs Michael's approval) and `no_shorting`. The account was left at cap 1 and long only. Raising to 2 or 4 happens only through the morning approval.
+- One real paper round trip, disclosed: bought 1 share of SPY (IEX last 751.29) with a protective stop 5 percent below. The stop leg was created as `held`, then `new` after the fill, i.e. held at Alpaca. A second submit with the same id returned the same order (no second order). Close all left 0 positions and 0 open orders. This is a plumbing test by the builder, not the stack's trading; no limit approved by Michael applies to it, and its size (1 share, about 751 dollars of a 20,000 dollar paper account) is far below any limit I would suggest.
+- Stream for fills: not built. Fills are read by polling orders (simple, and enough for plumbing). Revisit if polling proves too slow.
