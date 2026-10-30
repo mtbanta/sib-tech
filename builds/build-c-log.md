@@ -418,3 +418,28 @@ A trading client that can only reach Alpaca's paper host; account switches (long
 - **Set cap 1 and long only: both honoured and read back correct.** This answers piece 0's build-time question: Alpaca's paper server honours the borrowing cap setting (tested with 1, the safe value; 2 and 4 not tested because raising needs Michael's approval) and `no_shorting`. The account was left at cap 1 and long only. Raising to 2 or 4 happens only through the morning approval.
 - One real paper round trip, disclosed: bought 1 share of SPY (IEX last 751.29) with a protective stop 5 percent below. The stop leg was created as `held`, then `new` after the fill, i.e. held at Alpaca. A second submit with the same id returned the same order (no second order). Close all left 0 positions and 0 open orders. This is a plumbing test by the builder, not the stack's trading; no limit approved by Michael applies to it, and its size (1 share, about 751 dollars of a 20,000 dollar paper account) is far below any limit I would suggest.
 - Stream for fills: not built. Fills are read by polling orders (simple, and enough for plumbing). Revisit if polling proves too slow.
+
+### Piece 4 review, round 1 (2026-10-30)
+
+The named `build-reviewer` agent was not available in this session (agent files are read when a session starts, so it exists only after a restart). A general-purpose agent on Opus was told to follow `.claude/agents/build-reviewer.md` exactly. This is a stand-in, recorded here. Michael may restart the session before later reviews so the real agent is used.
+
+- **Verdict: CHANGES REQUIRED.** Paper only, no secrets, separation and hard stops passed. Piece 2 was also checked: trading host is a constant, live-shaped keys refused, the `scan-allow-fake` marker is limited to test files and pattern rules.
+- **Blocking finding:** `setAccountConfig` accepted `noShorting: false`, so later code could switch shorting back on, and a protective stop firing at the same moment as a close-out could leave the account short. **Fixed:** the method refuses `noShorting: false` outright (long only can be switched on, never off); tests added.
+- **Non-blocking, done now:** requests refuse redirects (key headers never follow one); the paper check tool always closes positions in a `finally`; added tests for a failed lookup after a timeout, a duplicate answer on the second send, and the redirect setting.
+- **Non-blocking, carried forward:** (a) pieces 6 and 7 route every order and every cap change through one gate that checks the stop flag, the limits and the morning approval, with a test that nothing else calls `submitEntry`; (b) the approved cap is passed in and any higher value refused; (c) the same decision must build the same order id after a restart (test in piece 7); (d) the protective stop is a day order, so a failed close-out leaves a position with no protection overnight: piece 7 alerts on that; (e) no retry or alerting in the data client yet (piece 8); (f) records: this section.
+
+## Piece 5: market data and the daily screen
+
+### Built (`stacks/cyrus/src/`)
+- `universe.ts`: the day's starting universe from Nasdaq Trader's free symbol files (all Nasdaq-listed common stocks, plus NYSE-listed ones). Drops ETFs, test issues, warrants, units, preferreds, notes and tickers with symbols or digits. **Departure from the brief, stated plainly:** the brief says the screen builds from the six indexes of run 3 section 7.3. This universe (5,154 names on 2026-10-30) contains every member of all six (Dow, S&P 500, Nasdaq 100, Russell 2000, Nasdaq Composite, NYSE Composite) but does not label which index a name belongs to. Per-index labelling needs three more third-party files; it can be added later, and for a plumbing test it changes nothing. Michael can overrule.
+- `screen.ts`: a deliberately simple placeholder rule, documented in the file: last close between 10 and 500 dollars; average daily dollar volume at least 100 million; rank by last session volume divided by the average of the earlier sessions; keep the top N. Same data always gives the same list. `liveListSize` cuts the list to 30 on the free feed.
+- `stream.ts`: one connection to Alpaca's market data stream; the feed is a setting; refuses more than 30 symbols on `iex`; reconnects with a growing delay; a failed login is fatal (reconnecting cannot fix it).
+- `alpaca-data.ts`: daily bars for many symbols, paged and chunked.
+
+### Measured today
+- **A paper-only login can read consolidated (`sip`) daily history**, because history older than 15 minutes is free on the Basic plan (AAPL, MSFT, SPY, 2026-10-23 to 2026-10-29: sip volume about 40 million for AAPL against about 1 million on iex). So the morning screen runs on consolidated prior-day data, as run 3 recommended, while live prices come from the free IEX stream. Real-time `sip` still needs a live account, so it stays a later configuration change.
+- Live check at 13:50 Central: 5,154 names screened (5,149 returned bars; 195 seconds, so the screen should start well before the open), a 20 name live list, the stream connected, authenticated and went live, and received 197 trades from 16 of the 20 symbols in 25 seconds.
+- The free IEX stream limit is 30 symbols; the live list defaults to 20.
+
+### Tests
+41 tests pass (12 new: universe filters, screen filters and ranking, list size, stream connect/auth/subscribe/trade delivery, feed as a setting, over-30 refused, reconnect and stop, fatal login failure, connection limit backoff).

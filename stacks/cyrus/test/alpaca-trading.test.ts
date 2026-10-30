@@ -144,3 +144,29 @@ test("error text carries no key", async () => {
   const { client } = fake([json({ message: "forbidden" }, 403)]);
   await assert.rejects(client.getAccount(), (e: Error) => !e.message.includes("fakeSecret") && !e.message.includes("PKTEST"));
 });
+
+test("the client can turn long only on but never allow shorting again", async () => {
+  const { calls, client } = fake([]);
+  await assert.rejects(client.setAccountConfig({ noShorting: false }), /long only/);
+  await assert.rejects(client.setAccountConfig({ maxMarginMultiplier: 2, noShorting: false }), /long only/);
+  assert.equal(calls.length, 0);
+});
+
+test("requests refuse redirects, so key headers never follow one", async () => {
+  let seen: RequestInit | undefined;
+  const client = new AlpacaTrading(settings, { fetchImpl: (async (_u: URL | string, init?: RequestInit) => { seen = init; return json({ status: "ACTIVE" }); }) as typeof fetch, retryDelayMs: 0 });
+  await client.getAccount();
+  assert.equal(seen?.redirect, "error");
+});
+
+test("after a timeout where the lookup also fails, the error is raised and nothing is sent twice", async () => {
+  const { calls, client } = fake([new Error("timeout"), json({ message: "boom" }, 500), json({ message: "boom" }, 500), json({ message: "boom" }, 500)]);
+  await assert.rejects(client.submitEntry(entry));
+  assert.equal(calls.filter((c) => c.method === "POST").length, 1);
+});
+
+test("a second send that gets a duplicate answer raises that answer and never sends a third time", async () => {
+  const { calls, client } = fake([new Error("timeout"), json({ message: "order not found" }, 404), json({ message: "client_order_id must be unique" }, 422)]);
+  await assert.rejects(client.submitEntry(entry), /client_order_id/);
+  assert.equal(calls.filter((c) => c.method === "POST").length, 2);
+});

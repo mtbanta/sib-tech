@@ -37,6 +37,7 @@ if (process.argv.includes("--trade")) {
     console.log("SPY last (", data.feed, ")", last.price, last.time);
     const stop = Math.floor(last.price * 0.95 * 100) / 100;
     const clientOrderId = `cyrus-plumbing-${Date.now()}`;
+    try {
     const order = await trading.submitEntry({ symbol: "SPY", qty: 1, stopPrice: stop, referencePrice: last.price, clientOrderId });
     console.log("submitted", { status: order.status, class: order.orderClass, legs: order.legs.map((l) => ({ type: l.type, status: l.status, stop: l.stopPrice })) });
     // Same id again must not create a second order.
@@ -50,8 +51,11 @@ if (process.argv.includes("--trade")) {
     console.log("entry", { status: filled.status, filledQty: filled.filledQty, avg: filled.filledAvgPrice, legs: filled.legs.map((l) => ({ type: l.type, status: l.status, stop: l.stopPrice })) });
     console.log("positions", (await trading.listPositions()).map((p) => ({ symbol: p.symbol, qty: p.qty })));
     console.log("open orders", (await trading.listOrders("open")).map((o) => ({ symbol: o.symbol, type: o.type, status: o.status })));
-    await trading.closeAllPositions();
-    await sleep(3000);
-    console.log("after close: positions", (await trading.listPositions()).length, "open orders", (await trading.listOrders("open")).length);
+    } finally {
+      // Whatever happened above, leave the paper account flat.
+      await trading.closeAllPositions();
+      await sleep(3000);
+      console.log("after close: positions", (await trading.listPositions()).length, "open orders", (await trading.listOrders("open")).length);
+    }
   }
 }

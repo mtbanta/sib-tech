@@ -128,6 +128,7 @@ export class AlpacaTrading {
       },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(10_000),
+      redirect: "error", // never follow a redirect with the key headers attached
     });
     const text = await res.text();
     let parsed: unknown = null;
@@ -194,7 +195,9 @@ export class AlpacaTrading {
       if (![1, 2, 4].includes(patch.maxMarginMultiplier)) throw new AlpacaError("Borrowing cap must be 1, 2 or 4", 0);
       body.max_margin_multiplier = String(patch.maxMarginMultiplier);
     }
-    if (patch.noShorting !== undefined) body.no_shorting = patch.noShorting;
+    // Long only is not negotiable: this client can turn shorting off but never back on.
+    if (patch.noShorting === false) throw new AlpacaError("Refusing to allow shorting: stack C is long only", 0);
+    if (patch.noShorting === true) body.no_shorting = true;
     if (patch.suspendTrade !== undefined) body.suspend_trade = patch.suspendTrade;
     return this.parseConfig((await this.once("PATCH", "/v2/account/configurations", undefined, body)) as Json);
   }
