@@ -443,3 +443,21 @@ The named `build-reviewer` agent was not available in this session (agent files 
 
 ### Tests
 41 tests pass (12 new: universe filters, screen filters and ranking, list size, stream connect/auth/subscribe/trade delivery, feed as a setting, over-30 refused, reconnect and stop, fatal login failure, connection limit backoff).
+
+### Piece 4 review, round 2 (2026-10-30)
+**PASS** (same stand-in reviewer). The shorting blocker is fixed and tested; redirects refused; the paper check always closes. Piece 5 was checked for paper only, secrets, separation and gate bypass: nothing in it can place an order or change account settings. Reviewer's process note, accepted: the round 2 fixes and piece 5 shared one commit (`9f8436e`); later pieces will keep fixes in their own commit. Reviewer's note for Michael: piece 5's universe departs from the brief (see Piece 5).
+
+## Piece 7 groundwork: limit checks (not yet complete, no reviewer yet)
+
+`src/limits.ts` holds the pure check every entry must pass, with 16 tests: stop flag first, then "no limits approved today", market closed, first 5 minutes, last 60 minutes, stale price (older than 120 seconds), daily loss stop (at the limit refuses), trades a day, one entry per symbol per day, no doubling a held symbol, borrowing cap (cap 1 means exposure never above equity), position limit, whole shares only. Suggested limits (placeholders, small on purpose): largest position 1000 dollars, daily loss stop 200 dollars, 10 trades a day, borrowing cap 1. Owner overrides (`position`, `loss`, `trades`, `cap`) are checked against sanity bounds meant to catch typos.
+
+## Where the build stands (2026-10-30)
+
+- Done and pushed: pieces 1, 2, 4 (reviewed, PASS round 2), 5. Piece 7 groundwork (limits) in progress.
+- **Blocked on Michael.** Nothing past this point can be built without them:
+  1. `! cd /Users/mtbanta/Projects/sib-tech/stacks/cyrus && npx supabase login` (piece 3, the database that holds the stop flag, approvals and trade counts across restarts).
+  2. `! ~/.fly/bin/fly auth login` (piece 9, deployment). Needs a Fly.io account with a card on file, under cyrus@sib-tech.co.
+  3. Healthchecks: Integrations, "Connect Discord", Stack C server, `alerts` channel (the heartbeat alert route). Only the email route exists now.
+  4. Discord holdback test: open the Discord desktop app, tell me, I post one message; then tell me whether the phone buzzed.
+  5. Optional: restart Claude Code so the real `build-reviewer` agent loads, and paste Alpaca's written reply if you want it on file verbatim.
+- Order of the remaining pieces: 3 database, 6 Discord commands and morning limits, 7 order gate and close-out (with the reviewer), 8 daily summary and scheduler, 9 Fly deployment, 10 rehearsal and the "first paper session" checklist.
