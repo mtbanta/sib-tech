@@ -158,7 +158,9 @@ export class OrderGate {
       // Only a definite "no" from Alpaca (a local refusal, or a 4xx other than 429) means nothing was sent.
       // Anything else (a timeout, a 5xx, a failed lookup) may have landed: the row stays "intent", still counts
       // as a trade, and the order sync reconciles it by its id.
-      const definite = err instanceof AlpacaError && (err.status === 0 || (err.status >= 400 && err.status < 500 && err.status !== 429));
+      // A "duplicate client_order_id" answer (422) means the order already exists at Alpaca, so it is unclear, not refused.
+      const duplicate = err instanceof AlpacaError && err.status === 422 && /client_order_id/i.test(err.message);
+      const definite = err instanceof AlpacaError && !duplicate && (err.status === 0 || (err.status >= 400 && err.status < 500 && err.status !== 429));
       if (definite) {
         await this.d.store.updateOrder(clientOrderId, { status: "failed", note: reason }).catch(() => undefined);
         await this.d.say("commands", `Entry for ${symbol} was refused by Alpaca and not retried: ${reason}`);

@@ -156,7 +156,7 @@ export class CommandProcessor {
           return;
         }
         await this.d.store.updateDay(date, decision.patch);
-        const flag = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
+        const flag = await this.d.store.getControl<StopFlag>(CONTROL_STOP).catch(() => null);
         if (flag?.on && decision.patch.status === "approved") decision.reply += `\n**Note: the stop flag is ON (${flag.reason}), so there will be no entries until you type \`resume\`.**`;
         this.d.log?.("limits_decision", { status: decision.patch.status, limits: decision.patch.limits });
         await this.say(decision.reply);

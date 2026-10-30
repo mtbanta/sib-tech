@@ -182,6 +182,15 @@ test("an unclear outcome (timeout, server error) is kept as an intent that still
   assert.equal(row.alpacaOrderId, "00000000-0000-0000-0000-0000000000aa");
 });
 
+test("a duplicate-id answer (the order exists at Alpaca) is kept as an intent that still counts, never recorded as failed", async () => {
+  const s = await setup();
+  s.broker.submitEntry = async (e) => { s.broker.calls.push({ fn: "submitEntry", args: [e] }); throw new AlpacaError("client_order_id must be unique", 422); };
+  const r = await s.gate.enter(s.signal());
+  assert.equal(r.status, "error");
+  assert.equal((await s.store.getOrder(clientOrderIdFor(D, "AAA")))?.status, "intent");
+  assert.ok(s.said.some((m) => m.text.includes("outcome at Alpaca is unclear")));
+});
+
 test("if the database fails after the order was sent, the order is not reported as failed", async () => {
   const s = await setup();
   const realUpdate = s.store.updateOrder.bind(s.store);
