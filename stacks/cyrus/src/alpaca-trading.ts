@@ -17,6 +17,7 @@ export class AlpacaError extends Error {
 export interface Account {
   status: string;
   equity: number;
+  lastEquity: number; // equity at the previous close: the day's starting point
   cash: number;
   buyingPower: number;
   multiplier: number;
@@ -36,6 +37,12 @@ export interface Clock {
   timestamp: string;
   nextOpen: string;
   nextClose: string;
+}
+
+export interface CalendarDay {
+  date: string; // YYYY-MM-DD
+  open: string; // HH:MM New York time
+  close: string; // HH:MM New York time (earlier on half days)
 }
 
 export interface Position {
@@ -165,6 +172,7 @@ export class AlpacaTrading {
     return {
       status: String(a.status),
       equity: num(a.equity),
+      lastEquity: num(a.last_equity),
       cash: num(a.cash),
       buyingPower: num(a.buying_power),
       multiplier: num(a.multiplier),
@@ -200,6 +208,12 @@ export class AlpacaTrading {
     if (patch.noShorting === true) body.no_shorting = true;
     if (patch.suspendTrade !== undefined) body.suspend_trade = patch.suspendTrade;
     return this.parseConfig((await this.once("PATCH", "/v2/account/configurations", undefined, body)) as Json);
+  }
+
+  // The market's sessions between two dates, inclusive. A weekend or holiday is simply absent.
+  async getCalendar(start: string, end: string): Promise<CalendarDay[]> {
+    const rows = (await this.read("/v2/calendar", { start, end })) as Json[];
+    return rows.map((r) => ({ date: String(r.date), open: String(r.open), close: String(r.close) }));
   }
 
   async listPositions(): Promise<Position[]> {
@@ -268,6 +282,18 @@ export class AlpacaTrading {
     if (!Array.isArray(result)) return;
     const failed = (result as Json[]).filter((r) => num(r.status) >= 400).map((r) => String(r.symbol ?? r.id ?? "?"));
     if (failed.length > 0) throw new AlpacaError(`${what} failed for: ${failed.join(", ")}`, 207);
+  }
+
+  // Cancels one order (used by the stop command, for entries that have not filled yet).
+  async cancelOrder(orderId: string): Promise<void> {
+    if (!/^[0-9a-f-]{36}$/.test(orderId)) throw new AlpacaError("Bad order id", 0);
+    await this.once("DELETE", `/v2/orders/${orderId}`);
+  }
+
+  // Sells one position at market (used when a position turns out to have no protective stop).
+  async closePosition(symbol: string): Promise<void> {
+    if (!/^[A-Z.]{1,6}$/.test(symbol)) throw new AlpacaError("Bad symbol", 0);
+    await this.once("DELETE", `/v2/positions/${encodeURIComponent(symbol)}`);
   }
 
   async cancelAllOrders(): Promise<void> {

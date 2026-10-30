@@ -531,3 +531,24 @@ Re-read the brief, this log, `PROJECT_STATE.md` and `CLAUDE.md` first, as the br
 
 ### Not done, blocked on Michael
 `SUPABASE_DB_URL` in `.env.local` is a web address (`https://...`), not a Postgres connection string, so the schema is not applied and the `PgStore` has not been run against the real database. Needed: the Supabase "Connect" string (Session pooler works over IPv4 and is the safe default for Fly) with the database password filled in. Then: `node src/tools/apply-schema.ts`.
+
+## Piece 6: Discord commands and the morning limits flow (touches money, reviewer required)
+
+### Built (`stacks/cyrus/src/`)
+- `time.ts`: market date and market-time conversion using the platform's time zone data (checked across the daylight saving change on 2026-11-01), and Central time text for messages to Michael.
+- `discord-bot.ts`: the bot over Discord's plain web interface (no live connection). It finds the server's channels by name, **checks the command channel belongs to the configured server**, posts redacted text with mentions off, and reads command messages newer than a cursor. `isOwnerCommand`: only the owner's id, only the command channel, never a bot's message.
+- `morning.ts`: builds the day's record from Alpaca's calendar (holidays and half days come from there), with the **previous close equity as the day's starting point**; the request message; the command parser; `decideLimits` (pure): approve all, approve one, or overrule one (an overrule counts as the decision for that limit). **The day is approved only when all four limits are decided, and only before the open.** Steps: post the request once, one reminder 10 minutes before the open, and **lapse the day at the open if anything is undecided** (no trading that day, Michael told, a late approval is refused).
+- `commands.ts`: `help`, `status`, `stop`, `resume`, `flatten`, `limits`, `approve [name]`, and the four overrules. `stop` sets the stop flag in the database and cancels only unfilled buy orders (never a protective stop); open positions keep their stops and are closed by the end-of-day close-out. `flatten` is my addition beyond the brief's "at least stop and status": it sets the flag and sells everything, because stop alone leaves positions open. A cap decision is **set at Alpaca first** (long only is set with it); if Alpaca refuses, nothing is approved.
+- `broker.ts`: the slice of the Alpaca client the worker uses, so tests can supply a fake. New client calls: market calendar, cancel one order, close one position, and last-close equity on the account.
+
+### Decisions
+- **Polling, not a live connection.** The bot asks for new command messages every few seconds. Simpler and more reliable than keeping a socket alive; a command takes up to the polling interval (planned 5 seconds) to be seen. Needs the Message Content setting on the bot (Michael switched it on); **not yet verified**, because the command channel is empty. Once Michael types `help` in `commands`, `node src/tools/discord-check.ts` reports whether the text is visible.
+- **First run never acts on history:** the cursor starts at the newest message. A replayed approval older than this morning's request is ignored (the request's time is stored).
+- **A stop that cannot be saved says so loudly** and tells Michael to check Alpaca's dashboard. The gate (piece 7) also refuses every entry while the database is unreachable.
+- **Posting channels:** requests, replies and alerts to Michael go to `commands`; trade messages to `trading`; `alerts` is used by Healthchecks (and the webhook for outages).
+
+### Tests
+104 pass (26 new): market times across daylight saving and half days, day creation and non-trading days, command parsing, owner-only handling (strangers, wrong channel, bots get no reply), first-run cursor, stop cancels only unfilled buys, flatten, partial and full approval, overrule bounds, cap set at Alpaca first and failure leaves nothing approved, late approval refused, lapsed day stays lapsed, old approval ignored, stop-failure message, bot channel checks, redaction and rate limit handling.
+
+### Live check (2026-10-30)
+`node src/tools/discord-check.ts`: channels found, command channel belongs to the configured server, one line posted to `trading`. Command channel empty, so message text visibility is untested.

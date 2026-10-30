@@ -1,0 +1,269 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { etDate, etInstant, centralClock } from "../src/time.ts";
+import { ensureDay, formatLimitsRequest, parseCommand, decideLimits } from "../src/morning.ts";
+import { CommandProcessor } from "../src/commands.ts";
+import { MemoryStore, CONTROL_STOP, CONTROL_COMMAND_CURSOR, type StopFlag } from "../src/store.ts";
+import { FakeBroker, FakeBot, order, settings } from "./helpers.ts";
+
+const D = "2026-11-02"; // a Monday, after daylight saving ends (winter time)
+const OPEN = new Date("2026-11-02T14:30:00Z"); // 9:30 New York = 14:30 UTC in winter
+
+test("market times: summer and winter, and the day change", () => {
+  assert.equal(etInstant("2026-10-30", "09:30").toISOString(), "2026-10-30T13:30:00.000Z");
+  assert.equal(etInstant("2026-11-02", "09:30").toISOString(), OPEN.toISOString());
+  assert.equal(etInstant("2026-11-02", "16:00").toISOString(), "2026-11-02T21:00:00.000Z");
+  assert.equal(etInstant("2026-11-27", "13:00").toISOString(), "2026-11-27T18:00:00.000Z"); // half day close
+  // 11 PM in New York is already the next day in UTC, but the market date stays
+  assert.equal(etDate(new Date("2026-11-03T03:30:00Z")), "2026-11-02");
+  assert.equal(etDate(new Date("2026-11-02T04:59:00Z")), "2026-11-01");
+  assert.equal(etDate(new Date("2026-11-02T05:00:00Z")), "2026-11-02");
+  assert.equal(centralClock(OPEN), "8:30 AM CT");
+  assert.equal(centralClock(new Date("2026-10-30T13:30:00Z")), "8:30 AM CT");
+});
+
+test("ensureDay builds a trading day from the calendar, using the previous close as the starting equity", async () => {
+  const store = new MemoryStore();
+  const broker = new FakeBroker();
+  broker.account = { ...broker.account, lastEquity: 19900, equity: 19950 };
+  const day = await ensureDay({ store, broker }, D);
+  assert.equal(day.status, "pending");
+  assert.equal(day.openAt?.toISOString(), OPEN.toISOString());
+  assert.equal(day.dayStartEquity, 19900);
+  assert.equal(day.limits.borrowingCap, 1);
+  assert.deepEqual(day.decided, {});
+  const again = await ensureDay({ store, broker }, D);
+  assert.equal(again.tradeDate, D);
+  assert.equal(broker.count("getCalendar"), 1, "a stored day is not rebuilt");
+});
+
+test("a weekend is recorded as not a trading day", async () => {
+  const day = await ensureDay({ store: new MemoryStore(), broker: new FakeBroker() }, "2026-11-01");
+  assert.equal(day.status, "not_trading_day");
+  assert.equal(day.isTradingDay, false);
+});
+
+test("the request message names every limit and says what silence means", async () => {
+  const day = await ensureDay({ store: new MemoryStore(), broker: new FakeBroker() }, D);
+  const text = formatLimitsRequest(day);
+  for (const w of ["position", "loss", "trades", "cap", "8:30 AM CT", "will not trade today", "never an instruction to act"]) assert.ok(text.includes(w), w);
+});
+
+test("commands are parsed", () => {
+  assert.deepEqual(parseCommand("  Stop "), { kind: "stop" });
+  assert.deepEqual(parseCommand("/status"), { kind: "status" });
+  assert.deepEqual(parseCommand("approve"), { kind: "approve", name: "all" });
+  assert.deepEqual(parseCommand("approve cap"), { kind: "approve", name: "cap" });
+  assert.deepEqual(parseCommand("position 1500"), { kind: "set", name: "position", value: "1500" });
+  assert.equal(parseCommand("approve everything").kind, "unknown");
+  assert.equal(parseCommand("loss").kind, "unknown");
+  assert.equal(parseCommand("buy AAPL").kind, "unknown");
+});
+
+async function setup() {
+  const store = new MemoryStore();
+  const broker = new FakeBroker();
+  const bot = new FakeBot();
+  let now = new Date("2026-11-02T12:30:00Z"); // 7:30 AM Central, two hours before the open
+  const proc = new CommandProcessor({ settings, store, broker, bot, now: () => now });
+  const day = await ensureDay({ store, broker }, D);
+  await store.updateDay(D, { phases: { morning: "2026-11-02T12:00:00.000Z" } });
+  await proc.poll(); // first run sets the cursor
+  return { store, broker, bot, proc, day, setNow: (d: Date) => (now = d), get now() { return now; } };
+}
+
+test("first poll ignores history; later owner messages are handled", async () => {
+  const store = new MemoryStore();
+  const broker = new FakeBroker();
+  const bot = new FakeBot();
+  bot.say("stop", new Date("2026-11-02T11:00:00Z")); // old, before we started
+  const proc = new CommandProcessor({ settings, store, broker, bot, now: () => new Date("2026-11-02T12:30:00Z") });
+  assert.equal(await proc.poll(), 0);
+  assert.equal(await store.getControl(CONTROL_STOP), null, "history is never acted on");
+  bot.say("stop", new Date("2026-11-02T12:31:00Z"));
+  assert.equal(await proc.poll(), 1);
+  assert.equal((await store.getControl<StopFlag>(CONTROL_STOP))?.on, true);
+});
+
+test("only the owner, in the command channel, counts", async () => {
+  const s = await setup();
+  s.bot.say("stop", s.now, { authorId: "999999999999999999" });
+  s.bot.say("stop", s.now, { channelId: "888888888888888888" });
+  s.bot.say("stop", s.now, { authorIsBot: true });
+  assert.equal(await s.proc.poll(), 0);
+  assert.equal(await s.store.getControl(CONTROL_STOP), null);
+  assert.equal(s.bot.posts.length, 0, "strangers get no reply");
+  const cursor = await s.store.getControl<{ id: string }>(CONTROL_COMMAND_CURSOR);
+  assert.equal(cursor?.id, s.bot.messages[2]!.id, "the cursor still moves past them");
+});
+
+test("stop sets the flag and cancels only unfilled entries, never a protective stop", async () => {
+  const s = await setup();
+  s.broker.orders = [
+    order({ id: "00000000-0000-0000-0000-00000000000a", symbol: "AAA", side: "buy", filledQty: 0, status: "accepted" }),
+    order({ id: "00000000-0000-0000-0000-00000000000b", symbol: "BBB", side: "sell", type: "stop", filledQty: 0, status: "new" }),
+    order({ id: "00000000-0000-0000-0000-00000000000c", symbol: "CCC", side: "buy", filledQty: 1, status: "partially_filled" }),
+  ];
+  s.bot.say("stop", s.now);
+  await s.proc.poll();
+  const cancelled = s.broker.calls.filter((c) => c.fn === "cancelOrder").map((c) => c.args[0]);
+  assert.deepEqual(cancelled, ["00000000-0000-0000-0000-00000000000a"]);
+  assert.equal(s.broker.count("closeAllPositions"), 0);
+  assert.ok(s.bot.last().includes("Stopped"));
+  s.bot.say("resume", s.now);
+  await s.proc.poll();
+  assert.equal((await s.store.getControl<StopFlag>(CONTROL_STOP))?.on, false);
+});
+
+test("flatten sets the stop flag and sells everything", async () => {
+  const s = await setup();
+  s.bot.say("flatten", s.now);
+  await s.proc.poll();
+  assert.equal((await s.store.getControl<StopFlag>(CONTROL_STOP))?.on, true);
+  assert.equal(s.broker.count("closeAllPositions"), 1);
+});
+
+test("approve, with an overrule, before the open: approved only when all four are decided", async () => {
+  const s = await setup();
+  s.bot.say("approve position", s.now);
+  s.bot.say("loss 150", s.now);
+  s.bot.say("trades 5", s.now);
+  await s.proc.poll();
+  let day = (await s.store.getDay(D))!;
+  assert.equal(day.status, "pending", "three of four decided is not enough");
+  assert.equal(day.limits.dailyLossStopUsd, 150);
+  assert.equal(day.limits.maxTradesPerDay, 5);
+  s.bot.say("approve cap", s.now);
+  await s.proc.poll();
+  day = (await s.store.getDay(D))!;
+  assert.equal(day.status, "approved");
+  assert.ok(s.bot.last().includes("All four limits decided"));
+  assert.equal(s.broker.config.maxMarginMultiplier, 1);
+  assert.equal(s.broker.config.noShorting, true);
+});
+
+test("overruling the cap sets it at Alpaca first; if that fails nothing is approved", async () => {
+  const s = await setup();
+  s.broker.failOn.add("setAccountConfig");
+  s.bot.say("cap 2", s.now);
+  await s.proc.poll();
+  const day = (await s.store.getDay(D))!;
+  assert.equal(day.decided.cap, undefined);
+  assert.equal(day.limits.borrowingCap, 1);
+  assert.ok(s.bot.last().includes("failed"));
+  s.broker.failOn.clear();
+  s.bot.say("cap 2", s.now);
+  await s.proc.poll();
+  assert.equal(s.broker.config.maxMarginMultiplier, 2);
+  assert.equal((await s.store.getDay(D))!.limits.borrowingCap, 2);
+});
+
+test("a bad value is refused and nothing changes", async () => {
+  const s = await setup();
+  s.bot.say("cap 3", s.now);
+  s.bot.say("position 99999999", s.now);
+  await s.proc.poll();
+  const day = (await s.store.getDay(D))!;
+  assert.deepEqual(day.decided, {});
+  assert.equal(day.limits.borrowingCap, 1);
+});
+
+test("after the open, limits are fixed and approval is refused", async () => {
+  const s = await setup();
+  s.setNow(new Date("2026-11-02T14:31:00Z"));
+  s.bot.say("approve", s.now);
+  await s.proc.poll();
+  assert.equal((await s.store.getDay(D))!.status, "pending");
+  assert.ok(s.bot.last().includes("Too late"));
+});
+
+test("a lapsed day cannot be approved late", async () => {
+  const s = await setup();
+  await s.store.updateDay(D, { status: "lapsed" });
+  s.bot.say("approve", s.now);
+  await s.proc.poll();
+  assert.equal((await s.store.getDay(D))!.status, "lapsed");
+});
+
+test("an approval written before this morning's request is ignored", async () => {
+  const s = await setup();
+  s.bot.say("approve", new Date("2026-11-01T20:00:00Z")); // yesterday evening
+  await s.proc.poll();
+  assert.equal((await s.store.getDay(D))!.status, "pending");
+  assert.ok(s.bot.last().includes("older"));
+});
+
+test("the pure decision refuses on a non-trading day", () => {
+  const day = { tradeDate: D, isTradingDay: false, openAt: null, closeAt: null, status: "not_trading_day", dayStartEquity: 1, suggested: settingsLimits(), limits: settingsLimits(), decided: {}, liveList: null, phases: {} } as any;
+  const r = decideLimits(day, { kind: "approve", name: "all" }, 20000, OPEN, OPEN);
+  assert.equal(r.ok, false);
+});
+function settingsLimits() {
+  return { maxPositionUsd: 1000, dailyLossStopUsd: 200, maxTradesPerDay: 10, borrowingCap: 1 };
+}
+
+test("status reports the stop flag, limits and positions, and never a secret", async () => {
+  const s = await setup();
+  s.bot.say("status", s.now);
+  await s.proc.poll();
+  const t = s.bot.last();
+  for (const w of ["Stop flag: off", "pending", "Equity", "never an instruction to act"]) assert.ok(t.includes(w), w);
+});
+
+test("a store failure while handling a command is reported, not swallowed", async () => {
+  const s = await setup();
+  s.bot.say("stop", s.now);
+  s.store.failing = true;
+  await assert.rejects(s.proc.poll(), "the cursor cannot be read, so polling fails loudly");
+});
+
+test("a stop that cannot be saved says so loudly", async () => {
+  const s = await setup();
+  s.bot.say("stop", s.now);
+  const realSet = s.store.setControl.bind(s.store);
+  s.store.setControl = async (k: string, v: unknown) => {
+    if (k === CONTROL_STOP) throw new Error("db down (test)");
+    return realSet(k, v);
+  };
+  await s.proc.poll();
+  assert.ok(s.bot.last().includes("STOP DID NOT COMPLETE"));
+});
+
+import { postMorningRequest, postReminderIfNeeded, lapseIfUndecided } from "../src/morning.ts";
+
+test("the morning request is posted once; the reminder once; an undecided day lapses at the open", async () => {
+  const store = new MemoryStore();
+  const broker = new FakeBroker();
+  const bot = new FakeBot();
+  let now = new Date("2026-11-02T12:00:00Z");
+  const steps = { store, broker, say: (c: any, t: string) => bot.post(c, t), now: () => now };
+  let day = await ensureDay(steps, D);
+  day = await postMorningRequest(steps, day);
+  day = await postMorningRequest(steps, day);
+  assert.equal(bot.posts.length, 1, "a restart does not repeat the request");
+  assert.ok(day.phases.morning);
+  now = new Date("2026-11-02T14:15:00Z"); // 15 minutes before the open: too early for the reminder
+  day = await postReminderIfNeeded(steps, day);
+  assert.equal(bot.posts.length, 1);
+  now = new Date("2026-11-02T14:21:00Z");
+  day = await postReminderIfNeeded(steps, day);
+  day = await postReminderIfNeeded(steps, day);
+  assert.equal(bot.posts.length, 2);
+  assert.ok(bot.last().includes("Reminder"));
+  day = await lapseIfUndecided(steps, day);
+  assert.equal(day.status, "pending", "not yet open");
+  now = new Date("2026-11-02T14:30:00Z");
+  day = await lapseIfUndecided(steps, day);
+  assert.equal(day.status, "lapsed");
+  assert.ok(bot.last().includes("will not trade today"));
+});
+
+test("an approved day does not lapse", async () => {
+  const store = new MemoryStore();
+  const broker = new FakeBroker();
+  const bot = new FakeBot();
+  const steps = { store, broker, say: (c: any, t: string) => bot.post(c, t), now: () => new Date("2026-11-02T15:00:00Z") };
+  await ensureDay(steps, D);
+  const day = await store.updateDay(D, { status: "approved" });
+  assert.equal((await lapseIfUndecided(steps, day)).status, "approved");
+});
