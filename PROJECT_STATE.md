@@ -6,7 +6,9 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**BUILD C, PIECES 1 TO 9 BUILT AND TESTED; NOT YET DEPLOYED; WAITING FOR MICHAEL'S DATABASE ADDRESS.** As of October 30, 2026 (evening). Built and pushed: the worker's whole day in code (morning limits request and approval over Discord, the daily screen, live prices, a placeholder opening-range strategy, the single order gate with a protective stop at Alpaca on every entry, owner-only stop/flatten/status commands, the daily loss stop, the end-of-day close-out, the daily summary, a heartbeat that says fail when the worker is unwell), 134 passing tests including a whole simulated day. Reviews: piece 4 passed (round 2), piece 6 passed (round 1) by the real `build-reviewer` agent; pieces 7 and 8 are in review. The secret scan was reworked after the piece 2 push refusal (no exemption marker, broader rules, a test that runs the real hook). **Blocked on Michael:** (1) `SUPABASE_DB_URL` in `.env.local` is a web address, not a Postgres connection string, so the database schema is written (`stacks/cyrus/db/001-initial.sql`) but not applied, and the worker cannot start or be deployed; (2) the Discord holdback test result; (3) typing `help` in the `commands` channel so I can confirm the bot can read message text. The Fly token works and the empty Fly app exists. Not done: applying the schema, the deployment, and the rehearsal on a real paper trading day (the next one is Monday 2026-11-02). Paper only, nothing live.
+**BUILD C: PIECES 1 TO 9 BUILT, DEPLOYED AND RUNNING (PAPER); STOPPED AT A REVIEW STOP POINT, WAITING FOR MICHAEL.** As of October 30, 2026 (evening). The worker runs on Fly.io (app `sib-tech-cyrus`, San Jose), against Alpaca paper, Supabase (schema applied, row level security on, store check passed on the real database) and Discord; the Healthchecks heartbeat is live and the alert was tested on purpose (Michael received the down and recovery messages). 143 automated tests pass, including a whole simulated trading day. Reviews: piece 4 PASS (round 2), piece 6 PASS (round 1), pieces 7 and 8: round 1 CHANGES REQUIRED (four findings, all fixed), **round 2 STOP AND FLAG MICHAEL** because one leftover path (a duplicate-id answer recorded as failed) was still blocking. That path is fixed and tested in the latest commit but **not deployed and not re-reviewed**; the brief allows at most two rounds, so Michael decides (see Next Steps). Michael's Discord holdback test: no holdback for the website in Chrome (desktop app untested). **Not done:** the rehearsal on a real paper trading day (next: Monday 2026-11-02, needs Michael's answer to the 7:30 AM Central limits request), the final phase review, and confirming the bot can read Michael's text (he should type `help` in `commands`). Paper only, nothing live.
+
+Earlier entry, superseded by the paragraph above: **BUILD C, PIECES 1 TO 9 BUILT AND TESTED; NOT YET DEPLOYED; WAITING FOR MICHAEL'S DATABASE ADDRESS.** As of October 30, 2026 (evening, before deployment).
 
 Earlier entry, superseded by the paragraph above: **BUILD C, PIECES 1, 2, 4 AND 5 DONE, PIECE 7 STARTED; BLOCKED ON MICHAEL'S LOGINS.** As of October 30, 2026 (afternoon). Pieces 1, 2, 4 and 5 were built and pushed (57 tests); piece 4 passed review in round 2.
 
@@ -137,6 +139,14 @@ Research runs, oldest first. **Lever** is the one thing changed from the previou
 The full record of each run lives in `runs/`. This table is the index you read first.
 
 ## Next Steps
+
+As of 2026-10-30 (late evening), at the review stop point:
+
+1. **Michael decides** whether to accept the one-line duplicate-id fix (commit "duplicate-id answer stays an intent") without another review and have it deployed (`fly deploy --ha=false` from `stacks/cyrus`), or to have the reviewer look once more. Also rule on the reviewer's non-blocking notes listed in the build log, "Pieces 7 and 8 review, round 2".
+2. Michael: type `help` in the `commands` channel; before 8:30 AM Central on Monday 2026-11-02 answer the morning limits request; follow "First paper session" in the build log. Then the rehearsal and the final phase review close build C.
+3. Hard stops stay: nothing toward real money, no new paid plan without Michael, nothing touching stack D.
+
+Earlier entry, superseded by the list above:
 
 As of 2026-10-30 (evening), after build C piece 9 was prepared:
 
