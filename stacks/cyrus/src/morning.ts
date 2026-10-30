@@ -3,7 +3,7 @@
 // not trade that day. This file builds the day record, the request message, and the decisions (pure).
 import type { Broker } from "./broker.ts";
 import { LIMIT_NAMES, SUGGESTED_LIMITS, applyOverride, describeLimits, type LimitName, type Limits } from "./limits.ts";
-import type { DayRecord, Store } from "./store.ts";
+import { setPhase, type DayRecord, type Store } from "./store.ts";
 import { NOT_ADVICE } from "./discord.ts";
 import { centralClock, etInstant } from "./time.ts";
 
@@ -134,7 +134,7 @@ export async function postMorningRequest(steps: MorningSteps, day: DayRecord): P
   if (!day.isTradingDay || day.phases.morning) return day;
   const posted = await steps.say("commands", formatLimitsRequest(day));
   if (!posted) throw new Error("Could not post the morning request to Discord");
-  return steps.store.updateDay(day.tradeDate, { phases: { ...day.phases, morning: steps.now().toISOString() } });
+  return setPhase(steps.store, day.tradeDate, "morning", steps.now().toISOString());
 }
 
 // One reminder, ten minutes before the open, if anything is still undecided.
@@ -142,15 +142,15 @@ export async function postReminderIfNeeded(steps: MorningSteps, day: DayRecord):
   const t = steps.now();
   if (!day.isTradingDay || day.status !== "pending" || day.phases.reminder || !day.openAt) return day;
   if (t < new Date(day.openAt.getTime() - 10 * 60_000) || t >= day.openAt) return day;
-  await steps.say("commands", formatLimitsRequest(day, true));
-  return steps.store.updateDay(day.tradeDate, { phases: { ...day.phases, reminder: t.toISOString() } });
+  if (!(await steps.say("commands", formatLimitsRequest(day, true)))) return day; // not posted: try again next tick
+  return setPhase(steps.store, day.tradeDate, "reminder", t.toISOString());
 }
 
 // At the open, a day that is not fully approved becomes lapsed: no trading, and Michael is told.
 export async function lapseIfUndecided(steps: MorningSteps, day: DayRecord): Promise<DayRecord> {
   if (!day.isTradingDay || day.status !== "pending" || !day.openAt || steps.now() < day.openAt) return day;
   const updated = await steps.store.updateDay(day.tradeDate, { status: "lapsed" });
-  await steps.say("commands", `The market is open and today's limits were not all decided, so **I will not trade today**. Nothing is open. ${NOT_ADVICE}`);
-  await steps.store.addEvent("warn", "day_lapsed", { date: day.tradeDate });
+  const told = await steps.say("commands", `The market is open and today's limits were not all decided, so **I will not trade today**. Nothing is open. ${NOT_ADVICE}`);
+  await steps.store.addEvent("warn", "day_lapsed", { date: day.tradeDate, told });
   return updated;
 }

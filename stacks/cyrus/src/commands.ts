@@ -65,12 +65,7 @@ export class CommandProcessor {
           await this.handle(m);
         } catch (err) {
           this.d.log?.("command_failed", { error: (err as Error).message });
-          const kind = parseCommand(m.content).kind;
-          await this.say(
-            kind === "stop" || kind === "flatten"
-              ? "**STOP DID NOT COMPLETE.** The stack could not save the stop flag. It also cannot place new entries while its database is unreachable, but check Alpaca's dashboard and cancel or close anything open by hand."
-              : "That command failed. Nothing may have changed, so check `status`.",
-          );
+          await this.say("That command failed. Nothing may have changed, so check `status`.");
         }
       }
       await this.d.store.setControl(CONTROL_COMMAND_CURSOR, { id: m.id });
@@ -90,9 +85,21 @@ export class CommandProcessor {
         await this.say(`I did not understand "${cmd.text}". Type \`help\` for the list.`);
         return;
       case "stop": {
-        await this.setStop(true, "owner command (stop)", now);
-        const n = await this.cancelUnfilledEntries();
-        await this.say(`Stopped. No new entries. Cancelled ${n} unfilled entr${n === 1 ? "y" : "ies"}. Open positions keep their protective stops and will be closed at the end of the day (or type \`flatten\`).`);
+        const saved = await this.trySetStop(true, "owner command (stop)", now);
+        let n = 0;
+        let cancelFailed = false;
+        try {
+          n = await this.cancelUnfilledEntries();
+        } catch {
+          cancelFailed = true;
+        }
+        if (!saved) {
+          await this.say("**STOP DID NOT COMPLETE.** The stack could not save the stop flag. It also cannot place new entries while its database is unreachable, but check Alpaca's dashboard and cancel or close anything open by hand.");
+        } else if (cancelFailed) {
+          await this.say("Stop flag is set, so no new entries. But **cancelling unfilled entries failed**: check Alpaca's dashboard for open buy orders.");
+        } else {
+          await this.say(`Stopped. No new entries. Cancelled ${n} unfilled entr${n === 1 ? "y" : "ies"}. Open positions keep their protective stops and will be closed at the end of the day (or type \`flatten\`).`);
+        }
         return;
       }
       case "resume":
@@ -100,9 +107,20 @@ export class CommandProcessor {
         await this.say("Stop cleared. New entries still need today's limits approved before the open.");
         return;
       case "flatten": {
-        await this.setStop(true, "owner command (flatten)", now);
-        await this.d.broker.closeAllPositions();
-        await this.say("Stopped, and sent orders to sell every position and cancel every open order. Check `status` in a minute.");
+        const saved = await this.trySetStop(true, "owner command (flatten)", now);
+        let sold = true;
+        try {
+          await this.d.broker.closeAllPositions();
+        } catch {
+          sold = false;
+        }
+        await this.say(
+          !sold
+            ? `${saved ? "Stop flag is set" : "**The stop flag could not be saved**"}, but **selling failed**. Check Alpaca's dashboard and close positions by hand.`
+            : saved
+              ? "Stopped, and sent orders to sell every position and cancel every open order. Check `status` in a minute."
+              : "Sent orders to sell everything, but **the stop flag could not be saved**: no new entries can happen while the database is down, check `status` once it is back.",
+        );
         return;
       }
       case "limits": {
@@ -131,11 +149,27 @@ export class CommandProcessor {
         if (decision.patch.decided.cap) {
           await this.d.broker.setAccountConfig({ maxMarginMultiplier: decision.patch.limits.borrowingCap, noShorting: true });
         }
+        // The scheduler may have lapsed the day while we were talking to Alpaca: look again before writing.
+        const latest = await this.d.store.getDay(date);
+        if (!latest || latest.status === "lapsed" || (latest.openAt && this.d.now() >= latest.openAt)) {
+          await this.say("Too late: the market opened while I was saving that, so today's limits are fixed and nothing changed.");
+          return;
+        }
         await this.d.store.updateDay(date, decision.patch);
         this.d.log?.("limits_decision", { status: decision.patch.status, limits: decision.patch.limits });
         await this.say(decision.reply);
         return;
       }
+    }
+  }
+
+  // The stop flag is the first thing a stop does; if it cannot be saved the broker side still gets its turn.
+  private async trySetStop(on: boolean, reason: string, now: Date): Promise<boolean> {
+    try {
+      await this.setStop(on, reason, now);
+      return true;
+    } catch {
+      return false;
     }
   }
 

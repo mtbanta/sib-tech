@@ -267,3 +267,49 @@ test("an approved day does not lapse", async () => {
   const day = await store.updateDay(D, { status: "approved" });
   assert.equal((await lapseIfUndecided(steps, day)).status, "approved");
 });
+
+test("if cancelling fails after the flag is saved, the message says that, not that the flag failed", async () => {
+  const s = await setup();
+  s.broker.orders = [order({ id: "00000000-0000-0000-0000-00000000000a", side: "buy", filledQty: 0, status: "accepted" })];
+  s.broker.failOn.add("cancelOrder");
+  s.bot.say("stop", s.now);
+  await s.proc.poll();
+  assert.equal(((await s.store.getControl(CONTROL_STOP)) as StopFlag).on, true);
+  assert.ok(s.bot.last().includes("cancelling unfilled entries failed"));
+  assert.ok(!s.bot.last().includes("STOP DID NOT COMPLETE"));
+});
+
+test("flatten still tries to sell when the flag cannot be saved", async () => {
+  const s = await setup();
+  s.bot.say("flatten", s.now);
+  const realSet = s.store.setControl.bind(s.store);
+  s.store.setControl = async (k: string, v: unknown) => { if (k === CONTROL_STOP) throw new Error("db down (test)"); return realSet(k, v); };
+  await s.proc.poll();
+  assert.equal(s.broker.count("closeAllPositions"), 1);
+  assert.ok(s.bot.last().includes("could not be saved"));
+});
+
+test("an approval that loses a race with the lapse does not undo the lapse", async () => {
+  const s = await setup();
+  // The day lapses while the approval is talking to Alpaca.
+  const realSet = s.broker.setAccountConfig.bind(s.broker);
+  s.broker.setAccountConfig = async (p) => { await s.store.updateDay(D, { status: "lapsed" }); return realSet(p); };
+  s.bot.say("cap 1", s.now);
+  await s.proc.poll();
+  assert.equal((await s.store.getDay(D))!.status, "lapsed");
+  assert.ok(s.bot.last().includes("Too late"));
+});
+
+test("a reminder whose post failed is tried again", async () => {
+  const store = new MemoryStore();
+  const broker = new FakeBroker();
+  let ok = false;
+  const steps = { store, broker, say: async () => ok, now: () => new Date("2026-11-02T14:21:00Z") };
+  let day = await ensureDay(steps, D);
+  day = await store.updateDay(D, { phases: { morning: "x" } });
+  day = await postReminderIfNeeded(steps, day);
+  assert.equal(day.phases.reminder, undefined);
+  ok = true;
+  day = await postReminderIfNeeded(steps, day);
+  assert.ok(day.phases.reminder);
+});

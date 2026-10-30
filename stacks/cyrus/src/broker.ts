@@ -11,8 +11,10 @@ export type Broker = Pick<
   | "listPositions"
   | "listOrders"
   | "findOrderByClientId"
-  | "submitEntry"
   | "cancelOrder"
   | "closePosition"
   | "closeAllPositions"
 >;
+
+// Only the order gate is handed this wider type, because only the gate may send an entry.
+export type GateBroker = Broker & Pick<AlpacaTrading, "submitEntry">;
