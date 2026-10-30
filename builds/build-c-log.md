@@ -365,3 +365,27 @@ Written 2026-10-30. A plan, not a promise: each piece is re-scoped at its start.
 - **Alpaca, paper host only (`paper-api.alpaca.markets`):** account status ACTIVE, equity and cash 20000, so these are the new 20,000 dollar account's keys and not the 100,000 default's. Buying power 80000 and multiplier 4 (the default borrowing setting; stack C will set its cap in piece 4, subject to Michael's morning approval). Shorting is enabled on the account (`no_shorting` is false); stack C must set long only itself. Market clock works. One IEX latest trade (AAPL) returned data. The live host was not touched.
 - **Discord:** the bot token authenticates (bot "Stack C bot"); the bot is in exactly one server, `DISCORD_GUILD_ID` ("Stack C"); the command channel is `commands` and belongs to that server; the server has `alerts`, `trading` and `commands`; Michael's user id is a human member and the server owner; the bot can read the command channel (0 messages yet). The alerts webhook belongs to the same server.
 - **Healthchecks:** created `sib-tech stack C worker (cyrus)` through the v3 API with period 60 seconds and grace 180 seconds (the suggested values in the piece 0 checklist, a guess to tune), `unique` on the name so a retry cannot duplicate it. The ping URL was written into `.env.local`, not printed. An older check named "My First Check" already existed and was left alone.
+
+## Piece 2: worker skeleton
+
+### Plan
+Settings loader with a paper-only guard, a logger and a redactor that hide secrets, a Discord webhook poster, a Healthchecks pinger, a test setup, and a tool that posts the holdback test message.
+
+### Built (all under `stacks/cyrus/`)
+- `src/config.ts`: reads settings from environment variables. **The trading host is a constant** (`paper-api.alpaca.markets`), not a setting, and `assertPaperHost` accepts only that exact host over https. A key id that does not start with `PK` (paper) is refused, so a live key (`AK`) cannot be loaded. `ALPACA_DATA_FEED` is `iex` or `sip`, default `iex`. Error messages name the setting, never the value.
+- `src/redact.ts` and `src/log.ts`: every log line and every Discord message passes through a redactor that hides the exact secret values the process holds, then key-shaped patterns (webhook, ping address, bot token, database address, JWT, Alpaca key id, Supabase tokens). Logs are one JSON object per line.
+- `src/discord.ts`: posts through the alerts webhook. Text is redacted and cut to Discord's 2000 characters, mentions are disabled (an alert cannot ping everyone), one retry after a rate limit, and a failed post returns a result instead of throwing. Holds the standing line "Paper trading only. Research input for a human decision, never an instruction to act."
+- `src/heartbeat.ts`: Healthchecks pings (`ok`, `start`, `fail`), failure returns false.
+- `src/local-env.ts`: reads `.env.local` on the Mac; on Fly the same names are secrets. Checked that Node's loader reads every value the same as a manual parse.
+- `src/tools/post-test-alert.ts`: posts one test message to `alerts` for the holdback test.
+
+### Decisions
+- **Dependencies:** dev only, `typescript` and `@types/node` (type checking, nothing ships from them). No runtime dependency yet. The database library (`pg`) comes in piece 3.
+- **Test runner:** Node's built-in (`node --test`). Test scripts: `npm test`, `npm run typecheck`. Node's runner needs a glob, not a folder name.
+- A first redaction test failed: the database address pattern hid only the front of the address, leaving a tail. Fixed to hide the whole address. Kept the test.
+
+### Tests
+16 tests pass, type check clean. They cover: good settings, feed switch, live-shaped keys refused, no setting changes the trading host, eight bad trading addresses refused, missing and malformed settings, secret listing, redaction of values and key shapes, the logger, error descriptions, webhook post (redaction, length, no mentions, retry after rate limit, failure without throwing), and heartbeat urls.
+
+### Left open
+- **Discord desktop holdback test** needs Michael: desktop app open, then `node src/tools/post-test-alert.ts` from `stacks/cyrus/`, then whether the phone buzzed. Result to be appended here.

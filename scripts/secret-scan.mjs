@@ -1,5 +1,6 @@
 // Secret scan. Run by the pre-commit hook. Refuses the commit if staged content holds a secret.
-// Two checks: (1) every value in any stacks/*/.env.local appears in staged content, (2) key-shaped patterns.
+// Two checks: (1) every value in any stacks/*/.env.local appears in staged content, (2) key-shaped patterns
+// (skippable per line only in test files, with the marker scan-allow-fake).
 // It never prints a matched secret, only the file, line number and rule name.
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
@@ -58,8 +59,11 @@ for (const f of files) {
         hits++;
       }
     }
+    // A line in a test file may carry the marker "scan-allow-fake" for an obviously fake, key-shaped value.
+    // The marker skips only the pattern rules. The check against the real values above is never skipped.
+    const markedFake = /(^|\/)test\//.test(f) && line.includes("scan-allow-fake");
     for (const [name, re] of patterns) {
-      if (re.test(line)) {
+      if (!markedFake && re.test(line)) {
         console.error(`SECRET SCAN: ${f}:${i + 1} matches rule "${name}"`);
         hits++;
       }
