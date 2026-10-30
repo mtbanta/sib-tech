@@ -55,6 +55,12 @@ test("missing and malformed settings are refused with the setting name, not the 
   assert.throws(() => loadSettings({ ...good, SUPABASE_DB_URL: "" }, { requireDatabase: true }), /SUPABASE_DB_URL/);
 });
 
+test("a database address that is not a Postgres connection string is refused", () => {
+  assert.throws(() => loadSettings({ ...good, SUPABASE_DB_URL: "https://supabase.com/dashboard/project/abc" }), /SUPABASE_DB_URL/);
+  assert.throws(() => loadSettings({ ...good, SUPABASE_DB_URL: "postgresql://postgres@db.example.invalid:5432/postgres" }), /SUPABASE_DB_URL/);
+  assert.doesNotThrow(() => loadSettings({ ...good, SUPABASE_DB_URL: shaped.databaseUrl() }));
+});
+
 test("secretValues lists every secret and skips blanks", () => {
   const s = loadSettings({ ...good, SUPABASE_DB_URL: shaped.databaseUrl() });
   const values = secretValues(s, { HEALTHCHECKS_API_KEY: FAKE_HEALTHCHECKS_API_KEY });

@@ -88,6 +88,9 @@ export function loadSettings(env: Env = process.env, options: { requireDatabase?
 
   const supabaseDbUrl = env.SUPABASE_DB_URL?.trim() || undefined;
   if (options.requireDatabase && !supabaseDbUrl) throw new ConfigError("Missing setting SUPABASE_DB_URL");
+  if (supabaseDbUrl && !/^postgres(ql)?:\/\/[^:@/\s]+:[^@\s]+@[^/\s]+\/\S+$/.test(supabaseDbUrl)) {
+    throw new ConfigError("Setting SUPABASE_DB_URL is not a Postgres connection address (use the Postgres connection string from the Connect page of the Supabase project, with the database password filled in)");
+  }
 
   return {
     alpaca: {

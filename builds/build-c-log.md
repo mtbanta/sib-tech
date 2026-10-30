@@ -510,3 +510,24 @@ Re-read the brief, this log, `PROJECT_STATE.md` and `CLAUDE.md` first, as the br
 - `FLY_API_TOKEN` is not in `.env.local` (13 names, none Fly). Michael to re-save.
 - `SUPABASE_URL` held `https://supabase.com`, the vendor's home page, not the project address. The full-tree secret scan flagged it, because it matched ten old research documents. I rewrote that one line to `https://<project reference>.supabase.co`, taking the reference from the service key's own claims (a service role key is a signed token whose readable part names the project; the reference is an address part, not a secret). Michael is told.
 - `SUPABASE_DB_URL` is an `https://` web address, not a Postgres connection string (no `postgresql://`, no password). I cannot repair this one: the connection string contains the database password, which only Michael has. Michael to paste the Supabase "Connect" string (Session pooler, or Direct) with his password filled in. Piece 3 waits on that.
+
+## Piece 3: database (code and schema done; not yet applied)
+
+### Built (`stacks/cyrus/`)
+- `db/001-initial.sql`: tables `control` (stop flag, Discord command cursor), `trading_days` (limits, approvals, live list, phase times), `orders` (every entry decided, keyed by the `client_order_id` sent to Alpaca), `refusals`, `events` (run log), `schema_migrations`. Row level security is on for all of them with no policy, and `anon` and `authenticated` get nothing, so the Data API cannot touch them. Nothing in the file deletes data. Written as a file first, as the override requires; Michael can read it before it is applied.
+- `src/store.ts`: the `Store` interface and `MemoryStore` (tests only). `src/pg-store.ts`: `PgStore` over the `pg` library. The worker talks to Postgres directly with `SUPABASE_DB_URL`, not through the Data API (automatic table exposure is off).
+- `src/store-contract.ts`: one behaviour check any store must pass (including "the same order id is refused, not overwritten"). `src/tools/apply-schema.ts` applies `db/*.sql` once each (recorded in `schema_migrations`) and then runs that check inside a transaction that is rolled back, so it leaves nothing behind.
+- `config.ts` now refuses a `SUPABASE_DB_URL` that is not a Postgres connection address, with an error that names the setting.
+
+### Decisions
+- **New dependency: `pg` (version 8), with `@types/pg` for type checking.** The Postgres client for Node. It is the only runtime dependency so far. Added under the build override.
+- **Direct Postgres, not the Data API,** because the schema must be applied with SQL anyway and the worker needs transactions. The Supabase access token (blank by Michael's ruling) is never needed.
+- **TLS gap, said plainly:** the connection is encrypted but the server certificate is not pinned (`rejectUnauthorized: false`), because Supabase signs with its own authority that Node does not know. Fix later: pin Supabase's published certificate. A guess about severity: low for paper data, but it is a known gap.
+- **Fail closed:** the worker never falls back to memory. If the store is down, it does not trade (built into the gate in piece 7).
+- Postgres `date` values are read as plain text so the machine's time zone cannot shift a trading day.
+
+### Tests
+78 pass (3 new: memory store passes the behaviour check, can be made to fail, bad database address refused). 
+
+### Not done, blocked on Michael
+`SUPABASE_DB_URL` in `.env.local` is a web address (`https://...`), not a Postgres connection string, so the schema is not applied and the `PgStore` has not been run against the real database. Needed: the Supabase "Connect" string (Session pooler works over IPv4 and is the safe default for Fly) with the database password filled in. Then: `node src/tools/apply-schema.ts`.
