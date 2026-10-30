@@ -1,6 +1,8 @@
 .DS_Store
-.claude/
+.claude/*
+!.claude/agents/
 .playwright-mcp/
 .env
 .env.*
 *.env
+node_modules/

@@ -14,21 +14,63 @@ sib-tech is a U.S. stock market equities research and trading agent.
 
 
 
+## Build override: stack C and stack D, paper trading only (dated 2026-10-30)
+
+On 2026-10-29 the owner decided to build two stacks and compare them in paper trading. The brief is `builds/build-c-brief.md` (saved verbatim, do not edit it) and the running record is `builds/build-c-log.md`. **This section supersedes every rule below that conflicts with it, for as long as trading is paper only.** It supersedes these rules by name:
+
+- "Commits and pushes stay manual and ask-gated" (How I work).
+- "One build piece equals one fresh session" (How I work). Build C chains pieces in one session, each ending at a clean boundary.
+- "Schema changes are written as a file, read by the owner, then applied in one approved MCP call" (How I work). Schema changes are still written as a file in the repo first, then applied by the builder.
+- "Ask before anything hard to reverse: a new dependency, a schema change, a deploy" (Conventions).
+- "NO SCAFFOLDING UNTIL THE STACK IS DECIDED" (Conventions). The stack is decided.
+- The research-run rules (one commit and one push per run, the research-run carve-out). Those apply to research runs only. Build pieces commit and push at the end of each piece.
+
+**Autonomy while trading is paper only.** Without asking, the builder may plan pieces, write code, add dependencies, install tools the build needs (for example Fly.io's command line tool), create database tables, deploy, test, debug, commit and push.
+
+**Hard stops. Always stop and ask the owner first before:**
+
+- anything that could move any stack toward real money, including live keys or a live endpoint
+- raising a borrowing cap or a trading limit beyond what the owner approved
+- starting any new paid plan
+- deleting data or an account
+- touching stack D's resources, or anything outside stack C's
+
+**Paper only, with no exceptions.** No live trading, no live keys, no live endpoints, anywhere. Anything the stack writes or posts is research input for a human decision, never an instruction to act.
+
+**Credentials.** The owner creates every account. The builder gets only the API keys a stack needs, kept in a git-ignored file (`stacks/cyrus/.env.local`) and as secrets on the hosting platform. Never in the repo, a commit message, a log, a chat message or Discord. The owner keeps passwords in Google Password Manager. A secret scan runs before every commit and refuses the commit if it finds a key.
+
+**Review.** Pieces that touch money, and the end of every phase, are reviewed by the `build-reviewer` agent (`.claude/agents/build-reviewer.md`), at most two rounds. If round 2 still has a blocking finding, or the reviewer returns STOP AND FLAG MICHAEL, stop and flag the owner.
+
+**Stack separation.** Stack C is cyrus (cyrus@sib-tech.co), code under `stacks/cyrus/`. Stack D is dexter (dexter@sib-tech.co), built later, under `stacks/dexter/`, and is off limits until the owner says otherwise. Each stack has its own Alpaca paper account, Supabase project, Fly.io app, Discord server and bot, and keys. Shared code is copied, never imported across stack folders.
+
+**Rulings after piece 0 (owner, 2026-10-30).**
+
+- Market data: Alpaca confirmed that a paper-only login gets IEX data only, even with Algo Trader Plus, and that full SIP needs a live account. The owner will not buy the plan or open a live account. So the paper test runs on the free IEX feed, whose job is to prove the plumbing. This relaxes the brief's "real time and consolidated" data requirement, by the owner's ruling. The feed is a configuration value (`ALPACA_DATA_FEED`, default `iex`), so moving to `sip` later is a configuration change. The free IEX stream is capped at 30 symbols, which shapes the live list.
+- Alpaca: one plan covers every paper account under one login. Stack D will later use its own 20,000 dollar paper account under the same login. Nothing for D now.
+- Supabase: stack C's project is created with the Supabase command line tool in the owner's existing organization, region West US (Oregon).
+- Discord: one Discord account for both stacks, on cyrus@sib-tech.co, with a separate private server and a separate bot application per stack. This reverses piece 0's recommendation of one account per stack. Stack C's server has channels `alerts`, `trading` and `commands`. Stack C's code accepts commands only from its own server, its own command channel and the owner's user id.
+
 ## Tech stack
 
-NOT DECIDED. Do not assume one.
+**DECIDED for the paper evaluation, 2026-10-29.** Two stacks are compared in paper trading, stack C first.
 
-Deciding it is the first piece of work. The two candidate directions:
+**Stack C (cyrus), option C from run 3:** one always-on worker.
 
-1. A web application on the Relii stack: Next.js on Vercel, Supabase for database and auth.
-2. A Claude-native agent built on connectors and MCP servers, with candidates including LiquidTrade, QuiverQuant, FireCrawl and Co-Invest.
+- Worker: TypeScript on Node 24, run directly by Node's built-in TypeScript support, no build step. Hosted on Fly.io (one small always-on machine). Chosen because Node 24 is current and the system Python (3.9) is past end of life.
+- Memory and run log: a Supabase project (Postgres), Micro compute, `us-west-2` (Oregon).
+- Broker: Alpaca, paper environment only (`https://paper-api.alpaca.markets`), 20,000 dollar paper account, long only, flat at the close.
+- Messages, alerts and commands: Discord (free plan), one private server for this stack.
+- Heartbeat: Healthchecks.io (free plan), alerting to Discord.
+- Driver: software. Fixed rules in code choose every trade. No language model in the decision or order path.
+- Code in this repo under `stacks/cyrus/`. Dependencies are kept to the few the build needs, and each is named in the build log.
 
-Until that is settled and written into this section, do not install dependencies, create a database, or scaffold an application.
+**Stack D (dexter):** not decided in detail, built after stack C passes. Off limits now.
 
 ## Build order
 
-1. Scope the stack and the connector strategy. Produce a recommendation with trade-offs.
-2. Everything after this is written once step 1 is decided.
+1. Scope the stack and the connector strategy. Done (runs 1 to 5).
+2. Build C, piece by piece, per `builds/build-c-brief.md`. Pieces and their status are in `builds/build-c-log.md`.
+3. Stack D, only after stack C is done and the owner says go.
 
 
 

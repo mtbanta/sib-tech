@@ -1,0 +1,3 @@
+#!/bin/sh
+# Refuses the commit if the secret scan finds a key. Enabled by: git config core.hooksPath .githooks
+exec node "$(git rev-parse --show-toplevel)/scripts/secret-scan.mjs"

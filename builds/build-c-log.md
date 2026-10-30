@@ -234,7 +234,7 @@ Alpaca, in order:
 4. Paper keys: step 2 above. Never create live keys.
 
 Discord, in order:
-1. Create the account. If Discord asks for a phone number and that number is already on another Discord account, STOP and tell me. Switch on an authenticator app or passkey, and save the backup codes in Apple Passwords. Discord's support "is not able to remove MFA" (run 5, footnote 61).
+1. Create the account. If Discord asks for a phone number and that number is already on another Discord account, STOP and tell me. Switch on an authenticator app or passkey, and save the backup codes in Google Password Manager. Discord's support "is not able to remove MFA" (run 5, footnote 61).
 2. Create a private server. Make three channels: `alerts`, `trading`, `commands`. Set the server to notify on all messages (run 5).
 3. Developer Portal (discord.com/developers/applications): New Application, named for stack C. On the Bot page, switch on "Message Content Intent" (D1). Reset the token and copy it once.
 4. Invite the bot to your server (OAuth2 page, scope `bot`). Give the bot's role View Channel, Read Message History and Send Messages on the three channels (D2).
@@ -243,11 +243,11 @@ Discord, in order:
 
 Fly.io: create the account and organization, add the card. Nothing else. I will install Fly's command line tool in piece 1 and you will run `! fly auth login` once there (the code goes to your phone).
 
-Supabase: create the project. Choose a database password and save it in Apple Passwords right away. Copy the project URL, the service role key (Project Settings, API) and the connection string (Project Settings, Database).
+Supabase: create the project. Choose a database password and save it in Google Password Manager right away. Copy the project URL, the service role key (Project Settings, API) and the connection string (Project Settings, Database).
 
 Healthchecks.io: create the account and a check named for stack C, a period of 1 minute and a grace of 3 minutes (my suggestion, a guess to tune). Copy its ping URL. In its integrations, "Connect Discord" and pick the `alerts` channel, so a missed heartbeat reaches you on your phone. Leave email on as the second route.
 
-### B. Save in Apple Passwords (never in the file, never in chat)
+### B. Save in Google Password Manager (never in the file, never in chat)
 
 - Each account's password and its multi-factor backup codes (Alpaca, Discord, Fly.io, Supabase, Healthchecks.io).
 - The Alpaca account number.
@@ -297,3 +297,71 @@ If you want Alpaca's answer in writing before stack D, here is a draft with no p
 - **Tests:** none exist yet (no code written).
 - **Reviewer agent:** not run; piece 0 touches no money and the agent file is created in piece 1.
 - **Hard stops:** nothing created at any vendor, no key or personal detail sent anywhere, no helper agents used, nothing in `~/Projects/relii` read, nothing touching stack D.
+
+---
+
+# Resumed 2026-10-30 (after piece 0)
+
+Re-read the brief, this log, `PROJECT_STATE.md` and `CLAUDE.md` first, as the brief requires.
+
+## Note on the password manager edit (2026-10-30)
+
+Michael's ruling: he uses Google Password Manager, not Apple Passwords. Every "Apple Passwords" in this log (three places in piece 0's checklist) and the comment line in `stacks/cyrus/.env.local` was changed to "Google Password Manager" in place, on his explicit order. The brief (`builds/build-c-brief.md`) is left as saved, so it still says Apple Passwords, because it is the verbatim record. `PROJECT_STATE.md` had no mention.
+
+## Michael's rulings after piece 0 (2026-10-30), as given
+
+1. **Data.** Alpaca support confirmed a paper-only login gets IEX data only, even with Algo Trader Plus, and full SIP needs a live account. Michael will not buy Algo Trader Plus and will not open a live account. The paper test runs on the free IEX feed; its goal is to prove the plumbing. Build so switching to `feed=sip` later is a configuration change. Full-feed verification is no longer required before the rehearsal. This relaxes the brief's "real time and consolidated" requirement, by Michael's ruling. This also settles piece 0's open conflict between A1 and A14/A15 in favour of the docs (A1): IEX only for a paper-only login.
+   - Alpaca's reply: recorded here as Michael relayed it (his words: support "confirmed a paper-only login gets IEX data only, even with Algo Trader Plus, and full SIP needs a live account"). I have not seen the original message text. If Michael wants the verbatim reply on file, he can paste it into the next session and it will be appended here as a dated note. Strength: D until then (relayed, not read first hand by me).
+2. **Alpaca plan.** One plan covers every paper account under one login. Stack D will later use its own 20,000 dollar paper account under this same login. Nothing for D now.
+3. **Supabase.** Option 1: the Supabase command line tool, with a one-time browser login by Michael, creates stack C's project in his existing organization, region West US (Oregon). Michael stores the database password. I fill the three Supabase values in `.env.local`.
+4. **Healthchecks.** API key is in `.env.local` as `HEALTHCHECKS_API_KEY`. I create stack C's check and fill `HEALTHCHECKS_PING_URL`. Michael clicks "Connect Discord".
+5. **Discord.** One account for both stacks, on cyrus@sib-tech.co, with a separate private server and a separate bot application per stack. Stack C's server has channels `alerts`, `trading` and `commands`. Stack C's code must accept commands only from its own server and command channel. **This reverses piece 0's recommendation of one Discord account per stack** (Q4). It also makes piece 0's phone-number risk smaller (one account asks for at most one phone check) and makes the bots-per-account question matter: one account must own both bot applications (checked when stack D is built; stack C needs only one).
+6. Alpaca and Discord values are in `.env.local`.
+7. Google Password Manager, see the note above.
+8. Start piece 1 and continue. Tell Michael whenever a login or a click is needed.
+
+## Build plan (pieces)
+
+Written 2026-10-30. A plan, not a promise: each piece is re-scoped at its start. Pieces marked (R) touch money and get the `build-reviewer` agent. The end of each phase also gets a review.
+
+**Phase 1, foundations**
+- Piece 1: repo rules, reviewer agent, folder layout, secret-scan hook, vendor accounts wired (Supabase project, Healthchecks check, Fly login), read-only smoke checks of Alpaca and Discord.
+- Piece 2: worker skeleton in TypeScript on Node 24: settings loader, paper-only guard, logger that hides secrets, Discord poster, heartbeat pinger, test setup. Includes the Discord desktop holdback test (needs Michael).
+- Piece 3: database tables (written as a file first, then applied), run log, small data layer.
+
+**Phase 2, market and broker**
+- Piece 4 (R): Alpaca connection, paper host only, account settings (borrowing cap, long only), orders client, trade updates stream.
+- Piece 5: market data client with the feed as a setting, and the daily screen that builds the live list from the six indexes (run 3, section 7.3), sized to the free stream's 30 symbol cap.
+
+**Phase 3, rules and trading**
+- Piece 6 (R): Discord commands (stop, status), owner-only, own server and own command channel only, and the morning limits flow with the gate.
+- Piece 7 (R): placeholder strategy, limit checks, orders with a protective order at Alpaca, safe retries, close-out at the end of the day.
+- Piece 8: daily summary, heartbeat wiring, the scheduler that runs the day.
+
+**Phase 4, deploy and prove**
+- Piece 9: Fly.io deployment, secrets, region check.
+- Piece 10 (R): rehearsal on a recorded trading day, heartbeat alert test, final review, "first paper session" checklist for Michael.
+
+## Piece 1: foundations
+
+### Plan
+1. `CLAUDE.md` override and Tech stack text (first, so later steps are allowed by the repo's own rules).
+2. `.gitignore`: ignore `.claude/*` but not `.claude/agents/` (git cannot re-include inside an ignored folder, so the rule is `.claude/*` then `!.claude/agents/`).
+3. `build-reviewer` agent file, byte-exact from the brief.
+4. Folder layout under `stacks/cyrus/`, a secret-scan commit hook in the repo.
+5. Read-only smoke checks with the keys already in `.env.local`.
+6. Healthchecks check via its API. Supabase project via its command line tool. Fly command line tool installed.
+7. One batched ask to Michael for the logins and clicks.
+
+### Decisions
+- **Language: TypeScript on Node 24.** Node 24 runs TypeScript directly (no build step), has a built-in WebSocket client and a built-in test runner, so dependencies stay few. The system Python is 3.9, past end of life. Michael is a non-coder, so the choice is mine; the point is fewer moving parts.
+- **Key file check before use.** `.env.local` is plain ASCII, no carriage returns, no quotes, no stray spaces, no trailing spaces; every value has a plausible length. No value was printed.
+- **The free IEX stream is capped at 30 symbols (A2, A3).** The live list built by the daily screen must fit in 30 symbols, or the design must poll instead of stream. This shapes piece 5. Recorded now so it is not forgotten.
+- **Feed is a setting:** `ALPACA_DATA_FEED`, default `iex`. Not in the key file because it is not a secret; it will live in the worker's plain settings.
+- **Secret scan lives in the repo now:** `scripts/secret-scan.mjs`, run by `.githooks/pre-commit` (enabled with `git config core.hooksPath .githooks`). It loads every value from every `stacks/*/.env.local` and refuses the commit if any value appears in staged content, then applies key-shaped patterns. It never prints a match, only file, line and rule. Self-test: refused all six fake secrets and a real value taken from the key file; passed a clean file.
+- **Fly command line tool:** installed with Fly's own install script to `~/.fly/bin`, with `--non-interactive` so the script does not edit shell startup files. Run as `~/.fly/bin/fly`. Supabase's tool runs through `npx supabase` (version 2.122.0).
+
+### Smoke checks (read only, 2026-10-30, secrets not printed)
+- **Alpaca, paper host only (`paper-api.alpaca.markets`):** account status ACTIVE, equity and cash 20000, so these are the new 20,000 dollar account's keys and not the 100,000 default's. Buying power 80000 and multiplier 4 (the default borrowing setting; stack C will set its cap in piece 4, subject to Michael's morning approval). Shorting is enabled on the account (`no_shorting` is false); stack C must set long only itself. Market clock works. One IEX latest trade (AAPL) returned data. The live host was not touched.
+- **Discord:** the bot token authenticates (bot "Stack C bot"); the bot is in exactly one server, `DISCORD_GUILD_ID` ("Stack C"); the command channel is `commands` and belongs to that server; the server has `alerts`, `trading` and `commands`; Michael's user id is a human member and the server owner; the bot can read the command channel (0 messages yet). The alerts webhook belongs to the same server.
+- **Healthchecks:** created `sib-tech stack C worker (cyrus)` through the v3 API with period 60 seconds and grace 180 seconds (the suggested values in the piece 0 checklist, a guess to tune), `unique` on the name so a retry cannot duplicate it. The ping URL was written into `.env.local`, not printed. An older check named "My First Check" already existed and was left alone.
