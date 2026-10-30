@@ -552,3 +552,38 @@ Re-read the brief, this log, `PROJECT_STATE.md` and `CLAUDE.md` first, as the br
 
 ### Live check (2026-10-30)
 `node src/tools/discord-check.ts`: channels found, command channel belongs to the configured server, one line posted to `trading`. Command channel empty, so message text visibility is untested.
+
+### Piece 6 review, round 1 (2026-10-30), real `build-reviewer` agent
+**PASS**, no blocking findings. Paper only, owner-only commands, stop flag and morning gate stored and read correctly, no new path to an entry, secret scan rework sound (marker removal proved by test). Non-blocking notes, and what was done (own commit, "piece 6 review fixes"):
+- Stop error message could say the flag failed when cancelling failed; and a flag that could not be saved skipped the broker side. **Fixed:** the flag, the cancel and the sale are separate steps with separate honest messages; flatten still tries to sell if the flag cannot be saved.
+- An approval could undo a lapse that happened while it was being saved. **Fixed:** the day is read again just before writing.
+- A reminder was recorded as sent even if the post failed. **Fixed.** A failed lapse message is now recorded in the run log.
+- `Broker` type included `submitEntry`. **Fixed:** only the gate holds the wider `GateBroker` type.
+- Gate must pass limits only when the day is `approved` (done, tested with a pending and a lapsed day that both carry filled-in limits).
+- Stop leaves partly filled entries alone (entries are market day orders, so the gap is short). **Left as is, recorded:** before changing it, test on paper what happens to the stop of a parent cancelled after a partial fill.
+- `PgStore` untested against a real database; clock skew with Discord's timestamps refuses an approval (safe direction). Open.
+
+## Piece 7: placeholder strategy, order gate, close-out (touches money, reviewer required)
+
+### Built (`stacks/cyrus/src/`)
+- `strategy.ts`: **placeholder opening range breakout.** For each name on the live list, the highest price in the first 5 minutes after the open is the range; the first trade above it afterwards is a buy signal, once per name per day; the protective stop is 1.5 percent below. Long only, deterministic. Its only job is to exercise the plumbing. Limitation, recorded: after a restart mid-session the range is not rebuilt, so that day gets no new signals (conservative).
+- `gate.ts`: **the only code that sends an entry.** Order: stop flag read fresh from the database, morning approval (limits count only when the day is `approved`), the fixed checks in `limits.ts`, the broker's own switches (long only and cap no higher than approved are forced at Alpaca if they differ; an inactive or suspended account refuses), then the intent is written to the database with an id built from the date and symbol (`cyrus-YYYYMMDD-SYMBOL`) so a retry or restart cannot send it twice, the stop flag is read again, and only then is the order sent with its protective stop held at Alpaca. A database or broker outage refuses the entry (fail closed). Entries are handled one at a time. Refusals are written to the database with their reason. The peak exposure of the day is kept for the summary.
+- `risk.ts`: brings stored entries up to date from Alpaca; **a filled entry whose protective stop is gone while the position is still held is sold at once and reported**; **daily loss stop**: when equity is down by the approved limit, sets the stop flag, sells everything, tells Michael (my addition: the brief only says "daily loss stop"; selling is the safer reading).
+- `closeout.ts`: five minutes before the close, cancel open orders and sell every position (up to 3 tries, checking positions between), then put the borrowing cap back to 1. If the account is not flat it posts **NOT FLAT** loudly to `alerts` and `commands`.
+
+### Tests
+130 pass at this point. Gate: sent order shape (long, whole shares, stop, id), duplicate and restart never send twice, no approval means no entry (pending and lapsed), stop flag wins, a stop set between the checks and the send still stops it, database outage and broker outage refuse, each fixed limit refuses with its own reason, trades per day, borrowing cap 1, the cap lowered at Alpaca first (and no entry if that fails), broker error on send is recorded and not retried, simultaneous signals one at a time, **a structure test that fails if any file other than the gate and the manual paper-check tool calls `submitEntry`**, or if any other file changes the account or sells everything. Strategy, sync with an unprotected position, loss stop, close-out flat and not flat. A deliberate break of the stop check was caught by the full-day test, then restored.
+
+## Piece 8: summary, scheduler, entry point
+
+- `summary.ts`: the daily summary (entries with in and out prices, profit or loss from closed trades and from account equity, borrowing used as peak exposure over equity, refused entries by reason, stop flag, flat or not).
+- `worker.ts`: one pass every 5 seconds: read commands (always first), build the day, morning request at open minus 60 minutes, reminder at minus 10, the screen in the background at minus 45, live prices from minus 5, lapse at the open, order sync and loss stop every 30 seconds during the session, close-out at close minus 5, summary at close plus 5. Every finished step is stored, so a restart repeats nothing. **The heartbeat is "ok" after a pass that worked and "fail" after one that did not** (database or broker unreachable), so Healthchecks hears about an unwell worker, not only a dead one.
+- `main.ts`: wires the real pieces; refuses to start if the database does not answer; posts a start message; warnings and errors also go into the database run log (redacted).
+- `test/day.test.ts`: the **rehearsal in code**: a whole simulated Monday through the real scheduler (request, approval with an overrule, screen, live list, a breakout entry with its stop, a stop command and the refusal after it, close-out, summary posted once, heartbeats), a day that lapses at the open and refuses a late approval, a restart that repeats nothing, a holiday, a database outage (heartbeat says fail), and a stopped worker that stops pinging. This is **not** the rehearsal the brief asks for (a recorded trading day on Alpaca's paper server with Michael answering); that needs a market day.
+
+## Piece 9: deployment (prepared, not yet deployed)
+
+- `Dockerfile`, `.dockerignore` (keys never enter the image), `fly.toml` (app `sib-tech-cyrus`, region San Jose, 512 MB shared CPU, restart always, no public service), `deploy/set-fly-secrets.mjs` (sends only what the worker needs through standard input, never on a command line; not the Fly token, not the Supabase service key, not the Healthchecks API key; refuses a non-paper key id or a non-Postgres database address).
+- The Fly app `sib-tech-cyrus` was created in Michael's personal organization (empty, no machine, no cost yet). Fly token: it was pasted without the space after `FlyV1`; fixed in the file, then verified (one organization, no apps).
+- **Not deployed**, because the worker refuses to start without a working database address and a crash loop would raise a false alarm on Michael's phone.
+- Region note: San Jose chosen as the nearest to the Oregon database; Alpaca's server location is unknown. Measure later (a guess, not a measurement).

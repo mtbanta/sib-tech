@@ -1,0 +1,15 @@
+# Stack C (cyrus): one small always-on machine, no public service (it only makes outbound calls).
+app = "sib-tech-cyrus"
+primary_region = "sjc"
+
+[build]
+
+[env]
+  ALPACA_DATA_FEED = "iex"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[[restart]]
+  policy = "always"

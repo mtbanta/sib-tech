@@ -1,0 +1,8 @@
+# Never ship keys, tests or tools' scratch to the image. Secrets reach the app only as Fly secrets.
+.env
+.env.*
+node_modules
+test
+deploy
+*.md
+.git

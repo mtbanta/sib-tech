@@ -65,6 +65,14 @@ export interface Store {
   addEvent(level: string, event: string, data?: Record<string, unknown>): Promise<void>;
 }
 
+// Records that a step of the day finished. Reads the day fresh first, so two steps finishing at nearly the same
+// time (one runs in the background) cannot overwrite each other's record.
+export async function setPhase(store: Store, tradeDate: string, name: string, iso: string, extra: Record<string, string> = {}): Promise<DayRecord> {
+  const fresh = await store.getDay(tradeDate);
+  if (!fresh) throw new Error(`no such day ${tradeDate}`);
+  return store.updateDay(tradeDate, { phases: { ...fresh.phases, [name]: iso, ...extra } });
+}
+
 export const CONTROL_STOP = "stop_flag";
 export const CONTROL_COMMAND_CURSOR = "discord_command_cursor";
 
