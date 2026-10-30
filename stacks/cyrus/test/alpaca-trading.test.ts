@@ -2,17 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AlpacaTrading, AlpacaError } from "../src/alpaca-trading.ts";
 import { loadSettings } from "../src/config.ts";
+import { FAKE_ENV } from "./fakes.ts";
 
-const settings = loadSettings({
-  ALPACA_PAPER_API_KEY_ID: "PKTESTTESTTESTTESTTEST1234", // scan-allow-fake
-  ALPACA_PAPER_API_SECRET_KEY: "fakeSecretFakeSecretFakeSecretFakeSecret12",
-  DISCORD_BOT_TOKEN: "fakeBotTokenFakeBotTokenFakeBotTokenFakeBotTokenFakeBotToken1",
-  DISCORD_GUILD_ID: "123456789012345678",
-  DISCORD_COMMAND_CHANNEL_ID: "223456789012345678",
-  DISCORD_OWNER_USER_ID: "323456789012345678",
-  DISCORD_ALERTS_WEBHOOK_URL: "https://discord.com/api/webhooks/123456789012345678/fakeWebhookTokenFake", // scan-allow-fake
-  HEALTHCHECKS_PING_URL: "https://hc-ping.com/12345678-1234-1234-1234-123456789012", // scan-allow-fake
-});
+const settings = loadSettings({ ...FAKE_ENV });
 
 type Call = { method: string; url: URL; headers: Record<string, string>; body: any };
 type Reply = Response | Error | ((c: Call) => Response | Error);
@@ -42,7 +34,7 @@ test("every call goes to the paper host, with the keys in headers only", async (
   assert.equal(a.equity, 20000);
   assert.equal(calls[0]!.url.host, "paper-api.alpaca.markets");
   assert.equal(calls[0]!.url.protocol, "https:");
-  assert.ok(!calls[0]!.url.toString().includes("fakeSecret"));
+  assert.ok(!calls[0]!.url.toString().includes(FAKE_ENV.ALPACA_PAPER_API_SECRET_KEY));
   assert.equal(calls[0]!.headers["APCA-API-KEY-ID"], settings.alpaca.keyId);
 });
 
@@ -142,7 +134,7 @@ test("a 207 bulk answer with a failed item is an error", async () => {
 
 test("error text carries no key", async () => {
   const { client } = fake([json({ message: "forbidden" }, 403)]);
-  await assert.rejects(client.getAccount(), (e: Error) => !e.message.includes("fakeSecret") && !e.message.includes("PKTEST"));
+  await assert.rejects(client.getAccount(), (e: Error) => !e.message.includes(FAKE_ENV.ALPACA_PAPER_API_SECRET_KEY) && !e.message.includes(FAKE_ENV.ALPACA_PAPER_API_KEY_ID));
 });
 
 test("the client can turn long only on but never allow shorting again", async () => {

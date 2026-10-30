@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { FAKE_ENV } from "./fakes.ts";
 import assert from "node:assert/strict";
 import { parseNasdaqListed, parseOtherListed } from "../src/universe.ts";
 import { screen, liveListSize, DEFAULT_SCREEN, type Bar } from "../src/screen.ts";
@@ -58,12 +59,7 @@ test("the live list is cut to the free stream's 30 symbols, and not on sip", () 
 
 // ---- stream, with a fake socket ----
 const settings = (feed?: string) => loadSettings({
-  ALPACA_PAPER_API_KEY_ID: "PKTESTTESTTESTTESTTEST1234", // scan-allow-fake
-  ALPACA_PAPER_API_SECRET_KEY: "fakeSecretFakeSecretFakeSecretFakeSecret12",
-  DISCORD_BOT_TOKEN: "fakeBotTokenFakeBotTokenFakeBotTokenFakeBotTokenFakeBotToken1",
-  DISCORD_GUILD_ID: "123456789012345678", DISCORD_COMMAND_CHANNEL_ID: "223456789012345678", DISCORD_OWNER_USER_ID: "323456789012345678",
-  DISCORD_ALERTS_WEBHOOK_URL: "https://discord.com/api/webhooks/123456789012345678/fakeWebhookTokenFake", // scan-allow-fake
-  HEALTHCHECKS_PING_URL: "https://hc-ping.com/12345678-1234-1234-1234-123456789012", // scan-allow-fake
+  ...FAKE_ENV,
   ...(feed ? { ALPACA_DATA_FEED: feed } : {}),
 });
 

@@ -461,3 +461,52 @@ The named `build-reviewer` agent was not available in this session (agent files 
   4. Discord holdback test: open the Discord desktop app, tell me, I post one message; then tell me whether the phone buzzed.
   5. Optional: restart Claude Code so the real `build-reviewer` agent loads, and paste Alpaca's written reply if you want it on file verbatim.
 - Order of the remaining pieces: 3 database, 6 Discord commands and morning limits, 7 order gate and close-out (with the reviewer), 8 daily summary and scheduler, 9 Fly deployment, 10 rehearsal and the "first paper session" checklist.
+
+---
+
+# Resumed 2026-10-30, evening (second session)
+
+Re-read the brief, this log, `PROJECT_STATE.md` and `CLAUDE.md` first, as the brief requires.
+
+## Rulings and facts received at the start of this session
+
+1. **Logins.** The `!` sign-ins failed, so Michael used other routes. Supabase: he created stack C's project himself (`sib-tech-stack-c`, West US Oregon, his existing organization), Data API on, automatic table exposure off, automatic RLS on. `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` and `SUPABASE_DB_URL` are in `.env.local`. `SUPABASE_ACCESS_TOKEN` stays blank and no account-wide token is to be requested. Fly.io: Michael says `FLY_API_TOKEN` is in `.env.local`; the card is on file and Fly.io is the approved host, so this is not a new paid plan. **Check made at the start of the session:** `.env.local` holds 13 names and none is a Fly name (see "Key file problems found" below).
+2. **Healthchecks.io** is connected to Discord, Stack C server, `alerts` channel (Michael's statement, not yet tested by me).
+3. **Screen universe approved:** all Nasdaq-listed and NYSE-listed common stocks, without index labels. This clears the piece 5 departure from the brief ("Piece 5", universe).
+4. **Discord holdback test:** Michael will use the Discord website in Chrome (no Mac App Store app). I tell him when to open it and post the test message. Note for the result: a browser tab is not the computer app, so the result describes the website only.
+5. **`build-reviewer` agent confirmed loaded** in this session (it is listed among the available agent types), so later reviews use the real agent, not the stand-in used for piece 4.
+6. **Alpaca support's reply, verbatim, as Michael pasted it** (replaces the earlier relayed summary, which was strength D; this is the vendor's written answer, strength A for what it says, though I saw it second hand through Michael):
+
+> Here is what we can share about Algo Trader Plus for personal, non-commercial Trading API use:
+> One Algo Trader Plus market data subscription under a single Alpaca login generally covers all paper and live Trading API accounts tied to that login. Paper accounts use the same market data plan attached to your login as the live accounts, and you can have multiple paper accounts, each with its own API keys, and select the keys for the specific account you intend to trade.
+> An Alpaca Paper Only Account receives IEX market data only, not the full SIP feed. The full SIP feed is part of Algo Trader Plus; real-time SIP requires an active Algo Trader Plus subscription. On the Basic plan, SIP is only available for historical data older than 15 minutes; recent or real-time SIP requires Algo Trader Plus on the login.
+> We don't list a specific simultaneous stock data stream connection limit for personal Trading API logins. Instead, we specify websocket symbol limits: 30 symbols on Basic and unlimited on Algo Trader Plus. A numeric stream-connection limit per login is only shown for Broker API partner plans, not for personal Trading API subscriptions.
+> Multiple subscribed logins are not described as a standard personal-use setup. Subscriptions are tied to a login and generally cover the paper and live accounts under that login. Separate accounts have separate credentials, and each account uses the plan attached to its own login.
+
+   What it settles and what it leaves open, in plain terms:
+   - It matches the earlier ruling: a paper-only login gets IEX only. It also matches the measurement in piece 5 (history older than 15 minutes on `sip` is readable on Basic).
+   - **Open, matters only for stack D, no action now:** the reply names no per-login stream connection limit, while Alpaca's docs (A5) say that in many subscriptions the limit is 1 connection. The reply does not contradict A5, it just does not answer it. Whether stack C and stack D can stream at once on one login is therefore still unmeasured. Test when D is built.
+
+## Follow-up on the piece 2 push refusal: the secret scan (separate commit)
+
+**Root cause.** Piece 2's first push was refused by GitHub's push protection because a made-up Discord-token-shaped test string matched GitHub's scanner. My pre-commit scan should have caught it and did not, for two reasons I found by reading it:
+1. The scan had a per-line exemption marker, `scan-allow-fake`, that skipped every pattern rule on a line in a test file. The offending line carried the marker. GitHub has no such marker, so the two scanners disagreed by design.
+2. The Discord rule only matched tokens starting with M, N or O and a fixed part length, narrower than GitHub's.
+
+**What changed.**
+- The marker is **removed**, not tightened. No rule can be skipped for a line, a file or a folder. The check against the real values in each `.env.local` was never skippable and still is not.
+- The rules moved to `scripts/secret-patterns.mjs`, each one deliberately broader than the vendor's real format. The Discord bot token rule now matches any three-part dot-separated base64 shape, whatever the first letter.
+- **What I can and cannot say about "at least the same patterns as GitHub".** I read GitHub's supported patterns page on 2026-10-30 (`docs.github.com`, "Supported secret scanning patterns"; strength A). It names: Discord Bot Token (push protection on); Supabase Secret Key and Supabase Personal Access Token (push protection on); Supabase scoped personal access token and Supabase OAuth access token (alerts only). It names **nothing for Alpaca or for Healthchecks**, so those two rules in this repo already go beyond GitHub. GitHub **does not publish its regular expressions** and says it updates them and supports more than one token version, so copying its patterns exactly is not possible. The honest target is "broader than every known format", plus the real-values check. GitHub's push protection stays as a second line of defence.
+- Rules now: Alpaca key ids (paper, live, broker) and Alpaca secret keys (next to the word alpaca), Discord webhook addresses, Discord bot tokens (any version) and Discord secrets next to the word discord, `sk-` keys, JWTs (this covers Supabase's service key), database addresses with a password, Healthchecks ping addresses (by check id or ping key) and API keys (as a header or next to the word healthchecks), Supabase `sb_secret_` keys and every `sbp_` access token (personal, scoped, OAuth), Fly.io `fo1_` and `FlyV1` tokens, private key headers. The Supabase, Fly and Healthchecks shapes are from the vendors' documented prefixes as I know them, written broad on purpose; they are not copied from GitHub.
+- `--tree` option: `node scripts/secret-scan.mjs --tree` scans every tracked file. Ran it over the whole repo: clean after one false positive was fixed (the `sk-` rule matched the end of a web address slug in an old research note; the rule now requires `sk-` not to follow a letter, digit, underscore or hyphen).
+- The pre-commit hook now finds the scan script next to itself, so it also works from a copy of the repo (the new test relies on this).
+
+**Fixtures.** `stacks/cyrus/test/fakes.ts` holds every fake value. Rule: each is plainly fake and none has the shape of a real token. Tests that must prove a rule catches a realistic shape build that shape at run time from parts, so no source file holds a contiguous token. All `scan-allow-fake` markers were removed from the test files.
+
+**Proof test.** `stacks/cyrus/test/secret-scan.test.ts` copies the real hook and scan into a throwaway git repository, with a dummy identity (`scan-test@example.invalid`, not Michael's), and for each of 15 realistic-looking tokens (Discord bot tokens including one starting with another letter, webhook, paper and live Alpaca key ids, Alpaca secret, Supabase secret key, personal and OAuth tokens, a service-key JWT, a database address with a password, Healthchecks ping and API key, Fly.io token, a private key header) checks that `git commit` exits non-zero, that HEAD does not move, that the rule is named, and that the scan never prints the token. Further cases: the old marker no longer lets a token through, in a test folder or elsewhere (the exact regression); a value copied from a local `.env.local` is refused even without a token shape; a clean file commits. 75 tests pass in total (57 before).
+
+## Key file problems found at the start of this session (values never printed)
+
+- `FLY_API_TOKEN` is not in `.env.local` (13 names, none Fly). Michael to re-save.
+- `SUPABASE_URL` held `https://supabase.com`, the vendor's home page, not the project address. The full-tree secret scan flagged it, because it matched ten old research documents. I rewrote that one line to `https://<project reference>.supabase.co`, taking the reference from the service key's own claims (a service role key is a signed token whose readable part names the project; the reference is an address part, not a secret). Michael is told.
+- `SUPABASE_DB_URL` is an `https://` web address, not a Postgres connection string (no `postgresql://`, no password). I cannot repair this one: the connection string contains the database password, which only Michael has. Michael to paste the Supabase "Connect" string (Session pooler, or Direct) with his password filled in. Piece 3 waits on that.

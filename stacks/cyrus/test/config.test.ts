@@ -1,18 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { FAKE_ENV, FAKE_LIVE_KEY_ID, FAKE_HEALTHCHECKS_API_KEY, shaped } from "./fakes.ts";
 import { loadSettings, assertPaperHost, assertPaperKeyId, secretValues, ConfigError, PAPER_TRADING_BASE_URL } from "../src/config.ts";
 
-// Fake values only. They are shaped like the real ones and are not secrets.
-const good = {
-  ALPACA_PAPER_API_KEY_ID: "PKTESTTESTTESTTESTTEST1234", // scan-allow-fake
-  ALPACA_PAPER_API_SECRET_KEY: "fakeSecretFakeSecretFakeSecretFakeSecret12",
-  DISCORD_BOT_TOKEN: "fakeBotTokenFakeBotTokenFakeBotTokenFakeBotTokenFakeBotToken1",
-  DISCORD_GUILD_ID: "123456789012345678",
-  DISCORD_COMMAND_CHANNEL_ID: "223456789012345678",
-  DISCORD_OWNER_USER_ID: "323456789012345678",
-  DISCORD_ALERTS_WEBHOOK_URL: "https://discord.com/api/webhooks/123456789012345678/fakeWebhookTokenFake", // scan-allow-fake
-  HEALTHCHECKS_PING_URL: "https://hc-ping.com/12345678-1234-1234-1234-123456789012", // scan-allow-fake
-};
+// Fake values only (see fakes.ts). They are plainly fake and are not shaped like real tokens.
+const good = { ...FAKE_ENV };
 
 test("loads good settings and defaults the feed to iex", () => {
   const s = loadSettings(good);
@@ -28,8 +20,8 @@ test("the feed is a setting: sip is a configuration change", () => {
 });
 
 test("a live-shaped key id is refused", () => {
-  assert.throws(() => loadSettings({ ...good, ALPACA_PAPER_API_KEY_ID: "AKTESTTESTTESTTESTTEST1234" }), ConfigError); // scan-allow-fake
-  assert.throws(() => assertPaperKeyId("AKTESTTESTTESTTESTTEST1234"), ConfigError); // scan-allow-fake
+  assert.throws(() => loadSettings({ ...good, ALPACA_PAPER_API_KEY_ID: FAKE_LIVE_KEY_ID }), ConfigError);
+  assert.throws(() => assertPaperKeyId(FAKE_LIVE_KEY_ID), ConfigError);
   assert.throws(() => assertPaperKeyId(""), ConfigError);
 });
 
@@ -64,10 +56,10 @@ test("missing and malformed settings are refused with the setting name, not the 
 });
 
 test("secretValues lists every secret and skips blanks", () => {
-  const s = loadSettings({ ...good, SUPABASE_DB_URL: "postgresql://postgres:fakepassword@db.example.supabase.co:5432/postgres" }); // scan-allow-fake
-  const values = secretValues(s, { HEALTHCHECKS_API_KEY: "fakeHealthchecksApiKey1234567890ab" });
+  const s = loadSettings({ ...good, SUPABASE_DB_URL: shaped.databaseUrl() });
+  const values = secretValues(s, { HEALTHCHECKS_API_KEY: FAKE_HEALTHCHECKS_API_KEY });
   assert.ok(values.includes(good.ALPACA_PAPER_API_SECRET_KEY));
   assert.ok(values.includes(good.DISCORD_ALERTS_WEBHOOK_URL));
-  assert.ok(values.includes("fakeHealthchecksApiKey1234567890ab"));
+  assert.ok(values.includes(FAKE_HEALTHCHECKS_API_KEY));
   assert.ok(values.every((v) => v.length >= 8));
 });

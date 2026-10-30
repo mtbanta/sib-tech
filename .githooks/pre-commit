@@ -1,3 +1,4 @@
 #!/bin/sh
 # Refuses the commit if the secret scan finds a key. Enabled by: git config core.hooksPath .githooks
-exec node "$(git rev-parse --show-toplevel)/scripts/secret-scan.mjs"
+# The scan script is found next to this hook, so the hook also works from a copy of the repo (the tests do this).
+exec node "$(dirname "$0")/../scripts/secret-scan.mjs"

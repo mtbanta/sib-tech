@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { FAKE_WEBHOOK } from "./fakes.ts";
 import assert from "node:assert/strict";
 import { postWebhook } from "../src/discord.ts";
 import { ping } from "../src/heartbeat.ts";
@@ -20,7 +21,7 @@ function recorder(responses: Array<Response | Error>) {
 
 test("postWebhook sends redacted, bounded text with mentions disabled", async () => {
   const { calls, impl } = recorder([new Response(null, { status: 204 })]);
-  const res = await postWebhook("https://discord.com/api/webhooks/1/x", "hello supersecretvalue123 " + "a".repeat(3000), redact, impl); // scan-allow-fake
+  const res = await postWebhook(FAKE_WEBHOOK, "hello supersecretvalue123 " + "a".repeat(3000), redact, impl);
   assert.deepEqual(res, { ok: true, status: 204 });
   const body = JSON.parse(String(calls[0]!.init!.body));
   assert.ok(!body.content.includes("supersecretvalue123"));
@@ -33,14 +34,14 @@ test("postWebhook retries once after a rate limit", async () => {
     new Response(null, { status: 429, headers: { "retry-after": "0" } }),
     new Response(null, { status: 204 }),
   ]);
-  const res = await postWebhook("https://discord.com/api/webhooks/1/x", "hi", redact, impl); // scan-allow-fake
+  const res = await postWebhook(FAKE_WEBHOOK, "hi", redact, impl);
   assert.equal(res.ok, true);
   assert.equal(calls.length, 2);
 });
 
 test("postWebhook reports failure instead of throwing", async () => {
-  assert.deepEqual(await postWebhook("https://discord.com/api/webhooks/1/x", "hi", redact, recorder([new Error("network down")]).impl), { ok: false, status: 0 }); // scan-allow-fake
-  assert.deepEqual(await postWebhook("https://discord.com/api/webhooks/1/x", "hi", redact, recorder([new Response(null, { status: 404 })]).impl), { ok: false, status: 404 }); // scan-allow-fake
+  assert.deepEqual(await postWebhook(FAKE_WEBHOOK, "hi", redact, recorder([new Error("network down")]).impl), { ok: false, status: 0 });
+  assert.deepEqual(await postWebhook(FAKE_WEBHOOK, "hi", redact, recorder([new Response(null, { status: 404 })]).impl), { ok: false, status: 404 });
 });
 
 test("ping uses the plain url, /start and /fail, and reports failure", async () => {

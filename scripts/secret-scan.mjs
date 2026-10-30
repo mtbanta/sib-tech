@@ -1,12 +1,19 @@
 // Secret scan. Run by the pre-commit hook. Refuses the commit if staged content holds a secret.
 // Two checks: (1) every value in any stacks/*/.env.local appears in staged content, (2) key-shaped patterns
-// (skippable per line only in test files, with the marker scan-allow-fake).
+// from secret-patterns.mjs. There is no exemption marker: a rule cannot be skipped for a line or a folder.
 // It never prints a matched secret, only the file, line number and rule name.
+// Usage: node scripts/secret-scan.mjs          scans the staged files (the pre-commit hook)
+//        node scripts/secret-scan.mjs --tree   scans every file git tracks, for a full check
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const { PATTERNS } = await import(pathToFileURL(join(here, "secret-patterns.mjs")).href);
 
 const root = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
+const scanTree = process.argv.includes("--tree");
 
 // Values from every local key file. Short values (under 12 characters) are skipped to avoid false hits.
 const secretValues = [];
@@ -25,20 +32,10 @@ if (existsSync(stacksDir)) {
   }
 }
 
-const patterns = [
-  ["alpaca key id", /\b(PK|AK|CK)[A-Z0-9]{18,}\b/],
-  ["discord webhook", /discord(app)?\.com\/api\/webhooks\/\d+\/[\w-]+/],
-  ["discord bot token", /\b[MNO][\w-]{23,26}\.[\w-]{6}\.[\w-]{27,}\b/],
-  ["api key with sk- prefix", /\bsk-[A-Za-z0-9_-]{20,}\b/],
-  ["jwt", /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/],
-  ["database url with password", /\bpostgres(ql)?:\/\/[^\s:@/]+:[^\s@/]+@/],
-  ["healthchecks ping url", /hc-ping\.com\/[0-9a-f-]{20,}/],
-  ["supabase secret key", /\bsb_secret_[A-Za-z0-9_-]{10,}\b/],
-  ["supabase access token", /\bsbp_[a-f0-9]{30,}\b/],
-  ["private key header", /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
-];
-
-const files = execFileSync("git", ["diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"], { encoding: "utf8" })
+const files = (scanTree
+  ? execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" })
+  : execFileSync("git", ["diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"], { encoding: "utf8" })
+)
   .split("\0")
   .filter(Boolean);
 
@@ -46,7 +43,9 @@ let hits = 0;
 for (const f of files) {
   let text;
   try {
-    text = execFileSync("git", ["show", `:${f}`], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    text = scanTree
+      ? readFileSync(join(root, f), "utf8")
+      : execFileSync("git", ["show", `:${f}`], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   } catch {
     continue;
   }
@@ -59,11 +58,8 @@ for (const f of files) {
         hits++;
       }
     }
-    // A line in a test file may carry the marker "scan-allow-fake" for an obviously fake, key-shaped value.
-    // The marker skips only the pattern rules. The check against the real values above is never skipped.
-    const markedFake = /(^|\/)test\//.test(f) && line.includes("scan-allow-fake");
-    for (const [name, re] of patterns) {
-      if (!markedFake && re.test(line)) {
+    for (const [name, re] of PATTERNS) {
+      if (re.test(line)) {
         console.error(`SECRET SCAN: ${f}:${i + 1} matches rule "${name}"`);
         hits++;
       }
@@ -74,4 +70,4 @@ if (hits > 0) {
   console.error(`SECRET SCAN: refusing the commit (${hits} hit${hits === 1 ? "" : "s"}). Remove the secret, then commit again.`);
   process.exit(1);
 }
-console.log(`SECRET SCAN: clean (${files.length} staged files, ${secretValues.length} local secret values checked)`);
+console.log(`SECRET SCAN: clean (${files.length} files, ${secretValues.length} local secret values checked)`);

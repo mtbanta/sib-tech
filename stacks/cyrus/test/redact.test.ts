@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { shaped } from "./fakes.ts";
 import { makeRedactor } from "../src/redact.ts";
 import { makeLogger, describeError } from "../src/log.ts";
 
@@ -11,16 +12,22 @@ test("exact secret values are hidden, longest first", () => {
 
 test("key-shaped strings are hidden even when not on the list", () => {
   const r = makeRedactor([]);
+  // Built at run time from parts (see fakes.ts), so this file never holds a token shape.
   for (const s of [
-    "https://discord.com/api/webhooks/123456789012345678/abcDEF_ghi-JKL", // scan-allow-fake
-    "https://hc-ping.com/12345678-1234-1234-1234-123456789012", // scan-allow-fake
-    "postgresql://postgres:hunter2pass@db.example.com:5432/postgres", // scan-allow-fake
-    "eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoic2VydmljZSJ9.abcdefghijk", // scan-allow-fake
-    "PKABCDEFGHIJKLMNOPQRSTUV12", // scan-allow-fake
-    ["MTIzNDU2Nzg5MDEyMzQ1Njc4OQ", "GabcDE", "abcdefghijklmnopqrstuvwxyz1"].join("."), // scan-allow-fake (built at run time so the file never holds a token shape)
+    shaped.discordWebhook(),
+    shaped.healthchecksPing(),
+    shaped.databaseUrl(),
+    shaped.jwt(),
+    shaped.alpacaKeyId(),
+    shaped.discordBotToken(),
+    shaped.discordBotTokenOtherStart(),
+    shaped.supabaseSecretKey(),
+    shaped.supabaseAccessToken(),
+    shaped.supabaseOauthToken(),
+    shaped.flyToken(),
   ]) {
-    assert.ok(r(`before ${s} after`).includes("[redacted]"), s);
-    assert.ok(!r(`before ${s} after`).includes(s.slice(-12)), s);
+    assert.ok(r(`before ${s} after`).includes("[redacted]"), s.slice(0, 6));
+    assert.ok(!r(`before ${s} after`).includes(s.slice(-12)), s.slice(0, 6));
   }
 });
 
