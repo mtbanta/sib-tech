@@ -2,6 +2,7 @@
 // filled entry still has its protective stop, and stop the day if the daily loss limit is reached.
 import type { Order } from "./alpaca-trading.ts";
 import type { Broker } from "./broker.ts";
+import { etInstant } from "./time.ts";
 import { CONTROL_STOP, type DayRecord, type StopFlag, type Store } from "./store.ts";
 import { NOT_ADVICE } from "./discord.ts";
 
@@ -25,13 +26,16 @@ export function stopLeg(o: Order): Order | undefined {
 export async function syncOrders(d: RiskDeps, day: DayRecord): Promise<{ unprotected: string[] }> {
   const stored = (await d.store.listOrders(day.tradeDate)).filter((o) => o.status === "intent" || o.status === "submitted" || o.status === "filled");
   if (stored.length === 0) return { unprotected: [] };
-  const [orders, positions] = await Promise.all([d.broker.listOrders("all"), d.broker.listPositions()]);
+  const [orders, positions] = await Promise.all([d.broker.listOrders("all", etInstant(day.tradeDate, "00:00").toISOString()), d.broker.listPositions()]);
   const byClientId = new Map(orders.map((o) => [o.clientOrderId, o]));
   const held = new Set(positions.map((p) => p.symbol));
   const unprotected: string[] = [];
   for (const s of stored) {
     const o = byClientId.get(s.clientOrderId);
     if (!o) continue;
+    if (s.status === "intent" && o.status !== "filled" && o.status !== "canceled" && o.status !== "expired" && o.status !== "rejected") {
+      await d.store.updateOrder(s.clientOrderId, { status: "submitted", alpacaOrderId: o.id, note: null });
+    }
     if (o.status === "filled" && s.status !== "filled") {
       await d.store.updateOrder(s.clientOrderId, { status: "filled", filledQty: o.filledQty, filledAvgPrice: o.filledAvgPrice, alpacaOrderId: o.id });
     } else if ((o.status === "canceled" || o.status === "expired") && s.status !== "canceled" && o.filledQty === 0) {
@@ -40,7 +44,9 @@ export async function syncOrders(d: RiskDeps, day: DayRecord): Promise<{ unprote
       await d.store.updateOrder(s.clientOrderId, { status: "rejected", alpacaOrderId: o.id, note: "rejected by Alpaca" });
       await d.say("commands", `Alpaca rejected the entry for ${s.symbol}.`);
     }
-    if (o.filledQty > 0 && held.has(s.symbol)) {
+    // A sell that is already working (flatten, loss stop, close-out) explains a missing stop: no false alarm.
+    const selling = orders.some((x) => x.side === "sell" && x.symbol === s.symbol && ["new", "accepted", "pending_new", "partially_filled"].includes(x.status));
+    if (o.filledQty > 0 && held.has(s.symbol) && !selling) {
       const leg = stopLeg(o);
       if (!leg || DEAD_STOP.has(leg.status)) {
         unprotected.push(s.symbol);

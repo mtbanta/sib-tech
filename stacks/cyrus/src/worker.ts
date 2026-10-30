@@ -19,7 +19,7 @@ import { OpeningRangeBreakout } from "./strategy.ts";
 import type { Trade } from "./stream.ts";
 import { CONTROL_STOP, setPhase, type DayRecord, type StopFlag, type Store } from "./store.ts";
 import { formatSummary } from "./summary.ts";
-import { addMinutes, centralClock, etDate } from "./time.ts";
+import { addMinutes, centralClock, etDate, etInstant } from "./time.ts";
 import { NOT_ADVICE } from "./discord.ts";
 import type { PingKind } from "./heartbeat.ts";
 
@@ -59,6 +59,12 @@ export class Worker {
   private lastTradeAt: Date | null = null;
   private lastTickError: string | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private ticking = false;
+  private failedTicks = 0;
+  private lastOkPing = 0;
+  private notFlat = false;
+  private emergencyDate: string | null = null;
+  private lastCloseoutAttempt = 0;
 
   constructor(deps: WorkerDeps) {
     this.d = deps;
@@ -109,17 +115,57 @@ export class Worker {
   }
 
   async tick(): Promise<boolean> {
+    if (this.ticking) return true; // a slow pass is still running: do not start a second one
+    this.ticking = true;
     let ok = true;
     try {
       await this.pass();
       this.lastTickError = null;
+      this.failedTicks = 0;
     } catch (err) {
       ok = false;
+      this.failedTicks++;
       this.lastTickError = (err as Error).message.slice(0, 150);
       this.d.log?.("error", "tick_failed", { error: this.lastTickError });
+      // The database may be what failed. Selling needs only the broker, so the end of the day does not wait for it.
+      await this.emergencyCloseoutIfNeeded().catch(() => undefined);
+    } finally {
+      this.ticking = false;
     }
-    await this.d.ping(ok ? "ok" : "fail").catch(() => false);
+    await this.heartbeat(ok);
     return ok;
+  }
+
+  // "ok" at most every 30 seconds; "fail" after 3 failed passes in a row, or at once while the account is
+  // still holding positions after the close-out time.
+  private async heartbeat(ok: boolean): Promise<void> {
+    const nowMs = this.d.now().getTime();
+    if (this.notFlat) {
+      await this.d.ping("fail").catch(() => false);
+      return;
+    }
+    if (!ok) {
+      if (this.failedTicks >= 3) await this.d.ping("fail").catch(() => false);
+      return;
+    }
+    if (nowMs - this.lastOkPing >= 30_000) {
+      this.lastOkPing = nowMs;
+      await this.d.ping("ok").catch(() => false);
+    }
+  }
+
+  // Needs no database: reads the market clock from the broker and sells everything near the close.
+  private async emergencyCloseoutIfNeeded(): Promise<void> {
+    const now = this.d.now();
+    const date = etDate(now);
+    if (this.emergencyDate === date) return;
+    const clock = await this.d.broker.getClock();
+    const minutesToClose = (new Date(clock.nextClose).getTime() - now.getTime()) / 60_000;
+    if (!clock.isOpen || minutesToClose > CLOSEOUT_MINUTES_BEFORE_CLOSE) return;
+    this.emergencyDate = date;
+    await this.say("alerts", "The database is unreachable near the close, so I am closing everything from the broker's clock alone.");
+    const result = await closeOut({ broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c, t) => this.say(c, t), sleep: this.d.sleep }, date);
+    this.notFlat = !result.flat;
   }
 
   private async pass(): Promise<void> {
@@ -155,8 +201,14 @@ export class Worker {
       await enforceDailyLoss(risk, current);
     }
 
-    if (now >= addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !current.phases.closeout) {
-      this.background("closeout", () => this.closeoutPhase(date));
+    // Close-out runs until the account is flat: a failed attempt is retried every 5 minutes for 30 minutes
+    // past the close, and the heartbeat says "fail" for as long as positions remain.
+    if (now >= addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !current.phases.closeout && now.getTime() - this.lastCloseoutAttempt >= 5 * 60_000) {
+      this.lastCloseoutAttempt = now.getTime();
+      this.background("closeout", () => this.closeoutPhase(date, now >= addMinutes(day.closeAt!, 30)));
+    }
+    if (this.notFlat && !this.inflight.has("closeout")) {
+      this.notFlat = (await this.d.broker.listPositions()).length > 0; // clears as soon as someone closes by hand
     }
     if (now >= addMinutes(day.closeAt, 5) && current.phases.closeout && !current.phases.summary) {
       this.background("summary", () => this.summaryPhase(date));
@@ -172,7 +224,7 @@ export class Worker {
 
   private startStream(day: DayRecord, symbols: string[]): void {
     this.streamDate = day.tradeDate;
-    this.strategy = new OpeningRangeBreakout(day.openAt!, symbols);
+    this.strategy = new OpeningRangeBreakout(day.openAt!, symbols, this.d.now());
     this.stream = this.d.makeStream(symbols, (t) => this.onTrade(t));
     this.stream.start();
     this.d.log?.("info", "stream_started", { symbols: symbols.length });
@@ -192,15 +244,17 @@ export class Worker {
     this.gate.enter(signal).catch((err) => this.d.log?.("error", "gate_failed", { error: (err as Error).message.slice(0, 200) }));
   }
 
-  private async closeoutPhase(date: string): Promise<void> {
+  private async closeoutPhase(date: string, lastTry: boolean): Promise<void> {
     this.endStream();
     const result = await closeOut({ broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c, t) => this.say(c, t), sleep: this.d.sleep, log: (e, data) => this.d.log?.("info", e, data) }, date);
-    await setPhase(this.d.store, date, "closeout", this.d.now().toISOString(), { flat: result.flat ? "yes" : "no" });
+    this.notFlat = !result.flat;
+    // Recorded as done only when flat (or when this was the last try), so otherwise the next tick tries again.
+    if (result.flat || lastTry) await setPhase(this.d.store, date, "closeout", this.d.now().toISOString(), { flat: result.flat ? "yes" : "no" });
   }
 
   private async summaryPhase(date: string): Promise<void> {
     const day = (await this.d.store.getDay(date))!;
-    const [account, alpacaOrders, positions] = await Promise.all([this.d.broker.getAccount(), this.d.broker.listOrders("all"), this.d.broker.listPositions()]);
+    const [account, alpacaOrders, positions] = await Promise.all([this.d.broker.getAccount(), this.d.broker.listOrders("all", etInstant(date, "00:00").toISOString()), this.d.broker.listPositions()]);
     // Bring the stored entries up to date from the final fills before summarising.
     await syncOrders({ broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c, t) => this.say(c, t) }, day).catch(() => undefined);
     const text = formatSummary({

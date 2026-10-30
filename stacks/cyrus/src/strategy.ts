@@ -26,14 +26,19 @@ export class OpeningRangeBreakout {
   private readonly signaled = new Set<string>();
   private readonly watch: ReadonlySet<string>;
 
-  constructor(open: Date, symbols: readonly string[]) {
+  // `startedAt` is when this object was created. If that is already past the open, the range cannot be trusted
+  // (some trades were missed), so this strategy gives no signals for the day.
+  private readonly usable: boolean;
+
+  constructor(open: Date, symbols: readonly string[], startedAt: Date = open) {
+    this.usable = startedAt.getTime() <= open.getTime() + 30_000;
     this.open = open;
     this.rangeEnd = new Date(open.getTime() + RANGE_MINUTES * 60_000);
     this.watch = new Set(symbols);
   }
 
   onTrade(t: Trade): Signal | null {
-    if (!this.watch.has(t.symbol) || !(t.price > 0)) return null;
+    if (!this.usable || !this.watch.has(t.symbol) || !(t.price > 0)) return null;
     const time = new Date(t.time);
     if (!(time >= this.open)) return null; // before the open: ignored
     if (time < this.rangeEnd) {

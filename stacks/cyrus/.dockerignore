@@ -6,3 +6,4 @@ test
 deploy
 *.md
 .git
+src/tools

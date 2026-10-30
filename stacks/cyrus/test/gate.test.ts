@@ -8,6 +8,8 @@ import { syncOrders, enforceDailyLoss } from "../src/risk.ts";
 import { closeOut } from "../src/closeout.ts";
 import { ensureDay } from "../src/morning.ts";
 import { MemoryStore, CONTROL_STOP, type DayRecord } from "../src/store.ts";
+import { AlpacaError } from "../src/alpaca-trading.ts";
+import { FeedAlerter } from "../src/feed-alert.ts";
 import { FakeBroker, order } from "./helpers.ts";
 
 const D = "2026-11-02";
@@ -151,15 +153,43 @@ test("if Alpaca's cap is higher than approved, the gate lowers it first; shortin
   assert.equal(s2.broker.count("submitEntry"), 0);
 });
 
-test("a broker error on send is recorded as failed, reported, and not retried", async () => {
+test("a definite refusal from Alpaca is recorded as failed, reported and not retried", async () => {
   const s = await setup();
-  s.broker.failOn.add("submitEntry");
+  s.broker.submitEntry = async () => { s.broker.calls.push({ fn: "submitEntry", args: [] }); throw new AlpacaError("insufficient buying power", 403); };
   const r = await s.gate.enter(s.signal());
   assert.equal(r.status, "error");
   assert.equal((await s.store.getOrder(clientOrderIdFor(D, "AAA")))?.status, "failed");
-  assert.equal(s.broker.count("submitEntry"), 1);
-  assert.ok(s.said.some((m) => m.text.includes("failed at Alpaca")));
+  assert.ok(s.said.some((m) => m.text.includes("refused by Alpaca")));
   assert.equal((await s.gate.enter(s.signal())).status, "refused", "a second try the same day is refused");
+});
+
+test("an unclear outcome (timeout, server error) is kept as an intent that still counts, and the sync finds the order", async () => {
+  const s = await setup();
+  await s.store.updateDay(D, { limits: { maxPositionUsd: 1000, dailyLossStopUsd: 200, maxTradesPerDay: 1, borrowingCap: 4 } });
+  s.broker.submitEntry = async (e) => {
+    s.broker.calls.push({ fn: "submitEntry", args: [e] });
+    s.broker.orders.push(order({ id: "00000000-0000-0000-0000-0000000000aa", clientOrderId: e.clientOrderId, symbol: e.symbol, status: "accepted" })); // it landed
+    throw new Error("timeout (test)");
+  };
+  const r = await s.gate.enter(s.signal("AAA", 20));
+  assert.equal(r.status, "error");
+  assert.equal((await s.store.getOrder(clientOrderIdFor(D, "AAA")))?.status, "intent", "not marked failed");
+  assert.ok(s.said.some((m) => m.text.includes("outcome at Alpaca is unclear")));
+  assert.equal((await s.gate.enter(s.signal("BBB", 20))).status, "refused", "it still counts toward trades a day");
+  await syncOrders({ ...s.deps }, (await s.store.getDay(D))!);
+  const row = (await s.store.getOrder(clientOrderIdFor(D, "AAA")))!;
+  assert.equal(row.status, "submitted");
+  assert.equal(row.alpacaOrderId, "00000000-0000-0000-0000-0000000000aa");
+});
+
+test("if the database fails after the order was sent, the order is not reported as failed", async () => {
+  const s = await setup();
+  const realUpdate = s.store.updateOrder.bind(s.store);
+  s.store.updateOrder = async (id, patch) => { if (patch.status === "submitted") throw new Error("db blip (test)"); return realUpdate(id, patch); };
+  const r = await s.gate.enter(s.signal());
+  assert.equal(r.status, "sent");
+  assert.equal((await s.store.getOrder(clientOrderIdFor(D, "AAA")))?.status, "intent", "stays an intent, counted, reconciled later");
+  assert.ok(!s.said.some((m) => m.text.includes("failed")));
 });
 
 test("simultaneous signals are handled one at a time", async () => {
@@ -260,4 +290,43 @@ test("close-out that cannot get flat retries, then shouts", async () => {
   assert.deepEqual(r.remaining, ["AAA"]);
   assert.equal(s.broker.count("closeAllPositions"), 3);
   assert.ok(s.said.some((m) => m.ch === "alerts" && m.text.includes("NOT FLAT")));
+});
+
+test("sync reads only today's orders, and does not cry wolf while a sell is already working", async () => {
+  const s = await setup();
+  await s.gate.enter(s.signal("AAA", 50));
+  const row = (await s.store.listOrders(D))[0]!;
+  s.broker.positions = [{ symbol: "AAA", qty: 20, marketValue: 1000, avgEntryPrice: 50, unrealizedPl: 0 }];
+  s.broker.orders = [
+    order({ id: row.alpacaOrderId!, clientOrderId: row.clientOrderId, symbol: "AAA", status: "filled", filledQty: 20, filledAvgPrice: 50, legs: [order({ side: "sell", type: "stop", status: "canceled" })] }),
+    order({ id: "00000000-0000-0000-0000-0000000000bb", clientOrderId: "flatten", symbol: "AAA", side: "sell", type: "market", status: "new", orderClass: "" }),
+  ];
+  s.broker.calls.length = 0;
+  const r = await syncOrders({ ...s.deps }, (await s.store.getDay(D))!);
+  assert.deepEqual(r.unprotected, []);
+  assert.equal(s.broker.count("closePosition"), 0);
+  const call = s.broker.calls.find((c) => c.fn === "listOrders" && c.args[0] === "all")!;
+  assert.equal(call.args[1], "2026-11-02T05:00:00.000Z", "from the start of the New York day");
+});
+
+test("the feed alerter: login failure at once, reconnects only when repeated, with a cooldown", () => {
+  const a = new FeedAlerter();
+  assert.ok(a.onStatus("auth_failed", 0)!.includes("refused our login"));
+  assert.equal(a.onStatus("auth_failed", 60_000), null, "cooldown");
+  const b = new FeedAlerter();
+  for (let i = 0; i < 4; i++) assert.equal(b.onStatus("reconnecting", i), null);
+  assert.ok(b.onStatus("reconnecting", 5)!.includes("keeps dropping"));
+  assert.equal(b.onStatus("reconnecting", 6), null);
+  b.onStatus("live", 7);
+  assert.equal(new FeedAlerter().onStatus("live", 0), null);
+});
+
+test("a strategy created after the open gives no signals that day", () => {
+  const open = new Date("2026-11-02T14:30:00Z");
+  const late = new OpeningRangeBreakout(open, ["AAA"], new Date("2026-11-02T14:33:00Z"));
+  late.onTrade({ symbol: "AAA", price: 100, size: 1, time: "2026-11-02T14:34:00Z" });
+  assert.equal(late.onTrade({ symbol: "AAA", price: 120, size: 1, time: "2026-11-02T14:40:00Z" }), null);
+  const early = new OpeningRangeBreakout(open, ["AAA"], new Date("2026-11-02T14:25:00Z"));
+  early.onTrade({ symbol: "AAA", price: 100, size: 1, time: "2026-11-02T14:31:00Z" });
+  assert.ok(early.onTrade({ symbol: "AAA", price: 120, size: 1, time: "2026-11-02T14:40:00Z" }));
 });

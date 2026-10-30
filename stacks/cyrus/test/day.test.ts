@@ -158,13 +158,63 @@ test("a non-trading day does nothing but answer commands and send the heartbeat"
   assert.ok(r.pings.length >= 3);
 });
 
-test("when the database is down the heartbeat says fail and nothing trades", async () => {
+test("when the database is down the heartbeat says fail after three bad passes, and nothing trades", async () => {
   const r = rig();
   await r.at("13:30:00");
   r.store.failing = true;
   await r.at("13:31:00");
+  await r.at("13:31:10");
+  assert.equal(r.pings.filter((p) => p === "fail").length, 0, "one or two bad passes are not an alarm");
+  await r.at("13:31:20");
   assert.equal(r.pings.at(-1), "fail");
   assert.equal(r.broker.count("submitEntry"), 0);
+});
+
+test("the ok heartbeat goes out about every 30 seconds, not every pass", async () => {
+  const r = rig();
+  await r.at("13:00:00");
+  await r.at("13:00:05");
+  await r.at("13:00:10");
+  assert.equal(r.pings.length, 1);
+  await r.at("13:00:31");
+  assert.equal(r.pings.length, 2);
+});
+
+test("with the database down at the close, the broker's own clock still triggers the close-out", async () => {
+  const r = rig();
+  await r.at("13:30:00");
+  r.store.failing = true;
+  r.broker.positions = [{ symbol: "AAA", qty: 5, marketValue: 500, avgEntryPrice: 100, unrealizedPl: 0 }];
+  r.broker.clock = { isOpen: true, timestamp: "", nextOpen: "", nextClose: "2026-11-02T21:00:00Z" };
+  await r.at("20:40:00");
+  assert.equal(r.broker.count("closeAllPositions"), 0, "not yet near the close");
+  await r.at("20:56:00");
+  assert.equal(r.broker.count("closeAllPositions"), 1);
+  assert.equal(r.broker.positions.length, 0);
+  await r.at("20:56:10");
+  assert.equal(r.broker.count("closeAllPositions"), 1, "only once");
+});
+
+test("a close-out that cannot get flat is retried, is not recorded as done, and the heartbeat says fail until flat", async () => {
+  const r = rig();
+  await r.at("13:30:00");
+  r.broker.positions = [{ symbol: "AAA", qty: 5, marketValue: 500, avgEntryPrice: 100, unrealizedPl: 0 }];
+  const realClose = r.broker.closeAllPositions.bind(r.broker);
+  let works = false;
+  r.broker.closeAllPositions = async () => { if (!works) { r.broker.calls.push({ fn: "closeAllPositions", args: [] }); throw new Error("rejected (test)"); } return realClose(); };
+  await r.at("20:55:00");
+  assert.equal((await r.store.getDay(D))!.phases.closeout, undefined, "not recorded as done");
+  assert.ok(r.said("alerts").some((t) => t.includes("NOT FLAT")));
+  await r.at("20:55:05");
+  assert.equal(r.pings.at(-1), "fail");
+  const attempts = r.broker.count("closeAllPositions");
+  await r.at("20:57:00");
+  assert.equal(r.broker.count("closeAllPositions"), attempts, "waits 5 minutes between tries");
+  works = true;
+  await r.at("21:01:00");
+  assert.ok((await r.store.getDay(D))!.phases.closeout, "recorded once flat");
+  await r.at("21:01:10");
+  assert.notEqual(r.pings.at(-1), "fail");
 });
 
 test("a stopped worker stops pinging, which is what the heartbeat service watches for", async () => {

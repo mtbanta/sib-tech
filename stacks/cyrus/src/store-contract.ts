@@ -3,6 +3,12 @@
 import { SUGGESTED_LIMITS } from "./limits.ts";
 import type { DayRecord, OrderRecord, Store } from "./store.ts";
 
+// Compares two JSON values ignoring key order (Postgres jsonb stores keys in its own order).
+const same = (a: unknown, b: unknown): boolean => {
+  const norm = (v: unknown): unknown => (Array.isArray(v) ? v.map(norm) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).sort(([x], [y]) => x.localeCompare(y)).map(([k, x]) => [k, norm(x)])) : v);
+  return JSON.stringify(norm(a)) === JSON.stringify(norm(b));
+};
+
 export async function runStoreContract(store: Store, date = "2099-01-04"): Promise<string[]> {
   const bad: string[] = [];
   const expect = (cond: boolean, what: string) => {
@@ -11,9 +17,9 @@ export async function runStoreContract(store: Store, date = "2099-01-04"): Promi
 
   expect((await store.getControl("contract_missing")) === null, "a missing control key reads as null");
   await store.setControl("contract_key", { on: true, n: 1 });
-  expect(JSON.stringify(await store.getControl("contract_key")) === JSON.stringify({ on: true, n: 1 }), "a control value reads back");
+  expect(same(await store.getControl("contract_key"), { on: true, n: 1 }), "a control value reads back");
   await store.setControl("contract_key", { on: false });
-  expect(JSON.stringify(await store.getControl("contract_key")) === JSON.stringify({ on: false }), "a control value is replaced");
+  expect(same(await store.getControl("contract_key"), { on: false }), "a control value is replaced");
 
   expect((await store.getDay(date)) === null, "an unknown day reads as null");
   const day: DayRecord = {

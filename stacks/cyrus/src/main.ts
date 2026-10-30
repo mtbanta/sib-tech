@@ -12,6 +12,7 @@ import { makeRedactor } from "./redact.ts";
 import { DEFAULT_SCREEN, liveListSize, screen } from "./screen.ts";
 import { TradeStream } from "./stream.ts";
 import { fetchUniverse } from "./universe.ts";
+import { FeedAlerter } from "./feed-alert.ts";
 import { Worker } from "./worker.ts";
 
 loadLocalEnv();
@@ -59,9 +60,12 @@ const worker = new Worker({
   buildLiveList,
   makeStream: (symbols, onTrade) => {
     let status = "starting";
+    const alerter = new FeedAlerter();
     const s = new TradeStream(settings, symbols, onTrade, (st, detail) => {
       status = st;
       if (st === "auth_failed" || st === "reconnecting") log("warn", "stream", { status: st, detail });
+      const msg = alerter.onStatus(st, Date.now());
+      if (msg) void bot.post("alerts", msg);
     });
     return { start: () => s.start(), stop: () => s.stop(), status: () => status };
   },

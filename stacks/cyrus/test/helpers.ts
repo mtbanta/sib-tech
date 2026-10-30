@@ -42,8 +42,8 @@ export class FakeBroker implements Broker {
   }
   async getCalendar(start: string, end: string) { this.rec("getCalendar", start, end); return this.calendar.filter((c) => c.date >= start && c.date <= end); }
   async listPositions() { this.rec("listPositions"); return this.positions; }
-  async listOrders(status: "open" | "closed" | "all") {
-    this.rec("listOrders", status);
+  async listOrders(status: "open" | "closed" | "all", afterIso?: string) {
+    this.rec("listOrders", status, afterIso);
     const open = new Set(["new", "accepted", "pending_new", "partially_filled", "held"]);
     return this.orders.filter((o) => (status === "all" ? true : status === "open" ? open.has(o.status) : !open.has(o.status)));
   }

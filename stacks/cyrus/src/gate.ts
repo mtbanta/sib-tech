@@ -8,6 +8,7 @@
 //   6. the stop flag again, immediately before sending
 // and then the order is sent with a protective stop held at Alpaca. If the database or the broker cannot be
 // read, the entry is refused: the stack fails closed. Calls are handled one at a time.
+import { AlpacaError } from "./alpaca-trading.ts";
 import type { GateBroker } from "./broker.ts";
 import { checkEntry, type EntryContext } from "./limits.ts";
 import { CONTROL_STOP, type OrderRecord, type StopFlag, type Store } from "./store.ts";
@@ -149,19 +150,30 @@ export class OrderGate {
       return this.refuse(date, symbol, "database unavailable, so no entry", undefined, false);
     }
 
+    let sent;
     try {
-      const sent = await this.d.broker.submitEntry({ symbol, qty: decision.qty, stopPrice: signal.stopPrice, referencePrice: signal.price, clientOrderId });
-      await this.d.store.updateOrder(clientOrderId, { status: "submitted", alpacaOrderId: sent.id });
-      await this.notePeak(date, ctx.grossExposure + decision.notional, account.equity);
-      this.d.log?.("entry_sent", { symbol, qty: decision.qty, stop: signal.stopPrice });
-      await this.d.say("trading", `Entry sent (paper): BUY ${decision.qty} ${symbol} at about ${signal.price.toFixed(2)}, protective stop at ${signal.stopPrice.toFixed(2)} held at Alpaca. ${NOT_ADVICE}`);
-      return { status: "sent", clientOrderId, qty: decision.qty };
+      sent = await this.d.broker.submitEntry({ symbol, qty: decision.qty, stopPrice: signal.stopPrice, referencePrice: signal.price, clientOrderId });
     } catch (err) {
       const reason = (err as Error).message.slice(0, 200);
-      await this.d.store.updateOrder(clientOrderId, { status: "failed", note: reason }).catch(() => undefined);
-      await this.d.say("commands", `Entry for ${symbol} failed at Alpaca and was not retried: ${reason}`);
-      return { status: "error", reason };
+      // Only a definite "no" from Alpaca (a local refusal, or a 4xx other than 429) means nothing was sent.
+      // Anything else (a timeout, a 5xx, a failed lookup) may have landed: the row stays "intent", still counts
+      // as a trade, and the order sync reconciles it by its id.
+      const definite = err instanceof AlpacaError && (err.status === 0 || (err.status >= 400 && err.status < 500 && err.status !== 429));
+      if (definite) {
+        await this.d.store.updateOrder(clientOrderId, { status: "failed", note: reason }).catch(() => undefined);
+        await this.d.say("commands", `Entry for ${symbol} was refused by Alpaca and not retried: ${reason}`);
+        return { status: "error", reason };
+      }
+      await this.d.store.updateOrder(clientOrderId, { note: `outcome unclear: ${reason}` }).catch(() => undefined);
+      await this.d.say("commands", `Entry for ${symbol}: the outcome at Alpaca is unclear (${reason}). It is counted as sent and will be checked against Alpaca; check the dashboard if it matters.`);
+      return { status: "error", reason: `outcome unclear: ${reason}` };
     }
+    // The order is at Alpaca. From here on, a problem writing it down must not make it look like it failed.
+    await this.d.store.updateOrder(clientOrderId, { status: "submitted", alpacaOrderId: sent.id }).catch(() => this.d.log?.("order_record_update_failed", { symbol }));
+    await this.notePeak(date, ctx.grossExposure + decision.notional, account.equity);
+    this.d.log?.("entry_sent", { symbol, qty: decision.qty, stop: signal.stopPrice });
+    await this.d.say("trading", `Entry sent (paper): BUY ${decision.qty} ${symbol} at about ${signal.price.toFixed(2)}, protective stop at ${signal.stopPrice.toFixed(2)} held at Alpaca. ${NOT_ADVICE}`);
+    return { status: "sent", clientOrderId, qty: decision.qty };
   }
 
   // Remembers the day's highest exposure, for the daily summary's "borrowing used".
