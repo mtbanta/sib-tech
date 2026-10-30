@@ -604,3 +604,30 @@ Re-read the brief, this log, `PROJECT_STATE.md` and `CLAUDE.md` first, as the br
 4. **Feed errors were only logged.** **Fixed:** `feed-alert.ts` posts a login failure to `alerts` at once and repeated reconnects after five in a row, at most once every 15 minutes.
 
 Non-blocking notes, done: a tick no longer starts while the previous one runs; the "ok" heartbeat goes out about every 30 seconds and `fail` only after 3 bad passes in a row (or at once while not flat); no false "no protective stop" alarm while a sell is already working; `src/tools` is left out of the Docker image; after a restart past the open the strategy gives no signals for the day (a partial opening range cannot be trusted); an approval reply now warns if the stop flag is still on. Left as is: the daily loss stop does not retry its sale (the close-out is the backstop); the stop command can miss an entry that passed the gate's last check just before it; Fly region (see above).
+
+## First paper session: checklist for Michael (plain English)
+
+The next trading day is **Monday 2026-11-02**. Times are Central. The worker is already running on Fly.io and needs nothing from you except the steps below. Everything is paper money (a 20,000 dollar practice account). Nothing the stack posts is advice or an instruction to act.
+
+**Before Monday (once):** type `help` in the `commands` channel of the Stack C server. The bot should answer with the command list. If it does not answer, the bot cannot read your messages (the Message Content switch on the bot's page in the Discord Developer Portal), and I need to know.
+
+**What you will see on Monday, and when**
+- **7:30 AM**, in `commands`: "Good morning. Suggested limits for today". It lists four limits: largest position 1,000 dollars, daily loss stop 200 dollars, 10 entries a day, borrowing cap 1 (no borrowing). These are small on purpose.
+- **Before 8:30 AM you must answer.** Reply `approve` to accept all four, or change any with `position 1500`, `loss 150`, `trades 5`, `cap 2` (changing one counts as your decision on it). `approve cap` accepts one. The stack says "All four limits decided" when it has them all. **If any limit is undecided at 8:30 AM, it will not trade that day** and says so. A reminder arrives at 8:20 AM.
+- **7:45 AM onward**, in `trading`: today's live list (up to 20 names; the free price feed carries at most 30).
+- **8:30 AM**: the market opens. The strategy watches each name's first 5 minutes, then buys the first name that breaks above its opening high (long only, whole shares, at most one entry per name, each with a stop order held at Alpaca 1.5 percent below). Expect few or no entries on some days. Each entry is announced in `trading`.
+- **2:55 PM**: the close-out sells everything and checks the account is flat ("Close-out done: the account is flat"). If it is not, **NOT FLAT** goes to `alerts` and `commands` and the heartbeat alarm fires: open Alpaca and close by hand.
+- **3:05 PM**: the daily summary in `trading`: entries, profit or loss, borrowing used, refused entries and why.
+
+**Commands (only you, only in `commands`)**
+- `status`: what it is doing right now.
+- `stop`: no new entries; unfilled entries are cancelled; open positions keep their stops and are sold at the close-out.
+- `flatten`: stop, then sell everything now.
+- `resume`: clears a stop (also needed the day after a loss stop).
+- `limits`, `help`.
+
+**Things to test on Monday** (the rehearsal the brief asks for): answer the morning request; type `status`; type `stop` after an entry (or before the open, to see entries refused) and then `resume`; watch for the close-out and summary. Then on purpose, stop the worker once more (I do this; you will get the alert and the recovery message, as on Friday).
+
+**How to stop the stack, from your phone:** type `stop` (or `flatten`) in `commands`. If Discord is down: open the Alpaca app or website, cancel open orders and close positions. Stronger still: in Fly.io, stop the machine (the heartbeat will then also alert you).
+
+**What is NOT proven yet:** a trading day with real paper entries. Everything so far was tested by automated simulation and by live reads, one 1-share paper round trip (piece 4), the heartbeat alert, the database and the deployment. The free price feed is one exchange only, so prices and the opening range are rough; the placeholder strategy is not meant to make money.
