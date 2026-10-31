@@ -605,7 +605,7 @@ Re-read the brief, this log, `PROJECT_STATE.md` and `CLAUDE.md` first, as the br
 
 Non-blocking notes, done: a tick no longer starts while the previous one runs; the "ok" heartbeat goes out about every 30 seconds and `fail` only after 3 bad passes in a row (or at once while not flat); no false "no protective stop" alarm while a sell is already working; `src/tools` is left out of the Docker image; after a restart past the open the strategy gives no signals for the day (a partial opening range cannot be trusted); an approval reply now warns if the stop flag is still on. Left as is: the daily loss stop does not retry its sale (the close-out is the backstop); the stop command can miss an entry that passed the gate's last check just before it; Fly region (see above).
 
-## First paper session: checklist for Michael (plain English)
+## First paper session: checklist for Michael (plain English) (SUPERSEDED 2026-10-30 night: see the revised checklist at the end of this log)
 
 The next trading day is **Monday 2026-11-02**. Times are Central. The worker is already running on Fly.io and needs nothing from you except the steps below. Everything is paper money (a 20,000 dollar practice account). Nothing the stack posts is advice or an instruction to act.
 
@@ -640,3 +640,112 @@ The real `build-reviewer` agent confirmed findings 2, 3 and 4 fixed and tested, 
 - **Fix made after the round (small, tested, committed, NOT yet deployed, NOT yet re-reviewed):** the gate treats a duplicate-id 422 as unclear, so the row stays an intent and still counts. Also: the approval reply no longer says the command failed if only the stop-flag read afterwards fails. 143 tests pass.
 - **Per the brief this is a stop point:** no third review round and no new piece without Michael. Michael decides: (a) accept the fix without another review and deploy it, or (b) have the reviewer look at it once more.
 - **Reviewer's other non-blocking notes, not fixed, for Michael to rule on:** `notFlat` lives only in memory (a restart after a failed close-out forgets it, and on a weekend it is never re-checked); close-out retries after hours would queue market sells for the next open; the emergency and the regular close-out could overlap (harmless near the close); `failedTicks` resets after one good pass, so failures on alternate passes never raise `fail`; a stream started after the open gives no entries and nothing tells Michael why; a failed record update after a good send is only logged.
+
+---
+
+# Resumed 2026-10-30, night (third session)
+
+Re-read `CLAUDE.md`, `PROJECT_STATE.md`, the brief and this log first. The `build-reviewer` agent is loaded (listed among the available agent types, and used below).
+
+## Michael's decisions at the start of this session (as given)
+
+1. Order-recording fix: run the reviewer once more (a one-time third round, approved), deploy if it passes.
+2. Reviewer's smaller notes: fix every note that touches orders, limits, protective stops or the close-out, including the "not flat" state being forgotten after a restart. Log the rest.
+3. Commands: the bot answered `I did not understand ""` to `help`. Message Content Intent was switched on in the Developer Portal. Make sure the worker reads message text.
+4. Market hours: at 4:32 PM Central on Friday the bot said "The market is open". Fix and test after-hours, weekends, holidays.
+5. Restarts: "worker started" three times between 4:32 and 4:41 PM Central. Find the cause.
+6. Limits flow: after the close, post the next trading day's suggested limits and checklist. Michael approves that evening, can change them again before the open. Nothing approved before the open means no trading that day.
+7. Final phase review before Monday's open.
+
+## Decision 1: review round 3 (one-time, approved): PASS, deployed
+
+The real `build-reviewer` agent, round 3, range `2c46451..6673e94`. **PASS, no blocking findings.** It walked every path where an order may exist at Alpaca (timeout then not found then duplicate 422; 5xx; failed lookup; database error after a good send; restart between intent and send) and found each recorded as an intent that still counts. 143 tests and the type check passed on its run. Standing checks 2, 7, 8, 10 clean.
+
+Deployed as Fly release v3 (about 8:56 PM Central, market closed), `fly deploy --ha=false`. The worker started on the new image.
+
+Its non-blocking notes: (a) after an unclear first send, a later 4xx other than 429 or the duplicate 422 (for example a 403 from a failed lookup or from the second send) was still treated as a definite refusal and recorded as failed. **Fixed in this session** (`submitEntry` now turns every later error after an unclear first send into an unclear one, status 502, which the gate keeps as an intent). (b) The duplicate check matches the text `client_order_id` in Alpaca's 422 message; not confirmed against a live answer. **Open, to log:** one paper test sending a duplicate id would confirm it (market hours needed). (c) No single test runs the whole chain: **done**, `alpaca-trading.test.ts` and the gate tests now cover the chain end to end.
+
+## Decision 3: commands and message text
+
+- **Cause and state:** with Message Content Intent off, Discord returns empty text to a bot in its web interface. The worker reads the command channel through that web interface (it polls, it never opens a live gateway connection), so **there is no intent for the worker to request in code**: the switch in the Developer Portal is the whole mechanism, and no restart is needed. **Measured at about 8:50 PM Central:** reading the channel now returns Michael's `Good`, `Help` and `help` with their text (length 4 each). The earlier empty replies were from before the switch took effect.
+- **Code change:** an owner message whose text arrives empty now gets an honest reply naming the Message Content switch and where it is, instead of `I did not understand ""` (test added).
+- Because of the three earlier empty messages the command cursor is past them, so Michael types `help` again.
+
+## Decision 4: market hours bug
+
+- **Cause (found, not guessed):** at 4:32 PM Central on Friday 2026-10-30 (21:32 UTC) the deploy started the worker, whose first pass created Friday's day record because none existed (the request is made in the morning and the worker had not run that morning). `lapseIfUndecided` only asked whether the clock was past the open, not whether the session was still on, so it lapsed the day and posted "The market is open and today's limits were not all decided" two seconds after the start (Discord history: 21:32:57 start, 21:32:59 that message). The time zone arithmetic itself was right: checked 4:32 PM CT = 5:32 PM ET, after the 4:00 PM close; the 2026-11-02 open converts to 8:30 AM CT; a half day closes at 18:00 UTC.
+- **Fix:** one function, `sessionPhase(day, now)` in `time.ts`, answers `no_session`, `before_open`, `open` or `after_close` from the day's own calendar times. The lapse now uses it: during the session the message names the open time and the day; after the close, a day that never had a request is created already lapsed with its close-out and summary marked skipped, and says nothing. The "too late" wording no longer claims the market is open. `status` now prints the session phase from the calendar next to Alpaca's clock and flags a disagreement.
+- **Tests added:** the exact bug (a deploy at 4:32 PM Central on a Friday posts nothing about the market, no lapse, no close-out or summary, one request for Monday), session phase at the open, the close, one second either side, Friday 4:32 PM Central, the daylight saving weekend, a half day, weekends and holidays, the next session across a weekend and across Thanksgiving, late-night Central time (the New York date is what counts), status after hours.
+
+## Decision 5: the three "worker started" messages
+
+**Not a crash loop.** Fly logs and release history (read 2026-10-30): 4:32 PM Central deploy (release v1); 4:34 to 4:41 PM Central the deliberate stop and start for the heartbeat alert test (SIGINT, "exited normally with code 0"); 4:44 PM Central the deploy of the round 1 review fixes (release v2). Each is an action the builder took. Nothing restarted by itself. Tonight's deploy (release v3) posted a fourth.
+
+**Change so it cannot look like a crash again:** the start message now says why. Each start records the release and its time in the database; the message says "New release X (it was Y), so this is a deploy" or "Release X again: the same code started again", gives the start time in Central time and how many starts there were in the last hour, and three or more in an hour also posts an alert to `alerts` telling Michael to check the Fly logs. Tests added.
+
+## Decision 6: the limits flow moved to the evening before
+
+Michael's ruling supersedes the brief's "each morning before the open" for the timing. The brief's other rules stand (Michael approves or overrules each limit; undecided at the open means no trading that day).
+
+**How it works now** (code: `morning.ts`, `worker.ts`, `commands.ts`; the file name `morning.ts` is kept):
+- **Request.** After a session is over, the stack posts the NEXT trading day's suggested limits and a checklist to `commands`. The next session comes from Alpaca's calendar (`NextSessionFinder`, 14 days ahead, so weekends, holidays and half days are right), never "tomorrow". It is posted at any quiet hour if it has not been posted for that day: 10 minutes after the close (after the summary), or at once on a weekend or after a restart. Posted once, remembered in the database.
+- **Checklist** (read live, each line says "could not be read" rather than disappearing): stop flag (warns if ON), whether the account is flat, the borrowing cap and long only at Alpaca right now, the price feed.
+- **Answers.** `approve`, `approve cap`, `position 1500`, `loss 150`, `trades 5`, `cap 2` apply to the next trading day that has not opened, picked by comparing against open times (not the calendar date, so late evening is right). They work any time before that day's open, including again after the day is approved. The old "approval sets the cap at Alpaca first" is gone: approval only records.
+- **Review.** At 60 minutes before the open a "Good morning" message shows the day's limits and checklist again (skipped if the request itself went out inside that hour); a reminder at 10 minutes if still undecided.
+- **Open.** Undecided limits lapse the day: no trading, Michael told (only when the session is actually on).
+- **Arming (new, 5 minutes before the open).** For an approved day: set long only and the approved borrowing cap at Alpaca, read both back (a cap Alpaca does not keep is a failure), read the day's starting equity from the previous close, record `armed`. **The gate refuses every entry on an unarmed day** (fail closed). A failure alerts `alerts` (at most every 5 minutes) and is retried every 10 seconds. Reason for arming at the open and not at approval: an evening approval of cap 2 would otherwise leave the account at cap 2 overnight and over the weekend with nothing watching, and the close-out deliberately returns it to 1 every night. The starting equity is also read at arming, because Alpaca's "last equity" is not yet the right day's number the evening before.
+- **Commands.** `limits` shows today's and the next day's limits; `status` shows the session phase and the next session.
+
+**Tests added** (`test/limits-flow.test.ts`, `test/day.test.ts` rewritten for the evening flow): the request goes out once at Friday night, Saturday and Sunday starts across restarts; waits until 10 minutes after the close during a session; an after-close approval applies to Monday and not to Friday; a change after approval applies, and is refused at the open; nothing approved means no trading; arming sets the cap at open minus 5 and not before, reads the start equity, and fails closed when Alpaca errors or does not keep the cap (no entry, an alert, works once Alpaca does); the gate refuses unarmed and not-flat days and the stop flag stays the reason given; a late request is not followed by a duplicate review.
+
+## Decision 2: the reviewer's non-blocking notes (pieces 6, 7 and 8, rounds 1 to 3)
+
+Rule applied: fix every note that touches orders, limits, protective stops or the close-out; log the rest.
+
+| Note | Decision | What was done |
+| :-- | :-- | :-- |
+| "Not flat" lived only in memory, so a restart forgot it, and on a weekend it was never re-checked | Fix | Saved in the database (`not_flat`). Loaded on start with an alert. Cleared only when the account is seen flat, on any day and hour. The heartbeat says fail while set. The gate refuses entries while set. Tested across a restart. |
+| Close-out retries after hours would queue market sells for the next open (and cancel the stops first) | Fix | After the close, close-out sends nothing: it reports once and keeps the flag. At the next open any carried positions are sold (the market is open, so it sends). Tested. |
+| Emergency and regular close-out could overlap | Fix | One lock for regular, carried and emergency close-outs. Tested (the test fails by timeout if the lock is removed). |
+| Daily loss stop does not retry its sale | Fix | While the stop flag carries the loss-stop reason, each order sync retries the sale unless a sell is already working. An owner's plain `stop` is left alone. Tested. |
+| The stop command can miss an entry that passed the gate's last look just before it | Fix | While the stop flag is on, every order sync cancels unfilled entries (protective stops and partly filled entries untouched). The gap is at most one sync interval (30 seconds). Tested. |
+| A failed record update after a good send was only logged | Fix | Alert to `alerts`. The row stays an intent, which counts, and the sync reconciles it by its id. Tested. |
+| After an unclear first send, a later 4xx (such as a 403 from the lookup or second send) was treated as a definite refusal | Fix | `submitEntry` turns every error after an unclear first send into status 502 (unclear). Tested with the exact chains. |
+| The duplicate check depends on Alpaca's wording | **Measured** | Paper test 2026-10-30 night: a 1-share unfillable limit order sent twice with the same id answered `422 "client_order_id must be unique"`; cancelled; 0 open orders left. The match is right. |
+| Stop leaves partly filled entries alone | Log | Entries are market day orders, so partial fills are rare. To settle: on paper during market hours, partly fill an entry, cancel the parent, and see whether the protective stop survives. |
+| `failedTicks` resets after one good pass, so alternate failures never raise `fail` | Log | Health alerting only, touches no order. Better rule: fail on 3 failures in the last 10 passes. |
+| A stream started after the open gives no entries and nothing tells Michael why | Log | Touches no limit or stop; the restart path is conservative (no entries). Better: one message "opening range missed, no entries today". |
+| Clock skew between Discord timestamps and ours could refuse an approval | Log | Safe direction (refuses). |
+
+## First paper session: checklist for Michael (plain English), revised 2026-10-30 night
+
+This replaces the earlier checklist (limits flow moved from the morning to the evening before). The next trading day is **Monday 2026-11-02**. Times are Central. The worker is already running on Fly.io. Everything is paper money (a 20,000 dollar practice account). Nothing the stack posts is advice or an instruction to act.
+
+**Once, before the weekend ends:** type `help` in the `commands` channel of the Stack C server. The bot should answer with the command list. (It can read your text now: the Message Content switch is on.) If you type `stop` to test it, type `resume` afterwards: the stop flag is saved in the database, survives restarts and deploys, and stops all entries until cleared.
+
+**What you will see, and when**
+- **Right after the worker is up outside a trading session** (tonight, then every evening about 10 minutes after the close, 3:10 PM): in `commands`, "Suggested limits for Monday 2026-11-02 (market opens at 8:30 AM CT)". Four limits (largest position 1,000 dollars, daily loss stop 200 dollars, 10 entries a day, borrowing cap 1, which means no borrowing) and a **checklist**: the stop flag, whether the account is flat, the borrowing cap at Alpaca right now, the price feed.
+- **You answer that evening or any time before the open.** `approve` accepts all four. Change one with `position 1500`, `loss 150`, `trades 5`, `cap 2` (changing one counts as your decision on it). `approve cap` accepts one. The stack says "All four limits decided" when it has them all. **You can change any limit again until the open**, even after approving.
+- **7:30 AM**, "Good morning. Limits for today ... all four are decided" or "NOT all decided yet", with the checklist again. A chance to review and change.
+- **8:20 AM**, a reminder only if something is still undecided.
+- **If any limit is undecided at 8:30 AM, it will not trade that day** and says so. A late approval is refused.
+- **7:45 AM**, in `trading`: today's live list (up to 20 names; the free feed carries at most 30).
+- **8:25 AM**, "Armed for Monday": the stack sets the approved borrowing cap and long only at Alpaca, and reads the day's starting equity. This is when the cap changes at Alpaca, never overnight. If it cannot, `alerts` says "Could not arm" and there are no entries until it can.
+- **8:30 AM**: the market opens. After the first 5 minutes the strategy buys the first name that breaks above its opening high (long only, whole shares, one entry per name, each with a stop held at Alpaca 1.5 percent below). Expect few or no entries on some days.
+- **2:55 PM**: the close-out sells everything and checks the account is flat. If it is not, **NOT FLAT** goes to `alerts` and `commands`, the heartbeat alarm fires, and the flag is remembered across restarts. After 3:00 PM it sends nothing (a market order after the close would queue overnight); it sells at the next open instead, and no entries happen until the account is flat. You can also close by hand in Alpaca.
+- **3:05 PM**: the daily summary in `trading`. **3:10 PM**: the request for the next trading day.
+
+**Commands (only you, only in `commands`)**
+- `status`: what it is doing now, including the session phase from the calendar and the next session.
+- `stop`: no new entries; unfilled entries are cancelled (and again every 30 seconds while stopped); open positions keep their stops and are sold at the close-out.
+- `flatten`: stop, then sell everything now.
+- `resume`: clears a stop (also needed the day after a loss stop).
+- `limits`: today's and the next trading day's limits. `help`.
+
+**Things to test on Monday** (the rehearsal): answer the evening request, change one limit after approving, watch the 7:30 review and the "Armed" message, type `status`; type `stop` after an entry (or before the open, to see entries refused) and then `resume`; watch the close-out, the summary and the evening request. Then, on purpose, stop the worker once more (I do this; you get the alert and the recovery message).
+
+**How to stop the stack from your phone:** `stop` (or `flatten`) in `commands`. If Discord is down: Alpaca's app or website, cancel open orders and close positions. Stronger still: in Fly.io, stop the machine (the heartbeat also alerts).
+
+**Restarts:** each start posts "worker started" and now says why (new release, or the same release again) and how many starts in the last hour. Three in an hour also posts to `alerts`.
+
+**What is NOT proven yet:** a trading day with real paper entries. Everything so far was automated simulation, live reads, one 1-share paper round trip, the heartbeat alert, the database and the deployment. The free feed is one exchange only; the placeholder strategy is not meant to make money.

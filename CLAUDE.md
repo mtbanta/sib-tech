@@ -50,6 +50,8 @@ On 2026-10-29 the owner decided to build two stacks and compare them in paper tr
 - Supabase: stack C's project is created with the Supabase command line tool in the owner's existing organization, region West US (Oregon).
 - Discord: one Discord account for both stacks, on cyrus@sib-tech.co, with a separate private server and a separate bot application per stack. This reverses piece 0's recommendation of one account per stack. Stack C's server has channels `alerts`, `trading` and `commands`. Stack C's code accepts commands only from its own server, its own command channel and the owner's user id.
 
+**Ruling after the first deploy (owner, 2026-10-30, night).** The limits flow moves from the morning to the evening before. After each close the stack posts the next trading day's suggested limits and a checklist to Discord; the owner approves or overrules that evening and can change them again until the open; if any limit is undecided at the open, there is no trading that day. This supersedes the brief's "each morning before the open" for the timing only. The borrowing cap is set at Alpaca at 5 minutes before the open (arming), not at approval. One extra review round (round 3) was approved once for the order-recording fix and is not a precedent.
+
 ## Tech stack
 
 **DECIDED for the paper evaluation, 2026-10-29.** Two stacks are compared in paper trading, stack C first.
