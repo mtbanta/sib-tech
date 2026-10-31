@@ -49,6 +49,8 @@ Earlier entry, superseded by the paragraph above: **NOT STARTED.** Created Octob
 
 ## Open Issues
 
+Raised by build C on 2026-10-30 (owner's design point, to revisit before any real money): when a carried position is found, the stack sells everything, including today's own positions, and cancels their stops; the owner may want only the unexpected position sold. See `builds/build-c-log.md`, "Michael's decisions after review round 3".
+
 Raised by run 1 on 2026-10-08. Each is quoted and sourced in the run 1 deliverable. None is resolved.
 
 - **Anthropic's terms and a securities agent.** The Consumer Terms that govern a Max plan list relying on the service "to buy or sell securities" or to "receive advice about securities" among prohibited uses. Whether a personal research or trading agent is permitted on a Max plan, and whether the answer differs on the pay-as-you-go API, needs an answer from Anthropic in writing. See the deliverable, section 4.0.1 and section 7.

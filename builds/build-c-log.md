@@ -805,3 +805,8 @@ Round 3 of the final phase review (the extra round Michael approved), range `da5
 
 **Non-blocking notes from round 3, for Michael:** a position bought by hand in Alpaca during the session is flagged and sold within about 30 seconds; the carried sale uses close-all, so it also sells today's own positions and cancels their protective stops (the alert says so); a cap left at 2 on a flat account outside the session stays there overnight, and arming and the gate correct it before any entry; the position scan adds about 2 calls a minute (an estimate, not a measurement); `CLAUDE.md` contradicted itself on the review rounds, now resolved in favour of the standing rule.
 
+## Michael's decisions after review round 3 (2026-10-30, late night)
+
+1. **One fourth review round on the round 3 fix, approved, one time only.** If it passes: deploy, let the worker post Monday's limits request, tell Michael when to test `help`, `status`, `stop` and `resume`, and confirm the stop flag is cleared. If it does not pass: do not deploy, start no fifth round, leave release v3 running for Monday, and tell Michael exactly what he will see Monday morning under v3.
+2. **Design point to revisit before any real money (open):** when a carried position is found, the stack sells everything (`closeAllPositions`), including today's own positions, and cancels their protective stops. Michael may want only the unexpected position sold. The code path: the carried step in `Worker.pass`, `carriedPhase`, `closeOut`; a finer version would sell only the symbols that have no stored order from today (`closePosition` per symbol) and leave today's entries and their stops alone. Not changed now: selling everything is the simpler and safer rule for a paper test of the plumbing.
+
