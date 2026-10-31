@@ -23,6 +23,9 @@ export interface CloseoutResult {
 export interface CloseoutOptions {
   // False on a repeat attempt, so a failure that was already reported is not reported again every 5 minutes.
   alert?: boolean;
+  // The day's close. If the broker's clock cannot be read, a time at or after this counts as closed, so a clock
+  // failure after the close never leads to market sells that would queue overnight.
+  closeAt?: Date;
 }
 
 export const CLOSEOUT_MINUTES_BEFORE_CLOSE = 5;
@@ -36,7 +39,8 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
   const alert = options.alert !== false;
   let remaining: string[] = [];
   const clock = await d.broker.getClock().catch(() => null);
-  if (clock && !clock.isOpen) {
+  const marketClosed = clock ? !clock.isOpen : options.closeAt !== undefined && d.now() >= options.closeAt;
+  if (marketClosed) {
     let held: string[];
     try {
       held = (await d.broker.listPositions()).map((p) => p.symbol);

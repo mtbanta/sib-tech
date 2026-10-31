@@ -66,7 +66,8 @@ export async function syncOrders(d: RiskDeps, day: DayRecord): Promise<{ unprote
 // When equity has fallen by the approved daily loss limit, stop the day: set the stop flag, sell everything.
 // Runs again and again without harm (once the flag is set it does nothing).
 export async function enforceDailyLoss(d: RiskDeps, day: DayRecord): Promise<boolean> {
-  if (day.status !== "approved" || day.dayStartEquity === null) return false;
+  // Not before arming: until then the starting equity may be an earlier day's number.
+  if (day.status !== "approved" || !day.phases.armed || day.dayStartEquity === null) return false;
   const flag = await d.store.getControl<StopFlag>(CONTROL_STOP);
   if (flag?.on) {
     // The loss stop already fired. If its sale did not go through, try again on every pass (a sell that is

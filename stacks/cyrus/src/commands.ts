@@ -172,7 +172,12 @@ export class CommandProcessor {
           await this.say("Too late: the market opened while I was saving that, so that day's limits are fixed and nothing changed.");
           return;
         }
-        await this.d.store.updateDay(date, decision.patch);
+        // A changed cap after the day was armed must be set at Alpaca again, so arming is undone and the scheduler
+        // arms again (the gate refuses entries in between). Other limits are read from the day at each entry.
+        const { armed: _armed, ...phasesWithoutArmed } = latest.phases;
+        const rearm = latest.phases.armed !== undefined && cmd.kind === "set" && cmd.name === "cap";
+        await this.d.store.updateDay(date, rearm ? { ...decision.patch, phases: phasesWithoutArmed } : decision.patch);
+        if (rearm) decision.reply += "\nThe cap changed after arming, so I will set it at Alpaca again in a few seconds.";
         const flag = await this.d.store.getControl<StopFlag>(CONTROL_STOP).catch(() => null);
         if (flag?.on && decision.patch.status === "approved") decision.reply += `\n**Note: the stop flag is ON (${flag.reason}), so there will be no entries until you type \`resume\`.**`;
         this.d.log?.("limits_decision", { status: decision.patch.status, limits: decision.patch.limits });

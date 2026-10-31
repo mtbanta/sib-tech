@@ -7,6 +7,7 @@ import { dayWord, etInstant, sessionPhase } from "../src/time.ts";
 import { NextSessionFinder, ensureDay } from "../src/morning.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, MemoryStore, type NotFlatState, type StopFlag } from "../src/store.ts";
 import { enforceDailyLoss, sweepEntriesWhileStopped } from "../src/risk.ts";
+import { closeOut } from "../src/closeout.ts";
 import { OrderGate } from "../src/gate.ts";
 import { recordStart, releaseLabel } from "../src/start-note.ts";
 import { FakeBroker, FakeBot, order } from "./helpers.ts";
@@ -296,7 +297,7 @@ test("while the stop flag is on, an unfilled entry that arrives late is cancelle
 
 test("the daily loss stop retries its sale until the account is flat, but not for an owner stop or while a sell is working", async () => {
   const day = (await ensureDay({ store: new MemoryStore(), broker: brokerWith() }, D));
-  const approved = { ...day, status: "approved" as const, dayStartEquity: 20000 };
+  const approved = { ...day, status: "approved" as const, dayStartEquity: 20000, phases: { armed: "x" } };
   const store = new MemoryStore();
   const broker = brokerWith(CALENDAR, true);
   const said: Array<{ ch: string; text: string }> = [];
@@ -469,4 +470,153 @@ test("the scheduler keeps cancelling unfilled entries while the stop flag is on,
   await r.at("14:41:00");
   assert.deepEqual(broker.calls.filter((c) => c.fn === "cancelOrder").map((c) => c.args[0]), ["00000000-0000-0000-0000-00000000000a"]);
   assert.ok(r.said("commands").some((t) => t.includes("reached Alpaca late")));
+});
+
+// ---- final review round 1 fixes ----
+
+test("positions held outside the session with no saved flag are flagged, alerted, kept out of the gate, and sold at the open", async () => {
+  const broker = brokerWith(CALENDAR, false);
+  broker.positions = HOLD;
+  const r = rig({ broker });
+  // a brand new worker on Tuesday before the open (it was down across the close): nothing was ever saved
+  await r.at("2026-11-03T13:00:00Z");
+  assert.equal((await r.store.getControl<NotFlatState>(CONTROL_NOT_FLAT))?.on, true);
+  assert.ok(r.said("alerts").some((t) => t.includes("Positions are held outside the session") && t.includes("AAA")));
+  assert.equal(r.pings.at(-1), "fail");
+  const g = await gateRig({ notFlat: true });
+  assert.match((await g.gate.enter(g.signal) as any).reason, /not flat/);
+  assert.equal(broker.count("closeAllPositions"), 0, "nothing sent while the market is closed");
+  broker.clock = { ...broker.clock, isOpen: true };
+  await r.at("2026-11-03T14:35:00Z");
+  assert.equal(broker.count("closeAllPositions"), 1, "sold at the open");
+  assert.equal((await r.store.getControl<NotFlatState>(CONTROL_NOT_FLAT))?.on, false);
+});
+
+test("when the flag clears outside the session the borrowing cap goes back to 1", async () => {
+  const broker = brokerWith(CALENDAR, false);
+  broker.config = { ...broker.config, maxMarginMultiplier: 2 }; // left raised by a failed close-out
+  broker.positions = HOLD;
+  const r = rig({ broker });
+  await r.at("2026-11-01T22:00:00Z"); // Sunday: flagged
+  broker.positions = []; // closed by hand
+  await r.at("2026-11-01T22:00:10Z");
+  assert.equal(broker.config.maxMarginMultiplier, 1);
+  assert.ok(broker.calls.some((c) => c.fn === "setAccountConfig" && (c.args[0] as any).maxMarginMultiplier === 1));
+});
+
+test("a flag that could not be saved (database down) is saved again once the database is back", async () => {
+  const broker = brokerWith(CALENDAR, true);
+  broker.clock = { isOpen: true, timestamp: "", nextOpen: "", nextClose: "2026-11-02T21:00:00Z" };
+  const r = rig({ broker });
+  await r.at("2026-11-01T22:10:00Z");
+  await r.at("13:45:00");
+  broker.positions = HOLD;
+  broker.closeAllPositions = async () => { broker.calls.push({ fn: "closeAllPositions", args: [] }); throw new Error("rejected (test)"); };
+  // the regular close-out is already recorded as done, so only the re-save can write the flag later
+  await r.store.updateDay(D, { phases: { ...(await r.store.getDay(D))!.phases, closeout: "done", summary: "done" } });
+  r.store.failing = true;
+  await r.at("20:56:00"); // the emergency close-out cannot get flat and cannot save the flag
+  r.store.failing = false;
+  assert.equal(await r.store.getControl<NotFlatState>(CONTROL_NOT_FLAT), null, "not saved yet");
+  await r.at("21:01:00"); // after the close, when nothing else would write it
+  assert.equal((await r.store.getControl<NotFlatState>(CONTROL_NOT_FLAT))?.on, true);
+});
+
+test("changing the cap after the day is armed arms it again with the new cap", async () => {
+  const broker = brokerWith();
+  const r = rig({ broker });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("approve", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:25:00");
+  assert.ok((await r.store.getDay(D))!.phases.armed);
+  assert.equal(broker.config.maxMarginMultiplier, 1);
+  r.ownerSays("cap 2", "14:27:00");
+  await r.at("14:27:05");
+  // the change undid the arming and the same pass armed again, so the gap is closed before any entry can use it
+  assert.equal((await r.store.getDay(D))!.phases.armed, "2026-11-02T14:27:05.000Z", "armed again by the change");
+  assert.equal(broker.config.maxMarginMultiplier, 2);
+  assert.ok(r.said("commands").some((t) => t.includes("set it at Alpaca again")));
+  assert.equal(broker.calls.filter((c) => c.fn === "setAccountConfig").length, 2, "set once at arming, once again after the change");
+});
+
+test("a failure in the limits flow does not skip the stop sweep, and Michael is told", async () => {
+  const broker = brokerWith(CALENDAR, true);
+  const r = rig({ broker });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("approve", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:26:00");
+  r.ownerSays("stop", "14:40:00");
+  broker.failOn.add("getCalendar"); // the next-session lookup fails from here on (its cache expired at the open)
+  await r.at("14:40:05");
+  broker.orders = [order({ id: "00000000-0000-0000-0000-00000000000a", side: "buy", filledQty: 0, status: "accepted" })];
+  await r.at("14:41:00");
+  assert.equal(broker.count("cancelOrder"), 1, "the rest of the pass still ran");
+  assert.ok(r.said("alerts").some((t) => t.includes("limits flow hit a problem")));
+});
+
+test("if the broker's clock cannot be read after the close, close-out sends nothing; before the close it still sells", async () => {
+  const broker = brokerWith(CALENDAR, true);
+  broker.positions = HOLD;
+  broker.failOn.add("getClock");
+  const said: string[] = [];
+  const closeAt = new Date("2026-11-02T21:00:00Z");
+  const mk = (iso: string) => ({ broker, store: new MemoryStore(), now: () => new Date(iso), say: (async (_c: string, t: string) => (said.push(t), true)) as any, sleep: async () => undefined });
+  const after = await closeOut(mk("2026-11-02T21:05:00Z"), D, { closeAt });
+  assert.equal(after.deferred, true);
+  assert.equal(broker.count("closeAllPositions"), 0);
+  await closeOut(mk("2026-11-02T20:56:00Z"), D, { closeAt });
+  assert.equal(broker.count("closeAllPositions"), 1, "before the close an unreadable clock does not stop the sale");
+});
+
+test("the daily loss stop does nothing on a day that is not armed yet (its starting equity may be an earlier day's)", async () => {
+  const day = (await ensureDay({ store: new MemoryStore(), broker: brokerWith() }, D));
+  const store = new MemoryStore();
+  const broker = brokerWith(CALENDAR, true);
+  broker.account = { ...broker.account, equity: 15000 };
+  const said: Array<{ ch: string; text: string }> = [];
+  assert.equal(await enforceDailyLoss(riskDeps(broker, store, said), { ...day, status: "approved", dayStartEquity: 20000, phases: {} }), false);
+  assert.equal(await store.getControl(CONTROL_STOP), null);
+  assert.equal(await enforceDailyLoss(riskDeps(broker, store, said), { ...day, status: "approved", dayStartEquity: 20000, phases: { armed: "x" } }), true);
+});
+
+// A close-out that is waiting on the broker, with the account's positions as given when it was called.
+async function slowCloseRig(clearAtOnce: boolean) {
+  const broker = brokerWith(CALENDAR, true);
+  broker.positions = HOLD;
+  const store = new MemoryStore();
+  await store.setControl(CONTROL_NOT_FLAT, { on: true, since: "2026-11-02T01:00:00.000Z", remaining: ["AAA"] } satisfies NotFlatState);
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((res) => (release = res));
+  broker.closeAllPositions = async () => { broker.calls.push({ fn: "closeAllPositions", args: [] }); if (clearAtOnce) broker.positions = []; await gate; broker.positions = []; };
+  return { r: rig({ broker, store }), broker, release: () => release() };
+}
+
+test("a carried close-out in flight blocks the regular close-out", { timeout: 20_000 }, async () => {
+  const { r, broker, release } = await slowCloseRig(false);
+  try {
+    await r.at("13:30:00");
+    await r.at("14:35:00"); // the open: the carried sale starts and waits on the broker
+    assert.equal(broker.count("closeAllPositions"), 1);
+    await r.at("20:55:00"); // close - 5: the regular close-out is due but must not start
+    assert.equal(broker.count("closeAllPositions"), 1);
+  } finally {
+    release();
+    await settle();
+  }
+});
+
+test("the not-flat flag is not cleared while a close-out is still running", { timeout: 20_000 }, async () => {
+  const { r, broker, release } = await slowCloseRig(true);
+  try {
+    await r.at("13:30:00");
+    await r.at("14:35:00"); // the carried sale starts; the broker already shows no positions
+    await r.at("14:35:10");
+    assert.ok(!r.said("commands").some((t) => t.includes("not-flat flag is cleared")), "left to the close-out to report");
+    assert.equal(broker.count("closeAllPositions"), 1);
+  } finally {
+    release();
+    await settle();
+  }
 });

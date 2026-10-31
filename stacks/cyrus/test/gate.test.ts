@@ -214,7 +214,7 @@ test("structure: only the gate sends entries; only known places change the accou
   const src = join(import.meta.dirname, "../src");
   const callers = (fn: string) => files(src).filter((f) => new RegExp(`\\.${fn}\\(`).test(readFileSync(f, "utf8"))).map((f) => f.slice(src.length + 1)).sort();
   assert.deepEqual(callers("submitEntry"), ["gate.ts", "tools/paper-check.ts"]);
-  assert.deepEqual(callers("setAccountConfig"), ["closeout.ts", "gate.ts", "morning.ts", "tools/paper-check.ts"]);
+  assert.deepEqual(callers("setAccountConfig"), ["closeout.ts", "gate.ts", "morning.ts", "tools/paper-check.ts", "worker.ts"]);
   assert.deepEqual(callers("closeAllPositions"), ["closeout.ts", "commands.ts", "risk.ts", "tools/paper-check.ts"]);
   // nothing in the worker (outside tools) imports a tool
   for (const f of files(src).filter((f) => !f.includes("/tools/"))) assert.ok(!/from "\.\/tools\//.test(readFileSync(f, "utf8")), f);

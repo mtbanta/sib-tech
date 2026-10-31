@@ -20,7 +20,7 @@ import { OpeningRangeBreakout } from "./strategy.ts";
 import type { Trade } from "./stream.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
 import { formatSummary } from "./summary.ts";
-import { addMinutes, centralClock, etDate, etInstant } from "./time.ts";
+import { addMinutes, centralClock, etDate, etInstant, sessionPhase } from "./time.ts";
 import { NOT_ADVICE } from "./discord.ts";
 import type { PingKind } from "./heartbeat.ts";
 
@@ -65,6 +65,8 @@ export class Worker {
   private lastOkPing = 0;
   private notFlat = false;
   private notFlatLoaded = false;
+  private notFlatSaved = false;
+  private lastFlowAlert = 0;
   private notFlatAlertDate: string | null = null;
   private emergencyDate: string | null = null;
   private lastCloseoutAttempt = 0;
@@ -190,25 +192,48 @@ export class Worker {
     this.notFlat = on;
     if (on) this.notFlatAlertDate = date;
     const state: NotFlatState = { on, since: this.d.now().toISOString(), remaining };
-    await this.d.store.setControl(CONTROL_NOT_FLAT, state).catch((err) => this.d.log?.("warn", "not_flat_save_failed", { error: (err as Error).message.slice(0, 120) }));
+    this.notFlatSaved = false;
+    await this.d.store.setControl(CONTROL_NOT_FLAT, state).then(() => void (this.notFlatSaved = true)).catch((err) => this.d.log?.("warn", "not_flat_save_failed", { error: (err as Error).message.slice(0, 120) }));
   }
 
-  // Runs on every pass, on any day: loads the remembered state after a restart, and clears it as soon as the
-  // account is seen flat (for example when Michael closes by hand, or on a weekend).
-  private async notFlatCheck(): Promise<void> {
+  // Runs on every pass, on any day. Loads the remembered state after a restart. Outside the session (before the
+  // open, after the close, a weekend) any position that is held counts as not flat, even if no flag was ever
+  // saved (the worker was down across the close, or the database was down when a close-out failed): it sets the
+  // flag, saves it, and alerts. Clears the flag as soon as the account is seen flat, and then puts the borrowing
+  // cap back to 1 if that happens outside the session.
+  private async notFlatCheck(today: DayRecord, now: Date): Promise<void> {
     if (!this.notFlatLoaded) {
       const saved = await this.d.store.getControl<NotFlatState>(CONTROL_NOT_FLAT);
       this.notFlatLoaded = true;
       if (saved?.on) {
         this.notFlat = true;
+        this.notFlatSaved = true;
         await this.say("alerts", `**The worker restarted while the account was NOT FLAT** (${saved.remaining.join(", ") || "positions held"}, since ${centralClock(new Date(saved.since))}). It stays flagged until the account is seen flat. No entries until then. ${NOT_ADVICE}`);
       }
     }
-    if (this.notFlat && !this.closingOut && !this.inflight.has("closeout") && !this.inflight.has("carried")) {
-      if ((await this.d.broker.listPositions()).length === 0) {
-        await this.setNotFlat(false, [], etDate(this.d.now()));
-        await this.say("commands", "The account is flat now, so the not-flat flag is cleared.");
+    const idle = !this.closingOut && !this.inflight.has("closeout") && !this.inflight.has("carried");
+    const outside = sessionPhase(today, now) !== "open";
+    if (!idle || !(this.notFlat || outside)) return;
+    const held = (await this.d.broker.listPositions()).map((p) => p.symbol);
+    const date = etDate(now);
+    if (held.length === 0) {
+      if (!this.notFlat) return;
+      await this.setNotFlat(false, [], date);
+      await this.say("commands", "The account is flat now, so the not-flat flag is cleared.");
+      if (outside) {
+        try {
+          await this.d.broker.setAccountConfig({ maxMarginMultiplier: 1 }); // the armed cap must not sit at Alpaca overnight
+        } catch {
+          await this.say("commands", "The account is flat, but I could not set the borrowing cap back to 1. Check it before the next open.");
+        }
       }
+      return;
+    }
+    if (!this.notFlat) {
+      await this.setNotFlat(true, held, date);
+      await this.say("alerts", `**Positions are held outside the session (${held.join(", ")}) and nothing had flagged it.** Flagged as not flat: no entries until the account is flat, and I will sell at the next open. You can also close by hand in Alpaca. ${NOT_ADVICE}`);
+    } else if (!this.notFlatSaved) {
+      await this.setNotFlat(true, held, date); // the earlier save failed (database down): save it again
     }
   }
 
@@ -216,14 +241,25 @@ export class Worker {
     const now = this.d.now();
     // Commands first, at any hour: a stop must never wait behind anything else.
     await this.commands.poll();
-    await this.notFlatCheck();
 
     const date = etDate(now);
     const today = await ensureDay({ store: this.d.store, broker: this.d.broker, now: this.d.now }, date);
+    await this.notFlatCheck(today, now);
     const steps: MorningSteps = { store: this.d.store, broker: this.d.broker, say: (c, t) => this.say(c, t), now: this.d.now, feed: this.d.settings.alpaca.dataFeed };
 
     // The limits flow for the next session (it may be a later day) runs at any hour, even on a weekend.
-    let current: DayRecord = await this.limitsFlow(now, date, today, steps);
+    // A failure here (the calendar, Discord) must not skip the order sync, the loss stop or the close-out below.
+    let current: DayRecord = today;
+    try {
+      current = await this.limitsFlow(now, date, today, steps);
+    } catch (err) {
+      this.lastTickError = `limits flow: ${(err as Error).message.slice(0, 120)}`;
+      this.d.log?.("error", "limits_flow_failed", { error: (err as Error).message.slice(0, 200) });
+      if (now.getTime() - this.lastFlowAlert >= 10 * 60_000) {
+        this.lastFlowAlert = now.getTime();
+        await this.say("alerts", `The limits flow hit a problem (${(err as Error).message.slice(0, 120)}). Trading checks continue; I keep trying.`);
+      }
+    }
     const day = current;
     if (!day.isTradingDay || !day.openAt || !day.closeAt) return;
     const at = (minutesFromOpen: number) => now >= addMinutes(day.openAt!, minutesFromOpen);
@@ -272,7 +308,7 @@ export class Worker {
     // long as positions remain.
     if (now >= addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !current.phases.closeout && !this.closingOut && now.getTime() - this.lastCloseoutAttempt >= 5 * 60_000) {
       this.lastCloseoutAttempt = now.getTime();
-      this.background("closeout", () => this.closeoutPhase(date, now >= addMinutes(day.closeAt!, 30)));
+      this.background("closeout", () => this.closeoutPhase(date, now >= addMinutes(day.closeAt!, 30), day.closeAt));
     }
     if (now >= addMinutes(day.closeAt, 5) && current.phases.closeout && !current.phases.summary) {
       this.background("summary", () => this.summaryPhase(date));
@@ -329,11 +365,11 @@ export class Worker {
     this.gate.enter(signal).catch((err) => this.d.log?.("error", "gate_failed", { error: (err as Error).message.slice(0, 200) }));
   }
 
-  private async closeoutPhase(date: string, lastTry: boolean): Promise<void> {
+  private async closeoutPhase(date: string, lastTry: boolean, closeAt: Date | null = null): Promise<void> {
     this.endStream();
     this.closingOut = true;
     try {
-      const result = await closeOut({ broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c, t) => this.say(c, t), sleep: this.d.sleep, log: (e, data) => this.d.log?.("info", e, data) }, date, { alert: this.notFlatAlertDate !== date });
+      const result = await closeOut({ broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c, t) => this.say(c, t), sleep: this.d.sleep, log: (e, data) => this.d.log?.("info", e, data) }, date, { alert: this.notFlatAlertDate !== date, closeAt: closeAt ?? undefined });
       await this.setNotFlat(!result.flat, result.remaining, date);
       // Recorded as done only when flat (or when this was the last try), so otherwise the next tick tries again.
       if (result.flat || lastTry) await setPhase(this.d.store, date, "closeout", this.d.now().toISOString(), { flat: result.flat ? "yes" : "no" });
