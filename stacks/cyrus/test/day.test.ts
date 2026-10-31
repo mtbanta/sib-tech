@@ -177,6 +177,7 @@ test("a close-out that cannot get flat is retried, is not recorded as done, and 
   await r.at("13:30:00");
   r.broker.clock = { ...r.broker.clock, isOpen: true };
   r.broker.positions = [{ symbol: "AAA", qty: 5, marketValue: 500, avgEntryPrice: 100, unrealizedPl: 0 }];
+  await r.store.insertOrder({ clientOrderId: "cyrus-20261102-AAA", tradeDate: D, symbol: "AAA", qty: 5, referencePrice: 100, stopPrice: 98.5, status: "submitted", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: null });
   const realClose = r.broker.closeAllPositions.bind(r.broker);
   let works = false;
   r.broker.closeAllPositions = async () => { if (!works) { r.broker.calls.push({ fn: "closeAllPositions", args: [] }); throw new Error("rejected (test)"); } return realClose(); };

@@ -175,7 +175,7 @@ export class CommandProcessor {
         // A changed cap after the day was armed must be set at Alpaca again, so arming is undone and the scheduler
         // arms again (the gate refuses entries in between). Other limits are read from the day at each entry.
         const { armed: _armed, ...phasesWithoutArmed } = latest.phases;
-        const rearm = latest.phases.armed !== undefined && cmd.kind === "set" && cmd.name === "cap";
+        const rearm = latest.phases.armed !== undefined && decision.patch.limits.borrowingCap !== latest.limits.borrowingCap;
         await this.d.store.updateDay(date, rearm ? { ...decision.patch, phases: phasesWithoutArmed } : decision.patch);
         if (rearm) decision.reply += "\nThe cap changed after arming, so I will set it at Alpaca again in a few seconds.";
         const flag = await this.d.store.getControl<StopFlag>(CONTROL_STOP).catch(() => null);

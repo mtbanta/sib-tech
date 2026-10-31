@@ -325,6 +325,8 @@ async function notFlatDay() {
   await r.at("2026-11-01T22:20:10Z");
   await r.at("13:45:00");
   broker.positions = HOLD;
+  // the gate recorded this entry before sending it, so the position is today's and not a carried one
+  await r.store.insertOrder({ clientOrderId: "cyrus-20261102-AAA", tradeDate: D, symbol: "AAA", qty: 5, referencePrice: 100, stopPrice: 98.5, status: "submitted", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: null });
   let fails = true;
   const realClose = broker.closeAllPositions.bind(broker);
   broker.closeAllPositions = async () => { broker.calls.push({ fn: "closeAllPositions", args: [] }); if (fails) throw new Error("rejected (test)"); broker.positions = []; };
@@ -619,4 +621,82 @@ test("the not-flat flag is not cleared while a close-out is still running", { ti
     release();
     await settle();
   }
+});
+
+// ---- final review round 2 ----
+
+test("a carried position found in the middle of the session (first pass after an outage) is flagged, alerted, refused entries and sold", async () => {
+  const broker = brokerWith(CALENDAR, true);
+  const first = rig({ broker });
+  await first.at("2026-11-01T22:10:00Z");
+  first.ownerSays("approve", "2026-11-01T22:20:00Z");
+  await first.at("2026-11-01T22:20:10Z");
+  broker.positions = HOLD; // yesterday's position, no flag was ever saved
+  // a fresh worker whose first pass is Monday 10:00 AM New York, inside the session
+  const r = rig({ broker, store: first.store, bot: first.bot });
+  await r.at("2026-11-02T15:00:00Z");
+  assert.ok(r.said("alerts").some((t) => t.includes("did not enter today") && t.includes("AAA")), "flagged and alerted");
+  assert.equal(r.pings.at(-1), "fail");
+  assert.equal(broker.count("closeAllPositions"), 1, "sold");
+  assert.equal(broker.positions.length, 0);
+  await r.at("2026-11-02T15:00:10Z");
+  assert.equal((await r.store.getControl<NotFlatState>(CONTROL_NOT_FLAT))?.on, false, "cleared once the sale left the account flat");
+  const g = await gateRig({ notFlat: true });
+  assert.match((await g.gate.enter(g.signal) as any).reason, /not flat/);
+});
+
+test("a position the gate itself entered today is not treated as carried", async () => {
+  const broker = brokerWith(CALENDAR, true);
+  const r = rig({ broker });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("approve", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:26:00");
+  // the gate recorded this entry before sending it
+  await r.store.insertOrder({ clientOrderId: "cyrus-20261102-AAA", tradeDate: D, symbol: "AAA", qty: 5, referencePrice: 100, stopPrice: 98.5, status: "submitted", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: null });
+  broker.positions = HOLD;
+  await r.at("14:40:00");
+  await r.at("14:41:00");
+  assert.equal(broker.count("closeAllPositions"), 0);
+  assert.equal(await r.store.getControl(CONTROL_NOT_FLAT), null);
+});
+
+test("a regular close-out in flight blocks a later carried close-out, and an approve that changes the cap re-arms", { timeout: 20_000 }, async () => {
+  const broker = brokerWith(CALENDAR, true);
+  broker.positions = HOLD;
+  const store = new MemoryStore();
+  await store.setControl(CONTROL_NOT_FLAT, { on: true, since: "2026-11-02T01:00:00.000Z", remaining: ["AAA"] } satisfies NotFlatState);
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((res) => (release = res));
+  let n = 0;
+  broker.closeAllPositions = async () => { broker.calls.push({ fn: "closeAllPositions", args: [] }); n++; if (n <= 3) throw new Error("rejected (test)"); await gate; broker.positions = []; }; // a close-out run makes 3 attempts
+  const r = rig({ broker, store });
+  try {
+    await r.at("13:30:00");
+    await r.at("20:52:00"); // the carried sale runs and fails (3 attempts); its 5 minute wait starts
+    assert.equal(broker.count("closeAllPositions"), 3);
+    await r.at("20:55:00"); // the regular close-out starts and waits on the broker (call 4)
+    assert.equal(broker.count("closeAllPositions"), 4);
+    await r.at("20:57:10"); // the carried sale is due again but the regular close-out is still running
+    assert.equal(broker.count("closeAllPositions"), 4);
+  } finally {
+    release();
+    await settle();
+  }
+});
+
+test("an approve that changes the cap after arming arms again", async () => {
+  const broker = brokerWith();
+  const r = rig({ broker });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("approve", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:25:00");
+  // a plain `approve` cannot change the cap value, so make the day's cap differ the way an overrule would, then confirm the compare is on values
+  r.ownerSays("cap 4", "14:27:00");
+  await r.at("14:27:05");
+  assert.equal(broker.config.maxMarginMultiplier, 4);
+  r.ownerSays("cap 4", "14:28:00");
+  await r.at("14:28:05");
+  assert.equal(broker.calls.filter((c) => c.fn === "setAccountConfig").length, 2, "the same cap again does not re-arm");
 });

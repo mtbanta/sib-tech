@@ -67,6 +67,7 @@ export class Worker {
   private notFlatLoaded = false;
   private notFlatSaved = false;
   private lastFlowAlert = 0;
+  private lastCarriedScan = 0;
   private notFlatAlertDate: string | null = null;
   private emergencyDate: string | null = null;
   private lastCloseoutAttempt = 0;
@@ -213,7 +214,14 @@ export class Worker {
     }
     const idle = !this.closingOut && !this.inflight.has("closeout") && !this.inflight.has("carried");
     const outside = sessionPhase(today, now) !== "open";
-    if (!idle || !(this.notFlat || outside)) return;
+    if (!idle) return;
+    // During the session a held position is normal, but one this worker did not enter today is a carried one (the
+    // worker was down across the close, or came back after the open): flag it like any other carried position.
+    if (!outside && !this.notFlat) {
+      await this.scanForCarried(today, now);
+      return;
+    }
+    if (!(this.notFlat || outside)) return;
     const held = (await this.d.broker.listPositions()).map((p) => p.symbol);
     const date = etDate(now);
     if (held.length === 0) {
@@ -237,6 +245,20 @@ export class Worker {
     }
   }
 
+  // In-session check, every 30 seconds while nothing is flagged: any held symbol with no stored order from today
+  // (every entry is written down by the gate before it is sent, so a legitimate position always has one) is carried.
+  private async scanForCarried(today: DayRecord, now: Date): Promise<void> {
+    if (now.getTime() - this.lastCarriedScan < 30_000) return;
+    this.lastCarriedScan = now.getTime();
+    const held = (await this.d.broker.listPositions()).map((p) => p.symbol);
+    if (held.length === 0) return;
+    const known = new Set((await this.d.store.listOrders(today.tradeDate)).map((o) => o.symbol));
+    const carried = held.filter((sym) => !known.has(sym));
+    if (carried.length === 0) return;
+    await this.setNotFlat(true, carried, etDate(now));
+    await this.say("alerts", `**Positions are held that this worker did not enter today (${carried.join(", ")}).** Treated as carried over: no entries until the account is flat, and I am selling everything now (nothing here has a protective stop from today). ${NOT_ADVICE}`);
+  }
+
   private async pass(): Promise<void> {
     const now = this.d.now();
     // Commands first, at any hour: a stop must never wait behind anything else.
@@ -244,7 +266,13 @@ export class Worker {
 
     const date = etDate(now);
     const today = await ensureDay({ store: this.d.store, broker: this.d.broker, now: this.d.now }, date);
-    await this.notFlatCheck(today, now);
+    try {
+      await this.notFlatCheck(today, now);
+    } catch (err) {
+      // A failed check must not stop the limits flow, arming or the close-out below; the gate reads the saved flag itself.
+      this.lastTickError = `not-flat check: ${(err as Error).message.slice(0, 120)}`;
+      this.d.log?.("error", "not_flat_check_failed", { error: (err as Error).message.slice(0, 200) });
+    }
     const steps: MorningSteps = { store: this.d.store, broker: this.d.broker, say: (c, t) => this.say(c, t), now: this.d.now, feed: this.d.settings.alpaca.dataFeed };
 
     // The limits flow for the next session (it may be a later day) runs at any hour, even on a weekend.
