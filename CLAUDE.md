@@ -41,6 +41,8 @@ On 2026-10-29 the owner decided to build two stacks and compare them in paper tr
 
 **Review.** Pieces that touch money, and the end of every phase, are reviewed by the `build-reviewer` agent (`.claude/agents/build-reviewer.md`), at most two rounds. If round 2 still has a blocking finding, or the reviewer returns STOP AND FLAG MICHAEL, stop and flag the owner.
 
+**Standing rule change (owner, 2026-10-30, night):** money-touching pieces and phase-end reviews may run up to **three** `build-reviewer` rounds without asking the owner. Stop and flag the owner if round three fails (any blocking finding), or on any `STOP AND FLAG MICHAEL` verdict for paper-only, secrets or hard-stop reasons (checks 2, 7 or 10). The reviewer agent file is a byte-exact copy of the brief and still says round 2 with a blocking finding means STOP AND FLAG MICHAEL; under this rule the builder tells the reviewer in its prompt which round is the last allowed, and a round 1 or 2 blocking finding is CHANGES REQUIRED. Future build briefs carry this rule.
+
 **Stack separation.** Stack C is cyrus (cyrus@sib-tech.co), code under `stacks/cyrus/`. Stack D is dexter (dexter@sib-tech.co), built later, under `stacks/dexter/`, and is off limits until the owner says otherwise. Each stack has its own Alpaca paper account, Supabase project, Fly.io app, Discord server and bot, and keys. Shared code is copied, never imported across stack folders.
 
 **Rulings after piece 0 (owner, 2026-10-30).**

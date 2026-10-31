@@ -782,3 +782,10 @@ Range `6676607..f775572`, the real `build-reviewer` agent. Standing checks 2, 7,
 - Tests after these fixes: 192 pass, type check clean; each new behaviour fails a test when removed (the in-session scan, the carried lock, the re-arm compare, own entries not being treated as carried).
 
 **State of the deployment, said plainly:** Fly runs release v3 (code at `da59c9f`: the morning limits flow, the earlier fixes, none of tonight's changes). Everything after that, the evening flow, arming, the session phase fix, the close-out hardening, the start reason and the in-session carried scan, is committed and pushed but **not deployed and not passed by the reviewer** (round 1 CHANGES REQUIRED, round 2 STOP AND FLAG MICHAEL, one blocking finding which is fixed but not re-reviewed).
+
+## Michael's decisions after the round 2 stop (2026-10-30, night)
+
+1. **One more review round on the final phase fixes, approved as a one-time extra round** (it becomes round 3 of the final phase review). If it passes, deploy. If it returns CHANGES REQUIRED or STOP AND FLAG MICHAEL, do not deploy, leave release v3 running and tell Michael.
+2. After a successful deploy: post Monday's suggested limits and checklist to Discord at once (Michael approves over the weekend); tell Michael when to test `help`, `status`, `stop` and `resume` from his phone and confirm the stop flag is cleared afterwards; update this log and `PROJECT_STATE.md` with the review result and the release number.
+3. **Standing rule change:** money-touching pieces and phase-end reviews may run up to **three** `build-reviewer` rounds without asking. Stop and flag Michael if round three fails, or on any STOP AND FLAG MICHAEL verdict (the reviewer uses that verdict for paper-only, secrets and hard-stop problems). Recorded in `CLAUDE.md`'s sib-tech override. Note for the reviewer prompts: the agent file is a byte-exact copy of the brief and says a blocking finding in round 2 means STOP AND FLAG MICHAEL; under this rule the builder tells the reviewer which round is the last allowed.
+
