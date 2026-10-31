@@ -101,6 +101,14 @@ export class OrderGate {
       return this.refuse(date, symbol, "broker or database unavailable, so no entry", undefined, false);
     }
 
+    // Fail closed on its own, whatever the worker's carried-position scan has or has not done yet: a held symbol
+    // with no stored order from today is a position this worker did not enter today (every entry is written down
+    // before it is sent), so no entry goes out beside it.
+    const todaysSymbols = new Set(orders.map((o) => o.symbol));
+    const carried = positions.map((p) => p.symbol).filter((sym) => !todaysSymbols.has(sym));
+    if (carried.length > 0 && !stop?.on && limits) {
+      return this.refuse(date, symbol, `a held position has no order from today (${carried.join(", ")}), so it is carried over: no entry`);
+    }
     const held = new Set(positions.map((p) => p.symbol));
     const countable = orders.filter((o) => o.status !== "failed" && o.status !== "rejected");
     const pendingExposure = orders.filter((o) => (o.status === "intent" || o.status === "submitted") && !held.has(o.symbol)).reduce((s, o) => s + o.qty * o.referencePrice, 0);

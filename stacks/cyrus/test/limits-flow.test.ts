@@ -700,3 +700,40 @@ test("an approve that changes the cap after arming arms again", async () => {
   await r.at("14:28:05");
   assert.equal(broker.calls.filter((c) => c.fn === "setAccountConfig").length, 2, "the same cap again does not re-arm");
 });
+
+// ---- final review round 3 ----
+
+test("one failed read on the first in-session pass: the gate still refuses beside the carried position, Michael is told, and the next pass retries at once", async () => {
+  const broker = brokerWith(CALENDAR, true);
+  const first = rig({ broker });
+  await first.at("2026-11-01T22:10:00Z");
+  first.ownerSays("approve", "2026-11-01T22:20:00Z");
+  await first.at("2026-11-01T22:20:10Z");
+  broker.positions = HOLD; // yesterday's position, nothing saved
+  for (const failing of ["listOrders", "listPositions"] as const) {
+    const store = first.store;
+    const b = brokerWith(CALENDAR, true);
+    b.positions = HOLD;
+    const r = rig({ broker: b, store, bot: new FakeBot() });
+    let thrown = false;
+    if (failing === "listOrders") {
+      const real = store.listOrders.bind(store);
+      store.listOrders = async (d: string) => { if (!thrown) { thrown = true; throw new Error("db blip (test)"); } return real(d); };
+    } else {
+      const real = b.listPositions.bind(b);
+      b.listPositions = async () => { if (!thrown) { thrown = true; throw new Error("broker blip (test)"); } return real(); };
+    }
+    await r.at("2026-11-02T15:00:00Z");
+    assert.ok(r.said("alerts").some((t) => t.includes("could not check for carried-over positions")), `${failing}: Michael is told`);
+    // the worker's own gate, built over the same store and broker, in the window before the next scan
+    const now = new Date("2026-11-02T15:00:01Z");
+    const gate = new OrderGate({ broker: b, store, now: () => now, say: (async () => true) as any });
+    const result = await gate.enter({ symbol: "BBB", price: 50, tradeTime: new Date(now.getTime() - 3000), stopPrice: 49.25 });
+    assert.equal(result.status, "refused", `${failing}: no entry beside a carried position`);
+    assert.match((result as any).reason, /carried over/);
+    assert.equal(b.count("submitEntry"), 0);
+    await r.at("2026-11-02T15:00:05Z"); // the very next pass, not 30 seconds later
+    assert.equal(b.count("closeAllPositions"), 1, `${failing}: retried on the next pass and sold`);
+    await store.setControl(CONTROL_NOT_FLAT, { on: false, since: "x", remaining: [] });
+  }
+});

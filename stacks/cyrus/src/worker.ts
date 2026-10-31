@@ -68,6 +68,7 @@ export class Worker {
   private notFlatSaved = false;
   private lastFlowAlert = 0;
   private lastCarriedScan = 0;
+  private lastScanAlert = 0;
   private notFlatAlertDate: string | null = null;
   private emergencyDate: string | null = null;
   private lastCloseoutAttempt = 0;
@@ -249,14 +250,25 @@ export class Worker {
   // (every entry is written down by the gate before it is sent, so a legitimate position always has one) is carried.
   private async scanForCarried(today: DayRecord, now: Date): Promise<void> {
     if (now.getTime() - this.lastCarriedScan < 30_000) return;
-    this.lastCarriedScan = now.getTime();
-    const held = (await this.d.broker.listPositions()).map((p) => p.symbol);
-    if (held.length === 0) return;
-    const known = new Set((await this.d.store.listOrders(today.tradeDate)).map((o) => o.symbol));
-    const carried = held.filter((sym) => !known.has(sym));
-    if (carried.length === 0) return;
-    await this.setNotFlat(true, carried, etDate(now));
-    await this.say("alerts", `**Positions are held that this worker did not enter today (${carried.join(", ")}).** Treated as carried over: no entries until the account is flat, and I am selling everything now (nothing here has a protective stop from today). ${NOT_ADVICE}`);
+    try {
+      const held = (await this.d.broker.listPositions()).map((p) => p.symbol);
+      let carried: string[] = [];
+      if (held.length > 0) {
+        const known = new Set((await this.d.store.listOrders(today.tradeDate)).map((o) => o.symbol));
+        carried = held.filter((sym) => !known.has(sym));
+      }
+      this.lastCarriedScan = now.getTime(); // only a scan that finished counts; a failed one is retried on the next pass
+      if (carried.length === 0) return;
+      await this.setNotFlat(true, carried, etDate(now));
+      await this.say("alerts", `**Positions are held that this worker did not enter today (${carried.join(", ")}).** Treated as carried over: no entries until the account is flat, and I am selling everything now (nothing here has a protective stop from today). ${NOT_ADVICE}`);
+    } catch (err) {
+      this.lastTickError = `carried-position scan: ${(err as Error).message.slice(0, 120)}`;
+      this.d.log?.("error", "carried_scan_failed", { error: (err as Error).message.slice(0, 200) });
+      if (now.getTime() - this.lastScanAlert >= 5 * 60_000) {
+        this.lastScanAlert = now.getTime();
+        await this.say("alerts", `I could not check for carried-over positions (${(err as Error).message.slice(0, 100)}). The order gate refuses any entry beside a position it did not enter today, and I retry on the next pass.`);
+      }
+    }
   }
 
   private async pass(): Promise<void> {

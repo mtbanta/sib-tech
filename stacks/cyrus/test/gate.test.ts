@@ -111,7 +111,7 @@ test("each fixed limit refuses with its own reason", async () => {
     ["too close to the close", (s) => void s.setNow(new Date("2026-11-02T20:10:00Z")), /too close to the close/],
     ["stale price", () => undefined, /stale/, 600],
     ["daily loss", (s) => void (s.broker.account = { ...s.broker.account, equity: 19790 }), /daily loss stop/],
-    ["already holding", (s) => void (s.broker.positions = [{ symbol: "AAA", qty: 1, marketValue: 50, avgEntryPrice: 50, unrealizedPl: 0 }]), /already holding/],
+    ["holding a symbol this worker did not enter today", (s) => void (s.broker.positions = [{ symbol: "AAA", qty: 1, marketValue: 50, avgEntryPrice: 50, unrealizedPl: 0 }]), /carried over/],
   ];
   for (const [name, arrange, re, age] of cases) {
     const s = await setup();
@@ -136,6 +136,7 @@ test("borrowing cap 1: exposure never goes above equity; the cap is held at Alpa
   await s.store.updateDay(D, { limits: { maxPositionUsd: 15000, dailyLossStopUsd: 200, maxTradesPerDay: 10, borrowingCap: 1 } });
   s.broker.account = { ...s.broker.account, equity: 20000 };
   s.broker.positions = [{ symbol: "ZZZ", qty: 1, marketValue: 19900, avgEntryPrice: 1, unrealizedPl: 0 }];
+  await s.store.insertOrder({ clientOrderId: "cyrus-20261102-ZZZ", tradeDate: D, symbol: "ZZZ", qty: 1, referencePrice: 19900, stopPrice: 19000, status: "filled", alpacaOrderId: null, filledQty: 1, filledAvgPrice: 19900, note: null }); // today's own entry
   const r = await s.gate.enter(s.signal("AAA", 150));
   assert.equal(r.status, "refused");
   assert.match((r as any).reason, /borrowing cap/);
