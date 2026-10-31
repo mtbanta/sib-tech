@@ -149,7 +149,7 @@ The full record of each run lives in `runs/`. This table is the index you read f
 As of 2026-10-30 (late night), release v4 deployed:
 
 1. Michael: approve or overrule Monday's limits in `commands` over the weekend (`approve`, or `position 1500`, `loss 150`, `trades 5`, `cap 2`); he can change them again until 8:30 AM Central Monday. Test `help`, `status`, `stop` and then `resume` from his phone, and check `status` shows "Stop flag: off". Confirm in Alpaca that the paper account is flat before Monday's open.
-2. Monday 2026-11-02: the rehearsal per "First paper session" (revised) in `builds/build-c-log.md`, including stopping the worker once on purpose for the heartbeat alert. That closes build C.
+2. Monday 2026-11-02: the rehearsal per "First paper session" (revised) in `builds/build-c-log.md`, including stopping the worker once on purpose for the heartbeat alert (Michael's ruling, 2026-10-31: only after the 2:55 PM Central close-out, and I will wait for the 3:10 PM request; the session itself runs uninterrupted). That closes build C.
 3. Hard stops stay: nothing toward real money, no new paid plan without Michael, nothing touching stack D.
 
 Earlier entry, superseded by the list above:
@@ -183,7 +183,7 @@ As of 2026-10-30 (evening), after build C piece 9 was prepared:
 
 1. Michael: replace `SUPABASE_DB_URL` in `stacks/cyrus/.env.local` with the Postgres connection string from the Supabase "Connect" page (Session pooler), password filled in. Tell the builder the Discord holdback result, and type `help` in the `commands` channel.
 2. Builder, then: `node src/tools/apply-schema.ts`, `node deploy/set-fly-secrets.mjs`, `fly deploy --ha=false`, check the heartbeat and the start message, final phase review.
-3. The rehearsal on a real paper trading day (Monday 2026-11-02 is next): Michael answers the morning request before 8:30 AM Central, tests `stop`, and the worker is stopped on purpose once to see the heartbeat alert.
+3. The rehearsal on a real paper trading day (Monday 2026-11-02 is next): Michael answers the morning request before 8:30 AM Central, tests `stop`, and the worker is stopped on purpose once, only after the 2:55 PM close-out (Michael, 2026-10-31), to see the heartbeat alert.
 4. Hard stops stay: nothing toward real money, no new paid plan without Michael, nothing touching stack D.
 
 Earlier entry, superseded by the list above:

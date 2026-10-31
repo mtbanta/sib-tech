@@ -742,7 +742,7 @@ This replaces the earlier checklist (limits flow moved from the morning to the e
 - `resume`: clears a stop (also needed the day after a loss stop).
 - `limits`: today's and the next trading day's limits. `help`.
 
-**Things to test on Monday** (the rehearsal): answer the evening request, change one limit after approving, watch the 7:30 review and the "Armed" message, type `status`; type `stop` after an entry (or before the open, to see entries refused) and then `resume`; watch the close-out, the summary and the evening request. Then, on purpose, stop the worker once more (I do this; you get the alert and the recovery message).
+**Things to test on Monday** (the rehearsal): answer the evening request, change one limit after approving, watch the 7:30 review and the "Armed" message, type `status`; type `stop` after an entry (or before the open, to see entries refused) and then `resume`; watch the close-out, the summary and the evening request. Then, on purpose, stop the worker once more (I do this; you get the alert and the recovery message). **Michael's ruling (2026-10-31): the deliberate heartbeat stop happens only after the 2:55 PM Central close-out, never during the session. The first paper session runs uninterrupted.** I will do it after the 3:10 PM request for Tuesday has posted, so the close-out, the summary and the request are all seen first.
 
 **How to stop the stack from your phone:** `stop` (or `flatten`) in `commands`. If Discord is down: Alpaca's app or website, cancel open orders and close positions. Stronger still: in Fly.io, stop the machine (the heartbeat also alerts).
 
