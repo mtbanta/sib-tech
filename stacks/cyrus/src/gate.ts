@@ -1,6 +1,7 @@
 // THE ORDER GATE. The only code in the worker that may send an entry order. Every entry passes, in order:
 //   1. the stop flag, read fresh from the database
-//   2. the morning approval (no approved limits today means no entry)
+//   2. the approval (no approved limits today means no entry) and the arming (the borrowing cap and long only
+//      are set at Alpaca at 5 minutes before the open; an unarmed day does not trade), and no carried position
 //   3. the fixed limit checks in limits.ts
 //   4. the broker's own switches (long only, borrowing cap no higher than approved)
 //   5. a record of the intent in the database, with an id built from the date and the symbol, so a restart
@@ -11,7 +12,7 @@
 import { AlpacaError } from "./alpaca-trading.ts";
 import type { GateBroker } from "./broker.ts";
 import { checkEntry, type EntryContext } from "./limits.ts";
-import { CONTROL_STOP, type OrderRecord, type StopFlag, type Store } from "./store.ts";
+import { CONTROL_NOT_FLAT, CONTROL_STOP, type NotFlatState, type OrderRecord, type StopFlag, type Store } from "./store.ts";
 import type { Signal } from "./strategy.ts";
 import { etDate, minutesBetween } from "./time.ts";
 import { NOT_ADVICE } from "./discord.ts";
@@ -68,9 +69,11 @@ export class OrderGate {
     const symbol = signal.symbol;
 
     let stop: StopFlag | null;
+    let notFlat: NotFlatState | null;
     let day;
     try {
       stop = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
+      notFlat = await this.d.store.getControl<NotFlatState>(CONTROL_NOT_FLAT);
       day = await this.d.store.getDay(date);
     } catch {
       return this.refuse(date, symbol, "database unavailable, so no entry", undefined, false);
@@ -79,6 +82,11 @@ export class OrderGate {
     if (!day || !day.openAt || !day.closeAt) {
       return this.refuse(date, symbol, limits ? "no session times for today" : "no limits approved for today");
     }
+    // Approved but not armed (the cap and long only were not confirmed at Alpaca): fail closed. The stop flag
+    // and the approval are still reported first, because checkEntry below puts them first.
+    const unarmed = limits !== null && !stop?.on && !day.phases.armed;
+    if (unarmed) return this.refuse(date, symbol, "the day is not armed yet (borrowing cap and long only not confirmed at Alpaca)");
+    if (notFlat?.on && !stop?.on && limits) return this.refuse(date, symbol, "the account was not flat after the last close-out");
 
     let clock, account, positions, config, orders;
     try {
@@ -171,7 +179,11 @@ export class OrderGate {
       return { status: "error", reason: `outcome unclear: ${reason}` };
     }
     // The order is at Alpaca. From here on, a problem writing it down must not make it look like it failed.
-    await this.d.store.updateOrder(clientOrderId, { status: "submitted", alpacaOrderId: sent.id }).catch(() => this.d.log?.("order_record_update_failed", { symbol }));
+    await this.d.store.updateOrder(clientOrderId, { status: "submitted", alpacaOrderId: sent.id }).catch(async () => {
+      // The row stays "intent", which still counts, and the order sync fills it in by its id. Say so.
+      this.d.log?.("order_record_update_failed", { symbol });
+      await this.d.say("alerts", `The entry for ${symbol} was sent to Alpaca but its record could not be updated. It is still counted, and will be reconciled from Alpaca by its id.`);
+    });
     await this.notePeak(date, ctx.grossExposure + decision.notional, account.equity);
     this.d.log?.("entry_sent", { symbol, qty: decision.qty, stop: signal.stopPrice });
     await this.d.say("trading", `Entry sent (paper): BUY ${decision.qty} ${symbol} at about ${signal.price.toFixed(2)}, protective stop at ${signal.stopPrice.toFixed(2)} held at Alpaca. ${NOT_ADVICE}`);

@@ -2,10 +2,11 @@
 // the database when it finishes, so a restart picks up where it left off and never repeats a step.
 //
 // A day, in New York time (Michael sees Central time in messages):
-//   open - 60 min  morning request for the limits           open - 45 min  daily screen builds the live list
-//   open - 5 min   live prices start                        open           undecided limits lapse: no trading
-//   open to close  entries (gate), order sync, loss stop    close - 5 min  close-out: flat
-//   close + 5 min  daily summary
+//   close + 10 min  request for the NEXT trading day's limits, with a checklist (Michael answers that evening)
+//   open - 60 min   review of that day's limits (he can change them again)   open - 10 min  reminder if undecided
+//   open - 45 min   daily screen builds the live list      open - 5 min   arming (cap and long only set at Alpaca), live prices
+//   open            undecided limits lapse: no trading     open to close  entries (gate), order sync, loss stop
+//   close - 5 min   close-out: flat                        close + 5 min  daily summary
 // Commands are read on every tick, at any hour. The heartbeat is sent at the end of a tick that worked, and
 // "fail" after a tick that did not, so Healthchecks hears when the worker is unwell, not only when it is dead.
 import type { GateBroker } from "./broker.ts";
@@ -13,11 +14,11 @@ import { CommandProcessor, type CommandBot } from "./commands.ts";
 import type { Settings } from "./config.ts";
 import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
-import { ensureDay, lapseIfUndecided, postMorningRequest, postReminderIfNeeded } from "./morning.ts";
-import { enforceDailyLoss, syncOrders } from "./risk.ts";
+import { armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, type MorningSteps } from "./morning.ts";
+import { enforceDailyLoss, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import { OpeningRangeBreakout } from "./strategy.ts";
 import type { Trade } from "./stream.ts";
-import { CONTROL_STOP, setPhase, type DayRecord, type StopFlag, type Store } from "./store.ts";
+import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
 import { formatSummary } from "./summary.ts";
 import { addMinutes, centralClock, etDate, etInstant } from "./time.ts";
 import { NOT_ADVICE } from "./discord.ts";
@@ -63,12 +64,22 @@ export class Worker {
   private failedTicks = 0;
   private lastOkPing = 0;
   private notFlat = false;
+  private notFlatLoaded = false;
+  private notFlatAlertDate: string | null = null;
   private emergencyDate: string | null = null;
   private lastCloseoutAttempt = 0;
+  private lastCarriedAttempt = 0;
+  private lastArmAttempt = 0;
+  private lastArmAlert = 0;
+  // True while any close-out (regular, carried-over or emergency) is running, so two never overlap.
+  private closingOut = false;
+  private readonly sessions: NextSessionFinder;
 
   constructor(deps: WorkerDeps) {
     this.d = deps;
+    this.sessions = new NextSessionFinder(deps.broker);
     this.commands = new CommandProcessor({
+      sessions: this.sessions,
       settings: deps.settings,
       store: deps.store,
       broker: deps.broker,
@@ -158,33 +169,81 @@ export class Worker {
   private async emergencyCloseoutIfNeeded(): Promise<void> {
     const now = this.d.now();
     const date = etDate(now);
-    if (this.emergencyDate === date) return;
+    if (this.emergencyDate === date || this.closingOut || this.inflight.has("closeout")) return;
     const clock = await this.d.broker.getClock();
     const minutesToClose = (new Date(clock.nextClose).getTime() - now.getTime()) / 60_000;
     if (!clock.isOpen || minutesToClose > CLOSEOUT_MINUTES_BEFORE_CLOSE) return;
     this.emergencyDate = date;
     await this.say("alerts", "The database is unreachable near the close, so I am closing everything from the broker's clock alone.");
-    const result = await closeOut({ broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c, t) => this.say(c, t), sleep: this.d.sleep }, date);
-    this.notFlat = !result.flat;
+    this.closingOut = true;
+    try {
+      const result = await closeOut({ broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c, t) => this.say(c, t), sleep: this.d.sleep }, date);
+      await this.setNotFlat(!result.flat, result.remaining, date);
+    } finally {
+      this.closingOut = false;
+    }
+  }
+
+  // "Not flat" is remembered in the database as well as in memory, so a restart cannot forget it. Saving it is
+  // best effort: with the database down the in-memory value still drives the heartbeat.
+  private async setNotFlat(on: boolean, remaining: string[], date: string): Promise<void> {
+    this.notFlat = on;
+    if (on) this.notFlatAlertDate = date;
+    const state: NotFlatState = { on, since: this.d.now().toISOString(), remaining };
+    await this.d.store.setControl(CONTROL_NOT_FLAT, state).catch((err) => this.d.log?.("warn", "not_flat_save_failed", { error: (err as Error).message.slice(0, 120) }));
+  }
+
+  // Runs on every pass, on any day: loads the remembered state after a restart, and clears it as soon as the
+  // account is seen flat (for example when Michael closes by hand, or on a weekend).
+  private async notFlatCheck(): Promise<void> {
+    if (!this.notFlatLoaded) {
+      const saved = await this.d.store.getControl<NotFlatState>(CONTROL_NOT_FLAT);
+      this.notFlatLoaded = true;
+      if (saved?.on) {
+        this.notFlat = true;
+        await this.say("alerts", `**The worker restarted while the account was NOT FLAT** (${saved.remaining.join(", ") || "positions held"}, since ${centralClock(new Date(saved.since))}). It stays flagged until the account is seen flat. No entries until then. ${NOT_ADVICE}`);
+      }
+    }
+    if (this.notFlat && !this.closingOut && !this.inflight.has("closeout") && !this.inflight.has("carried")) {
+      if ((await this.d.broker.listPositions()).length === 0) {
+        await this.setNotFlat(false, [], etDate(this.d.now()));
+        await this.say("commands", "The account is flat now, so the not-flat flag is cleared.");
+      }
+    }
   }
 
   private async pass(): Promise<void> {
     const now = this.d.now();
     // Commands first, at any hour: a stop must never wait behind anything else.
     await this.commands.poll();
+    await this.notFlatCheck();
 
     const date = etDate(now);
-    const day = await ensureDay({ store: this.d.store, broker: this.d.broker }, date);
+    const today = await ensureDay({ store: this.d.store, broker: this.d.broker, now: this.d.now }, date);
+    const steps: MorningSteps = { store: this.d.store, broker: this.d.broker, say: (c, t) => this.say(c, t), now: this.d.now, feed: this.d.settings.alpaca.dataFeed };
+
+    // The limits flow for the next session (it may be a later day) runs at any hour, even on a weekend.
+    let current: DayRecord = await this.limitsFlow(now, date, today, steps);
+    const day = current;
     if (!day.isTradingDay || !day.openAt || !day.closeAt) return;
     const at = (minutesFromOpen: number) => now >= addMinutes(day.openAt!, minutesFromOpen);
-    const steps = { store: this.d.store, broker: this.d.broker, say: (c: Channel, t: string) => this.say(c, t), now: this.d.now };
+    const alivePending = current.status === "approved" || current.status === "pending";
 
-    let current: DayRecord = day;
-    if (at(-60) && now < day.closeAt) {
-      current = await postMorningRequest(steps, current);
-      current = await postReminderIfNeeded(steps, current);
+    if (at(-45) && now < day.closeAt && alivePending && !current.phases.screen) this.background("screen", () => this.screenPhase(date));
+
+    // Arming: set long only and the approved cap at Alpaca. Until it works the gate refuses every entry.
+    if (at(-5) && now < day.closeAt && current.status === "approved" && !current.phases.armed && now.getTime() - this.lastArmAttempt >= 10_000) {
+      this.lastArmAttempt = now.getTime();
+      try {
+        current = await armDay(steps, current);
+      } catch (err) {
+        this.lastTickError = `arming: ${(err as Error).message.slice(0, 120)}`;
+        if (now.getTime() - this.lastArmAlert >= 5 * 60_000) {
+          this.lastArmAlert = now.getTime();
+          await this.say("alerts", `Could not arm today (${(err as Error).message.slice(0, 120)}). There will be no entries until it works; I keep trying.`);
+        }
+      }
     }
-    if (at(-45) && now < day.closeAt && !current.phases.screen) this.background("screen", () => this.screenPhase(date));
     if (at(0)) current = await lapseIfUndecided(steps, current);
 
     // Live prices: from 5 minutes before the open, only while the day is still alive.
@@ -199,20 +258,46 @@ export class Worker {
       const risk = { broker: this.d.broker, store: this.d.store, now: this.d.now, say: steps.say, log: (e: string, data?: Record<string, unknown>) => this.d.log?.("info", e, data) };
       await syncOrders(risk, current);
       await enforceDailyLoss(risk, current);
+      await sweepEntriesWhileStopped(risk);
+    }
+
+    // Positions carried over from a close-out that did not get flat: sold as soon as the market is open again.
+    if (this.notFlat && now >= day.openAt && now < day.closeAt && !this.closingOut && now.getTime() - this.lastCarriedAttempt >= 5 * 60_000) {
+      this.lastCarriedAttempt = now.getTime();
+      this.background("carried", () => this.carriedPhase(date));
     }
 
     // Close-out runs until the account is flat: a failed attempt is retried every 5 minutes for 30 minutes
-    // past the close, and the heartbeat says "fail" for as long as positions remain.
-    if (now >= addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !current.phases.closeout && now.getTime() - this.lastCloseoutAttempt >= 5 * 60_000) {
+    // past the close (after the close it only reports, it sends nothing), and the heartbeat says "fail" for as
+    // long as positions remain.
+    if (now >= addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !current.phases.closeout && !this.closingOut && now.getTime() - this.lastCloseoutAttempt >= 5 * 60_000) {
       this.lastCloseoutAttempt = now.getTime();
       this.background("closeout", () => this.closeoutPhase(date, now >= addMinutes(day.closeAt!, 30)));
-    }
-    if (this.notFlat && !this.inflight.has("closeout")) {
-      this.notFlat = (await this.d.broker.listPositions()).length > 0; // clears as soon as someone closes by hand
     }
     if (now >= addMinutes(day.closeAt, 5) && current.phases.closeout && !current.phases.summary) {
       this.background("summary", () => this.summaryPhase(date));
     }
+  }
+
+  // Posts the request for the next session once the current session is over, and the review and reminder before
+  // an open. Returns today's record (updated if today is the next session).
+  private async limitsFlow(now: Date, date: string, today: DayRecord, steps: MorningSteps): Promise<DayRecord> {
+    const next = await this.sessions.next(now);
+    if (!next) return today;
+    if (next.date !== date) {
+      // The next session is a later day. Its request goes out once today's session is over and summarized.
+      const sessionOn = today.isTradingDay && today.openAt !== null && today.closeAt !== null && now >= today.openAt && now < addMinutes(today.closeAt, 10);
+      if (sessionOn) return today;
+      const target = await ensureDay(steps, next.date);
+      await postLimitsRequest(steps, target);
+      return today;
+    }
+    // Today is the next session and has not opened: post the request if the evening one was missed, then the
+    // review at open - 60 and the reminder at open - 10.
+    let cur = await postLimitsRequest(steps, today);
+    cur = await postMorningReview(steps, cur);
+    cur = await postReminderIfNeeded(steps, cur);
+    return cur;
   }
 
   private async screenPhase(date: string): Promise<void> {
@@ -246,10 +331,26 @@ export class Worker {
 
   private async closeoutPhase(date: string, lastTry: boolean): Promise<void> {
     this.endStream();
-    const result = await closeOut({ broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c, t) => this.say(c, t), sleep: this.d.sleep, log: (e, data) => this.d.log?.("info", e, data) }, date);
-    this.notFlat = !result.flat;
-    // Recorded as done only when flat (or when this was the last try), so otherwise the next tick tries again.
-    if (result.flat || lastTry) await setPhase(this.d.store, date, "closeout", this.d.now().toISOString(), { flat: result.flat ? "yes" : "no" });
+    this.closingOut = true;
+    try {
+      const result = await closeOut({ broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c, t) => this.say(c, t), sleep: this.d.sleep, log: (e, data) => this.d.log?.("info", e, data) }, date, { alert: this.notFlatAlertDate !== date });
+      await this.setNotFlat(!result.flat, result.remaining, date);
+      // Recorded as done only when flat (or when this was the last try), so otherwise the next tick tries again.
+      if (result.flat || lastTry) await setPhase(this.d.store, date, "closeout", this.d.now().toISOString(), { flat: result.flat ? "yes" : "no" });
+    } finally {
+      this.closingOut = false;
+    }
+  }
+
+  // Sells positions carried over from an earlier close-out that ended not flat. The market is open, so this sends.
+  private async carriedPhase(date: string): Promise<void> {
+    this.closingOut = true;
+    try {
+      const result = await closeOut({ broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c, t) => this.say(c, t), sleep: this.d.sleep, log: (e, data) => this.d.log?.("info", e, data) }, date, { alert: this.notFlatAlertDate !== date });
+      await this.setNotFlat(!result.flat, result.remaining, date);
+    } finally {
+      this.closingOut = false;
+    }
   }
 
   private async summaryPhase(date: string): Promise<void> {

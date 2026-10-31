@@ -44,3 +44,24 @@ export function centralClock(d: Date): string {
   const s = new Intl.DateTimeFormat("en-US", { timeZone: CT, hour: "numeric", minute: "2-digit" }).format(d);
   return `${s} CT`;
 }
+
+// Where a trading day stands at an instant, by the day's own calendar times. Every step that behaves differently
+// before the open, during the session or after the close asks this one function instead of comparing times itself.
+//   no_session   a weekend, a holiday, or no record of the day
+//   before_open  a session is scheduled and has not started
+//   open         from the open up to (not including) the close
+//   after_close  the close has passed
+export type SessionPhase = "no_session" | "before_open" | "open" | "after_close";
+
+export function sessionPhase(day: { isTradingDay: boolean; openAt: Date | null; closeAt: Date | null } | null, now: Date): SessionPhase {
+  if (!day || !day.isTradingDay || !day.openAt || !day.closeAt) return "no_session";
+  if (now < day.openAt) return "before_open";
+  if (now < day.closeAt) return "open";
+  return "after_close";
+}
+
+// "Monday 2026-11-02", for messages that name a day. The date is a market calendar date, so noon UTC is safe.
+export function dayWord(date: string): string {
+  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "long" }).format(new Date(`${date}T12:00:00Z`));
+  return `${weekday} ${date}`;
+}

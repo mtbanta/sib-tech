@@ -68,7 +68,12 @@ export async function syncOrders(d: RiskDeps, day: DayRecord): Promise<{ unprote
 export async function enforceDailyLoss(d: RiskDeps, day: DayRecord): Promise<boolean> {
   if (day.status !== "approved" || day.dayStartEquity === null) return false;
   const flag = await d.store.getControl<StopFlag>(CONTROL_STOP);
-  if (flag?.on) return false;
+  if (flag?.on) {
+    // The loss stop already fired. If its sale did not go through, try again on every pass (a sell that is
+    // already working counts as going through). An owner's plain `stop` is left alone: it keeps positions.
+    if (flag.reason.startsWith("daily loss stop")) await retryLossStopSale(d);
+    return false;
+  }
   const account = await d.broker.getAccount();
   const loss = day.dayStartEquity - account.equity;
   if (loss < day.limits.dailyLossStopUsd) return false;
@@ -82,4 +87,41 @@ export async function enforceDailyLoss(d: RiskDeps, day: DayRecord): Promise<boo
   }
   await d.say("commands", `**Daily loss stop reached** (down ${loss.toFixed(2)} of the ${day.limits.dailyLossStopUsd} dollar limit). Stopped for the day and sent orders to sell everything. ${NOT_ADVICE}`);
   return true;
+}
+
+const WORKING = ["new", "accepted", "pending_new", "partially_filled"];
+
+// Sells what the loss stop failed to sell. Does nothing when the account is flat or a sell is already working.
+async function retryLossStopSale(d: RiskDeps): Promise<void> {
+  const [positions, open] = await Promise.all([d.broker.listPositions(), d.broker.listOrders("open")]);
+  if (positions.length === 0) return;
+  const selling = open.some((o) => o.side === "sell" && WORKING.includes(o.status) && o.type !== "stop");
+  if (selling) return;
+  try {
+    await d.broker.closeAllPositions();
+    d.log?.("loss_stop_sale_retried", { positions: positions.length });
+  } catch (err) {
+    await d.say("alerts", `Daily loss stop: selling is still failing (${(err as Error).message.slice(0, 120)}). Check Alpaca now.`);
+  }
+}
+
+// While the stop flag is on, cancel any entry that has not filled. This catches an entry that passed the gate's
+// last look at the flag just before a stop command and reached Alpaca after the command's own cancel pass.
+// Protective stops (sell orders) and entries that have started to fill are left alone.
+export async function sweepEntriesWhileStopped(d: RiskDeps): Promise<number> {
+  const flag = await d.store.getControl<StopFlag>(CONTROL_STOP);
+  if (!flag?.on) return 0;
+  const open = await d.broker.listOrders("open");
+  let n = 0;
+  for (const o of open) {
+    if (o.side === "buy" && o.filledQty === 0) {
+      await d.broker.cancelOrder(o.id);
+      n++;
+    }
+  }
+  if (n > 0) {
+    d.log?.("entries_swept_while_stopped", { cancelled: n });
+    await d.say("commands", `The stop flag is on and ${n} unfilled entr${n === 1 ? "y" : "ies"} reached Alpaca late, so I cancelled ${n === 1 ? "it" : "them"}.`);
+  }
+  return n;
 }

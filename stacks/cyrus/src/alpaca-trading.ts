@@ -269,11 +269,27 @@ export class AlpacaTrading {
       const unclear = !(err instanceof AlpacaError) || err.status === 429 || err.status >= 500;
       const duplicate = err instanceof AlpacaError && err.status === 422 && /client_order_id/i.test(err.message);
       if (!unclear && !duplicate) throw err;
-      const existing = await this.findOrderByClientId(entry.clientOrderId);
+      // From here the first send may have landed, so whatever goes wrong next is still "unclear" to the caller
+      // (status 502), never a definite refusal: the gate keeps such an entry counted and reconciles it by its id.
+      const stillUnclear = (e: unknown): never => {
+        throw new AlpacaError(`outcome of the first send is still unclear: ${(e as Error).message.slice(0, 160)}`, 502);
+      };
+      let existing: Order | null;
+      try {
+        existing = await this.findOrderByClientId(entry.clientOrderId);
+      } catch (e) {
+        return stillUnclear(e);
+      }
       if (existing) return existing;
       if (duplicate) throw err;
       // Not there: the first send did not land. Sending again with the same id cannot create two orders.
-      return parseOrder((await this.once("POST", "/v2/orders", undefined, body)) as Json);
+      try {
+        return parseOrder((await this.once("POST", "/v2/orders", undefined, body)) as Json);
+      } catch (e) {
+        const dup2 = e instanceof AlpacaError && e.status === 422 && /client_order_id/i.test(e.message);
+        if (dup2) throw e;
+        return stillUnclear(e);
+      }
     }
   }
 

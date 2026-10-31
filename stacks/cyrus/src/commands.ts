@@ -5,11 +5,11 @@ import type { Broker } from "./broker.ts";
 import type { DiscordBot, DiscordMessage } from "./discord-bot.ts";
 import { isOwnerCommand } from "./discord-bot.ts";
 import type { Settings } from "./config.ts";
-import { decideLimits, limitLines, parseCommand } from "./morning.ts";
+import { decideLimits, limitLines, parseCommand, type NextSessionFinder } from "./morning.ts";
 import { CONTROL_COMMAND_CURSOR, CONTROL_STOP, type StopFlag, type Store } from "./store.ts";
 import { NOT_ADVICE } from "./discord.ts";
 import { describeLimits } from "./limits.ts";
-import { etDate } from "./time.ts";
+import { centralClock, dayWord, etDate, sessionPhase } from "./time.ts";
 
 export type CommandBot = Pick<DiscordBot, "post" | "latestCommandMessageId" | "commandMessagesAfter">;
 
@@ -19,6 +19,8 @@ export interface CommandDeps {
   broker: Broker;
   bot: CommandBot;
   now: () => Date;
+  // Finds the next trading day that has not opened yet: the day approvals and limit changes apply to.
+  sessions: NextSessionFinder;
   // Extra status lines the worker knows (stream state, last price time). Optional.
   extraStatus?: () => Promise<string[]>;
   log?: (event: string, data?: Record<string, unknown>) => void;
@@ -31,7 +33,7 @@ const HELP = [
   "`resume` clears the stop (approved limits are still needed)",
   "`flatten` stop, then sell everything now",
   "`limits` today's limits",
-  "`approve` or `approve cap` accept the limits; `position 1500`, `loss 150`, `trades 5`, `cap 2` change one before the open",
+  "`approve` or `approve cap` accept the next trading day's limits; `position 1500`, `loss 150`, `trades 5`, `cap 2` change one (until that day's open)",
   NOT_ADVICE,
 ].join("\n");
 
@@ -74,6 +76,12 @@ export class CommandProcessor {
   }
 
   async handle(m: DiscordMessage): Promise<void> {
+    if (m.content.trim() === "") {
+      // Discord hides message text from a bot whose Message Content switch is off. Say that, not "did not understand".
+      this.d.log?.("command", { kind: "empty_text" });
+      await this.say("I can see that you wrote a message, but its text came through empty, so I cannot read it. If this keeps happening, the bot's **Message Content Intent** is off: Discord Developer Portal, this bot's application, Bot page, Privileged Gateway Intents.");
+      return;
+    }
     const cmd = parseCommand(m.content);
     const now = this.d.now();
     this.d.log?.("command", { kind: cmd.kind });
@@ -124,8 +132,15 @@ export class CommandProcessor {
         return;
       }
       case "limits": {
-        const day = await this.d.store.getDay(etDate(now));
-        await this.say(day ? `Limits for ${day.tradeDate} (${day.status}):\n${limitLines(day)}` : "No limits yet today.");
+        const next = await this.d.sessions.next(now);
+        const nextDay = next ? await this.d.store.getDay(next.date) : null;
+        const today = await this.d.store.getDay(etDate(now));
+        const parts: string[] = [];
+        if (today && today.isTradingDay && today.status !== "not_trading_day" && (!nextDay || today.tradeDate !== nextDay.tradeDate)) {
+          parts.push(`Today, ${dayWord(today.tradeDate)} (${today.status}):\n${limitLines(today)}`);
+        }
+        if (nextDay) parts.push(`${dayWord(nextDay.tradeDate)} (${nextDay.status}):\n${limitLines(nextDay)}`);
+        await this.say(parts.length > 0 ? parts.join("\n\n") : next ? `No limits request yet for ${dayWord(next.date)}. It is posted after the close.` : "No upcoming trading day found.");
         return;
       }
       case "status":
@@ -133,10 +148,15 @@ export class CommandProcessor {
         return;
       case "approve":
       case "set": {
-        const date = etDate(now);
+        const next = await this.d.sessions.next(now);
+        if (!next) {
+          await this.say("I cannot find the next trading day in Alpaca's calendar, so there is nothing to approve.");
+          return;
+        }
+        const date = next.date;
         const day = await this.d.store.getDay(date);
         if (!day) {
-          await this.say("There is no request for today yet, so there is nothing to approve.");
+          await this.say(`There is no limits request for ${dayWord(date)} yet, so there is nothing to approve. I post it after the market closes.`);
           return;
         }
         const account = await this.d.broker.getAccount();
@@ -145,14 +165,11 @@ export class CommandProcessor {
           await this.say(decision.reply);
           return;
         }
-        // The borrowing cap is set at Alpaca first; if that fails, nothing is approved.
-        if (decision.patch.decided.cap) {
-          await this.d.broker.setAccountConfig({ maxMarginMultiplier: decision.patch.limits.borrowingCap, noShorting: true });
-        }
         // The scheduler may have lapsed the day while we were talking to Alpaca: look again before writing.
+        // The borrowing cap itself is set at Alpaca only at 5 minutes before the open (arming), never here.
         const latest = await this.d.store.getDay(date);
         if (!latest || latest.status === "lapsed" || (latest.openAt && this.d.now() >= latest.openAt)) {
-          await this.say("Too late: the market opened while I was saving that, so today's limits are fixed and nothing changed.");
+          await this.say("Too late: the market opened while I was saving that, so that day's limits are fixed and nothing changed.");
           return;
         }
         await this.d.store.updateDay(date, decision.patch);
@@ -198,10 +215,16 @@ export class CommandProcessor {
     const day = await this.d.store.getDay(etDate(now));
     const [account, positions, clock] = await Promise.all([this.d.broker.getAccount(), this.d.broker.listPositions(), this.d.broker.getClock()]);
     const orders = day ? await this.d.store.listOrders(day.tradeDate) : [];
+    const next = await this.d.sessions.next(now).catch(() => null);
+    const nextDay = next && (!day || next.date !== day.tradeDate) ? await this.d.store.getDay(next.date) : null;
+    const phase = sessionPhase(day, now);
+    const phaseText = { no_session: "no session today (weekend, holiday or not set up)", before_open: `session not started (opens ${day?.openAt ? centralClock(day.openAt) : "?"})`, open: "session in progress", after_close: "session ended" }[phase];
+    const disagree = (phase === "open") !== clock.isOpen && phase !== "no_session" ? " (the calendar and Alpaca's clock disagree, so check Alpaca)" : "";
     const lines = [
       "**Status**",
       `Stop flag: ${flag?.on ? `ON (${flag.reason})` : "off"}`,
-      `Market: ${clock.isOpen ? "open" : "closed"}`,
+      `Market: ${clock.isOpen ? "open" : "closed"} by Alpaca's clock; ${phaseText}${disagree}`,
+      next ? `Next session: ${dayWord(next.date)}, opens ${centralClock(next.openAt)}${nextDay ? `, limits ${nextDay.status}` : ", limits request not posted yet"}` : "",
       day ? `Today (${day.tradeDate}): ${day.status}${day.isTradingDay ? `, limits: ${describeLimits(day.limits)}` : ""}` : "Today: not set up yet",
       day && day.status === "pending" ? limitLines(day) : "",
       `Live list: ${day?.liveList ? day.liveList.join(" ") || "(empty)" : "not built yet"}`,

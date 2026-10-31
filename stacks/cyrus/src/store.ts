@@ -75,6 +75,17 @@ export async function setPhase(store: Store, tradeDate: string, name: string, is
 
 export const CONTROL_STOP = "stop_flag";
 export const CONTROL_COMMAND_CURSOR = "discord_command_cursor";
+// Set when a close-out ended with positions still held. It survives a restart, and it is cleared only when the
+// account is seen flat. While it is on, the gate refuses every entry.
+export const CONTROL_NOT_FLAT = "not_flat";
+// The last release that started and when recent starts happened, so a start message can say why.
+export const CONTROL_START_HISTORY = "start_history";
+
+export interface NotFlatState {
+  on: boolean;
+  since: string;
+  remaining: string[];
+}
 
 export interface StopFlag {
   on: boolean;

@@ -23,7 +23,7 @@ async function setup(over: { approved?: boolean; now?: Date } = {}) {
   const say = async (ch: string, text: string) => (said.push({ ch, text }), true);
   const deps = { broker, store, now: () => now, say: say as any };
   await ensureDay(deps, D);
-  if (over.approved !== false) await store.updateDay(D, { status: "approved", decided: { position: true, loss: true, trades: true, cap: true } });
+  if (over.approved !== false) await store.updateDay(D, { status: "approved", decided: { position: true, loss: true, trades: true, cap: true }, phases: { request: "2026-11-01T22:10:00.000Z", armed: "2026-11-02T14:25:00.000Z" } });
   const gate = new OrderGate(deps);
   const signal = (symbol = "AAA", price = 50, ageSeconds = 5): Signal => ({ symbol, price, tradeTime: new Date(now.getTime() - ageSeconds * 1000), stopPrice: Math.round(price * 0.985 * 100) / 100 });
   return { store, broker, said, gate, deps, signal, setNow: (d: Date) => (now = d) };
@@ -214,7 +214,7 @@ test("structure: only the gate sends entries; only known places change the accou
   const src = join(import.meta.dirname, "../src");
   const callers = (fn: string) => files(src).filter((f) => new RegExp(`\\.${fn}\\(`).test(readFileSync(f, "utf8"))).map((f) => f.slice(src.length + 1)).sort();
   assert.deepEqual(callers("submitEntry"), ["gate.ts", "tools/paper-check.ts"]);
-  assert.deepEqual(callers("setAccountConfig"), ["closeout.ts", "commands.ts", "gate.ts", "tools/paper-check.ts"]);
+  assert.deepEqual(callers("setAccountConfig"), ["closeout.ts", "gate.ts", "morning.ts", "tools/paper-check.ts"]);
   assert.deepEqual(callers("closeAllPositions"), ["closeout.ts", "commands.ts", "risk.ts", "tools/paper-check.ts"]);
   // nothing in the worker (outside tools) imports a tool
   for (const f of files(src).filter((f) => !f.includes("/tools/"))) assert.ok(!/from "\.\/tools\//.test(readFileSync(f, "utf8")), f);

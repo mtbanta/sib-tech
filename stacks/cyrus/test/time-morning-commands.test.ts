@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { etDate, etInstant, centralClock } from "../src/time.ts";
-import { ensureDay, formatLimitsRequest, parseCommand, decideLimits } from "../src/morning.ts";
+import { ensureDay, formatLimitsRequest, parseCommand, decideLimits, NextSessionFinder } from "../src/morning.ts";
 import { CommandProcessor } from "../src/commands.ts";
 import { MemoryStore, CONTROL_STOP, CONTROL_COMMAND_CURSOR, type StopFlag } from "../src/store.ts";
 import { FakeBroker, FakeBot, order, settings } from "./helpers.ts";
@@ -46,7 +46,9 @@ test("a weekend is recorded as not a trading day", async () => {
 test("the request message names every limit and says what silence means", async () => {
   const day = await ensureDay({ store: new MemoryStore(), broker: new FakeBroker() }, D);
   const text = formatLimitsRequest(day);
-  for (const w of ["position", "loss", "trades", "cap", "8:30 AM CT", "will not trade today", "never an instruction to act"]) assert.ok(text.includes(w), w);
+  for (const w of ["position", "loss", "trades", "cap", "8:30 AM CT", "Monday 2026-11-02", "will not trade that day", "change any of them again until the open", "never an instruction to act"]) assert.ok(text.includes(w), w);
+  assert.ok(!text.includes("Good morning"), "an evening request is not a good morning");
+  assert.ok(formatLimitsRequest(day, "morning").includes("Good morning"));
 });
 
 test("commands are parsed", () => {
@@ -65,9 +67,9 @@ async function setup() {
   const broker = new FakeBroker();
   const bot = new FakeBot();
   let now = new Date("2026-11-02T12:30:00Z"); // 7:30 AM Central, two hours before the open
-  const proc = new CommandProcessor({ settings, store, broker, bot, now: () => now });
+  const proc = new CommandProcessor({ settings, store, broker, bot, now: () => now, sessions: new NextSessionFinder(broker) });
   const day = await ensureDay({ store, broker }, D);
-  await store.updateDay(D, { phases: { morning: "2026-11-02T12:00:00.000Z" } });
+  await store.updateDay(D, { phases: { request: "2026-11-02T12:00:00.000Z" } });
   await proc.poll(); // first run sets the cursor
   return { store, broker, bot, proc, day, setNow: (d: Date) => (now = d), get now() { return now; } };
 }
@@ -77,7 +79,7 @@ test("first poll ignores history; later owner messages are handled", async () =>
   const broker = new FakeBroker();
   const bot = new FakeBot();
   bot.say("stop", new Date("2026-11-02T11:00:00Z")); // old, before we started
-  const proc = new CommandProcessor({ settings, store, broker, bot, now: () => new Date("2026-11-02T12:30:00Z") });
+  const proc = new CommandProcessor({ settings, store, broker, bot, now: () => new Date("2026-11-02T12:30:00Z"), sessions: new NextSessionFinder(broker) });
   assert.equal(await proc.poll(), 0);
   assert.equal(await store.getControl(CONTROL_STOP), null, "history is never acted on");
   bot.say("stop", new Date("2026-11-02T12:31:00Z"));
@@ -138,24 +140,32 @@ test("approve, with an overrule, before the open: approved only when all four ar
   day = (await s.store.getDay(D))!;
   assert.equal(day.status, "approved");
   assert.ok(s.bot.last().includes("All four limits decided"));
-  assert.equal(s.broker.config.maxMarginMultiplier, 1);
-  assert.equal(s.broker.config.noShorting, true);
+  assert.equal(s.broker.count("setAccountConfig"), 0, "approving never touches Alpaca; the cap is set when the day is armed");
 });
 
-test("overruling the cap sets it at Alpaca first; if that fails nothing is approved", async () => {
+test("overruling the cap records it but leaves Alpaca at 1 until the day is armed", async () => {
   const s = await setup();
-  s.broker.failOn.add("setAccountConfig");
+  s.broker.failOn.add("setAccountConfig"); // would break the old behavior; now irrelevant
   s.bot.say("cap 2", s.now);
   await s.proc.poll();
   const day = (await s.store.getDay(D))!;
-  assert.equal(day.decided.cap, undefined);
-  assert.equal(day.limits.borrowingCap, 1);
-  assert.ok(s.bot.last().includes("failed"));
-  s.broker.failOn.clear();
-  s.bot.say("cap 2", s.now);
+  assert.equal(day.decided.cap, true);
+  assert.equal(day.limits.borrowingCap, 2);
+  assert.equal(s.broker.config.maxMarginMultiplier, 1, "still 1 at Alpaca");
+  assert.equal(s.broker.count("setAccountConfig"), 0);
+});
+
+test("a change after the day is already approved applies and the day stays approved", async () => {
+  const s = await setup();
+  s.bot.say("approve", s.now);
   await s.proc.poll();
-  assert.equal(s.broker.config.maxMarginMultiplier, 2);
-  assert.equal((await s.store.getDay(D))!.limits.borrowingCap, 2);
+  assert.equal((await s.store.getDay(D))!.status, "approved");
+  s.setNow(new Date("2026-11-02T13:00:00Z")); // 8:00 AM Central, before the open
+  s.bot.say("position 1500", s.now);
+  await s.proc.poll();
+  const day = (await s.store.getDay(D))!;
+  assert.equal(day.status, "approved");
+  assert.equal(day.limits.maxPositionUsd, 1500);
 });
 
 test("a bad value is refused and nothing changes", async () => {
@@ -168,13 +178,28 @@ test("a bad value is refused and nothing changes", async () => {
   assert.equal(day.limits.borrowingCap, 1);
 });
 
-test("after the open, limits are fixed and approval is refused", async () => {
+test("after the open, that day's limits are fixed: the pure decision refuses, and the command moves on to the next day", async () => {
   const s = await setup();
+  const day = (await s.store.getDay(D))!;
+  const r = decideLimits(day, { kind: "approve", name: "all" }, 20000, new Date("2026-11-02T14:31:00Z"), new Date("2026-11-02T14:31:00Z"));
+  assert.equal(r.ok, false);
+  assert.ok(!r.ok && r.reply.includes("already opened"));
+  // With the market open, an approval is about the NEXT trading day, which has no request yet: nothing changes.
+  s.broker.calendar = [...s.broker.calendar, { date: "2026-11-03", open: "09:30", close: "16:00" }];
   s.setNow(new Date("2026-11-02T14:31:00Z"));
   s.bot.say("approve", s.now);
   await s.proc.poll();
-  assert.equal((await s.store.getDay(D))!.status, "pending");
-  assert.ok(s.bot.last().includes("Too late"));
+  assert.equal((await s.store.getDay(D))!.status, "pending", "today is untouched");
+  assert.ok(s.bot.last().includes("Tuesday 2026-11-03") && s.bot.last().includes("no limits request"));
+});
+
+test("text that comes through empty gets an honest message, not 'did not understand'", async () => {
+  const s = await setup();
+  s.bot.say("   ", s.now);
+  s.bot.say("", s.now);
+  await s.proc.poll();
+  assert.ok(s.bot.last().includes("Message Content Intent"));
+  assert.ok(!s.bot.posts.some((p) => p.text.includes("did not understand")));
 });
 
 test("a lapsed day cannot be approved late", async () => {
@@ -185,7 +210,7 @@ test("a lapsed day cannot be approved late", async () => {
   assert.equal((await s.store.getDay(D))!.status, "lapsed");
 });
 
-test("an approval written before this morning's request is ignored", async () => {
+test("an approval written before the request was posted is ignored", async () => {
   const s = await setup();
   s.bot.say("approve", new Date("2026-11-01T20:00:00Z")); // yesterday evening
   await s.proc.poll();
@@ -229,19 +254,19 @@ test("a stop that cannot be saved says so loudly", async () => {
   assert.ok(s.bot.last().includes("STOP DID NOT COMPLETE"));
 });
 
-import { postMorningRequest, postReminderIfNeeded, lapseIfUndecided } from "../src/morning.ts";
+import { postLimitsRequest, postReminderIfNeeded, lapseIfUndecided } from "../src/morning.ts";
 
-test("the morning request is posted once; the reminder once; an undecided day lapses at the open", async () => {
+test("the request is posted once; the reminder once; an undecided day lapses at the open", async () => {
   const store = new MemoryStore();
   const broker = new FakeBroker();
   const bot = new FakeBot();
   let now = new Date("2026-11-02T12:00:00Z");
-  const steps = { store, broker, say: (c: any, t: string) => bot.post(c, t), now: () => now };
+  const steps = { store, broker, say: (c: any, t: string) => bot.post(c, t), now: () => now, feed: "iex" };
   let day = await ensureDay(steps, D);
-  day = await postMorningRequest(steps, day);
-  day = await postMorningRequest(steps, day);
+  day = await postLimitsRequest(steps, day);
+  day = await postLimitsRequest(steps, day);
   assert.equal(bot.posts.length, 1, "a restart does not repeat the request");
-  assert.ok(day.phases.morning);
+  assert.ok(day.phases.request);
   now = new Date("2026-11-02T14:15:00Z"); // 15 minutes before the open: too early for the reminder
   day = await postReminderIfNeeded(steps, day);
   assert.equal(bot.posts.length, 1);
@@ -255,14 +280,15 @@ test("the morning request is posted once; the reminder once; an undecided day la
   now = new Date("2026-11-02T14:30:00Z");
   day = await lapseIfUndecided(steps, day);
   assert.equal(day.status, "lapsed");
-  assert.ok(bot.last().includes("will not trade today"));
+  assert.ok(bot.last().includes("will not trade today") && bot.last().includes("8:30 AM CT"));
+  assert.ok(!bot.last().includes("The market is open"));
 });
 
 test("an approved day does not lapse", async () => {
   const store = new MemoryStore();
   const broker = new FakeBroker();
   const bot = new FakeBot();
-  const steps = { store, broker, say: (c: any, t: string) => bot.post(c, t), now: () => new Date("2026-11-02T15:00:00Z") };
+  const steps = { store, broker, say: (c: any, t: string) => bot.post(c, t), now: () => new Date("2026-11-02T15:00:00Z"), feed: "iex" };
   await ensureDay(steps, D);
   const day = await store.updateDay(D, { status: "approved" });
   assert.equal((await lapseIfUndecided(steps, day)).status, "approved");
@@ -292,8 +318,8 @@ test("flatten still tries to sell when the flag cannot be saved", async () => {
 test("an approval that loses a race with the lapse does not undo the lapse", async () => {
   const s = await setup();
   // The day lapses while the approval is talking to Alpaca.
-  const realSet = s.broker.setAccountConfig.bind(s.broker);
-  s.broker.setAccountConfig = async (p) => { await s.store.updateDay(D, { status: "lapsed" }); return realSet(p); };
+  const realGet = s.broker.getAccount.bind(s.broker);
+  s.broker.getAccount = async () => { await s.store.updateDay(D, { status: "lapsed" }); return realGet(); };
   s.bot.say("cap 1", s.now);
   await s.proc.poll();
   assert.equal((await s.store.getDay(D))!.status, "lapsed");
@@ -304,9 +330,9 @@ test("a reminder whose post failed is tried again", async () => {
   const store = new MemoryStore();
   const broker = new FakeBroker();
   let ok = false;
-  const steps = { store, broker, say: async () => ok, now: () => new Date("2026-11-02T14:21:00Z") };
+  const steps = { store, broker, say: async () => ok, now: () => new Date("2026-11-02T14:21:00Z"), feed: "iex" };
   let day = await ensureDay(steps, D);
-  day = await store.updateDay(D, { phases: { morning: "x" } });
+  day = await store.updateDay(D, { phases: { request: "x" } });
   day = await postReminderIfNeeded(steps, day);
   assert.equal(day.phases.reminder, undefined);
   ok = true;

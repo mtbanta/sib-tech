@@ -14,6 +14,7 @@ import { TradeStream } from "./stream.ts";
 import { fetchUniverse } from "./universe.ts";
 import { FeedAlerter } from "./feed-alert.ts";
 import { Worker } from "./worker.ts";
+import { recordStart, releaseLabel } from "./start-note.ts";
 
 loadLocalEnv();
 const settings = loadSettings(process.env, { requireDatabase: true });
@@ -73,8 +74,10 @@ const worker = new Worker({
 });
 
 await ping(settings.healthchecksPingUrl, "start");
-await bot.post("commands", "Stack C worker started (paper trading only). Type `help` for commands. Research input for a human decision, never an instruction to act.");
-log("info", "worker_started", { feed: settings.alpaca.dataFeed });
+const started = await recordStart(store, new Date(), releaseLabel(process.env));
+await bot.post("commands", started.text);
+if (started.repeated) await bot.post("alerts", `The worker has started ${started.recentStarts} times in the last hour. If you did not deploy or stop it, it may be crashing: check the Fly logs.`);
+log("info", "worker_started", { feed: settings.alpaca.dataFeed, recentStarts: started.recentStarts });
 worker.start();
 
 const shutdown = (why: string) => {

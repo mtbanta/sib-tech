@@ -162,3 +162,22 @@ test("a second send that gets a duplicate answer raises that answer and never se
   await assert.rejects(client.submitEntry(entry), /client_order_id/);
   assert.equal(calls.filter((c) => c.method === "POST").length, 2);
 });
+
+// After an unclear first send the order may exist, so NO later error may look like a definite refusal.
+// The gate treats status 502 (and any 5xx, 429 or network error) as unclear, and a plain 4xx as a definite no.
+test("after an unclear first send, a lookup that answers 403 is raised as unclear (502), not as a refusal", async () => {
+  const { calls, client } = fake([new Error("timeout"), json({ message: "forbidden" }, 403)]);
+  await assert.rejects(client.submitEntry(entry), (e: any) => e instanceof AlpacaError && e.status === 502 && /still unclear/.test(e.message));
+  assert.equal(calls.filter((c) => c.method === "POST").length, 1, "nothing sent twice");
+});
+
+test("after an unclear first send and a clean 'not found', a second send that gets a 403 is still unclear (502)", async () => {
+  const { client } = fake([new Error("timeout"), json({ message: "order not found" }, 404), json({ message: "forbidden" }, 403)]);
+  await assert.rejects(client.submitEntry(entry), (e: any) => e instanceof AlpacaError && e.status === 502);
+});
+
+test("a first send refused outright (a clean 403) is still a definite refusal and is not looked up", async () => {
+  const { calls, client } = fake([json({ message: "forbidden" }, 403)]);
+  await assert.rejects(client.submitEntry(entry), (e: any) => e instanceof AlpacaError && e.status === 403);
+  assert.equal(calls.length, 1);
+});

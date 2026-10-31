@@ -2,62 +2,32 @@
 // stream. This is the rehearsal in code; the rehearsal on Alpaca's paper server happens on a real trading day.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Worker, type StreamLike } from "../src/worker.ts";
-import { MemoryStore, CONTROL_STOP, type StopFlag } from "../src/store.ts";
-import type { Trade } from "../src/stream.ts";
-import { FakeBroker, FakeBot, order, settings } from "./helpers.ts";
-
-const D = "2026-11-02";
-const z = (hhmmss: string) => new Date(`2026-11-02T${hhmmss}Z`);
-const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setImmediate(r)); };
-
-function rig(opts: { store?: MemoryStore; bot?: FakeBot; broker?: FakeBroker } = {}) {
-  const store = opts.store ?? new MemoryStore();
-  const broker = opts.broker ?? new FakeBroker();
-  const bot = opts.bot ?? new FakeBot();
-  let now = z("12:00:00");
-  const pings: string[] = [];
-  let onTrade: (t: Trade) => void = () => undefined;
-  let streamStarts = 0;
-  let streamStops = 0;
-  let screens = 0;
-  const worker = new Worker({
-    settings, broker, store, bot,
-    now: () => now,
-    ping: async (k) => (pings.push(k), true),
-    buildLiveList: async () => (screens++, ["AAA", "BBB"]),
-    makeStream: (_symbols, cb): StreamLike => {
-      onTrade = cb;
-      return { start: () => void streamStarts++, stop: () => void streamStops++, status: () => "live" };
-    },
-    sleep: async () => undefined,
-  });
-  return {
-    store, broker, bot, worker, pings,
-    at: async (t: string) => { now = z(t); await worker.tick(); await settle(); },
-    trade: async (symbol: string, price: number, t: string) => { now = z(t); onTrade({ symbol, price, size: 100, time: z(t).toISOString() }); await settle(); },
-    counts: () => ({ streamStarts, streamStops, screens }),
-    said: (ch: string) => bot.posts.filter((p) => p.channel === ch).map((p) => p.text),
-    ownerSays: (text: string, t: string) => bot.say(text, z(t)),
-  };
-}
+import { CONTROL_STOP, type StopFlag } from "../src/store.ts";
+import { order } from "./helpers.ts";
+import { D, rig, settle } from "./rig.ts";
 
 test("a full day: request, approval, screen, live list, entry with a stop, a refusal after stop, close-out, summary", async () => {
   const r = rig();
-  await r.at("12:00:00"); // 7:00 New York: too early for the request, but commands and the heartbeat already run
-  assert.equal(r.said("commands").length, 0);
-  assert.deepEqual(r.pings, ["ok"]);
-
-  await r.at("13:30:00"); // 8:30 New York
+  await r.at("2026-11-01T22:10:00Z"); // Sunday evening: the request for Monday goes out
   assert.equal(r.said("commands").length, 1);
-  assert.ok(r.said("commands")[0]!.includes("will not trade today"));
+  assert.ok(r.said("commands")[0]!.includes("Suggested limits for Monday 2026-11-02") && r.said("commands")[0]!.includes("Checklist"));
+  await r.at("2026-11-01T22:10:30Z");
+  assert.equal(r.said("commands").length, 1, "the request is posted once");
 
-  r.ownerSays("position 500", "13:35:00");
-  r.ownerSays("approve", "13:35:10");
-  await r.at("13:35:20");
+  r.ownerSays("position 500", "2026-11-01T22:20:00Z"); // Michael answers that evening
+  r.ownerSays("approve", "2026-11-01T22:20:10Z");
+  await r.at("2026-11-01T22:20:20Z");
   assert.equal((await r.store.getDay(D))!.status, "approved");
   assert.equal((await r.store.getDay(D))!.limits.maxPositionUsd, 500);
-  assert.equal(r.broker.config.maxMarginMultiplier, 1);
+  assert.equal(r.broker.count("setAccountConfig"), 0, "nothing is set at Alpaca overnight");
+
+  const before = r.said("commands").length;
+  await r.at("12:00:00"); // 7:00 New York: before the review
+  assert.equal(r.said("commands").length, before);
+  await r.at("13:30:00"); // 8:30 New York, an hour before the open: the review
+  assert.ok(r.said("commands").at(-1)!.includes("Good morning") && r.said("commands").at(-1)!.includes("all four are decided"));
+  await r.at("13:31:00");
+  assert.equal(r.said("commands").filter((t) => t.includes("Good morning")).length, 1, "the review is posted once");
 
   await r.at("13:45:00"); // 8:45: the screen starts in the background
   assert.equal(r.counts().screens, 1);
@@ -66,8 +36,11 @@ test("a full day: request, approval, screen, live list, entry with a stop, a ref
   await r.at("13:46:00");
   assert.equal(r.counts().screens, 1, "the screen runs once");
 
-  await r.at("14:25:00");
+  await r.at("14:25:00"); // open - 5 minutes: armed, and prices start
   assert.equal(r.counts().streamStarts, 1);
+  assert.deepEqual(r.broker.calls.filter((c) => c.fn === "setAccountConfig").map((c) => c.args[0]), [{ maxMarginMultiplier: 1, noShorting: true }]);
+  assert.ok((await r.store.getDay(D))!.phases.armed);
+  assert.ok(r.said("commands").at(-1)!.startsWith("Armed for Monday 2026-11-02"));
 
   r.broker.clock = { ...r.broker.clock, isOpen: true };
   await r.trade("AAA", 100, "14:31:00"); // inside the first 5 minutes: builds the range
@@ -112,17 +85,19 @@ test("a full day: request, approval, screen, live list, entry with a stop, a ref
   await r.at("21:10:00");
   assert.equal(r.said("trading").filter((t) => t.includes("Daily summary")).length, 1, "the summary is posted once");
   assert.ok(r.pings.every((p) => p === "ok"));
+  // after the close, the request for the next trading day goes out (none exists in this calendar, so nothing)
 });
 
 test("if limits are not all decided at the open: no trading, no stream, and a late approval is refused", async () => {
   const r = rig();
-  await r.at("13:30:00");
-  r.ownerSays("approve position", "13:40:00");
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("approve position", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:20Z");
   await r.at("13:45:00");
   await r.at("14:26:00"); // a stream may start while the day is still pending
   await r.at("14:30:00"); // the open
   assert.equal((await r.store.getDay(D))!.status, "lapsed");
-  assert.ok(r.said("commands").some((t) => t.includes("will not trade today") && t.includes("not all decided")));
+  assert.ok(r.said("commands").some((t) => t.includes("will not trade today") && t.includes("not all decided") && t.includes("8:30 AM CT")));
   assert.equal(r.counts().streamStops >= 1, true, "prices stop");
   r.ownerSays("approve", "14:31:00");
   await r.at("14:31:10");
@@ -135,13 +110,15 @@ test("if limits are not all decided at the open: no trading, no stream, and a la
   assert.ok(r.said("trading").some((t) => t.includes("No trading today")));
 });
 
-test("a restart in the middle of the morning does not repeat the request or the screen", async () => {
+test("a restart in the middle of the morning does not repeat the request, the review or the screen", async () => {
   const first = rig();
+  await first.at("2026-11-01T22:10:00Z");
   await first.at("13:30:00");
   await first.at("13:45:00");
   const second = rig({ store: first.store, broker: first.broker, bot: first.bot });
   await second.at("13:50:00");
   assert.equal(first.said("commands").filter((t) => t.includes("Suggested limits")).length, 1);
+  assert.equal(first.said("commands").filter((t) => t.includes("Good morning")).length, 1);
   assert.equal(second.counts().screens, 0, "the stored live list is reused");
 });
 
@@ -198,6 +175,7 @@ test("with the database down at the close, the broker's own clock still triggers
 test("a close-out that cannot get flat is retried, is not recorded as done, and the heartbeat says fail until flat", async () => {
   const r = rig();
   await r.at("13:30:00");
+  r.broker.clock = { ...r.broker.clock, isOpen: true };
   r.broker.positions = [{ symbol: "AAA", qty: 5, marketValue: 500, avgEntryPrice: 100, unrealizedPl: 0 }];
   const realClose = r.broker.closeAllPositions.bind(r.broker);
   let works = false;
@@ -211,7 +189,7 @@ test("a close-out that cannot get flat is retried, is not recorded as done, and 
   await r.at("20:57:00");
   assert.equal(r.broker.count("closeAllPositions"), attempts, "waits 5 minutes between tries");
   works = true;
-  await r.at("21:01:00");
+  await r.at("21:01:00"); // the retry goes through (the broker still says open)
   assert.ok((await r.store.getDay(D))!.phases.closeout, "recorded once flat");
   await r.at("21:01:10");
   assert.notEqual(r.pings.at(-1), "fail");
