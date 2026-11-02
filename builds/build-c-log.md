@@ -826,3 +826,25 @@ The one-time extra round Michael approved, range `da59c9f..123d0fc`. **PASS, no 
 
 **Where review stands for build C:** piece 4 PASS (round 2), piece 6 PASS (round 1), pieces 7 and 8 (round 3 PASS on order recording), final phase review round 4 PASS. The rehearsal on a real trading day (Monday) is what is left to close the build.
 
+
+---
+
+# Build C closing section (2026-11-02, evening)
+
+Written at the start of build C2 (`builds/build-c2-brief.md`, `builds/build-c2-log.md`). Full detail of the review is in the build C2 log under "Job 1".
+
+**Definition of done for stack C, item by item**
+- Every requirement under "Michael's rulings" works, deployed on Fly.io against Alpaca paper: **met**, with the faults below. Monday 2026-11-02 was the first paper session: evening request, Michael's changes and approval, the screen and live list, arming, 14 entries each with its stop at Alpaca, the close-out, the summary and the next request all happened.
+- Full rehearsal on a recorded trading day: **done on Monday 2026-11-02.** Not exercised on the day: the `stop` command during a session (it was tested on Friday and `resume` cleared it on Saturday), and limit refusals (none occurred). Both are covered by automated tests.
+- Heartbeat alert when the worker is stopped on purpose: **done twice**, Friday 2026-10-30 and again Monday 2026-11-02 at 5:27 PM (down alert 5:31 PM, recovery 5:33 PM; Michael to confirm his phone received them).
+- The `build-reviewer` agent passed every money-touching piece and the final phase (round 4 PASS). Hard checks 2, 7, 8, 10 were clean in every round.
+- Documents current and everything pushed: this section, `PROJECT_STATE.md`, `CLAUDE.md` (updated again at the end of build C2).
+
+**Faults found in the first paper session (all to be fixed in build C2, none involved real money)**
+1. The close-out's bulk sale (`closeAllPositions`) cancelled the stops and then failed on all five positions (twice); `syncOrders` then sold them and raised five false "had no live protective stop" alerts. The close-out reported success only because of that race.
+2. The events table recorded nothing on Monday (only warn and error levels are stored, and Monday had none).
+3. Tuesday's suggested limits came from the fixed constant, not Monday's approved values.
+4. A message with four commands in it was not understood.
+5. The live list was posted as one long line.
+
+**What is not proven:** that the close-out works alone (it did not on Monday); what Alpaca's per-item error was; behaviour at high order volume; the `stop` command during a live session.
