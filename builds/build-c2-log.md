@@ -953,3 +953,33 @@ If the round passes, load mode deploys as a separate release after round 9, outs
 | instruction line back | 10-position request |
 | `load off` after the screen gives a normal day | cap after the screen |
 | `ended` drops the cap | cap after the screen; cap after Armed |
+
+## Load mode fixes review (2026-11-03, afternoon): PASS. Load mode is cleared to deploy after round 9, before 7:30 AM Wednesday.
+
+On `42cd64f` (on top of `312d9dc`), repo and local suite only. No blocking findings. Checks 2, 7 and 10 clean. 343 pass, type check clean. Every row of the builder's table the reviewer checked fails as claimed.
+
+**Confirmed:**
+- **Every Discord path now splits instead of cutting:** the bot's `post` (worker `say`, command replies, start-up messages, request, review, reminder, summary, owner mentions) and `postWebhook`.
+- 20,000 random texts through `splitMessage`: no part over 2,000 characters, every part with "Paper trading only.", no visible text lost.
+- Parts go out in order, the owner is mentioned only in the first, redaction runs before splitting, and a failed part stops the rest.
+- **No rate-limit storm:** the digest and the NOT FLAT alert are already under 1,800 characters (one part each); the safety alerts are short. Only the limits texts, the `limits` and `status` replies and the summary can reach 2 or 3 parts, none in a safety path.
+- **The previous blocking finding is closed:** Michael's 10-position request is now 1,902 characters in one message, ending with the warning and the paper-only line.
+- **The previous note 1 is fixed:** the summary is no longer cut.
+- **Item 2:**
+  - `load off` before the screen: a normal day.
+  - After the screen and before Armed: `ended` (new); the cap and the 10 second sync stay.
+  - After Armed: `ended`.
+  - Repeated: before Armed `ended` again; after Armed refused, and the cap stays.
+  - `load on` on an `ended` day: refused.
+  - A normal day is unaffected.
+- **The builder's reading of "that morning" is defensible.** Michael should confirm one window: a `load off` on the trading-day morning **before the 7:45 AM screen** gives a normal day with normal sizes, not the cap.
+
+**Non-blocking notes (logged, not changed):**
+1. On an `ended` day the Armed message still says "churn in the load window (no entries before it)". There is no churn, and entries start at 8:35 (normal placeholder, capped). A second `load off` after Armed is answered "not running as a load day" although the cap still applies. Message text only.
+2. If part 1 of a long request posts and part 2 fails, the whole request is posted again on the next pass, so Michael sees part 1 twice. For the evening request the request time moves later, so an approval sent in between is refused as older than the request (fails safe: no trading).
+3. **Test gaps** (the code is correct):
+   - removing `state !== "off"` from the new branch fails no test (it stops a stray `load off` after 7:45 on a normal day from setting `ended`);
+   - each half of the "screen has run, or 45 minutes before the open" condition covers the other.
+4. Michael's 10-position test fits in one message. Splitting is proven by the 40-position, bot and webhook tests.
+5. Older cuts remain, unchanged and outside the two items: the NOT FLAT alert at 1,800, error details, the digest's 60-line cap, and the summary's "...and N more symbols". None removes the paper-only line or the no-trade warning.
+6. Splitting can drop a blank line at a part's start, and can split an over-long single line inside an emoji.
