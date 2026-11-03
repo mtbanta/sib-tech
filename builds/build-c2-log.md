@@ -382,3 +382,117 @@ Release v5 has the round 3 and round 4 fixes but none of the round 6 fixes, so a
 - **Tuesday 2026-11-03's limits are approved** (read from the database): status `approved`, position 2000 dollars, daily loss stop 500 dollars, trades 100 a minute (the ceiling), borrowing cap 1; all four decided; position, loss and cap carried from 2026-11-02; stop flag off; not-flat flag off. Arming sets the cap at Alpaca at 8:25 AM Central.
 - **v5 runs Tuesday unchanged.** No code changed, nothing deployed or restarted in this close-out.
 - **After Tuesday's close:** review Tuesday's session (database, Fly logs, Discord), then fix round 6's start-up finding in `b764741` (a failing start-up migration must not leave commands unread while arming and trading run) and run a fresh review round before any deploy.
+
+## Tuesday 2026-11-03 session review (release v5, first C2 day; written during market hours, read only)
+
+Sources, all read only: the stack's database (one read-only transaction), Alpaca paper (account, positions, open orders, every order of the day with its exit legs, account activities, the one-minute equity history; 10 requests spaced 1.5 seconds apart), Alpaca market data on the free IEX feed (trades and quotes for the held symbols, 8:52 to 8:53:45 AM Central), the three Discord channels read through the bot, and the Fly log buffer. **The Fly buffer holds only the last 100 lines** (about two minutes of a session), so nothing from 8:53 survives there; every timing below comes from the database and Alpaca's own timestamps. Times are Central.
+
+**For Michael first: the stop flag is still ON and carries into Wednesday.** The daily loss stop sets the same stop flag as the `stop` command, and only `resume` clears it. Type `resume` in `commands` before the "Armed" message at 8:25 AM Wednesday, or Wednesday has no entries even with approved limits.
+
+### 1. The loss stop at 8:53 and the 19.71 overshoot
+
+**What happened, second by second** (Alpaca's minute equity history is the reference; a point stamped T is the equity at T, checked against the 8:35 point, which is still 0 although fills began at 8:35:00, and the 8:54 point, which equals the final flat value):
+
+| Time | Day loss | What |
+| :-- | --: | :-- |
+| 8:52:00 | 476.84 | Alpaca minute history |
+| about 8:52:55 | under 500 | previous 30 second loss stop check. **Inferred**, not logged: the worker's passes run on a 5 second tick whose phase (about :04.5 and :09.5 past each 10 seconds) comes from the 5-minute stats events and the 8:53:25.159 decision; it did not fire, so Alpaca's loss was under 500 |
+| 8:52:59 to 8:53:02 | | LSCC: 17 shares hit their protective stop (106.56) and filled at 106.14, 0.42 a share below the stop |
+| 8:53:00 | 517.82 | Alpaca minute history: the line was crossed in a burst of about 5 seconds, about 18 dollars, mostly LSCC (stop slippage and the drop from about 106.9 to 106.14) plus small moves in the other holdings |
+| 8:53:02.7 | | the last entry (FLUT, 8 shares) passed the gate on the cached view refreshed at about 8:52:59; it probably went out after Alpaca's equity had crossed the line |
+| 8:53:07.0 to 8:53:24.4 | | the gate's own cached view (account read every 5 seconds) saw the loss past 500 and refused 7 entries with "daily loss stop reached". In v5 only the 30 second loss stop task sells, so nothing was sold yet |
+| 8:53:25.159 | 519.71 | loss stop check: fired. Flag saved 8:53:25.169 |
+| 8:53:25.46 to 25.53 | | the 20 resting exit legs of the 10 open brackets cancelled |
+| 8:53:26.5 to 27.2 | | 10 market sells sent |
+| 8:53:27.4 to 31.1 | | 23 fills; account flat |
+| 8:53:34.4 | | `liquidation_result`: flat, sold 10, no errors; Discord message 8:53:34.5 |
+| after | 535.15 | final day loss (equity 19,208.31 from 19,743.46) |
+
+**The 19.71 overshoot at the trigger:** about 17.8 was already there at 8:53:00, arriving in a burst of about 5 seconds just after the previous check (the LSCC stop-out above). About 1.9 came from price moves in the 25 seconds the 30 second check took to come round. **Fees: none of it** (Alpaca posts the day's regulatory fees in the evening, see below). **Slippage on the exit sales is not in the 19.71**; it came after, see next.
+
+**After the trigger: 15.44 more.** From the decision (equity 19,223.75) to flat (19,208.31) the 10 market sells (about 15,950 dollars) cost 15.44: crossing the spread on market sales plus about 6 seconds of movement; the largest pieces were KRYS, AME and HALO. **The day's realized loss is 535.15, 35.15 past the 500 limit**, plus about 3.02 of fees to post tonight.
+
+**Confirmed:**
+- **Everything sold.** 10 positions (ABNB 11, AME 7, CTRE 54, EXEL 26, FLUT 8, HALO 15, KRYS 6, MRVL 11, VG 12, XEL 25) sold 8:53:27 to 8:53:31.
+- **Every protective stop cancelled or filled.** 91 stop legs: 44 filled, 47 cancelled; 91 take-profit legs: 37 filled, 54 cancelled; the open brackets' legs were cancelled before the first sale was sent; no leg filled after the stop; 0 open orders now.
+- **No entry after the stop.** Last entry decided 8:53:02.7, sent to Alpaca 8:53:02.93, last buy fill 8:53:06.3; every signal from 8:53:25.17 on was refused "stop flag is set" (763 refusals to 9:23 AM, still counting).
+- **The account is flat:** 0 positions, equity equals cash, 19,208.31. No symbol's position went below zero at any point in the day's fill sequence (no oversell).
+
+### 2. Open to stop (8:30 to 8:53)
+
+| Measure | Value |
+| :-- | :-- |
+| Entries sent to Alpaca | 99 (first 8:35:00, the first 5 minutes are closed by design): 91 accepted and filled, 7 refused by Alpaca (422, see item 3), 1 refused (403, insufficient buying power) |
+| Other orders | each accepted entry carried 2 resting exits (182 legs); the loss stop sent 10 market sells and cancelled 20 legs. 451 fills (the paper engine fills in many small pieces) |
+| Busiest minute | **12 entries** (8:35, also the most in any rolling 60 seconds) against the 100 a minute cap Michael approved |
+| Why so few | capital, not speed: with borrowing cap 1 and 2,000 dollar positions about 10 positions fill the account; exposure reached 99.9 percent of equity at 8:37 and the gate refused 126 signals as "borrowing cap leaves no room". **The 100 a minute ceiling was not exercised today** |
+| Governor | 0 refusals; lowest remaining Alpaca budget 194 of 200 before the stop, 177 during the sale; at most about 36 requests a minute in the 5-minute samples |
+| Decision to acceptance (91 accepted) | typical (median) 170 ms, mean 181 ms, 90th percentile 299 ms, 95th 336 ms, slowest 431 ms, fastest 95 ms |
+| Gate refusals (rows) | 110 first minutes, 126 cap room, 18 already holding, 13 entry still working, 6 waiting after an Alpaca refusal, 7 daily loss stop (gate view), 763 stop flag (after the stop), 2 market closed (before the open) |
+| Win / loss | 91 round trips: **34 won (+112.08), 57 lost (-647.23)**. By exit: 37 take-profits +95.06, 44 protective stops -584.37, 10 sold by the loss stop -45.84. Sum -535.15, matching Alpaca's equity to the cent |
+| Fees | none charged in today's equity yet. Estimate for tonight from the fee schedule: SEC fee 3.00 on 145,600 dollars of sales, CAT fee 0.02 on 4,164 shares, FINRA TAF 0 (paused to the end of 2026): **about 3.02** |
+
+**Where the 535.15 went (an estimate; the free IEX feed has no consolidated quote, so spread and slippage cannot be separated cleanly):**
+
+| Part | Dollars | How measured |
+| :-- | --: | :-- |
+| Entry fills above the price the signal saw | -274.11 | fill minus the IEX trade price the gate used, times shares (median 0.14 a share). Spread, the free feed lagging the real market, and movement in the 0.2 seconds to acceptance, together |
+| Protective stops filled below their stop price | -186.50 | stop price minus fill, times shares |
+| Take-profits filled above their limit | +79.46 | mostly entries that filled at or above their own take-profit, so the take-profit sold at once at the market |
+| Exit sale after the loss stop decided | -15.44 | Alpaca equity at the decision minus the final flat equity |
+| Fees | 0 today | about 3.02 posts tonight |
+| Price moves (the remainder) | -138.56 | |
+
+So about three quarters of the day's loss is trading cost (spread, slippage and a stale reference price), not the market moving against the positions. That is a property of the busy placeholder (tiny targets and stops set from the free IEX price), not of the plumbing it is there to test.
+
+### 3. What did not behave as designed
+
+1. **The loss stop sold 18 seconds after the stack knew.** The gate's 5 second view saw the line crossed at 8:53:07 and blocked entries, but only the 30 second task sells. Michael's 10 second ruling (item 5) narrows this; see the estimate there.
+2. **Discord read failures since 9:45 PM Monday: one.** At 10:34:02 PM Discord answered 503 (its own server error) to the command read; the alert went out at once ("I could not read your commands ... I keep trying"), the next read worked, and nothing was missed (Michael's 9:50 and 9:51 PM messages were read before it; the command cursor advanced normally through the session). Every warning and error goes into the run log, and there are no others since the deploy: no pass errors, no loss stop check failures, no unprotected-position alarms (Monday had five false ones). Caveat: live price stream reconnect warnings go only to the Fly log, which no longer holds them.
+3. **The paper account does charge regulatory fees.** Account activities show Monday's REG fee (0.56 on 27,100.09 of sales) and CAT fee (0.01), charged at about 7 PM Monday. `fees.ts` and the daily summary say paper charges none; that is wrong (it does not change any trading decision; the estimate becomes a forecast of a real charge). Today's, about 3.02, will post tonight, so Wednesday's start equity will include it.
+4. **Bracket levels come from the IEX price, Alpaca checks them against its own price.** 7 entries were refused by Alpaca because the take-profit (5) or stop (2) was on the wrong side of Alpaca's current price, and 22 of 91 accepted entries filled at or above their own take-profit. Placeholder design, logged for the redesign; nothing unsafe (a refused entry is just not placed).
+5. **One entry got past the gate's room check and was refused by Alpaca** for insufficient buying power (SHOP, 8:47:32): the gate's view is up to 5 seconds old. No harm (refused).
+6. **After the stop, every signal writes a refusal row:** 763 in the first 30 minutes, on course for about 9,000 by the close. Noise and database load; harmless.
+7. **The loss stop message went to `commands` only**, with no mention in `alerts`. By design, but worth Michael's view.
+8. **The Fly log buffer keeps about 100 lines**, and the loss stop check does not record the equity it saw, so the exact time of each check can only be inferred. Logged as an observability gap.
+
+None of these needed action during market hours: the account is flat, stopped and has no open orders.
+
+## Round 7 changes (built 2026-11-03, during market hours; code only, nothing deployed)
+
+Michael's asks for this session: (4) fix round 6's blocking start-up finding in `b764741`; (5) his ruling that the daily loss stop runs every 10 seconds instead of 30; (6) secret scan, full suite, then one build-reviewer round (round 7) scoped to `b764741`'s five fixes plus 4 and 5, against the round 5 audit table, a finding outside that scope logged rather than blocking unless it can lose money. Deploy only after 3:00 PM Central and only if round 7 passes.
+
+### 4. A failing start-up check can no longer leave the stack trading with commands unread (`worker.ts`)
+
+- **Live prices wait for the start-up check.** The stream (the only source of signals, so of entries) starts only once the once-per-start check of future days has worked (`this.migrated`). Until then commands are not read, so nothing trades. This covers the reviewer's case exactly: a restart in the middle of an already armed day, where arming is long done and only the stream was missing a condition.
+- **Backstop in the trade handler:** a price that arrives while the check has not worked is ignored. (It cannot happen with the stream held, since the check never goes back to "not done"; it is there in case a later change starts the stream elsewhere.)
+- **The alert now says so:** "Until it works I do not read commands, so I place no entries either; the daily loss stop and the close-out continue."
+- Unchanged: the daily loss stop, the missing-exit check and the close-out keep running while the check fails. Arming is not held: it sets the cap at Alpaca but trades nothing.
+- Once the check works, the same pass reads commands first, so a `stop` sent in the meantime is in force before the first price.
+
+### 5. Daily loss stop every 10 seconds (`worker.ts`)
+
+- `LOSS_STOP_EVERY_MS` is 10,000 (was 30,000). Passes run on a 5 second tick, so the check runs on every second tick; a 1 second allowance stops a tick that fires a few milliseconds early from stretching the gap to 15 seconds.
+- **A slow pass no longer holds it back.** Before, the check was scheduled inside the pass, so a slow pass (for example a Discord rate limit storm in the digest, about 150 seconds at worst) delayed it until the 60 second watchdog. Now a tick that finds the previous pass still running starts the loss stop itself, from today's record held in memory, on the same 10 second schedule.
+- **No pile-up.** One check at a time: while a check is still waiting on Alpaca, later slots are skipped, not queued, and the next check starts at the first tick after it ends. Each Alpaca request has its own time limit (10 seconds, 3 tries, about 31.5 seconds at worst), so a hung check ends by itself.
+- **Not held back by the governor.** The loss stop's account read does not ask the governor (only entries and the view refresh do), so it runs even when the budget is inside the 80-request safety reserve.
+
+**Requests (Alpaca's account, order and position calls share 200 a minute):** before the stop fires, each check is 1 account read: 6 a minute instead of 2, **+4 a minute**. After it fires, each check is the retry of the sale (positions and open orders, 2 reads, and nothing more when flat): 12 a minute instead of 4, at a time when no entries go out. Worst case in a session at the 100 a minute ceiling: 100 entries + 24 (account and positions every 5 seconds) + about 2 (settings) + at least 4 (order sync every 30 seconds) + 6 (loss stop) = **about 136 of 200**. Entries stop at 80 remaining (the reserve), and the loss stop is never held back by it. Measured in the simulated rehearsals: the 30-a-minute day made 4,249 requests with the 10 second check against 4,022 with 30 seconds (about 3 a minute more, as expected), no rate-limit refusals in either; the ceiling day's lowest remaining budget was 137 of 200 in both. Today's real session peaked at about 36 a minute in the 5-minute samples, so about 40 with the change.
+
+**What 10 seconds would have done today (an estimate):** the line was crossed in a burst of about 5 seconds just after the 8:52:55 check (inferred), and Alpaca's own history shows a loss of 517.82 at 8:53:00. Whichever 10 second phase the worker ran on, a check would have fired at about 8:53:00 to 8:53:05 at a loss of about 518, against 519.71 at 8:53:25: **about 2 dollars of the 19.71 saved** (range about 1 to 3). With the 8:53:00 phase it would also have refused the FLUT entry at 8:53:02.7. The 15.44 of exit cost after the decision would not change. The overshoot today came from the speed of the drop (a protective stop filling 0.42 a share below its price), which no check interval prevents. Two things would: a trigger set a little below the limit, or smaller positions. Neither is built; they are for Michael's design revisit. Also for that revisit: the gate's view already reads the account every 5 seconds and saw the loss at 8:53:07, so the loss stop could be driven from it at no extra request cost. To turn this estimate into a measurement, log the equity each loss stop check saw. Not done: with the Fly buffer at 100 lines that needs the database, about 2,300 rows a day.
+
+### Tests and the "fails without the fix" check
+
+New file `test/round7.test.ts`, 6 tests. Full suite **308 pass** (302 before), type check clean.
+
+| Change taken out | Tests that fail |
+| :-- | :-- |
+| 4. live prices wait for the start-up check (the round 6 behaviour) | the reviewer's reproduction: armed day, restart in the session, start-up query failing, `stop` posted, prices: stream started and an entry was sent |
+| 4. stream condition and trade-handler backstop both | same test |
+| 4. new alert wording | same test |
+| 5. 10 seconds back to 30 | every 10 seconds; slow pass; governor reserve |
+| 5. loss stop started from a busy tick | slow pass (fired only after the 60 second watchdog) |
+| 5. loss stop gated on the governor (a deliberate wrong change) | governor reserve |
+| 5. both one-at-a-time guards | hanging check (more than one account read piled up) |
+
+A control test shows the same restart with a working start-up check starts prices and enters, so the main test does not pass for another reason. Two first-run failures were test mistakes, not code: a restarted worker was given a fresh fake Discord whose message numbers sat behind the saved cursor (in production it is the same channel), and a hung pass was awaited by the test itself.
