@@ -702,3 +702,45 @@ Under the standing rule, each is proposed to Michael before any money-touching c
    - One position per symbol at a time means an average hold under about 18 seconds across 30 symbols.
    - Tuesday's trading cost was about 0.27 percent of round-trip value, so about 1,500 entries needs positions of about 75 dollars or less to keep it near 300 dollars.
    - SEC fee about 2.30 dollars.
+
+### Load day: whole shares (added 2026-11-03, for the proposal; no code)
+
+**Can our entry order use fractional shares?** Apparently not. Our entry is a bracket order: the entry with its stop and take-profit resting at Alpaca.
+- Alpaca's fractional trading page: "Alpaca currently supports fractional trading for market, limit, stop & stop limit orders with a time in force=Day". It does not mention bracket, OCO (one cancels other) or OTO (one triggers other) orders.
+- Alpaca's orders page lists fractional support only for those four simple order types, day orders only, and says nothing about bracket orders.
+- Alpaca forum, "Bracket Order with Fractional Shares" (March 2023, again July 2024): "fractional shares are only executing through simple orders". No staff answer.
+- Related threads: "When will bracket orders for fractional stocks be implemented?" (April 2021), and "Frustration with Fractional/Notional Order Limitations & OCO/Bracket Orders" (last activity August 2026), consistent with no support.
+- **Not confirmed by a test order.** One fractional bracket order on paper would settle it, on a day Michael approves (no orders today).
+
+Sources, read 2026-11-03:
+- https://docs.alpaca.markets/docs/fractional-trading
+- https://docs.alpaca.markets/docs/orders-at-alpaca
+- https://forum.alpaca.markets/t/bracket-order-with-fractional-shares/12027
+- https://forum.alpaca.markets/t/when-will-bracket-orders-for-fractional-stocks-be-implemented/5375
+
+So with whole shares, a 75 dollar position limits the stack to symbols under 75 dollars, and buys 1 share of a 60 dollar stock.
+
+**What Tuesday says about cost by price** (91 round trips; entry fill above the signal price, plus stop fills below the stop price, minus take-profits filled above their limit, as a share of the round trip's value):
+
+| | Round trips | Cost |
+| :-- | --: | --: |
+| Symbols under 75 dollars (VG, UPST, CTRE, TAP, EXEL) | 18 | 0.21 percent |
+| 75 dollars and over | 73 | 0.27 percent |
+
+Individual symbols ranged from 0.04 percent (SHOP, MRVL) to 1.0 percent (AXSM). These are small samples, so treat them as a rough guide, not a rate.
+
+**Option A, recommended: a live list of 30 symbols priced well under 75 dollars** (for example 5 to 35 dollars, highest volume, tightest spread, chosen by the morning screen). Positions at most 75 dollars, so 2 to 15 shares and about 60 dollars a position on average.
+- Expected cost of about 1,500 entries: 1,500 × 60 × 0.20 to 0.40 percent = **about 180 to 360 dollars, central about 225**, plus about 2 dollars of fees (SEC fee on about 90,000 dollars of sales; FINRA TAF paused; CAT a few cents). That stays under the 500 dollar loss stop with today's limits unchanged.
+- Risks:
+  - A 1 cent price step is a larger share of a cheap price (0.1 percent each way on a 10 dollar stock).
+  - The free IEX feed sees less of thinly traded names, so stale prices and Alpaca refusals of the bracket (as on Tuesday) could rise.
+  - It needs a screen change (code, after approval).
+
+**Option B: a larger position size, any symbol on the usual list.** For example, 300 dollars buys 1 share of anything up to 300 dollars, about 200 dollars a position on average.
+- Expected cost of about 1,500 entries: 1,500 × 200 × 0.27 percent = **about 810 dollars**. That would trip the 500 dollar loss stop after about 9 minutes.
+- To fit, either Michael approves a higher loss stop for that one day in the evening limits flow (for example 1,500 dollars; only he can set it), or the run is cut to about 600 entries (6 minutes at 100 a minute, about 325 dollars).
+- Up to 30 positions of about 300 dollars is about 9,000 dollars of exposure, inside borrowing cap 1 on about 19,200 dollars of equity.
+
+**Not proposed:** fractional entries with a separate stop placed after the fill. Each entry would be unprotected until its stop is placed, a change to how protection works (money-touching, and against "every entry carries a protective order at Alpaca").
+
+All of these are paper dollars, and estimates from one day's 91 trips. The load day itself is the measurement.
