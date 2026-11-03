@@ -5,9 +5,10 @@ import type { Broker } from "./broker.ts";
 import type { DiscordBot, DiscordMessage } from "./discord-bot.ts";
 import { isOwnerCommand } from "./discord-bot.ts";
 import type { Settings } from "./config.ts";
-import { decideLimits, limitLines, parseCommand, type NextSessionFinder } from "./morning.ts";
+import { decideLimits, decideLoad, limitLines, parseCommand, type NextSessionFinder } from "./morning.ts";
+import { LOAD_PHASE, loadLine } from "./load-mode.ts";
 import type { Liquidator, Say } from "./sells.ts";
-import { CONTROL_COMMAND_CURSOR, CONTROL_STOP, type DayRecord, type StopFlag, type Store } from "./store.ts";
+import { CONTROL_COMMAND_CURSOR, CONTROL_STOP, setPhase, type DayRecord, type StopFlag, type Store } from "./store.ts";
 import { describeLimits } from "./limits.ts";
 import { centralClock, dayWord, etDate, sessionPhase } from "./time.ts";
 
@@ -35,6 +36,7 @@ const HELP = [
   "`flatten` stop, then sell everything now",
   "`limits` today's limits",
   "`approve` or `approve cap` accept the next trading day's limits; `position 1500`, `loss 150`, `trades 20`, `cap 2` change one (`trades` is orders a minute, 1 to 100). Until the `Armed` message 5 minutes before the open you can change any limit; after it only tighten (lower) a limit, until the evening post.",
+  "`load on` / `load off` make the next trading day a load day or a normal day (see line 5 of the limits); `load on` until the morning screen, 45 minutes before the open; after `Armed` only `load off`.",
   "You can send several commands in one message, one per line; I reply to each line.",
 ].join("\n");
 
@@ -210,6 +212,29 @@ export class CommandProcessor {
       case "status":
         await this.say(await this.statusText(now));
         return;
+      case "load": {
+        const target = await this.targetDay(now);
+        if (!target) {
+          await this.say("I cannot find the next trading day in Alpaca's calendar, so there is nothing to switch.");
+          return;
+        }
+        const { date, day, mode } = target;
+        if (!day) {
+          await this.say(`There is no limits request for ${dayWord(date)} yet. I post it after the market closes.`);
+          return;
+        }
+        // Decided again on the record as it is now, just before writing (the clock may have passed a deadline meanwhile).
+        const latest = await this.d.store.getDay(date);
+        const decision = latest ? decideLoad(latest, cmd.on, this.d.now(), m.at, mode) : decideLoad(day, cmd.on, now, m.at, mode);
+        if (!decision.ok || !latest) {
+          await this.say(decision.reply);
+          return;
+        }
+        await setPhase(this.d.store, date, LOAD_PHASE, decision.value);
+        this.d.log?.("load_mode", { date, value: decision.value, mode });
+        await this.say(decision.reply);
+        return;
+      }
       case "approve":
       case "set": {
         const target = await this.targetDay(now);
@@ -313,6 +338,7 @@ export class CommandProcessor {
       `Market: ${clock.isOpen ? "open" : "closed"} by Alpaca's clock; ${phaseText}${disagree}`,
       next ? `Next session: ${dayWord(next.date)}, opens ${centralClock(next.openAt)}${nextDay ? `, limits ${nextDay.status}` : ", limits request not posted yet"}` : "",
       day ? `Today (${day.tradeDate}): ${day.status}${day.isTradingDay ? `, limits: ${describeLimits(day.limits)}` : ""}` : "Today: not set up yet",
+      day && day.isTradingDay ? loadLine(day).replace(/^5\. mode: /, "Mode today: ") : "",
       day && day.status === "pending" ? limitLines(day) : "",
       `Live list: ${day?.liveList ? day.liveList.join(" ") || "(empty)" : "not built yet"}`,
       `Entries today: ${orders.filter((o) => o.status !== "failed" && o.status !== "rejected").length}; positions now: ${positions.length}`,

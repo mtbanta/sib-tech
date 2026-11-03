@@ -25,6 +25,7 @@ export class Governor {
   private lowest: number | null = null;
   private peakTrades = 0;
   private refused = 0;
+  private rateLimited = 0; // answers from Alpaca saying "too many requests" (429), for the record only
 
   constructor(now: () => number = Date.now) {
     this.now = now;
@@ -34,6 +35,7 @@ export class Governor {
   observe(info: RateInfo): void {
     const clockPath = info.path === "/v2/clock" || info.path.startsWith("/v2/calendar");
     if (info.status === 429 && !clockPath) {
+      this.rateLimited++;
       // A refusal means the bucket is empty, whatever headers came with it.
       const t0 = this.now();
       this.remaining = 0;
@@ -94,13 +96,14 @@ export class Governor {
     return { ok: false, reason };
   }
 
-  stats(): { requestsLastMinute: number; lowestBudget: number | null; peakTradesPerMinute: number; refusedByGovernor: number } {
+  stats(): { requestsLastMinute: number; lowestBudget: number | null; peakTradesPerMinute: number; refusedByGovernor: number; rateLimitAnswers: number } {
     const t = this.now();
-    return { requestsLastMinute: this.requestTimes.filter((x) => t - x < 60_000).length, lowestBudget: this.lowest, peakTradesPerMinute: this.peakTrades, refusedByGovernor: this.refused };
+    return { requestsLastMinute: this.requestTimes.filter((x) => t - x < 60_000).length, lowestBudget: this.lowest, peakTradesPerMinute: this.peakTrades, refusedByGovernor: this.refused, rateLimitAnswers: this.rateLimited };
   }
   resetDayStats(): void {
     this.lowest = null;
     this.peakTrades = 0;
     this.refused = 0;
+    this.rateLimited = 0;
   }
 }

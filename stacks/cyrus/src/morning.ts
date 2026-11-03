@@ -9,6 +9,7 @@ import type { Broker } from "./broker.ts";
 import { LIMIT_NAMES, MAX_TRADES_PER_MINUTE, SUGGESTED_LIMITS, applyOverride, describeLimits, loosened, type LimitName, type Limits } from "./limits.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
 import { NOT_ADVICE } from "./discord.ts";
+import { LOAD_MAX_POSITION_USD, LOAD_NOTE_PHASE, LOAD_PHASE, LOAD_SWITCH_DEADLINE_MIN, isLoadDay, loadLine, loadState } from "./load-mode.ts";
 import type { Say } from "./sells.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
 
@@ -112,6 +113,7 @@ export function limitLines(day: DayRecord): string {
     `2. loss: daily loss stop ${l.dailyLossStopUsd} dollars (${mark("loss")})${from("loss")}`,
     `3. trades: at most ${l.maxTradesPerMinute} orders a minute, no daily total; the ceiling is ${MAX_TRADES_PER_MINUTE} (${mark("trades")})${from("trades")}`,
     `4. cap: borrowing cap ${l.borrowingCap}, where 1 means no borrowing (${mark("cap")})${from("cap")}`,
+    loadLine(day),
   ].join("\n");
 }
 
@@ -161,6 +163,7 @@ export function formatLimitsRequest(day: DayRecord, kind: RequestKind = "evening
     "Reply here: `approve` accepts every limit as shown, `approve cap` accepts one, or change one with `position 1500`, `loss 150`, `trades 20`, `cap 2` (that also counts as your decision). You can send several commands in one message, one per line.",
     "Until the `Armed` message 5 minutes before the open you can change any limit. After it, a limit can only be lowered (tightened), until the next evening post. Loosening is locked.",
     "`trades` is the most orders I will send in any 60 seconds to open positions; there is no daily total. The loss stop is the main safety net.",
+    "`load on` makes the day a load day (line 5), `load off` makes it normal; `load on` is accepted until the morning screen, 45 minutes before the open, and after `Armed` only `load off` is.",
     `**If any limit is still undecided at the open, I will not trade that day.**`,
     NOT_ADVICE,
   ].join("\n");
@@ -175,6 +178,7 @@ export type Command =
   | { kind: "limits" }
   | { kind: "approve"; name: LimitName | "all" }
   | { kind: "set"; name: LimitName; value: string }
+  | { kind: "load"; on: boolean }
   | { kind: "unknown"; text: string };
 
 export function parseCommand(content: string): Command {
@@ -198,6 +202,8 @@ export function parseCommand(content: string): Command {
       if (arg1 === undefined || arg1 === "all") return { kind: "approve", name: "all" };
       return (LIMIT_NAMES as readonly string[]).includes(arg1) ? { kind: "approve", name: arg1 as LimitName } : { kind: "unknown", text: content.slice(0, 40) };
     }
+    case "load":
+      return arg2 === undefined && (arg1 === "on" || arg1 === "off") ? { kind: "load", on: arg1 === "on" } : { kind: "unknown", text: content.slice(0, 40) };
     case "position":
     case "loss":
     case "trades":
@@ -248,6 +254,30 @@ export function decideLimits(day: DayRecord, cmd: Extract<Command, { kind: "appr
   return { ok: true, patch: { limits, decided, status }, reply };
 }
 
+// Applies `load on` / `load off` to a day (load-mode.ts). Pure: no clock, no network. The same timing rules as the limits:
+// before "Armed" either way, except that `load on` closes at the morning screen (45 minutes before the open), because the load
+// day's cheap list is built there; after "Armed" (mode "tighten") only `load off`, which ends the window and keeps the
+// 75 dollar cap and the faster sync for the rest of the day. Returns the new phase value, or a reply that nothing changed.
+export function decideLoad(day: DayRecord, on: boolean, now: Date, messageAt: Date, mode: "edit" | "tighten"): { ok: true; value: "on" | "off" | "ended"; reply: string } | { ok: false; reply: string } {
+  if (!day.isTradingDay) return { ok: false, reply: "That day is not a trading day." };
+  if (day.status === "lapsed") return { ok: false, reply: `Too late: ${dayWord(day.tradeDate)} opened with limits undecided, so there is no trading that day.` };
+  const asked = day.phases.request && day.phases.request !== "skipped" ? new Date(day.phases.request) : null;
+  if (!asked || messageAt < asked) return { ok: false, reply: "That message is older than the request for that day, so I ignored it." };
+  const state = loadState(day);
+  if (mode === "tighten") {
+    if (!day.closeAt || now >= day.closeAt) return { ok: false, reply: `${dayWord(day.tradeDate)} is over.` };
+    if (on) return { ok: false, reply: `Locked: ${dayWord(day.tradeDate)} is armed, so a load day can no longer be switched on (only \`load off\`).` };
+    if (state !== "on") return { ok: false, reply: `${dayWord(day.tradeDate)} is not running as a load day, so there is nothing to switch off.` };
+    return { ok: true, value: "ended", reply: `Load window switched off for ${dayWord(day.tradeDate)}: the normal placeholder from now on. Positions stay at most ${LOAD_MAX_POSITION_USD} dollars for the rest of the day (after Armed only the tighter direction is allowed).` };
+  }
+  if (!day.openAt || now >= day.openAt) return { ok: false, reply: `Too late: ${dayWord(day.tradeDate)} has already opened.` };
+  if (!on) return { ok: true, value: "off", reply: `${dayWord(day.tradeDate)} is a normal day.\n${loadLine({ ...day, phases: { ...day.phases, [LOAD_PHASE]: "off" } })}` };
+  if (day.phases.screen || now >= addMinutes(day.openAt, -LOAD_SWITCH_DEADLINE_MIN)) {
+    return { ok: false, reply: `Too late for a load day on ${dayWord(day.tradeDate)}: its live list is built at the morning screen (${centralClock(addMinutes(day.openAt, -LOAD_SWITCH_DEADLINE_MIN))}), and a load day needs the cheap list. It stays a normal day.` };
+  }
+  return { ok: true, value: "on", reply: `${dayWord(day.tradeDate)} will be a **load day**${day.status === "approved" ? "" : " (once all four limits are decided)"}.\n${loadLine({ ...day, phases: { ...day.phases, [LOAD_PHASE]: "on" } })}` };
+}
+
 // ---- the steps the scheduler runs ----
 
 export interface MorningSteps extends MorningDeps {
@@ -264,6 +294,7 @@ export async function postLimitsRequest(steps: MorningSteps, day: DayRecord): Pr
   const checklist = await buildChecklist({ store: steps.store, broker: steps.broker, feed: steps.feed });
   const posted = await steps.say("commands", formatLimitsRequest(day, "evening", checklist));
   if (!posted) throw new Error("Could not post the limits request to Discord");
+  await setPhase(steps.store, day.tradeDate, LOAD_NOTE_PHASE, "with the request"); // the request shows the mode line itself
   return setPhase(steps.store, day.tradeDate, "request", steps.now().toISOString());
 }
 
@@ -318,6 +349,6 @@ export async function armDay(steps: MorningSteps, day: DayRecord): Promise<DayRe
   const start = account.lastEquity > 0 ? account.lastEquity : account.equity;
   await steps.store.updateDay(day.tradeDate, { dayStartEquity: start });
   const armed = await setPhase(steps.store, day.tradeDate, "armed", t.toISOString());
-  await steps.say("commands", `Armed for ${dayWord(day.tradeDate)}: borrowing cap ${cap} and long only are set at Alpaca; the day starts at ${start.toFixed(2)} dollars of equity.`);
+  await steps.say("commands", `Armed for ${dayWord(day.tradeDate)}: borrowing cap ${cap} and long only are set at Alpaca; the day starts at ${start.toFixed(2)} dollars of equity.${isLoadDay(armed) ? ` **This is a load day:** at most ${LOAD_MAX_POSITION_USD} dollars a position all day, churn in the load window (no entries before it), then the normal placeholder.` : ""}`);
   return armed;
 }

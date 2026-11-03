@@ -5,6 +5,7 @@ import { estimateFees, tafActive, type Fill, type FeeEstimate } from "./fees.ts"
 import { describeLimits } from "./limits.ts";
 import type { DayRecord, OrderRecord, RefusalRecord, StopFlag } from "./store.ts";
 import { flattenLegs } from "./sells.ts";
+import { centralClock } from "./time.ts";
 
 export interface SummaryInput {
   day: DayRecord;
@@ -15,9 +16,11 @@ export interface SummaryInput {
   peak: { exposureUsd: number; equity: number; ratio: number } | null;
   stop: StopFlag | null;
   flat: boolean | null; // null = not known
-  requests?: { requestsLastMinute: number; lowestBudget: number | null; peakTradesPerMinute: number; refusedByGovernor: number } | null;
+  requests?: { requestsLastMinute: number; lowestBudget: number | null; peakTradesPerMinute: number; refusedByGovernor: number; rateLimitAnswers?: number } | null;
   feesRunning?: number | null;
   listComplete?: boolean;
+  // A load day (load-mode.ts): the window is reported apart from the rest of the day.
+  loadWindow?: { start: Date; end: Date } | null;
 }
 
 const money = (x: number) => `${x >= 0 ? "+" : "-"}${Math.abs(x).toFixed(2)}`;
@@ -118,6 +121,45 @@ export function feeLines(date: string, fees: FeeEstimate, running: number | null
   ];
 }
 
+// The most entries decided in any 60 seconds.
+export function busiestMinute(rows: OrderRecord[]): number {
+  const ts = rows.map((r) => (r.createdAt ? Date.parse(r.createdAt) : NaN)).filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
+  let best = 0;
+  for (let i = 0, j = 0; i < ts.length; i++) {
+    while (ts[i]! - ts[j]! >= 60_000) j++;
+    best = Math.max(best, i - j + 1);
+  }
+  return best;
+}
+
+// One part of a load day (the window, or the rest of the day): entries, the busiest minute, speed, and how the entries closed.
+// Profit is counted for entries closed by their own take-profit or stop at Alpaca; an entry closed another way (the close-out,
+// the loss stop) is counted, without profit, as closed later.
+export function partLines(label: string, rows: OrderRecord[], alpacaOrders: Order[]): string[] {
+  const byId = new Map(alpacaOrders.map((o) => [o.clientOrderId, o]));
+  const sent = rows.filter((r) => r.status !== "failed" && !(r.status === "canceled" && !r.alpacaOrderId));
+  let tp = 0;
+  let stop = 0;
+  let other = 0;
+  let pnl = 0;
+  for (const r of sent) {
+    const o = byId.get(r.clientOrderId);
+    if (!o || !(o.filledQty > 0) || o.filledAvgPrice === null) continue;
+    const legs = flattenLegs(o).filter((l) => l.side === "sell" && l.filledQty > 0 && l.filledAvgPrice !== null);
+    const exitQty = legs.reduce((n, l) => n + l.filledQty, 0);
+    if (exitQty >= o.filledQty - 1e-9) {
+      pnl += legs.reduce((n, l) => n + l.filledQty * l.filledAvgPrice!, 0) - o.filledQty * o.filledAvgPrice;
+      if (legs.some((l) => l.type === "stop")) stop++;
+      else tp++;
+    } else other++;
+  }
+  const speed = speedStats(sent);
+  return [
+    `**${label}:** ${sent.length} entries sent, busiest minute ${busiestMinute(sent)}. Closed by take-profit ${tp}, by stop ${stop} (${money(pnl)} on those), closed later or still open ${other}.`,
+    speed ? `- speed: typical ${speed.median} ms, 95th percentile ${speed.p95} ms, slowest ${speed.slowest} ms` : "- speed: no orders",
+  ];
+}
+
 export function formatSummary(i: SummaryInput): string {
   const head = `**Daily summary for ${i.day.tradeDate}**`;
   if (!i.day.isTradingDay) return `${head}\nNot a trading day.`;
@@ -149,7 +191,14 @@ export function formatSummary(i: SummaryInput): string {
     speed ? `Speed (decision to Alpaca accepting the order, ${speed.n} orders): typical ${speed.median} ms, 95th percentile ${speed.p95} ms, slowest ${speed.slowest} ms` : "Speed: no orders were sent",
     ...feeLines(i.day.tradeDate, fees, i.feesRunning),
     i.peak ? `Borrowing used: peak exposure ${i.peak.exposureUsd.toFixed(0)} dollars, ${i.peak.ratio.toFixed(2)} times equity (approved cap ${i.day.limits.borrowingCap})` : "Borrowing used: no entries, none",
-    i.requests ? `Alpaca requests: about ${i.requests.requestsLastMinute} in the last minute at the close; lowest budget seen ${i.requests.lowestBudget === null ? "unknown" : Math.floor(i.requests.lowestBudget)} of 200; busiest minute ${i.requests.peakTradesPerMinute} orders; held back by the governor ${i.requests.refusedByGovernor} times` : "",
+    i.requests ? `Alpaca requests: about ${i.requests.requestsLastMinute} in the last minute at the close; lowest budget seen ${i.requests.lowestBudget === null ? "unknown" : Math.floor(i.requests.lowestBudget)} of 200; busiest minute ${i.requests.peakTradesPerMinute} orders; held back by the governor ${i.requests.refusedByGovernor} times${i.requests.rateLimitAnswers !== undefined ? `; rate-limit answers from Alpaca ${i.requests.rateLimitAnswers}` : ""}` : "",
+    ...(i.loadWindow
+      ? [
+          "**Load day**",
+          ...partLines(`Load window (${centralClock(i.loadWindow.start)} to ${centralClock(i.loadWindow.end)})`, i.stored.filter((r) => r.createdAt && Date.parse(r.createdAt) >= i.loadWindow!.start.getTime() && Date.parse(r.createdAt) < i.loadWindow!.end.getTime()), i.alpacaOrders),
+          ...partLines("Rest of the day", i.stored.filter((r) => !(r.createdAt && Date.parse(r.createdAt) >= i.loadWindow!.start.getTime() && Date.parse(r.createdAt) < i.loadWindow!.end.getTime())), i.alpacaOrders),
+        ]
+      : []),
     `Refused entries: ${refusedTotal}${refusedTotal ? ` (${[...reasons].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([r, n]) => `${r.slice(0, 70)}: ${n}`).join("; ")})` : ""}`,
     i.listComplete === false ? "**Warning: the day's order list was longer than I could read, so the totals above may be incomplete.**" : "",
     `Stop flag: ${i.stop?.on ? `ON (${i.stop.reason})` : "off"}. End of day: ${i.flat === null ? "flat status not checked" : i.flat ? "flat" : "**NOT FLAT**"}.`,

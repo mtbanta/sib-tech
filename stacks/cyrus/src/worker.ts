@@ -22,11 +22,12 @@ import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
 import { enforceDailyLoss, LossStopMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
+import { LOAD_NOTE_PHASE, LOAD_STATS_EVERY_MS, LOAD_SYNC_EVERY_MS, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
 import { BusyPlaceholder } from "./strategy.ts";
 import type { Trade } from "./stream.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
 import { computeDay, formatSummary } from "./summary.ts";
-import { addMinutes, centralClock, etDate, etInstant, sessionPhase } from "./time.ts";
+import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
 import { NOT_ADVICE } from "./discord.ts";
 import type { PingKind } from "./heartbeat.ts";
 
@@ -52,7 +53,7 @@ export interface WorkerDeps {
   now: () => Date;
   ping: (kind: PingKind) => Promise<boolean>;
   // Builds the day's live list (universe, daily bars, screen). Slow (minutes), so it runs in the background.
-  buildLiveList: () => Promise<LiveListResult>;
+  buildLiveList: (opts?: { load?: boolean }) => Promise<LiveListResult>;
   makeStream: (symbols: string[], onTrade: (t: Trade) => void) => StreamLike;
   sleep?: (ms: number) => Promise<void>;
   log?: (level: "info" | "warn" | "error", event: string, data?: Record<string, unknown>) => void;
@@ -606,7 +607,7 @@ export class Worker {
     const at = (minutesFromOpen: number) => now >= addMinutes(day.openAt!, minutesFromOpen);
     const alivePending = current.status === "approved" || current.status === "pending";
 
-    if (at(-45) && now < day.closeAt && alivePending && !current.phases.screen) this.background("screen", () => this.screenPhase(date));
+    if (at(-45) && now < day.closeAt && alivePending && !current.phases.screen) this.background("screen", () => this.screenPhase(date, isLoadDay(current)));
 
     // Arming: set long only and the approved cap at Alpaca. Until it works the gate refuses every entry.
     if (at(-5) && now < day.closeAt && current.status === "approved" && !current.phases.armed && now.getTime() - this.lastArmAttempt >= 10_000) {
@@ -646,7 +647,9 @@ export class Worker {
     // The loss stop is scheduled first, before anything else in the session that waits on the broker.
     if (inSession) this.scheduleLossStop(current, now);
     if (inSession && current.phases.armed) await this.refreshView(now);
-    if (inSession && now.getTime() - this.lastSync >= SYNC_EVERY_MS) {
+    // A load day syncs every 10 seconds (closed entries free their symbol sooner; a bare position is found sooner), all day.
+    const syncEvery = isLoadDay(current) ? LOAD_SYNC_EVERY_MS : SYNC_EVERY_MS;
+    if (inSession && now.getTime() - this.lastSync >= syncEvery) {
       this.lastSync = now.getTime();
       const risk = this.riskDeps();
       const dayNow = current;
@@ -666,7 +669,10 @@ export class Worker {
     }
     if (inSession || (day.closeAt && now < addMinutes(day.closeAt, 10))) {
       await this.flushDigest();
-      if (now.getTime() - this.lastStatsEvent >= 5 * 60_000 && inSession) {
+      // Around a load window (from a minute before to a minute after) the request statistics are written every minute.
+      const lw = isLoadDay(current) ? loadWindow(current) : null;
+      const nearWindow = lw !== null && now.getTime() >= lw.start.getTime() - 60_000 && now.getTime() < lw.end.getTime() + 60_000;
+      if (now.getTime() - this.lastStatsEvent >= (nearWindow ? LOAD_STATS_EVERY_MS : 5 * 60_000) && inSession) {
         this.lastStatsEvent = now.getTime();
         await this.d.store.addEvent("info", "governor_stats", { ...this.d.governor.stats(), tradesLastMinute: this.d.governor.tradesInLastMinute() }).catch(() => undefined);
       }
@@ -701,23 +707,31 @@ export class Worker {
       const sessionOn = today.isTradingDay && today.openAt !== null && today.closeAt !== null && now >= today.openAt && now < addMinutes(today.closeAt, 10);
       if (sessionOn) return today;
       const target = await ensureDay(steps, next.date);
-      await postLimitsRequest(steps, target);
+      await this.loadNoteIfNeeded(steps, await postLimitsRequest(steps, target), now);
       return today;
     }
     // Today is the next session and has not opened: post the request if the evening one was missed, then the
     // review at open - 60 and the reminder at open - 10.
     let cur = await postLimitsRequest(steps, today);
+    cur = await this.loadNoteIfNeeded(steps, cur, now);
     cur = await postMorningReview(steps, cur);
     cur = await postReminderIfNeeded(steps, cur);
     return cur;
   }
 
-  private async screenPhase(date: string): Promise<void> {
-    const { symbols: list, names } = await this.d.buildLiveList();
+  // Once per day record: if its request was posted before load mode existed (by an older release), show the day's mode now.
+  private async loadNoteIfNeeded(steps: MorningSteps, day: DayRecord, now: Date): Promise<DayRecord> {
+    if (!day.isTradingDay || !day.phases.request || day.phases.request === "skipped" || day.phases[LOAD_NOTE_PHASE] || day.status === "lapsed" || !day.openAt || now >= day.openAt) return day;
+    if (!(await steps.say("commands", `**Mode for ${dayWord(day.tradeDate)}** (new: load mode, added after that day's request was posted):\n${loadLine(day)}\n${NOT_ADVICE}`))) return day;
+    return setPhase(this.d.store, day.tradeDate, LOAD_NOTE_PHASE, now.toISOString());
+  }
+
+  private async screenPhase(date: string, load = false): Promise<void> {
+    const { symbols: list, names } = await this.d.buildLiveList(load ? { load: true } : undefined);
     await this.d.store.updateDay(date, { liveList: list });
     await this.d.store.setControl(`live_names:${date}`, names).catch(() => undefined);
     await setPhase(this.d.store, date, "screen", this.d.now().toISOString());
-    await this.say("trading", `Today's live list (${list.length}):\n${list.length ? formatLiveList(list, names) : "(empty, nothing passed the screen)"}\n${NOT_ADVICE}`);
+    await this.say("trading", `Today's live list (${list.length})${load ? ", a load day: cheap, heavily traded names" : ""}:\n${list.length ? formatLiveList(list, names) : "(empty, nothing passed the screen)"}\n${NOT_ADVICE}`);
   }
 
   // Keeps the cached broker view fresh while the session runs: account and positions every few seconds (2 requests),
@@ -744,7 +758,8 @@ export class Worker {
 
   private startStream(day: DayRecord, symbols: string[]): void {
     this.streamDate = day.tradeDate;
-    this.strategy = new BusyPlaceholder(symbols);
+    // A load day: the churn rules apply while its window is on (read from the latest copy of the day, so `load off` takes effect).
+    this.strategy = isLoadDay(day) ? new BusyPlaceholder(symbols, { loadActive: (t) => inLoadWindow(this.lastDay?.tradeDate === day.tradeDate ? this.lastDay : day, t) }) : new BusyPlaceholder(symbols);
     this.stream = this.d.makeStream(symbols, (t) => this.onTrade(t));
     this.stream.start();
     this.d.log?.("info", "stream_started", { symbols: symbols.length });
@@ -813,6 +828,7 @@ export class Worker {
       requests: this.d.governor.stats(),
       feesRunning: running.total,
       listComplete: listed.complete,
+      loadWindow: isLoadDay(day) ? loadWindow(day) : null,
     });
     await this.say("trading", text);
     await setPhase(this.d.store, date, "summary", this.d.now().toISOString());

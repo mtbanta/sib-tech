@@ -26,11 +26,12 @@ export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryS
   let streamStarts = 0;
   let streamStops = 0;
   let screens = 0;
+  const screenOpts: Array<{ load?: boolean } | undefined> = [];
   const worker = new Worker({
     settings, broker, store, bot, governor,
     now: getNow,
     ping: async (k) => (pings.push(k), true),
-    buildLiveList: async () => (screens++, opts.liveList ? { symbols: opts.liveList, names: {} as Record<string, string> } : { symbols: ["AAA", "BBB"], names: { AAA: "Alpha Corp", BBB: "Beta" } as Record<string, string> }),
+    buildLiveList: async (o?: { load?: boolean }) => (screens++, screenOpts.push(o), opts.liveList ? { symbols: opts.liveList, names: {} as Record<string, string> } : { symbols: ["AAA", "BBB"], names: { AAA: "Alpha Corp", BBB: "Beta" } as Record<string, string> }),
     makeStream: (_symbols, cb): StreamLike => {
       onTrade = cb;
       return { start: () => void streamStarts++, stop: () => void streamStops++, status: () => "live" };
@@ -47,6 +48,7 @@ export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryS
     // Feeds a run of trades for one symbol, one per second from a start time: enough for the busy placeholder to signal.
     ramp: async (symbol: string, prices: number[], startT: string) => { for (let i = 0; i < prices.length; i++) { setNow(new Date(z(startT).getTime() + i * 1000)); onTrade({ symbol, price: prices[i]!, size: 100, time: getNow().toISOString() }); await settle(); } },
     counts: () => ({ streamStarts, streamStops, screens }),
+    screenOpts,
     said: (ch: string) => bot.posts.filter((p) => p.channel === ch).map((p) => p.text),
     ownerSays: (text: string, t: string) => bot.say(text, z(t)),
   };

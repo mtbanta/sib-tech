@@ -18,6 +18,7 @@ import type { BrokerView } from "./broker-view.ts";
 import type { GateBroker } from "./broker.ts";
 import type { Governor } from "./governor.ts";
 import { MAX_TRADES_PER_MINUTE, checkEntry, type EntryContext } from "./limits.ts";
+import { LOAD_MAX_POSITION_USD, beforeLoadWindow, isLoadDay, loadWindow } from "./load-mode.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, type NotFlatState, type OrderRecord, type StopFlag, type Store } from "./store.ts";
 import type { Signal } from "./strategy.ts";
 import { centralTime, etDate, minutesBetween } from "./time.ts";
@@ -52,7 +53,7 @@ export function clientOrderIdFor(date: string, symbol: string, n: number): strin
 
 // Refusals that are normal flow control at volume (a full minute, a held name). They are counted and written down
 // as one line per reason per minute, not one row each.
-const FLOW_REASONS = [/^my commands /, /^trades-per-minute/, /^holding back for safety/, /^already holding/, /^an entry for this symbol is still working/, /^the signal waited/, /^Alpaca refused this symbol a moment ago/];
+const FLOW_REASONS = [/^load day: entries start/, /^my commands /, /^trades-per-minute/, /^holding back for safety/, /^already holding/, /^an entry for this symbol is still working/, /^the signal waited/, /^Alpaca refused this symbol a moment ago/];
 
 const isActive = (o: OrderRecord) => !o.closedAt && (o.status === "intent" || o.status === "submitted" || o.status === "filled");
 
@@ -161,6 +162,9 @@ export class OrderGate {
     if (!limits) return this.refuse(date, symbol, "no limits approved for today");
     const blocked = this.d.entryBlock?.();
     if (blocked) return this.refuse(date, symbol, blocked);
+    // Load day (load-mode.ts): no entries before the load window, and at most 75 dollars an entry all day.
+    if (beforeLoadWindow(day, now)) return this.refuse(date, symbol, `load day: entries start at ${centralTime(loadWindow(day)!.start)} Central`);
+    const dayLimits = isLoadDay(day) ? { ...limits, maxPositionUsd: Math.min(limits.maxPositionUsd, LOAD_MAX_POSITION_USD) } : limits;
 
     // Strategy work never spends Alpaca's last request headroom: if the snapshot would have to ask Alpaca for something
     // and the budget is down to the safety reserve, refuse before any request is made. After a failed refresh, wait a
@@ -208,7 +212,7 @@ export class OrderGate {
     const ctx: EntryContext = {
       symbol,
       price: signal.price,
-      limits,
+      limits: dayLimits,
       stopFlag: false,
       marketOpen: clock.isOpen,
       minutesSinceOpen: minutesBetween(day.openAt, now),

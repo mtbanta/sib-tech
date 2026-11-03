@@ -819,3 +819,61 @@ Same universe (no ETFs, no test issues).
 6. Logging only: per-minute governor stats during the window and a 429 counter.
 
 Each gets a test that fails without it, plus a test that a normal day is unchanged. Then the secret scan, the full suite and one build-reviewer round. Nothing else changes.
+
+## Michael's approval of load mode (2026-11-03, afternoon)
+
+Approved as proposed, with three decisions:
+1. **10 second order check:** approved, load days only for now. Normal days stay at 30 seconds; the normal-day change stays in Next Steps.
+2. **Statistics every minute during the window:** approved.
+3. **After 9:00 AM on a load day:** the normal placeholder for the rest of the day, keeping the 75 dollar cap in code all day, so the 2:55 close-out runs with positions held. The summary reports the window (8:45 to 9:00) and the rest of the day separately.
+
+Build with a test that fails without each change and a test that a normal day is unchanged; secret scan, full suite, one build-reviewer round. Round 9 deploys on its own after 3:00 PM. Load mode deploys as a separate release only if it passes, before 7:30 AM Wednesday.
+
+## Load mode (built 2026-11-03, afternoon; code only, not deployed)
+
+**New file `src/load-mode.ts`** holds every rule and number in one place.
+- **The switch** is stored in the day record's phases (`load`: `on`, `ended` or absent). This is not a fifth limit, so the four limits' decisions, carry-forward and only-tighten-after-Armed rules are untouched. A normal day is a day without the marker.
+- `isLoadDay`, `loadWindow` (15 to 30 minutes after the open), `inLoadWindow`, `beforeLoadWindow` and `loadLine` (line 5 of the limits text).
+- The constants: 75 dollars, 5 second cooldown, exits 3 cents up and 4 cents down, sync 10 seconds, statistics 60 seconds.
+- The load screen: 5 to 35 dollars, at least 25 million dollars a day, ranked by shares, 30 names.
+
+**Changes, all only on a load day:**
+1. **Switch** (`morning.ts` `parseCommand`, `decideLoad`; `commands.ts`):
+   - `load on` / `load off`, for the next trading day before "Armed", or the running day after it.
+   - Refused if older than the day's request. `load on` closes at the morning screen (45 minutes before the open), because the cheap list is built there.
+   - After "Armed" only `load off`, which sets `ended`: the window stops, the 75 dollar cap and the 10 second sync stay (only the tighter direction is allowed after Armed).
+   - Never carried forward: each day's record starts without it. `approve` still covers the four limits.
+   - Line 5 appears in the evening request, the morning review, the reminder and every limits reply. The Armed message and `status` state the mode, and `help` lists the command.
+   - `postLimitsRequest` marks the request as already showing the mode. The worker posts a **one-time note** for a day whose request was posted by an older release: Wednesday's, after tonight's deploy.
+2. **Screen** (`screen.ts` `rankBy: "shares"`; `main.ts` `buildLiveList({ load })`; the worker passes `load` on a load day). A normal day's screen is unchanged (`rankBy` unset).
+3. **Strategy** (`strategy.ts`): while the window is on, a 5 second cooldown and exits 3 cents up and 4 cents down. Outside it, and on normal days, unchanged. The worker reads the window from the latest copy of the day, so `load off` takes effect at once.
+4. **Gate** (`gate.ts`):
+   - Before the window on a day still switched on: refused "load day: entries start at 8:45:00 AM Central", counted per minute rather than one row each.
+   - All load day (`on` or `ended`): the position limit used is the lower of the approved one and 75 dollars.
+   - Every entry still goes out as a bracket with its take-profit and stop at Alpaca.
+5. **Order sync** (`worker.ts`): every 10 seconds all load day (30 on normal days). I read "load days only" as the whole load day, so held positions keep the faster missing-exit check until the close.
+6. **Logging only:** `governor_stats` written every minute from a minute before the window to a minute after (otherwise every 5 minutes). The governor counts Alpaca's rate-limit answers (`rateLimitAnswers`, the clock's own bucket excluded), shown in the summary.
+7. **Summary** (`summary.ts` `partLines`): on a load day, a "Load day" part with the window and the rest of the day apart. Each shows entries sent, busiest minute, how entries closed (take-profit, stop, later), the profit on those closed by their own exits, and speed.
+
+**Found while testing:** the mode line, repeated in each reply to a several-line message, pushed the combined reply past Discord's 2,000-character limit and split it in two. The lines were shortened ("5. mode: normal (`load on` makes it a load day)").
+
+**Tests:** `test/load-mode.test.ts`, 12 tests, including "a normal day is unchanged" (an entry before 8:45, the approved size, the normal exits, the normal screen, sync every 30 seconds, statistics every 5 minutes). Full suite **334 pass**, type check clean; the round 8 and round 9 rehearsals are unchanged. Test helper: the rig records which screen the worker asked for.
+
+| Change taken out | Tests that fail |
+| :-- | :-- |
+| `load` not understood | 6 tests (switch, screen, gate, sync, statistics, refusals) |
+| `load on` accepted after the screen time | switch refusals |
+| `load on` accepted after Armed | switch refusals |
+| no line 5 | switch; evening request |
+| Armed message silent | switch |
+| no one-time note | one-time note |
+| worker asks for the normal screen | screen |
+| screen ranks by the old ratio | screen |
+| no entry window | gate |
+| no 75 dollar cap | gate |
+| strategy not given the window | gate |
+| strategy churn off | gate; strategy |
+| sync every 30 seconds on a load day | sync |
+| statistics every 5 minutes around the window | statistics |
+| no rate-limit counter | counter |
+| no summary split | summary |

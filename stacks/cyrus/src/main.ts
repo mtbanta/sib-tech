@@ -10,6 +10,7 @@ import { describeError, makeLogger } from "./log.ts";
 import { makePool, PgStore } from "./pg-store.ts";
 import { makeRedactor } from "./redact.ts";
 import { DEFAULT_SCREEN, liveListSize, screen } from "./screen.ts";
+import { LOAD_SCREEN } from "./load-mode.ts";
 import { TradeStream } from "./stream.ts";
 import { fetchUniverseWithNames } from "./universe.ts";
 import { CachingStore } from "./caching-store.ts";
@@ -38,13 +39,14 @@ const logAndStore: ConstructorParameters<typeof Worker>[0]["log"] = (level, even
   if (shouldStoreEvent(level, event)) void store.addEvent(level, event, JSON.parse(redact(JSON.stringify(fields ?? {})))).catch(() => undefined);
 };
 
-async function buildLiveList(): Promise<{ symbols: string[]; names: Record<string, string> }> {
+async function buildLiveList(opts: { load?: boolean } = {}): Promise<{ symbols: string[]; names: Record<string, string> }> {
   const { symbols: universe, names } = await fetchUniverseWithNames();
   const end = new Date(Date.now() - 16 * 60_000).toISOString(); // free history must be 15 minutes old
   const start = new Date(Date.now() - 12 * 86_400_000).toISOString();
   const bars = await data.dailyBars(universe, start, end, "sip"); // history older than 15 minutes is consolidated and free
-  const size = liveListSize(DEFAULT_SCREEN.listSize, data.feed);
-  const symbols = screen(bars, { ...DEFAULT_SCREEN, listSize: size }).map((c) => c.symbol);
+  const base = opts.load ? LOAD_SCREEN : DEFAULT_SCREEN; // a load day: 30 cheap, heavily traded names (load-mode.ts)
+  const size = liveListSize(base.listSize, data.feed);
+  const symbols = screen(bars, { ...base, listSize: size }).map((c) => c.symbol);
   return { symbols, names: Object.fromEntries(symbols.filter((s) => names.has(s)).map((s) => [s, names.get(s)!])) };
 }
 
