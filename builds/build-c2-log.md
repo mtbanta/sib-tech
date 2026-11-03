@@ -683,3 +683,11 @@ On `a7a8639..5c31aa3`, from the repo and the local suite only. No blocking findi
 - The flag is still read once per sync (unchanged from round 8). The reviewer agreed that leaving it alone was right under the new standing rule: a change would touch `syncOrders`.
 - **For Michael:** a plain `stop` sent after a loss stop overwrites the loss stop's reason. From then on the retry stops and the missing-exit check takes over, with one liquidation per position. With many positions whose sells keep failing, that brings back roughly v5's request load. The same happens on a `resume` while sells are still refused, which is the behaviour Michael asked for. Not a regression: it is how v5 behaves today.
 - The round 9 test raises equity above the line before `resume`; otherwise the stop fires again, as happened in production at 10:31.
+
+## Next steps for after Wednesday 2026-11-04's session (Michael, 2026-11-03); no code changes for these today
+
+1. **Faster order check.** Run the order sync (the missing-exit check and the record update) more often than every 30 seconds, fitted inside the request budget. Propose an interval with its request math before coding.
+2. **The round 9 reviewer's note.** A plain `stop` after the loss stop, or `resume` while sales are refused, brings back v5's request load (the missing-exit check, one liquidation per position). Propose a fix.
+3. **Wording from 10:31 AM.** A `resume` while over the loss limit should say the stop stays on until the next trading day. "Sold everything" should not appear when the account was already flat.
+
+Under the standing rule, each is proposed to Michael before any money-touching code changes.

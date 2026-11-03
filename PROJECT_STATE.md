@@ -158,7 +158,15 @@ The full record of each run lives in `runs/`. This table is the index you read f
 
 ## Next Steps
 
-As of 2026-11-02 (night), after build C2 round 6 and the deploy of release v5:
+As of 2026-11-03 (midday), after build C2 round 9 passed review (deploy after the close; outcome recorded in Current Stage):
+
+**For after Wednesday 2026-11-04's session, not before (Michael, 2026-11-03). No code changes for these until then; under the standing rule, each is proposed to Michael first:**
+
+1. **Faster order check.** Run the order sync (the missing-exit check, which sells a position left without a protective stop, plus the record update) more often than every 30 seconds, inside the request budget. Propose an interval with its request math before coding. Starting figures: each sync costs at least 2 requests (the day's order list, 1 page per 500 orders, and the positions), plus the sweep while stopped. The worker's other standing work is about 35 a minute, the loss stop and its retries at most 60, and the governor keeps 80 in reserve.
+2. **The reviewer's round 9 note.** A plain `stop` sent after the loss stop has fired, or a `resume` while Alpaca still refuses sales, hands the selling back from the loss stop's budgeted retry to the missing-exit check, one liquidation per position, which brings back v5's request load when many positions cannot be sold. Propose a fix.
+3. **Wording, from Michael's 10:31 AM note.** A `resume` sent while the day's loss is over the limit should reply that the stop stays on until the next trading day, not "Stop cleared". When the account is already flat, the loss stop message should not say "sold everything".
+
+As of 2026-11-02 (night), after build C2 round 6 and the deploy of release v5 (superseded by the block above):
 
 1. Done (close-out, about 10 PM Central): Tuesday's limits are approved (position 2000, loss 500, trades 100 a minute, cap 1). Michael rotated the Fly token and revoked the old one; the new one works. v5 runs Tuesday unchanged. After Tuesday's close: review the session, fix round 6's start-up finding in `b764741`, then a fresh review round before any deploy.
 2. Tuesday runs on release v5 (the round 5 code, `ac4a576`): trades per minute, the busy placeholder with bracket entries, the checked sell path and rebuilt close-out, the loss stop on its own schedule, the unsaved-stop memory and the Discord-read catch. It still has the three round 5 findings (no query time limit or watchdog; the loss stop sale waits on the flag write; a failed day read switches the loss stop off).
