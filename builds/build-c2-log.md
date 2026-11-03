@@ -660,3 +660,26 @@ Approved: review round 9, scoped only to round 8's blocking finding. Tie the pau
   5. Within the next missing-exit check AAA is sold, with the alert "AAA had no live protective stop, so I sold it."
   - **With the fix taken out (the round 8 code), it fails:** AAA is still held.
 - Full suite **322 pass**, type check clean. The 40-position rehearsal is unchanged: busiest minute 172, 0 rate-limit answers, flat.
+
+## Review round 9 (2026-11-03, during market hours): PASS. Cleared to deploy after 3:00 PM Central.
+
+On `a7a8639..5c31aa3`, from the repo and the local suite only. No blocking findings. Checks 2, 7 and 10 clean. Full suite 322 pass, type check clean. The diff is limited to what Michael asked (the only code change is `lossStopInForce`), so it respects the new standing rule.
+
+**Round 8's finding is closed in every case the reviewer checked:**
+
+| Case | Result | How checked |
+| :-- | :-- | :-- |
+| `resume` saved | The flag is off, so the missing-exit check sells the bare position with its alert | The round 9 test |
+| Unsaved stop held only in the caching store | Counts as in force: in 90 seconds the missing-exit check made 0 sales while the retry kept going; after `resume`, AAA was sold with the alert | Scratch test |
+| Flag unreadable | Falls back to the in-process memory, the same condition under which the retry sells, so there is no gap | Read, not run |
+| Michael's plain `stop` | The missing-exit check stays on | Read |
+| Restart after a loss stop | The saved flag decides, and the `rederive` path finds an unsaved stop again | Read |
+| Re-fire after `resume` (as at 10:31 today) | The stand-aside comes back, the missing-exit check makes 0 sales, the budgeted retry continues | Scratch test |
+
+- **Round 8's request-storm problem is not reopened:** the 40-position test still passes (busiest minute 172 requests, 0 rate-limit answers). With `lossStopInForce` forced to false it fails (398 requests a minute, 1,187 rate-limit answers), so the stand-aside is still needed and still guarded.
+- **The round 9 test fails on the round 8 code** ("AAA, left without a protective stop, is sold": 1 !== 0).
+
+**Non-blocking notes:**
+- The flag is still read once per sync (unchanged from round 8). The reviewer agreed that leaving it alone was right under the new standing rule: a change would touch `syncOrders`.
+- **For Michael:** a plain `stop` sent after a loss stop overwrites the loss stop's reason. From then on the retry stops and the missing-exit check takes over, with one liquidation per position. With many positions whose sells keep failing, that brings back roughly v5's request load. The same happens on a `resume` while sells are still refused, which is the behaviour Michael asked for. Not a regression: it is how v5 behaves today.
+- The round 9 test raises equity above the line before `resume`; otherwise the stop fires again, as happened in production at 10:31.
