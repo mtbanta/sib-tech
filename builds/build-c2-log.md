@@ -691,3 +691,14 @@ On `a7a8639..5c31aa3`, from the repo and the local suite only. No blocking findi
 3. **Wording from 10:31 AM.** A `resume` while over the loss limit should say the stop stays on until the next trading day. "Sold everything" should not appear when the account was already flat.
 
 Under the standing rule, each is proposed to Michael before any money-touching code changes.
+4. **A load day on Alpaca paper (a proposal for Michael first, no code until he approves).** Reach 100 entries a minute for about 15 minutes. The proposal must cover:
+   - **Churn:** hold times, and which of the 30 live symbols.
+   - **Position size:** small enough that spread and fees cannot trip the loss stop.
+   - **Measurements:** requests a minute from the 5-minute `governor_stats` events, the lowest remaining stock, any rate-limit errors, decision-to-acceptance times, fees, and the close-out.
+   - **Expected cost** in dollars.
+   - **The result that would show the 200-a-minute budget does not hold.**
+
+   Starting estimates (to be worked through in the proposal):
+   - One position per symbol at a time means an average hold under about 18 seconds across 30 symbols.
+   - Tuesday's trading cost was about 0.27 percent of round-trip value, so about 1,500 entries needs positions of about 75 dollars or less to keep it near 300 dollars.
+   - SEC fee about 2.30 dollars.

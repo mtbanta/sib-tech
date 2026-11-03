@@ -165,6 +165,17 @@ As of 2026-11-03 (midday), after build C2 round 9 passed review (deploy after th
 1. **Faster order check.** Run the order sync (the missing-exit check, which sells a position left without a protective stop, plus the record update) more often than every 30 seconds, inside the request budget. Propose an interval with its request math before coding. Starting figures: each sync costs at least 2 requests (the day's order list, 1 page per 500 orders, and the positions), plus the sweep while stopped. The worker's other standing work is about 35 a minute, the loss stop and its retries at most 60, and the governor keeps 80 in reserve.
 2. **The reviewer's round 9 note.** A plain `stop` sent after the loss stop has fired, or a `resume` while Alpaca still refuses sales, hands the selling back from the loss stop's budgeted retry to the missing-exit check, one liquidation per position, which brings back v5's request load when many positions cannot be sold. Propose a fix.
 3. **Wording, from Michael's 10:31 AM note.** A `resume` sent while the day's loss is over the limit should reply that the stop stays on until the next trading day, not "Stop cleared". When the account is already flat, the loss stop message should not say "sold everything".
+4. **A load day on Alpaca paper, proposed to Michael first (no code until he approves).** Aim: actually reach 100 entries a minute for about 15 minutes. The proposal must cover:
+   - **Churn:** how the placeholder churns (hold times, which of the 30 live symbols).
+   - **Position size:** small enough that spread and fees cannot trip the loss stop.
+   - **Measurements:** requests a minute from the 5-minute logs, the lowest remaining stock, any rate-limit errors, decision-to-acceptance times, fees, and the close-out.
+   - **Expected cost** in dollars.
+   - **What result would show the 200-a-minute budget does not hold.**
+
+   Starting estimates from Tuesday's data, to be worked through properly in the proposal:
+   - The gate allows one position per symbol at a time, so 100 entries a minute across 30 symbols needs an average hold under about 18 seconds.
+   - Tuesday's trading cost (spread, slippage, the stale free price) was about 0.27 percent of each round trip's value (about 397 dollars on 145,600 dollars of sales). About 1,500 entries in 15 minutes then needs positions of roughly 75 dollars or less to keep that cost near 300 dollars, under the 500 dollar loss stop.
+   - SEC fee on about 110,000 dollars of sales: about 2.30 dollars.
 
 As of 2026-11-02 (night), after build C2 round 6 and the deploy of release v5 (superseded by the block above):
 
