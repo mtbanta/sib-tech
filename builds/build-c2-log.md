@@ -744,3 +744,5 @@ Individual symbols ranged from 0.04 percent (SHOP, MRVL) to 1.0 percent (AXSM). 
 **Not proposed:** fractional entries with a separate stop placed after the fill. Each entry would be unprotected until its stop is placed, a change to how protection works (money-touching, and against "every entry carries a protective order at Alpaca").
 
 All of these are paper dollars, and estimates from one day's 91 trips. The load day itself is the measurement.
+
+**Michael's choice (2026-11-03): option A.** A live list of 30 symbols priced well under 75 dollars, positions at most 75 dollars, today's 500 dollar loss stop unchanged. Expected cost about 180 to 360 dollars, central about 225, plus about 2 dollars of fees (paper). The detailed proposal (how the placeholder churns and its hold times, the screen change that picks the cheap list, what is measured, and the result that would show the 200-a-minute budget does not hold) goes to Michael after Wednesday's session, before any code.
