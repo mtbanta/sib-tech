@@ -11,7 +11,9 @@ import { makePool, PgStore } from "./pg-store.ts";
 import { makeRedactor } from "./redact.ts";
 import { DEFAULT_SCREEN, liveListSize, screen } from "./screen.ts";
 import { TradeStream } from "./stream.ts";
-import { fetchUniverse } from "./universe.ts";
+import { fetchUniverseWithNames } from "./universe.ts";
+import { CachingStore } from "./caching-store.ts";
+import { Governor } from "./governor.ts";
 import { FeedAlerter } from "./feed-alert.ts";
 import { Worker } from "./worker.ts";
 import { recordStart, releaseLabel } from "./start-note.ts";
@@ -22,24 +24,31 @@ const redact = makeRedactor(secretValues(settings, process.env));
 const log = makeLogger(redact);
 
 const pool = makePool(settings.supabaseDbUrl!);
-const store = new PgStore(pool);
-const broker = new AlpacaTrading(settings);
+// The cache sits in front of the database so the order gate does not wait on it for every decision (see caching-store.ts).
+const store = new CachingStore(new PgStore(pool));
+const governor = new Governor();
+const broker = new AlpacaTrading(settings, { onRate: (info) => governor.observe(info) });
 const data = new AlpacaData(settings);
 const bot = new DiscordBot(settings, redact);
 
-// Warnings and errors also go into the database's run log (already redacted).
+// Warnings and errors, and the info events that tell the story of a day (commands, limit decisions, arming, the
+// close-out, unprotected positions, the start), go into the database's run log (already redacted). Monday 2026-11-02
+// left the table empty because only warnings and errors were stored. Per-trade events (signals, each entry) are not
+// stored here: the orders table already has every entry, and a busy day would bury the log.
+const STORED_INFO_EVENTS = new Set(["command", "limits_decision", "stream_started", "worker_started", "worker_stopping", "unprotected_position", "loss_stop_sale_retried", "future_days_reset", "sell_refused", "sell_failed", "order_list_incomplete", "entries_swept_while_stopped", "order_record_update_failed"]);
 const logAndStore: ConstructorParameters<typeof Worker>[0]["log"] = (level, event, fields) => {
   log(level, event, fields);
-  if (level !== "info") void store.addEvent(level, event, JSON.parse(redact(JSON.stringify(fields ?? {})))).catch(() => undefined);
+  if (level !== "info" || STORED_INFO_EVENTS.has(event)) void store.addEvent(level, event, JSON.parse(redact(JSON.stringify(fields ?? {})))).catch(() => undefined);
 };
 
-async function buildLiveList(): Promise<string[]> {
-  const universe = await fetchUniverse();
+async function buildLiveList(): Promise<{ symbols: string[]; names: Record<string, string> }> {
+  const { symbols: universe, names } = await fetchUniverseWithNames();
   const end = new Date(Date.now() - 16 * 60_000).toISOString(); // free history must be 15 minutes old
   const start = new Date(Date.now() - 12 * 86_400_000).toISOString();
   const bars = await data.dailyBars(universe, start, end, "sip"); // history older than 15 minutes is consolidated and free
   const size = liveListSize(DEFAULT_SCREEN.listSize, data.feed);
-  return screen(bars, { ...DEFAULT_SCREEN, listSize: size }).map((c) => c.symbol);
+  const symbols = screen(bars, { ...DEFAULT_SCREEN, listSize: size }).map((c) => c.symbol);
+  return { symbols, names: Object.fromEntries(symbols.filter((s) => names.has(s)).map((s) => [s, names.get(s)!])) };
 }
 
 try {
@@ -54,6 +63,7 @@ try {
 const worker = new Worker({
   settings,
   broker,
+  governor,
   store,
   bot,
   now: () => new Date(),

@@ -2,9 +2,22 @@
 // Reading the command channel is a later piece.
 import type { Redactor } from "./redact.ts";
 
+export const PAPER_ONLY = "Paper trading only.";
+// For messages that are research input (the suggested limits, the live list): they offer something for Michael to
+// decide on. A message that reports something the bot has already DONE (a sale, a close-out) carries only
+// PAPER_ONLY, because "never an instruction to act" does not fit a report of an action taken.
 export const NOT_ADVICE = "Paper trading only. Research input for a human decision, never an instruction to act.";
 
 const MAX_CONTENT = 2000;
+
+// The one place every outgoing message passes through: "Paper trading only." is on all of them, and the text is
+// cut to Discord's limit with that line kept (the cut falls on the body, not on the footer).
+export function finalizeMessage(text: string, max = MAX_CONTENT): string {
+  const footer = text.includes(PAPER_ONLY) ? "" : `\n${PAPER_ONLY}`;
+  const room = max - footer.length;
+  const body = text.length > room ? `${text.slice(0, room - 12)}\n(cut short)` : text;
+  return body + footer;
+}
 
 export interface PostResult {
   ok: boolean;
@@ -19,7 +32,7 @@ export async function postWebhook(
   redact: Redactor,
   fetchImpl: typeof fetch = fetch,
 ): Promise<PostResult> {
-  const content = redact(text).slice(0, MAX_CONTENT);
+  const content = finalizeMessage(redact(text));
   for (let attempt = 0; attempt < 2; attempt++) {
     let res: Response;
     try {

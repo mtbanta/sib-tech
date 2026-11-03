@@ -4,7 +4,7 @@ import { etDate, etInstant, centralClock } from "../src/time.ts";
 import { ensureDay, formatLimitsRequest, parseCommand, decideLimits, NextSessionFinder } from "../src/morning.ts";
 import { CommandProcessor } from "../src/commands.ts";
 import { MemoryStore, CONTROL_STOP, CONTROL_COMMAND_CURSOR, type StopFlag } from "../src/store.ts";
-import { FakeBroker, FakeBot, order, settings } from "./helpers.ts";
+import { FakeBroker, FakeBot, liquidatorFor, order, settings } from "./helpers.ts";
 
 const D = "2026-11-02"; // a Monday, after daylight saving ends (winter time)
 const OPEN = new Date("2026-11-02T14:30:00Z"); // 9:30 New York = 14:30 UTC in winter
@@ -46,7 +46,7 @@ test("a weekend is recorded as not a trading day", async () => {
 test("the request message names every limit and says what silence means", async () => {
   const day = await ensureDay({ store: new MemoryStore(), broker: new FakeBroker() }, D);
   const text = formatLimitsRequest(day);
-  for (const w of ["position", "loss", "trades", "cap", "8:30 AM CT", "Monday 2026-11-02", "will not trade that day", "change any of them again until the open", "never an instruction to act"]) assert.ok(text.includes(w), w);
+  for (const w of ["position", "loss", "trades", "cap", "8:30 AM CT", "Monday 2026-11-02", "will not trade that day", "Until the `Armed` message", "orders a minute", "several commands in one message", "never an instruction to act"]) assert.ok(text.includes(w), w);
   assert.ok(!text.includes("Good morning"), "an evening request is not a good morning");
   assert.ok(formatLimitsRequest(day, "morning").includes("Good morning"));
 });
@@ -67,7 +67,7 @@ async function setup() {
   const broker = new FakeBroker();
   const bot = new FakeBot();
   let now = new Date("2026-11-02T12:30:00Z"); // 7:30 AM Central, two hours before the open
-  const proc = new CommandProcessor({ settings, store, broker, bot, now: () => now, sessions: new NextSessionFinder(broker) });
+  const proc = new CommandProcessor({ settings, store, broker, bot, liquidator: liquidatorFor(broker, async () => true, () => new Date()), now: () => now, sessions: new NextSessionFinder(broker) });
   const day = await ensureDay({ store, broker }, D);
   await store.updateDay(D, { phases: { request: "2026-11-02T12:00:00.000Z" } });
   await proc.poll(); // first run sets the cursor
@@ -79,7 +79,7 @@ test("first poll ignores history; later owner messages are handled", async () =>
   const broker = new FakeBroker();
   const bot = new FakeBot();
   bot.say("stop", new Date("2026-11-02T11:00:00Z")); // old, before we started
-  const proc = new CommandProcessor({ settings, store, broker, bot, now: () => new Date("2026-11-02T12:30:00Z"), sessions: new NextSessionFinder(broker) });
+  const proc = new CommandProcessor({ settings, store, broker, bot, liquidator: liquidatorFor(broker, async () => true, () => new Date()), now: () => new Date("2026-11-02T12:30:00Z"), sessions: new NextSessionFinder(broker) });
   assert.equal(await proc.poll(), 0);
   assert.equal(await store.getControl(CONTROL_STOP), null, "history is never acted on");
   bot.say("stop", new Date("2026-11-02T12:31:00Z"));
@@ -110,7 +110,7 @@ test("stop sets the flag and cancels only unfilled entries, never a protective s
   await s.proc.poll();
   const cancelled = s.broker.calls.filter((c) => c.fn === "cancelOrder").map((c) => c.args[0]);
   assert.deepEqual(cancelled, ["00000000-0000-0000-0000-00000000000a"]);
-  assert.equal(s.broker.count("closeAllPositions"), 0);
+  assert.equal(s.broker.count("submitSell"), 0);
   assert.ok(s.bot.last().includes("Stopped"));
   s.bot.say("resume", s.now);
   await s.proc.poll();
@@ -119,10 +119,13 @@ test("stop sets the flag and cancels only unfilled entries, never a protective s
 
 test("flatten sets the stop flag and sells everything", async () => {
   const s = await setup();
+  s.broker.positions = [{ symbol: "AAA", qty: 5, marketValue: 500, avgEntryPrice: 100, unrealizedPl: 0 }];
   s.bot.say("flatten", s.now);
   await s.proc.poll();
   assert.equal((await s.store.getControl<StopFlag>(CONTROL_STOP))?.on, true);
-  assert.equal(s.broker.count("closeAllPositions"), 1);
+  assert.equal(s.broker.count("submitSell"), 1);
+  assert.equal(s.broker.positions.length, 0);
+  assert.equal(s.broker.count("cancelAllOrders"), 1);
 });
 
 test("approve, with an overrule, before the open: approved only when all four are decided", async () => {
@@ -134,7 +137,7 @@ test("approve, with an overrule, before the open: approved only when all four ar
   let day = (await s.store.getDay(D))!;
   assert.equal(day.status, "pending", "three of four decided is not enough");
   assert.equal(day.limits.dailyLossStopUsd, 150);
-  assert.equal(day.limits.maxTradesPerDay, 5);
+  assert.equal(day.limits.maxTradesPerMinute, 5);
   s.bot.say("approve cap", s.now);
   await s.proc.poll();
   day = (await s.store.getDay(D))!;
@@ -224,7 +227,7 @@ test("the pure decision refuses on a non-trading day", () => {
   assert.equal(r.ok, false);
 });
 function settingsLimits() {
-  return { maxPositionUsd: 1000, dailyLossStopUsd: 200, maxTradesPerDay: 10, borrowingCap: 1 };
+  return { maxPositionUsd: 1000, dailyLossStopUsd: 200, maxTradesPerMinute: 10, borrowingCap: 1 };
 }
 
 test("status reports the stop flag, limits and positions, and never a secret", async () => {
@@ -232,7 +235,8 @@ test("status reports the stop flag, limits and positions, and never a secret", a
   s.bot.say("status", s.now);
   await s.proc.poll();
   const t = s.bot.last();
-  for (const w of ["Stop flag: off", "pending", "Equity", "never an instruction to act"]) assert.ok(t.includes(w), w);
+  for (const w of ["Stop flag: off", "pending", "Equity", "Paper trading only."]) assert.ok(t.includes(w), w);
+  assert.ok(!t.includes("never an instruction to act"), "a status report is not research input");
 });
 
 test("a store failure while handling a command is reported, not swallowed", async () => {
@@ -307,11 +311,12 @@ test("if cancelling fails after the flag is saved, the message says that, not th
 
 test("flatten still tries to sell when the flag cannot be saved", async () => {
   const s = await setup();
+  s.broker.positions = [{ symbol: "AAA", qty: 5, marketValue: 500, avgEntryPrice: 100, unrealizedPl: 0 }];
   s.bot.say("flatten", s.now);
   const realSet = s.store.setControl.bind(s.store);
   s.store.setControl = async (k: string, v: unknown) => { if (k === CONTROL_STOP) throw new Error("db down (test)"); return realSet(k, v); };
   await s.proc.poll();
-  assert.equal(s.broker.count("closeAllPositions"), 1);
+  assert.equal(s.broker.count("submitSell"), 1);
   assert.ok(s.bot.last().includes("could not be saved"));
 });
 

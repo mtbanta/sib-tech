@@ -1,59 +1,102 @@
 // THE ORDER GATE. The only code in the worker that may send an entry order. Every entry passes, in order:
-//   1. the stop flag, read fresh from the database
-//   2. the approval (no approved limits today means no entry) and the arming (the borrowing cap and long only
-//      are set at Alpaca at 5 minutes before the open; an unarmed day does not trade), and no carried position
-//   3. the fixed limit checks in limits.ts
-//   4. the broker's own switches (long only, borrowing cap no higher than approved)
-//   5. a record of the intent in the database, with an id built from the date and the symbol, so a restart
-//      or a retry cannot send the same entry twice
-//   6. the stop flag again, immediately before sending
-// and then the order is sent with a protective stop held at Alpaca. If the database or the broker cannot be
-// read, the entry is refused: the stack fails closed. Calls are handled one at a time.
+//   1. the stop flag (kept in memory and written through to the database, so a stop command is seen at once)
+//   2. the approval (no approved limits today means no entry), the arming (the borrowing cap and long only are
+//      set at Alpaca at 5 minutes before the open; an unarmed day does not trade), and no carried position
+//   3. a broker snapshot no older than a few seconds (account, positions, settings, clock): too old means refused
+//   4. the fixed limit checks in limits.ts, including the trades-a-minute cap
+//   5. the governor: a slot under the per-minute cap and under Alpaca's request headroom
+//   6. the broker's own switches (long only, borrowing cap no higher than approved)
+//   7. a record of the intent in the database, with a unique id (date, symbol and a running number, because a name
+//      can be entered again after its first position closed), written BEFORE the order is sent
+//   8. the stop flag again, immediately before sending
+// and then the order is sent with its exits (a take-profit and a protective stop) resting at Alpaca. If the database
+// or the broker cannot be read, the entry is refused: the stack fails closed. Calls are handled one at a time.
+//
+// Speed: nothing in here waits on Discord. Trade news goes to a digest that the worker posts in batches.
 import { AlpacaError } from "./alpaca-trading.ts";
+import type { BrokerView } from "./broker-view.ts";
 import type { GateBroker } from "./broker.ts";
-import { checkEntry, type EntryContext } from "./limits.ts";
+import type { Governor } from "./governor.ts";
+import { MAX_TRADES_PER_MINUTE, checkEntry, type EntryContext } from "./limits.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, type NotFlatState, type OrderRecord, type StopFlag, type Store } from "./store.ts";
 import type { Signal } from "./strategy.ts";
-import { etDate, minutesBetween } from "./time.ts";
-import { NOT_ADVICE } from "./discord.ts";
+import { centralTime, etDate, minutesBetween } from "./time.ts";
 
 export type GateResult =
-  | { status: "sent"; clientOrderId: string; qty: number }
+  | { status: "sent"; clientOrderId: string; qty: number; acceptMs: number }
   | { status: "refused"; reason: string }
   | { status: "error"; reason: string };
 
 export interface GateDeps {
   broker: GateBroker;
   store: Store;
+  view: BrokerView;
+  governor: Governor;
   now: () => Date;
   say: (channel: "commands" | "trading" | "alerts", text: string) => Promise<boolean>;
+  // Adds a line to the trade digest. Instant; never waits.
+  note: (line: string) => void;
   log?: (event: string, data?: Record<string, unknown>) => void;
+  // A signal that waited longer than this in the queue is dropped (default 5 seconds).
+  maxQueueMs?: number;
+  clockMs?: () => number;
 }
 
 export const peakKey = (date: string) => `peak_exposure:${date}`;
 
-export function clientOrderIdFor(date: string, symbol: string): string {
-  return `cyrus-${date.replaceAll("-", "")}-${symbol}`;
+export function clientOrderIdFor(date: string, symbol: string, n: number): string {
+  return `cyrus-${date.replaceAll("-", "")}-${symbol}-${n}`;
 }
+
+// Refusals that are normal flow control at volume (a full minute, a held name). They are counted and written down
+// as one line per reason per minute, not one row each.
+const FLOW_REASONS = [/^trades-per-minute/, /^holding back for safety/, /^already holding/, /^an entry for this symbol is still working/, /^the signal waited/, /^Alpaca refused this symbol a moment ago/];
+
+const isActive = (o: OrderRecord) => o.status === "intent" || o.status === "submitted" || (o.status === "filled" && !o.closedAt);
 
 export class OrderGate {
   private readonly d: GateDeps;
   private chain: Promise<unknown> = Promise.resolve();
+  private readonly writes = new Set<Promise<unknown>>();
+  private readonly flow = new Map<string, { date: string; reason: string; count: number }>();
+  private peak: { date: string; exposureUsd: number; equity: number } | null = null;
+  private readonly clockMs: () => number;
 
   constructor(deps: GateDeps) {
     this.d = deps;
+    this.clockMs = deps.clockMs ?? (() => performance.now());
   }
 
-  // One entry at a time, so two signals cannot both pass the same trades-a-day check.
+  // One entry at a time, so two signals cannot both pass the same check.
   enter(signal: Signal): Promise<GateResult> {
-    const run = this.chain.then(() => this.run(signal));
+    const queuedAt = this.d.now().getTime();
+    const run = this.chain.then(() => this.run(signal, queuedAt));
     this.chain = run.catch(() => undefined);
     return run;
   }
 
+  // Resolves when every background write the gate started (the record update after a send) has finished.
+  async settled(): Promise<void> {
+    while (this.writes.size > 0) await Promise.allSettled([...this.writes]);
+  }
+
+  private background(p: Promise<unknown>): void {
+    const tracked = p.catch(() => undefined).finally(() => this.writes.delete(tracked));
+    this.writes.add(tracked);
+  }
+
+  private fire(channel: "commands" | "trading" | "alerts", text: string): void {
+    void this.d.say(channel, text).catch(() => undefined);
+  }
+
   private async refuse(date: string, symbol: string, reason: string, detail?: Record<string, unknown>, record = true): Promise<GateResult> {
     this.d.log?.("entry_refused", { symbol, reason, ...detail });
-    if (record) {
+    if (FLOW_REASONS.some((re) => re.test(reason))) {
+      const key = `${date}|${reason}`;
+      const cur = this.flow.get(key);
+      if (cur) cur.count++;
+      else this.flow.set(key, { date, reason, count: 1 });
+    } else if (record) {
       try {
         await this.d.store.addRefusal({ tradeDate: date, symbol, reason, detail });
       } catch {
@@ -63,10 +106,25 @@ export class OrderGate {
     return { status: "refused", reason };
   }
 
-  private async run(signal: Signal): Promise<GateResult> {
+  // Writes the counted flow-control refusals as single rows ("reason, count"), and the day's peak exposure.
+  async flush(): Promise<void> {
+    const rows = [...this.flow.values()];
+    this.flow.clear();
+    for (const r of rows) await this.d.store.addRefusal({ tradeDate: r.date, symbol: "(many)", reason: r.reason, detail: { count: r.count } }).catch(() => undefined);
+    if (this.peak) {
+      const p = this.peak;
+      const prev = await this.d.store.getControl<{ exposureUsd: number }>(peakKey(p.date)).catch(() => null);
+      if (!prev || p.exposureUsd > prev.exposureUsd) await this.d.store.setControl(peakKey(p.date), { exposureUsd: p.exposureUsd, equity: p.equity, ratio: p.exposureUsd / p.equity }).catch(() => undefined);
+    }
+  }
+
+  private async run(signal: Signal, queuedAt: number): Promise<GateResult> {
+    const t0 = this.clockMs();
     const now = this.d.now();
     const date = etDate(now);
     const symbol = signal.symbol;
+    const maxQueue = this.d.maxQueueMs ?? 5_000;
+    if (now.getTime() - queuedAt > maxQueue) return this.refuse(date, symbol, `the signal waited more than ${maxQueue / 1000} seconds in the queue, so it is stale`);
 
     let stop: StopFlag | null;
     let notFlat: NotFlatState | null;
@@ -87,41 +145,39 @@ export class OrderGate {
     const unarmed = limits !== null && !stop?.on && !day.phases.armed;
     if (unarmed) return this.refuse(date, symbol, "the day is not armed yet (borrowing cap and long only not confirmed at Alpaca)");
     if (notFlat?.on && !stop?.on && limits) return this.refuse(date, symbol, "the account was not flat after the last close-out");
+    if (stop?.on) return this.refuse(date, symbol, "stop flag is set");
+    if (!limits) return this.refuse(date, symbol, "no limits approved for today");
 
-    let clock, account, positions, config, orders;
+    let snap, rows;
     try {
-      [clock, account, positions, config, orders] = await Promise.all([
-        this.d.broker.getClock(),
-        this.d.broker.getAccount(),
-        this.d.broker.listPositions(),
-        this.d.broker.getAccountConfig(),
-        this.d.store.listOrders(date),
-      ]);
+      snap = await this.d.view.snapshot({ fastMs: 15_000, configMs: 120_000, clockMs: 20_000 });
+      rows = await this.d.store.listOrders(date);
     } catch {
       return this.refuse(date, symbol, "broker or database unavailable, so no entry", undefined, false);
     }
+    const { account, positions, config, clock } = snap;
 
     // Fail closed on its own, whatever the worker's carried-position scan has or has not done yet: a held symbol
     // with no stored order from today is a position this worker did not enter today (every entry is written down
     // before it is sent), so no entry goes out beside it.
-    const todaysSymbols = new Set(orders.map((o) => o.symbol));
+    const todaysSymbols = new Set(rows.map((o) => o.symbol));
     const carried = positions.map((p) => p.symbol).filter((sym) => !todaysSymbols.has(sym));
-    if (carried.length > 0 && !stop?.on && limits) {
+    if (carried.length > 0 && limits) {
       return this.refuse(date, symbol, `a held position has no order from today (${carried.join(", ")}), so it is carried over: no entry`);
     }
     const held = new Set(positions.map((p) => p.symbol));
-    const countable = orders.filter((o) => o.status !== "failed" && o.status !== "rejected");
-    const pendingExposure = orders.filter((o) => (o.status === "intent" || o.status === "submitted") && !held.has(o.symbol)).reduce((s, o) => s + o.qty * o.referencePrice, 0);
+    if (rows.some((o) => o.symbol === symbol && isActive(o) && !held.has(symbol))) return this.refuse(date, symbol, "an entry for this symbol is still working");
+    if (rows.some((o) => o.symbol === symbol && o.status === "failed" && o.createdAt && now.getTime() - new Date(o.createdAt).getTime() < 60_000)) return this.refuse(date, symbol, "Alpaca refused this symbol a moment ago, so I wait a minute before trying again");
+    const pendingExposure = rows.filter((o) => (o.status === "intent" || o.status === "submitted") && !held.has(o.symbol)).reduce((s, o) => s + o.qty * o.referencePrice, 0);
     const ctx: EntryContext = {
       symbol,
       price: signal.price,
       limits,
-      stopFlag: stop?.on === true,
+      stopFlag: false,
       marketOpen: clock.isOpen,
       minutesSinceOpen: minutesBetween(day.openAt, now),
       minutesToClose: minutesBetween(now, day.closeAt),
-      tradesToday: countable.length,
-      symbolsTradedToday: new Set(orders.map((o) => o.symbol)),
+      tradesLastMinute: this.d.governor.tradesInLastMinute(),
       heldSymbols: held,
       dayStartEquity: day.dayStartEquity ?? account.lastEquity,
       equity: account.equity,
@@ -138,23 +194,29 @@ export class OrderGate {
     if (!config.noShorting || config.maxMarginMultiplier > limits!.borrowingCap) {
       try {
         await this.d.broker.setAccountConfig({ noShorting: true, maxMarginMultiplier: limits!.borrowingCap });
+        this.d.view.invalidate();
       } catch {
         return this.refuse(date, symbol, "could not set long only and the approved borrowing cap at Alpaca");
       }
     }
-    if (!(signal.stopPrice > 0 && signal.stopPrice < signal.price)) return this.refuse(date, symbol, "protective stop is not below the price");
+    if (!(signal.stopPrice > 0 && signal.stopPrice < signal.price && signal.takeProfitPrice > signal.price)) return this.refuse(date, symbol, "the exits are not on the right sides of the price");
 
-    const clientOrderId = clientOrderIdFor(date, symbol);
-    const record: OrderRecord = { clientOrderId, tradeDate: date, symbol, qty: decision.qty, referencePrice: signal.price, stopPrice: signal.stopPrice, status: "intent", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: null };
+    // The governor: a slot under the per-minute cap (never above the fixed ceiling) and headroom under Alpaca's limit.
+    const slot = this.d.governor.admitTrade(Math.min(limits!.maxTradesPerMinute, MAX_TRADES_PER_MINUTE));
+    if (!slot.ok) return this.refuse(date, symbol, slot.reason);
+
+    const n = rows.filter((o) => o.symbol === symbol).length + 1;
+    const clientOrderId = clientOrderIdFor(date, symbol, n);
+    const record: OrderRecord = { clientOrderId, tradeDate: date, symbol, qty: decision.qty, referencePrice: signal.price, stopPrice: signal.stopPrice, takeProfitPrice: signal.takeProfitPrice, status: "intent", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: null, createdAt: now.toISOString() };
     let inserted: boolean;
     try {
       inserted = await this.d.store.insertOrder(record);
     } catch {
       return this.refuse(date, symbol, "database unavailable, so no entry", undefined, false);
     }
-    if (!inserted) return this.refuse(date, symbol, "already decided this symbol today", undefined, false);
+    if (!inserted) return this.refuse(date, symbol, "already decided this entry", undefined, false);
 
-    // Last look at the stop flag before the order leaves.
+    // Last look at the stop flag before the order leaves (in memory: a stop command sets it before it does anything else).
     try {
       const again = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
       if (again?.on) {
@@ -168,7 +230,7 @@ export class OrderGate {
 
     let sent;
     try {
-      sent = await this.d.broker.submitEntry({ symbol, qty: decision.qty, stopPrice: signal.stopPrice, referencePrice: signal.price, clientOrderId });
+      sent = await this.d.broker.submitEntry({ symbol, qty: decision.qty, stopPrice: signal.stopPrice, takeProfitPrice: signal.takeProfitPrice, referencePrice: signal.price, clientOrderId });
     } catch (err) {
       const reason = (err as Error).message.slice(0, 200);
       // Only a definite "no" from Alpaca (a local refusal, or a 4xx other than 429) means nothing was sent.
@@ -179,32 +241,27 @@ export class OrderGate {
       const definite = err instanceof AlpacaError && !duplicate && (err.status === 0 || (err.status >= 400 && err.status < 500 && err.status !== 429));
       if (definite) {
         await this.d.store.updateOrder(clientOrderId, { status: "failed", note: reason }).catch(() => undefined);
-        await this.d.say("commands", `Entry for ${symbol} was refused by Alpaca and not retried: ${reason}`);
+        this.d.note(`${centralTime(now)} ${symbol}: Alpaca refused the entry and it was not retried: ${reason.slice(0, 100)}`);
         return { status: "error", reason };
       }
       await this.d.store.updateOrder(clientOrderId, { note: `outcome unclear: ${reason}` }).catch(() => undefined);
-      await this.d.say("commands", `Entry for ${symbol}: the outcome at Alpaca is unclear (${reason}). It is counted as sent and will be checked against Alpaca; check the dashboard if it matters.`);
+      this.fire("commands", `Entry for ${symbol}: the outcome at Alpaca is unclear (${reason}). It is counted as sent and will be checked against Alpaca; check the dashboard if it matters.`);
       return { status: "error", reason: `outcome unclear: ${reason}` };
     }
-    // The order is at Alpaca. From here on, a problem writing it down must not make it look like it failed.
-    await this.d.store.updateOrder(clientOrderId, { status: "submitted", alpacaOrderId: sent.id }).catch(async () => {
-      // The row stays "intent", which still counts, and the order sync fills it in by its id. Say so.
-      this.d.log?.("order_record_update_failed", { symbol });
-      await this.d.say("alerts", `The entry for ${symbol} was sent to Alpaca but its record could not be updated. It is still counted, and will be reconciled from Alpaca by its id.`);
-    });
-    await this.notePeak(date, ctx.grossExposure + decision.notional, account.equity);
-    this.d.log?.("entry_sent", { symbol, qty: decision.qty, stop: signal.stopPrice });
-    await this.d.say("trading", `Entry sent (paper): BUY ${decision.qty} ${symbol} at about ${signal.price.toFixed(2)}, protective stop at ${signal.stopPrice.toFixed(2)} held at Alpaca. ${NOT_ADVICE}`);
-    return { status: "sent", clientOrderId, qty: decision.qty };
-  }
-
-  // Remembers the day's highest exposure, for the daily summary's "borrowing used".
-  private async notePeak(date: string, exposureUsd: number, equity: number): Promise<void> {
-    try {
-      const prev = await this.d.store.getControl<{ exposureUsd: number }>(peakKey(date));
-      if (!prev || exposureUsd > prev.exposureUsd) await this.d.store.setControl(peakKey(date), { exposureUsd, equity, ratio: exposureUsd / equity });
-    } catch {
-      /* the summary just shows what it knows */
-    }
+    const acceptMs = Math.max(0, Math.round(this.clockMs() - t0));
+    // The order is at Alpaca. From here on, a problem writing it down must not make it look like it failed, and
+    // the write must not hold up the next entry: it runs in the background.
+    this.background(
+      this.d.store.updateOrder(clientOrderId, { status: "submitted", alpacaOrderId: sent.id, acceptMs }).catch(() => {
+        // The row stays "intent", which still counts, and the order sync fills it in by its id. Say so.
+        this.d.log?.("order_record_update_failed", { symbol });
+        this.fire("alerts", `The entry for ${symbol} was sent to Alpaca but its record could not be updated. It is still counted, and will be reconciled from Alpaca by its id.`);
+      }),
+    );
+    const exposure = ctx.grossExposure + decision.notional;
+    if (!this.peak || this.peak.date !== date || exposure > this.peak.exposureUsd) this.peak = { date, exposureUsd: exposure, equity: account.equity };
+    this.d.log?.("entry_sent", { symbol, qty: decision.qty, stop: signal.stopPrice, target: signal.takeProfitPrice, acceptMs });
+    this.d.note(`${centralTime(now)} BUY ${decision.qty} ${symbol} at about ${signal.price.toFixed(2)}, target ${signal.takeProfitPrice.toFixed(2)}, stop ${signal.stopPrice.toFixed(2)} (both held at Alpaca), accepted in ${acceptMs} ms`);
+    return { status: "sent", clientOrderId, qty: decision.qty, acceptMs };
   }
 }

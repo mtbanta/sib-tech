@@ -1,53 +1,55 @@
-// The placeholder strategy: an opening range breakout. Deliberately simple; its job is to exercise the
-// plumbing, not to make money. Michael is researching the real strategy separately.
+// THE PLACEHOLDER STRATEGY ("busy"). It is MEANINGLESS AS A STRATEGY and is not meant to make money. Its only job is
+// to exercise the stack at volume: it trades often, stays long only, ends the day flat (the close-out sells what is
+// left; each entry also carries a take-profit and a protective stop resting at Alpaca), and stays inside every limit
+// (the order gate and the governor check each entry; this file only proposes).
 //
-// Rule, in plain words. For each name on the day's live list, note the highest trade price in the first
-// 5 minutes after the open (the "opening range"). After those 5 minutes, the first trade above that high is
-// a signal to buy, once per name per day. The protective stop sits 1.5 percent below the signal price.
-// Long only. The same trades always give the same signals (no clock, no randomness).
+// Rule, in plain words. For each name on the day's live list, keep the last 12 trade prices. When a trade prints
+// higher than the one before it AND at or above the average of those 12, and at least 15 seconds have passed since
+// this name last signalled, propose a buy: a take-profit 0.25 percent above, a stop 0.4 percent below. The gate
+// decides whether it goes out. The same trades always give the same signals (no clock, no randomness).
 import type { Trade } from "./stream.ts";
 
-export const RANGE_MINUTES = 5;
-export const STOP_FRACTION = 0.015;
+export const WINDOW = 12;
+export const COOLDOWN_SECONDS = 15;
+export const TAKE_PROFIT_FRACTION = 0.0025;
+export const STOP_FRACTION = 0.004;
 
 export interface Signal {
   symbol: string;
   price: number;
   tradeTime: Date;
   stopPrice: number;
+  takeProfitPrice: number;
 }
 
 const cents = (x: number) => Math.round(x * 100) / 100;
 
-export class OpeningRangeBreakout {
-  private readonly rangeEnd: Date;
-  private readonly open: Date;
-  private readonly highs = new Map<string, number>();
-  private readonly signaled = new Set<string>();
+export class BusyPlaceholder {
   private readonly watch: ReadonlySet<string>;
+  private readonly prices = new Map<string, number[]>();
+  private readonly lastSignal = new Map<string, number>();
 
-  // `startedAt` is when this object was created. If that is already past the open, the range cannot be trusted
-  // (some trades were missed), so this strategy gives no signals for the day.
-  private readonly usable: boolean;
-
-  constructor(open: Date, symbols: readonly string[], startedAt: Date = open) {
-    this.usable = startedAt.getTime() <= open.getTime() + 30_000;
-    this.open = open;
-    this.rangeEnd = new Date(open.getTime() + RANGE_MINUTES * 60_000);
+  constructor(symbols: readonly string[]) {
     this.watch = new Set(symbols);
   }
 
   onTrade(t: Trade): Signal | null {
-    if (!this.usable || !this.watch.has(t.symbol) || !(t.price > 0)) return null;
+    if (!this.watch.has(t.symbol) || !(t.price > 0)) return null;
     const time = new Date(t.time);
-    if (!(time >= this.open)) return null; // before the open: ignored
-    if (time < this.rangeEnd) {
-      this.highs.set(t.symbol, Math.max(this.highs.get(t.symbol) ?? 0, t.price));
-      return null;
-    }
-    const high = this.highs.get(t.symbol);
-    if (high === undefined || this.signaled.has(t.symbol) || !(t.price > high)) return null;
-    this.signaled.add(t.symbol);
-    return { symbol: t.symbol, price: t.price, tradeTime: time, stopPrice: cents(t.price * (1 - STOP_FRACTION)) };
+    if (Number.isNaN(time.getTime())) return null;
+    const ring = this.prices.get(t.symbol) ?? [];
+    const previous = ring[ring.length - 1];
+    ring.push(t.price);
+    if (ring.length > WINDOW) ring.shift();
+    this.prices.set(t.symbol, ring);
+    if (ring.length < WINDOW || previous === undefined || !(t.price > previous)) return null;
+    const mean = ring.reduce((s, x) => s + x, 0) / ring.length;
+    if (t.price < mean) return null;
+    const last = this.lastSignal.get(t.symbol);
+    if (last !== undefined && time.getTime() - last < COOLDOWN_SECONDS * 1000) return null;
+    this.lastSignal.set(t.symbol, time.getTime());
+    const stopPrice = Math.min(cents(t.price * (1 - STOP_FRACTION)), cents(t.price - 0.02));
+    const takeProfitPrice = Math.max(cents(t.price * (1 + TAKE_PROFIT_FRACTION)), cents(t.price + 0.02));
+    return { symbol: t.symbol, price: t.price, tradeTime: time, stopPrice, takeProfitPrice };
   }
 }

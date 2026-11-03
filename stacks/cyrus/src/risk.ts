@@ -1,36 +1,58 @@
-// Watching what the gate set in motion: bring the stored orders up to date from Alpaca, check that every
-// filled entry still has its protective stop, and stop the day if the daily loss limit is reached.
+// Watching what the gate set in motion: bring the stored entries up to date from Alpaca, check that every open
+// entry still has a live exit resting at Alpaca, and stop the day if the daily loss limit is reached.
 import type { Order } from "./alpaca-trading.ts";
 import type { Broker } from "./broker.ts";
 import { etInstant } from "./time.ts";
-import { CONTROL_STOP, type DayRecord, type StopFlag, type Store } from "./store.ts";
-import { NOT_ADVICE } from "./discord.ts";
+import { CONTROL_STOP, type DayRecord, type OrderRecord, type StopFlag, type Store } from "./store.ts";
+import { OPEN_STATUSES, flattenLegs, type Liquidator, type Say } from "./sells.ts";
 
 export interface RiskDeps {
   broker: Broker;
   store: Store;
   now: () => Date;
-  say: (channel: "commands" | "trading" | "alerts", text: string) => Promise<boolean>;
+  say: Say;
+  liquidator: Liquidator;
   log?: (event: string, data?: Record<string, unknown>) => void;
 }
 
-const DEAD_STOP = new Set(["canceled", "expired", "rejected", "replaced", "done_for_day"]);
+// A live exit leg of an entry: a sell leg that can still execute.
+export const hasLiveExit = (o: Order): boolean => flattenLegs(o).some((l) => l.side === "sell" && OPEN_STATUSES.has(l.status));
+const exitFilledQty = (o: Order): number => flattenLegs(o).filter((l) => l.side === "sell").reduce((n, l) => n + l.filledQty, 0);
 
-// The protective stop leg of an entry order, if Alpaca shows one.
+// Kept for older callers and tests: the protective stop leg, if Alpaca shows one.
 export function stopLeg(o: Order): Order | undefined {
   return o.legs.find((l) => l.side === "sell" && (l.type === "stop" || l.stopPrice !== null));
 }
 
-// Updates stored entries from Alpaca. A filled entry with no live stop, while the position is still held, is
-// closed at once and reported: an unprotected position is not allowed to stay open.
-export async function syncOrders(d: RiskDeps, day: DayRecord): Promise<{ unprotected: string[] }> {
-  const stored = (await d.store.listOrders(day.tradeDate)).filter((o) => o.status === "intent" || o.status === "submitted" || o.status === "filled");
-  if (stored.length === 0) return { unprotected: [] };
-  const [orders, positions] = await Promise.all([d.broker.listOrders("all", etInstant(day.tradeDate, "00:00").toISOString()), d.broker.listPositions()]);
-  const byClientId = new Map(orders.map((o) => [o.clientOrderId, o]));
+export interface SyncOptions {
+  // False while a close-out is running or after the close-out time: the missing-exit check is skipped and NO sell is
+  // placed. The close-out alone flattens the account. (On 2026-11-02 this check sold five positions the close-out had
+  // just un-protected on purpose, and raised five false alarms.)
+  protect: boolean;
+}
+
+// Updates stored entries from Alpaca by looking only at orders newer than the oldest entry still being watched
+// (paged, so a day with thousands of orders is read in full). An entry is judged by its OWN order and its OWN exit
+// legs, never by symbol, because a symbol can be entered again after the first position closed.
+// An open entry with no live exit while its position is still held is sold at once and reported.
+export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions = { protect: true }): Promise<{ unprotected: string[]; incomplete: boolean }> {
+  const active = (await d.store.listOrders(day.tradeDate)).filter((o) => !o.closedAt && (o.status === "intent" || o.status === "submitted" || o.status === "filled"));
+  if (active.length === 0) return { unprotected: [], incomplete: false };
+  const midnight = etInstant(day.tradeDate, "00:00").getTime();
+  const oldest = Math.min(...active.map((o) => (o.createdAt ? new Date(o.createdAt).getTime() : midnight)));
+  const since = new Date(Math.max(midnight, oldest - 60_000)).toISOString();
+  const [listed, positions] = await Promise.all([d.broker.listOrdersPaged("all", since), d.broker.listPositions()]);
+  const byClientId = new Map(listed.orders.map((o) => [o.clientOrderId, o]));
   const held = new Set(positions.map((p) => p.symbol));
+  const latestPerSymbol = new Map<string, OrderRecord>();
+  for (const s of active) {
+    const prev = latestPerSymbol.get(s.symbol);
+    if (!prev || (s.createdAt ?? "") > (prev.createdAt ?? "") || ((s.createdAt ?? "") === (prev.createdAt ?? "") && s.clientOrderId > prev.clientOrderId)) latestPerSymbol.set(s.symbol, s);
+  }
+  // A sell already working on a symbol (a liquidation in progress) explains a missing exit: no false alarm.
+  const sellingSymbols = new Set(listed.orders.filter((x) => x.side === "sell" && OPEN_STATUSES.has(x.status)).map((x) => x.symbol));
   const unprotected: string[] = [];
-  for (const s of stored) {
+  for (const s of active) {
     const o = byClientId.get(s.clientOrderId);
     if (!o) continue;
     if (s.status === "intent" && o.status !== "filled" && o.status !== "canceled" && o.status !== "expired" && o.status !== "rejected") {
@@ -44,35 +66,35 @@ export async function syncOrders(d: RiskDeps, day: DayRecord): Promise<{ unprote
       await d.store.updateOrder(s.clientOrderId, { status: "rejected", alpacaOrderId: o.id, note: "rejected by Alpaca" });
       await d.say("commands", `Alpaca rejected the entry for ${s.symbol}.`);
     }
-    // A sell that is already working (flatten, loss stop, close-out) explains a missing stop: no false alarm.
-    const selling = orders.some((x) => x.side === "sell" && x.symbol === s.symbol && ["new", "accepted", "pending_new", "partially_filled"].includes(x.status));
-    if (o.filledQty > 0 && held.has(s.symbol) && !selling) {
-      const leg = stopLeg(o);
-      if (!leg || DEAD_STOP.has(leg.status)) {
-        unprotected.push(s.symbol);
-        d.log?.("unprotected_position", { symbol: s.symbol });
-        try {
-          await d.broker.closePosition(s.symbol);
-          await d.say("alerts", `**${s.symbol} had no live protective stop, so I sold it.** ${NOT_ADVICE}`);
-        } catch (err) {
-          await d.say("alerts", `**${s.symbol} HAS NO PROTECTIVE STOP AND I COULD NOT SELL IT** (${(err as Error).message.slice(0, 120)}). Please check Alpaca now.`);
-        }
-      }
+    if (!(o.filledQty > 0)) continue;
+    // Closed: its exit leg has filled for the whole quantity, or the position is no longer held at all.
+    if (exitFilledQty(o) >= o.filledQty - 1e-9 || !held.has(s.symbol)) {
+      await d.store.updateOrder(s.clientOrderId, { closedAt: d.now().toISOString() });
+      continue;
+    }
+    if (!opts.protect || latestPerSymbol.get(s.symbol)?.clientOrderId !== s.clientOrderId || sellingSymbols.has(s.symbol)) continue;
+    if (!hasLiveExit(o)) {
+      unprotected.push(s.symbol);
+      d.log?.("unprotected_position", { symbol: s.symbol });
+      const r = await d.liquidator.flatten({ reason: "no live protective stop", tradeDate: day.tradeDate, only: [s.symbol], maxRounds: 3 });
+      if (r.flat) await d.say("alerts", `**${s.symbol} had no live protective stop, so I sold it.**`);
+      else await d.say("alerts", `**Michael: ${s.symbol} HAS NO PROTECTIVE STOP AND I COULD NOT SELL IT** (${(r.errors.at(-1) ?? "still held").slice(0, 120)}). Please check Alpaca now.`, { mentionOwner: true });
     }
   }
-  return { unprotected };
+  if (!listed.complete) d.log?.("order_list_incomplete", { since, pages: listed.pages });
+  return { unprotected, incomplete: !listed.complete };
 }
 
 // When equity has fallen by the approved daily loss limit, stop the day: set the stop flag, sell everything.
-// Runs again and again without harm (once the flag is set it does nothing).
+// Runs again and again without harm (once the flag is set it does nothing new).
 export async function enforceDailyLoss(d: RiskDeps, day: DayRecord): Promise<boolean> {
   // Not before arming: until then the starting equity may be an earlier day's number.
   if (day.status !== "approved" || !day.phases.armed || day.dayStartEquity === null) return false;
   const flag = await d.store.getControl<StopFlag>(CONTROL_STOP);
   if (flag?.on) {
-    // The loss stop already fired. If its sale did not go through, try again on every pass (a sell that is
-    // already working counts as going through). An owner's plain `stop` is left alone: it keeps positions.
-    if (flag.reason.startsWith("daily loss stop")) await retryLossStopSale(d);
+    // The loss stop already fired. If its sale did not finish, try again on every pass. An owner's plain `stop` is
+    // left alone: it keeps positions.
+    if (flag.reason.startsWith("daily loss stop")) await retryLossStopSale(d, day);
     return false;
   }
   const account = await d.broker.getAccount();
@@ -81,34 +103,26 @@ export async function enforceDailyLoss(d: RiskDeps, day: DayRecord): Promise<boo
   const flagNow: StopFlag = { on: true, at: d.now().toISOString(), reason: `daily loss stop reached (${loss.toFixed(2)} dollars)` };
   await d.store.setControl(CONTROL_STOP, flagNow);
   await d.store.addEvent("warn", "daily_loss_stop", { loss });
-  try {
-    await d.broker.closeAllPositions();
-  } catch (err) {
-    await d.say("alerts", `Daily loss stop reached but selling failed: ${(err as Error).message.slice(0, 120)}. Check Alpaca now.`);
-  }
-  await d.say("commands", `**Daily loss stop reached** (down ${loss.toFixed(2)} of the ${day.limits.dailyLossStopUsd} dollar limit). Stopped for the day and sent orders to sell everything. ${NOT_ADVICE}`);
+  const r = await d.liquidator.flatten({ reason: "daily loss stop", tradeDate: day.tradeDate });
+  await d.say("commands", `**Daily loss stop reached** (down ${loss.toFixed(2)} of the ${day.limits.dailyLossStopUsd} dollar limit). Stopped for the day and ${r.flat ? "sold everything" : `sent sells, but still held: ${r.remaining.join(", ")}`}.`);
+  if (!r.flat) await d.say("alerts", `**Michael: daily loss stop reached but still holding ${r.remaining.join(", ")}.** Check Alpaca now. I will keep trying.`, { mentionOwner: true });
   return true;
 }
 
-const WORKING = ["new", "accepted", "pending_new", "partially_filled"];
-
-// Sells what the loss stop failed to sell. Does nothing when the account is flat or a sell is already working.
-async function retryLossStopSale(d: RiskDeps): Promise<void> {
+// Sells what the loss stop failed to sell. Does nothing when the account is flat or a market sell is already working.
+async function retryLossStopSale(d: RiskDeps, day: DayRecord): Promise<void> {
   const [positions, open] = await Promise.all([d.broker.listPositions(), d.broker.listOrders("open")]);
   if (positions.length === 0) return;
-  const selling = open.some((o) => o.side === "sell" && WORKING.includes(o.status) && o.type !== "stop");
+  const selling = open.some((o) => o.side === "sell" && OPEN_STATUSES.has(o.status) && o.type === "market");
   if (selling) return;
-  try {
-    await d.broker.closeAllPositions();
-    d.log?.("loss_stop_sale_retried", { positions: positions.length });
-  } catch (err) {
-    await d.say("alerts", `Daily loss stop: selling is still failing (${(err as Error).message.slice(0, 120)}). Check Alpaca now.`);
-  }
+  const r = await d.liquidator.flatten({ reason: "daily loss stop (retry)", tradeDate: day.tradeDate });
+  d.log?.("loss_stop_sale_retried", { positions: positions.length, flat: r.flat });
+  if (!r.flat) await d.say("alerts", `**Michael: daily loss stop: selling is still failing (${r.remaining.join(", ")}).** Check Alpaca now.`, { mentionOwner: true });
 }
 
 // While the stop flag is on, cancel any entry that has not filled. This catches an entry that passed the gate's
 // last look at the flag just before a stop command and reached Alpaca after the command's own cancel pass.
-// Protective stops (sell orders) and entries that have started to fill are left alone.
+// Exits resting at Alpaca (sell orders) and entries that have started to fill are left alone.
 export async function sweepEntriesWhileStopped(d: RiskDeps): Promise<number> {
   const flag = await d.store.getControl<StopFlag>(CONTROL_STOP);
   if (!flag?.on) return 0;

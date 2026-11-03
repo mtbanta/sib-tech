@@ -124,12 +124,90 @@ test("the borrowing cap setting accepts only 1, 2 or 4", async () => {
   assert.deepEqual(calls[0]!.body, { max_margin_multiplier: "1", no_shorting: true });
 });
 
-test("a 207 bulk answer with a failed item is an error", async () => {
-  const { client } = fake([json([{ symbol: "AAPL", status: 200 }, { symbol: "MSFT", status: 500 }], 207)]);
-  await assert.rejects(client.closeAllPositions(), /MSFT/);
-  const ok = fake([json([{ symbol: "AAPL", status: 200 }], 207)]);
-  await ok.client.closeAllPositions();
-  assert.equal(ok.calls[0]!.url.searchParams.get("cancel_orders"), "true");
+test("a cancel-all answer with a failed item is reported per item, not thrown, and the caller checks the orders", async () => {
+  const { client, calls } = fake([json([{ id: "a", status: 200 }, { id: "b", status: 500, body: { message: "order not cancelable" } }], 207)]);
+  const r = await client.cancelAllOrders();
+  assert.equal(r.attempted, 2);
+  assert.equal(r.failed.length, 1);
+  assert.match(r.failed[0]!, /b: order not cancelable/);
+  assert.equal(calls[0]!.method, "DELETE");
+  assert.equal(calls[0]!.url.pathname, "/v2/orders");
+});
+
+test("cancelling waits out a 429 and treats an order that is already gone as cancelled", async () => {
+  const id = "00000000-0000-0000-0000-000000000001";
+  const { client, calls } = fake([json({ message: "rate limit exceeded" }, 429), new Response(null, { status: 204 })]);
+  await client.cancelOrder(id);
+  assert.equal(calls.length, 2);
+  const gone = fake([json({ message: "order not found" }, 404)]);
+  await gone.client.cancelOrder(id);
+  const done = fake([json({ message: "order is already canceled" }, 422)]);
+  await done.client.cancelOrder(id);
+});
+
+test("this client has no way to close positions in bulk or one by one: sells are explicit and go through submitSell", () => {
+  const c = new AlpacaTrading(settings) as unknown as Record<string, unknown>;
+  assert.equal(c.closeAllPositions, undefined);
+  assert.equal(c.closePosition, undefined);
+  assert.equal(typeof c.submitSell, "function");
+});
+
+const sellOrder = { symbol: "AAPL", qty: 3, clientOrderId: "cyrus-x-20261102-AAPL-abc-1" };
+test("a sell is an explicit market sell with a client id", async () => {
+  const { client, calls } = fake([json(orderJson({ side: "sell", order_class: "", legs: [] }))]);
+  await client.submitSell(sellOrder);
+  assert.deepEqual(calls[0]!.body, { symbol: "AAPL", qty: "3", side: "sell", type: "market", time_in_force: "day", client_order_id: sellOrder.clientOrderId });
+});
+
+test("a safety sell that meets a 429 waits and sends again with the SAME id, and never sends twice", async () => {
+  const { client, calls } = fake([json({ message: "rate limit exceeded" }, 429), json({ message: "rate limit exceeded" }, 429), json(orderJson({ side: "sell", legs: [] }))]);
+  const o = await client.submitSell(sellOrder);
+  assert.equal(o.id, "o1");
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every((c) => c.body.client_order_id === sellOrder.clientOrderId));
+  // a 429 on the entry path is NOT retried blindly: it asks Alpaca first
+  const e = fake([json({ message: "rate limit exceeded" }, 429), json({ message: "not found" }, 404), json(orderJson())]);
+  await e.client.submitEntry(entry);
+  assert.equal(e.calls[1]!.url.pathname, "/v2/orders:by_client_order_id");
+});
+
+test("bad sells are refused before anything is sent", async () => {
+  const { client, calls } = fake([]);
+  await assert.rejects(client.submitSell({ ...sellOrder, qty: 0 }), /positive/);
+  await assert.rejects(client.submitSell({ ...sellOrder, qty: -1 }), /positive/);
+  await assert.rejects(client.submitSell({ ...sellOrder, symbol: "aapl" }), /Bad symbol/);
+  await assert.rejects(client.submitSell({ ...sellOrder, clientOrderId: "x" }), /Bad client order id/);
+  assert.equal(calls.length, 0);
+});
+
+test("an entry with a take-profit is a bracket: a limit sell and a protective stop, both held at the broker", async () => {
+  const { client, calls } = fake([json(orderJson({ order_class: "bracket" }))]);
+  await client.submitEntry({ ...entry, takeProfitPrice: 101.234 });
+  assert.equal(calls[0]!.body.order_class, "bracket");
+  assert.deepEqual(calls[0]!.body.take_profit, { limit_price: "101.24" }, "rounded up to the cent");
+  assert.deepEqual(calls[0]!.body.stop_loss, { stop_price: "95.00" });
+  await assert.rejects(fake([]).client.submitEntry({ ...entry, takeProfitPrice: 99 }), /Take-profit must be above/);
+});
+
+test("the order list is read in pages of 500 so a busy day is read in full", async () => {
+  const page = (from: number, n: number) => Array.from({ length: n }, (_, i) => orderJson({ id: `o${from + i}`, client_order_id: `cyrus-x-${from + i}`, created_at: new Date(Date.UTC(2026, 10, 2, 14, 30, 0, from + i)).toISOString() }));
+  const { client, calls } = fake([json(page(0, 500)), json(page(500, 500)), json(page(1000, 120))]);
+  const r = await client.listOrdersPaged("all", "2026-11-02T05:00:00.000Z");
+  assert.equal(r.orders.length, 1120);
+  assert.equal(r.complete, true);
+  assert.equal(r.pages, 3);
+  assert.equal(calls[1]!.url.searchParams.get("after"), new Date(Date.UTC(2026, 10, 2, 14, 30, 0, 499)).toISOString());
+  const stuck = fake([json(page(0, 500)), json(page(0, 500))]);
+  const s2 = await stuck.client.listOrdersPaged("all", "x", 2);
+  assert.equal(s2.complete, false, "it never claims completeness when it stopped early");
+});
+
+test("every answer's rate-limit headers are reported to a listener, and a listener that throws changes nothing", async () => {
+  const seen: unknown[] = [];
+  const impl = (async () => new Response("{}", { status: 200, headers: { "x-ratelimit-limit": "200", "x-ratelimit-remaining": "150", "x-ratelimit-reset": "123" } })) as unknown as typeof fetch;
+  const c = new AlpacaTrading(settings, { fetchImpl: impl, retryDelayMs: 0, onRate: (i) => { seen.push(i); throw new Error("boom"); } });
+  await c.getClock();
+  assert.deepEqual(seen, [{ path: "/v2/clock", status: 200, limit: 200, remaining: 150, reset: 123 }]);
 });
 
 test("error text carries no key", async () => {

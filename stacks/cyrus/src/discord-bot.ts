@@ -3,7 +3,7 @@
 // Checked at start: the command channel really belongs to the configured server.
 import type { Settings } from "./config.ts";
 import type { Redactor } from "./redact.ts";
-import { NOT_ADVICE } from "./discord.ts";
+import { NOT_ADVICE, finalizeMessage } from "./discord.ts";
 
 const API = "https://discord.com/api/v10";
 const MAX_CONTENT = 2000;
@@ -73,11 +73,14 @@ export class DiscordBot {
     return id;
   }
 
-  // Posts plain text, redacted and cut to Discord's limit. Mentions are switched off.
-  async post(channel: ChannelName, text: string): Promise<boolean> {
-    const content = this.redact(text).slice(0, MAX_CONTENT);
+  // Posts plain text, redacted, with "Paper trading only." on it, cut to Discord's limit. Mentions are switched off,
+  // except that a message can ask to mention the owner (and only the owner), for the alerts that need a person now.
+  async post(channel: ChannelName, text: string, opts: { mentionOwner?: boolean } = {}): Promise<boolean> {
+    const owner = this.settings.discord.ownerUserId;
+    const body = opts.mentionOwner ? `<@${owner}> ${text}` : text;
+    const content = finalizeMessage(this.redact(body));
     try {
-      await this.call("POST", `/channels/${this.idFor(channel)}/messages`, { content, allowed_mentions: { parse: [] } });
+      await this.call("POST", `/channels/${this.idFor(channel)}/messages`, { content, allowed_mentions: opts.mentionOwner ? { parse: [], users: [owner] } : { parse: [] } });
       return true;
     } catch {
       return false;

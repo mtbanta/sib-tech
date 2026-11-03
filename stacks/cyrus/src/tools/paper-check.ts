@@ -6,6 +6,7 @@ import { loadLocalEnv } from "../local-env.ts";
 import { loadSettings } from "../config.ts";
 import { AlpacaTrading } from "../alpaca-trading.ts";
 import { AlpacaData } from "../alpaca-data.ts";
+import { Liquidator, SellGate } from "../sells.ts";
 
 loadLocalEnv();
 const settings = loadSettings();
@@ -53,7 +54,9 @@ if (process.argv.includes("--trade")) {
     console.log("open orders", (await trading.listOrders("open")).map((o) => ({ symbol: o.symbol, type: o.type, status: o.status })));
     } finally {
       // Whatever happened above, leave the paper account flat.
-      await trading.closeAllPositions();
+      const gate = new SellGate({ broker: trading, say: async () => true });
+      const r = await new Liquidator({ broker: trading, gate, now: () => new Date() }).flatten({ reason: "paper check", tradeDate: new Date().toISOString().slice(0, 10) });
+      console.log("liquidated", r);
       await sleep(3000);
       console.log("after close: positions", (await trading.listPositions()).length, "open orders", (await trading.listOrders("open")).length);
     }

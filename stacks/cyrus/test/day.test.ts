@@ -32,7 +32,7 @@ test("a full day: request, approval, screen, live list, entry with a stop, a ref
   await r.at("13:45:00"); // 8:45: the screen starts in the background
   assert.equal(r.counts().screens, 1);
   assert.deepEqual((await r.store.getDay(D))!.liveList, ["AAA", "BBB"]);
-  assert.ok(r.said("trading").some((t) => t.includes("live list") && t.includes("AAA BBB")));
+  assert.ok(r.said("trading").some((t) => t.includes("live list") && t.includes("1. Alpha Corp (AAA)") && t.includes("2. Beta (BBB)")), "numbered, name and ticker, one per line");
   await r.at("13:46:00");
   assert.equal(r.counts().screens, 1, "the screen runs once");
 
@@ -43,15 +43,15 @@ test("a full day: request, approval, screen, live list, entry with a stop, a ref
   assert.ok(r.said("commands").at(-1)!.startsWith("Armed for Monday 2026-11-02"));
 
   r.broker.clock = { ...r.broker.clock, isOpen: true };
-  await r.trade("AAA", 100, "14:31:00"); // inside the first 5 minutes: builds the range
-  await r.trade("BBB", 50, "14:31:30");
-  await r.trade("AAA", 101, "14:36:00"); // breakout
+  await r.ramp("AAA", [...Array(12).fill(100), 101], "14:36:00"); // twelve prints, then an uptick above the average: a signal
   await settle();
   const sent = r.broker.calls.filter((c) => c.fn === "submitEntry");
   assert.equal(sent.length, 1);
   assert.equal((sent[0]!.args[0] as any).qty, 4, "500 dollar limit at 101 dollars is 4 shares");
   assert.ok((sent[0]!.args[0] as any).stopPrice < 101);
-  assert.ok(r.said("trading").some((t) => t.includes("Entry sent")));
+  await r.worker.tick(); // the digest of trade news goes out in a batch
+  await r.at("14:37:00");
+  assert.ok(r.said("trading").some((t) => t.includes("BUY 4 AAA")), "trade news arrives as a digest");
 
   // a fill arrives; the next sync marks it
   const row = (await r.store.listOrders(D))[0]!;
@@ -64,14 +64,14 @@ test("a full day: request, approval, screen, live list, entry with a stop, a ref
   r.ownerSays("stop", "14:39:00");
   await r.at("14:39:10");
   assert.equal(((await r.store.getControl(CONTROL_STOP)) as StopFlag).on, true);
-  await r.trade("BBB", 52, "14:40:00");
+  await r.ramp("BBB", [...Array(12).fill(50), 50.6], "14:40:00");
   assert.equal(r.broker.calls.filter((c) => c.fn === "submitEntry").length, 1);
   assert.equal((await r.store.listRefusals(D)).at(-1)!.reason, "stop flag is set");
 
   await r.at("20:54:00"); // 3:54 PM New York: not yet
-  assert.equal(r.broker.count("closeAllPositions"), 0);
+  assert.equal(r.broker.count("submitSell"), 0);
   await r.at("20:55:00"); // close - 5 minutes
-  assert.equal(r.broker.count("closeAllPositions"), 1);
+  assert.equal(r.broker.count("submitSell"), 1);
   assert.equal(r.broker.positions.length, 0);
   assert.ok((await r.store.getDay(D))!.phases.closeout);
   assert.equal(r.counts().streamStops, 1);
@@ -81,7 +81,8 @@ test("a full day: request, approval, screen, live list, entry with a stop, a ref
   r.broker.account = { ...r.broker.account, equity: 20012 };
   await r.at("21:05:00");
   const summary = r.said("trading").find((t) => t.includes("Daily summary"))!;
-  for (const w of ["AAA", "Entries: 1", "Refused entries: 1", "stop flag is set", "Borrowing used", "flat", "never an instruction to act"]) assert.ok(summary.includes(w), w);
+  for (const w of ["AAA", "Trades: 1 entry orders sent", "Refused entries: 1", "stop flag is set", "Borrowing used", "flat", "Speed", "Estimated regulatory fees", "Running total", "Paper trading only."]) assert.ok(summary.includes(w), w);
+  assert.ok(!summary.includes("never an instruction to act"), "a report of what was done is not research input");
   await r.at("21:10:00");
   assert.equal(r.said("trading").filter((t) => t.includes("Daily summary")).length, 1, "the summary is posted once");
   assert.ok(r.pings.every((p) => p === "ok"));
@@ -102,8 +103,7 @@ test("if limits are not all decided at the open: no trading, no stream, and a la
   r.ownerSays("approve", "14:31:00");
   await r.at("14:31:10");
   assert.equal((await r.store.getDay(D))!.status, "lapsed");
-  await r.trade("AAA", 100, "14:31:20");
-  await r.trade("AAA", 110, "14:40:00");
+  await r.ramp("AAA", [...Array(12).fill(100), 101], "14:40:00");
   assert.equal(r.broker.count("submitEntry"), 0);
   await r.at("20:55:00");
   await r.at("21:05:00");
@@ -164,35 +164,38 @@ test("with the database down at the close, the broker's own clock still triggers
   r.broker.positions = [{ symbol: "AAA", qty: 5, marketValue: 500, avgEntryPrice: 100, unrealizedPl: 0 }];
   r.broker.clock = { isOpen: true, timestamp: "", nextOpen: "", nextClose: "2026-11-02T21:00:00Z" };
   await r.at("20:40:00");
-  assert.equal(r.broker.count("closeAllPositions"), 0, "not yet near the close");
+  assert.equal(r.broker.count("submitSell"), 0, "not yet near the close");
   await r.at("20:56:00");
-  assert.equal(r.broker.count("closeAllPositions"), 1);
+  assert.equal(r.broker.count("submitSell"), 1);
   assert.equal(r.broker.positions.length, 0);
   await r.at("20:56:10");
-  assert.equal(r.broker.count("closeAllPositions"), 1, "only once");
+  assert.equal(r.broker.count("submitSell"), 1, "only once");
 });
 
-test("a close-out that cannot get flat is retried, is not recorded as done, and the heartbeat says fail until flat", async () => {
+test("a close-out that cannot get flat is retried, is not recorded as done, tells Michael by name, and the heartbeat says fail until flat", async () => {
   const r = rig();
   await r.at("13:30:00");
   r.broker.clock = { ...r.broker.clock, isOpen: true };
   r.broker.positions = [{ symbol: "AAA", qty: 5, marketValue: 500, avgEntryPrice: 100, unrealizedPl: 0 }];
-  await r.store.insertOrder({ clientOrderId: "cyrus-20261102-AAA", tradeDate: D, symbol: "AAA", qty: 5, referencePrice: 100, stopPrice: 98.5, status: "submitted", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: null });
-  const realClose = r.broker.closeAllPositions.bind(r.broker);
+  await r.store.insertOrder({ clientOrderId: "cyrus-20261102-AAA-1", tradeDate: D, symbol: "AAA", qty: 5, referencePrice: 100, stopPrice: 98.5, status: "submitted", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: null });
   let works = false;
-  r.broker.closeAllPositions = async () => { if (!works) { r.broker.calls.push({ fn: "closeAllPositions", args: [] }); throw new Error("rejected (test)"); } return realClose(); };
+  r.broker.onSell = async () => { if (!works) throw new Error("rejected (test)"); };
   await r.at("20:55:00");
   assert.equal((await r.store.getDay(D))!.phases.closeout, undefined, "not recorded as done");
-  assert.ok(r.said("alerts").some((t) => t.includes("NOT FLAT")));
+  const alert = r.bot.posts.find((p) => p.channel === "alerts" && p.text.includes("NOT FLAT"))!;
+  assert.ok(alert.text.includes("Michael") && alert.mention, "named, and mentioned so the phone buzzes");
   await r.at("20:55:05");
   assert.equal(r.pings.at(-1), "fail");
-  const attempts = r.broker.count("closeAllPositions");
-  await r.at("20:57:00");
-  assert.equal(r.broker.count("closeAllPositions"), attempts, "waits 5 minutes between tries");
+  const attempts = r.broker.count("submitSell");
+  await r.at("20:55:10");
+  assert.equal(r.broker.count("submitSell"), attempts, "waits 20 seconds between tries before the close");
+  await r.at("20:55:30");
+  assert.ok(r.broker.count("submitSell") > attempts, "tries again");
+  assert.equal(r.said("alerts").filter((t) => t.includes("NOT FLAT")).length, 1, "reported once, not every try");
   works = true;
-  await r.at("21:01:00"); // the retry goes through (the broker still says open)
+  await r.at("20:56:00"); // the retry goes through (the broker still says open)
   assert.ok((await r.store.getDay(D))!.phases.closeout, "recorded once flat");
-  await r.at("21:01:10");
+  await r.at("20:56:10");
   assert.notEqual(r.pings.at(-1), "fail");
 });
 

@@ -3,21 +3,58 @@
 
 export type BorrowingCap = 1 | 2 | 4;
 
+// The most orders a minute the stack will ever send, whatever Michael types. This is a fixed ceiling in code, set
+// at half of Alpaca's 200 requests a minute so that cancels, protective actions, the close-out and the stop command
+// always have room. RAISING IT IS A HARD STOP: it needs Michael's decision, not a builder's.
+export const MAX_TRADES_PER_MINUTE = 100;
+
 export interface Limits {
   maxPositionUsd: number; // largest single position, in dollars at entry
   dailyLossStopUsd: number; // stop trading for the day when equity falls this far below the day's start
-  maxTradesPerDay: number; // entries per day
+  maxTradesPerMinute: number; // orders sent to open a position, in any 60 seconds (1 to MAX_TRADES_PER_MINUTE). No daily total.
   borrowingCap: BorrowingCap; // 1 = no borrowing, 2 or 4 = that multiple of equity
 }
 
-// What the stack suggests each morning. Placeholders: small on purpose for a 20,000 dollar paper account.
-export const SUGGESTED_LIMITS: Limits = { maxPositionUsd: 1000, dailyLossStopUsd: 200, maxTradesPerDay: 10, borrowingCap: 1 };
+// What the stack suggests when it has no earlier approved value for a limit (the first time). Small on purpose
+// for a 20,000 dollar paper account.
+export const SUGGESTED_LIMITS: Limits = { maxPositionUsd: 1000, dailyLossStopUsd: 200, maxTradesPerMinute: 20, borrowingCap: 1 };
 
 export const LIMIT_NAMES = ["position", "loss", "trades", "cap"] as const;
 export type LimitName = (typeof LIMIT_NAMES)[number];
 
+// Reads a stored limits object of any age. Records written before build C2 had `maxTradesPerDay` and no
+// `maxTradesPerMinute`: the old daily number means nothing as a per-minute cap, so it is replaced by the suggestion
+// and the caller is told (`tradesPerMinuteMissing`) so it can mark that limit as undecided.
+export function normalizeLimits(raw: unknown): { limits: Limits; tradesPerMinuteMissing: boolean } {
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const num = (v: unknown, fallback: number) => (typeof v === "number" && Number.isFinite(v) ? v : fallback);
+  const tpm = r.maxTradesPerMinute;
+  const missing = !(typeof tpm === "number" && Number.isFinite(tpm));
+  const cap = num(r.borrowingCap, 1);
+  return {
+    tradesPerMinuteMissing: missing,
+    limits: {
+      maxPositionUsd: num(r.maxPositionUsd, SUGGESTED_LIMITS.maxPositionUsd),
+      dailyLossStopUsd: num(r.dailyLossStopUsd, SUGGESTED_LIMITS.dailyLossStopUsd),
+      maxTradesPerMinute: missing ? SUGGESTED_LIMITS.maxTradesPerMinute : Math.max(1, Math.min(MAX_TRADES_PER_MINUTE, Math.floor(tpm as number))),
+      borrowingCap: (cap === 2 || cap === 4 ? cap : 1) as BorrowingCap,
+    },
+  };
+}
+
+// Which limits would a change make looser? After the "Armed" message only tightening is allowed.
+export function loosened(current: Limits, proposed: Limits): LimitName[] {
+  const out: LimitName[] = [];
+  if (proposed.maxPositionUsd > current.maxPositionUsd) out.push("position");
+  if (proposed.dailyLossStopUsd > current.dailyLossStopUsd) out.push("loss");
+  if (proposed.maxTradesPerMinute > current.maxTradesPerMinute) out.push("trades");
+  if (proposed.borrowingCap > current.borrowingCap) out.push("cap");
+  return out;
+}
+
 // Applies one owner override. Returns the new limits or an error text. The owner may set any value inside
-// sanity bounds (they exist to catch typos, not to second-guess the owner).
+// sanity bounds (they exist to catch typos, not to second-guess the owner), except that trades a minute can never
+// go above the fixed ceiling.
 export function applyOverride(current: Limits, name: string, raw: string, equity: number): { limits: Limits } | { error: string } {
   const value = Number(raw.replace(/[$,]/g, ""));
   if (!Number.isFinite(value)) return { error: `"${raw}" is not a number` };
@@ -29,8 +66,8 @@ export function applyOverride(current: Limits, name: string, raw: string, equity
       if (value < 10 || value > equity * 0.25) return { error: `loss stop must be between 10 and ${equity * 0.25} dollars` };
       return { limits: { ...current, dailyLossStopUsd: value } };
     case "trades":
-      if (!Number.isInteger(value) || value < 1 || value > 100) return { error: "trades must be a whole number from 1 to 100" };
-      return { limits: { ...current, maxTradesPerDay: value } };
+      if (!Number.isInteger(value) || value < 1 || value > MAX_TRADES_PER_MINUTE) return { error: `trades a minute must be a whole number from 1 to ${MAX_TRADES_PER_MINUTE} (${MAX_TRADES_PER_MINUTE} is the fixed ceiling, set in the code)` };
+      return { limits: { ...current, maxTradesPerMinute: value } };
     case "cap":
       if (value !== 1 && value !== 2 && value !== 4) return { error: "cap must be 1, 2 or 4" };
       return { limits: { ...current, borrowingCap: value } };
@@ -40,7 +77,7 @@ export function applyOverride(current: Limits, name: string, raw: string, equity
 }
 
 export function describeLimits(l: Limits): string {
-  return `largest position ${l.maxPositionUsd} dollars, daily loss stop ${l.dailyLossStopUsd} dollars, trades a day ${l.maxTradesPerDay}, borrowing cap ${l.borrowingCap}`;
+  return `largest position ${l.maxPositionUsd} dollars, daily loss stop ${l.dailyLossStopUsd} dollars, at most ${l.maxTradesPerMinute} orders a minute (no daily total), borrowing cap ${l.borrowingCap}`;
 }
 
 export interface EntryContext {
@@ -51,9 +88,9 @@ export interface EntryContext {
   marketOpen: boolean;
   minutesSinceOpen: number;
   minutesToClose: number;
-  tradesToday: number;
-  symbolsTradedToday: ReadonlySet<string>;
-  heldSymbols: ReadonlySet<string>;
+  tradesLastMinute: number; // entries sent in the last 60 seconds
+  heldSymbols: ReadonlySet<string>; // symbols held, or with an entry still working
+  inSymbolCooldown?: boolean;
   dayStartEquity: number;
   equity: number;
   grossExposure: number; // dollars currently in positions
@@ -75,8 +112,7 @@ export function checkEntry(c: EntryContext): EntryDecision {
   if (c.minutesToClose < MIN_MINUTES_BEFORE_CLOSE) return { ok: false, reason: "too close to the close for a new entry" };
   if (!(c.price > 0) || c.priceAgeSeconds > MAX_PRICE_AGE_SECONDS) return { ok: false, reason: "price is missing or stale" };
   if (c.dayStartEquity - c.equity >= c.limits.dailyLossStopUsd) return { ok: false, reason: "daily loss stop reached" };
-  if (c.tradesToday >= c.limits.maxTradesPerDay) return { ok: false, reason: "trades-a-day limit reached" };
-  if (c.symbolsTradedToday.has(c.symbol)) return { ok: false, reason: "already traded this symbol today" };
+  if (c.tradesLastMinute >= Math.min(c.limits.maxTradesPerMinute, MAX_TRADES_PER_MINUTE)) return { ok: false, reason: "trades-per-minute limit reached" };
   if (c.heldSymbols.has(c.symbol)) return { ok: false, reason: "already holding this symbol" };
   const room = c.equity * c.limits.borrowingCap - c.grossExposure;
   const notional = Math.min(c.limits.maxPositionUsd, room);

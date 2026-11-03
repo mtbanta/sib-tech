@@ -7,6 +7,8 @@ import { assertPaperHost, PAPER_TRADING_BASE_URL, type Settings } from "./config
 
 export class AlpacaError extends Error {
   readonly status: number;
+  // The per-item answers of a bulk call, when there were any.
+  items?: Array<Record<string, unknown>>;
   constructor(message: string, status: number) {
     super(message);
     this.name = "AlpacaError";
@@ -48,6 +50,8 @@ export interface CalendarDay {
 export interface Position {
   symbol: string;
   qty: number;
+  // Shares not held by open orders, if Alpaca reports it (null when it does not).
+  qtyAvailable?: number | null;
   marketValue: number;
   avgEntryPrice: number;
   unrealizedPl: number;
@@ -65,6 +69,9 @@ export interface Order {
   orderClass: string;
   type: string;
   stopPrice: number | null;
+  limitPrice: number | null;
+  createdAt: string | null;
+  filledAt: string | null;
   legs: Order[];
 }
 
@@ -74,6 +81,25 @@ export interface EntryOrder {
   stopPrice: number;
   referencePrice: number;
   clientOrderId: string;
+  // With a take-profit price the entry is a bracket (two linked exits held at Alpaca, only one can fill);
+  // without it, an OTO order with the protective stop only.
+  takeProfitPrice?: number;
+}
+
+export interface SellOrder {
+  symbol: string;
+  qty: number;
+  clientOrderId: string;
+}
+
+// What the rate-limit headers on a response said. Alpaca counts the account, order and position calls in one
+// bucket (limit 200); the clock and calendar have their own (limit 1000).
+export interface RateInfo {
+  path: string;
+  status: number;
+  limit: number | null;
+  remaining: number | null;
+  reset: number | null;
 }
 
 type Json = Record<string, unknown>;
@@ -94,6 +120,9 @@ export function parseOrder(raw: Json): Order {
     orderClass: String(raw.order_class ?? ""),
     type: String(raw.type ?? raw.order_type ?? ""),
     stopPrice: numOrNull(raw.stop_price),
+    limitPrice: numOrNull(raw.limit_price),
+    createdAt: raw.created_at ? String(raw.created_at) : null,
+    filledAt: raw.filled_at ? String(raw.filled_at) : null,
     legs,
   };
 }
@@ -104,6 +133,8 @@ export interface TradingClientOptions {
   fetchImpl?: typeof fetch;
   // Pause between retries of a read. Tests set this to 0.
   retryDelayMs?: number;
+  // Told about the rate-limit headers of every response (the governor listens).
+  onRate?: (info: RateInfo) => void;
 }
 
 export class AlpacaTrading {
@@ -111,6 +142,7 @@ export class AlpacaTrading {
   private readonly secretKey: string;
   private readonly fetchImpl: typeof fetch;
   private readonly retryDelayMs: number;
+  private readonly onRate: ((info: RateInfo) => void) | undefined;
 
   constructor(settings: Settings, options: TradingClientOptions = {}) {
     assertPaperHost(PAPER_TRADING_BASE_URL);
@@ -118,6 +150,7 @@ export class AlpacaTrading {
     this.secretKey = settings.alpaca.secretKey;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.retryDelayMs = options.retryDelayMs ?? 500;
+    this.onRate = options.onRate;
   }
 
   // One HTTP call. No retry here.
@@ -138,6 +171,14 @@ export class AlpacaTrading {
       redirect: "error", // never follow a redirect with the key headers attached
     });
     const text = await res.text();
+    if (this.onRate) {
+      const h = (name: string) => (res.headers.get(name) === null ? null : Number(res.headers.get(name)));
+      try {
+        this.onRate({ path, status: res.status, limit: h("x-ratelimit-limit"), remaining: h("x-ratelimit-remaining"), reset: h("x-ratelimit-reset") });
+      } catch {
+        /* a listener must never break a request */
+      }
+    }
     let parsed: unknown = null;
     try {
       parsed = text ? JSON.parse(text) : null;
@@ -146,7 +187,9 @@ export class AlpacaTrading {
     }
     if (!res.ok) {
       const message = parsed && typeof parsed === "object" && "message" in parsed ? String((parsed as Json).message) : text.slice(0, 200);
-      throw new AlpacaError(`Alpaca ${method} ${path} answered ${res.status}: ${message}`, res.status);
+      const err = new AlpacaError(`Alpaca ${method} ${path} answered ${res.status}: ${message}`, res.status);
+      err.items = Array.isArray(parsed) ? (parsed as Json[]) : undefined;
+      throw err;
     }
     return parsed;
   }
@@ -221,6 +264,7 @@ export class AlpacaTrading {
     return rows.map((p) => ({
       symbol: String(p.symbol),
       qty: num(p.qty),
+      qtyAvailable: numOrNull(p.qty_available),
       marketValue: num(p.market_value),
       avgEntryPrice: num(p.avg_entry_price),
       unrealizedPl: num(p.unrealized_pl),
@@ -233,6 +277,29 @@ export class AlpacaTrading {
     return ((await this.read("/v2/orders", query)) as Json[]).map(parseOrder);
   }
 
+  // Every order since `afterIso`, page by page (Alpaca returns at most 500 at a time, oldest first). A day with
+  // thousands of orders needs this: one call would show only the oldest 500 and hide the newest. Stops at
+  // `maxPages` and says so, rather than looping for ever.
+  async listOrdersPaged(status: "open" | "closed" | "all", afterIso: string, maxPages = 20): Promise<{ orders: Order[]; complete: boolean; pages: number }> {
+    const seen = new Map<string, Order>();
+    let cursor = afterIso;
+    let pages = 0;
+    let complete = false;
+    while (pages < maxPages) {
+      const page = await this.listOrders(status, cursor);
+      pages++;
+      for (const o of page) seen.set(o.id, o);
+      if (page.length < 500) {
+        complete = true;
+        break;
+      }
+      const last = page[page.length - 1]!.createdAt;
+      if (!last || last === cursor) break; // cannot advance: do not claim completeness
+      cursor = last;
+    }
+    return { orders: [...seen.values()], complete, pages };
+  }
+
   async findOrderByClientId(clientOrderId: string): Promise<Order | null> {
     try {
       const raw = (await this.read("/v2/orders:by_client_order_id", { client_order_id: clientOrderId })) as Json;
@@ -243,13 +310,65 @@ export class AlpacaTrading {
     }
   }
 
-  // The only way this client opens a position: a long, whole-share market buy that carries a protective stop
-  // order held at Alpaca (an "OTO" order: the stop is created with the entry and lives at the broker).
+  private cents(x: number): string {
+    return (Math.floor(x * 100 + 1e-9) / 100).toFixed(2);
+  }
+
+  // Sends an order body that carries a client_order_id, safely: after any unclear failure (network error, timeout,
+  // 5xx, and 429 when `retry429` is set) it asks Alpaca whether that id exists before it sends again, so a retry
+  // can never make a second order. A 429 means the request was refused, so for safety sells it is retried
+  // with the SAME id after a pause.
+  private async postOrder(body: Json, clientOrderId: string, retry429: boolean): Promise<Order> {
+    let sent429 = 0;
+    for (;;) {
+      try {
+        return parseOrder((await this.once("POST", "/v2/orders", undefined, body)) as Json);
+      } catch (err) {
+        const is429 = err instanceof AlpacaError && err.status === 429;
+        if (is429 && retry429 && sent429 < 8) {
+          sent429++;
+          await sleep(Math.min(2000, 250 * 2 ** (sent429 - 1)));
+          continue;
+        }
+        const unclear = !(err instanceof AlpacaError) || is429 || err.status >= 500;
+        const duplicate = err instanceof AlpacaError && err.status === 422 && /client_order_id/i.test(err.message);
+        if (!unclear && !duplicate) throw err;
+        // From here the first send may have landed, so whatever goes wrong next is still "unclear" to the caller
+        // (status 502), never a definite refusal: the caller keeps such an order counted and reconciles it by its id.
+        const stillUnclear = (e: unknown): never => {
+          throw new AlpacaError(`outcome of the first send is still unclear: ${(e as Error).message.slice(0, 160)}`, 502);
+        };
+        let existing: Order | null;
+        try {
+          existing = await this.findOrderByClientId(clientOrderId);
+        } catch (e) {
+          return stillUnclear(e);
+        }
+        if (existing) return existing;
+        if (duplicate) throw err;
+        // Not there: the first send did not land. Sending again with the same id cannot create two orders.
+        try {
+          return parseOrder((await this.once("POST", "/v2/orders", undefined, body)) as Json);
+        } catch (e) {
+          const dup2 = e instanceof AlpacaError && e.status === 422 && /client_order_id/i.test(e.message);
+          if (dup2) throw e;
+          return stillUnclear(e);
+        }
+      }
+    }
+  }
+
+  // The only way this client opens a position: a long, whole-share market buy that carries its exits held at
+  // Alpaca. With `takeProfitPrice` it is a bracket (a take-profit limit and a protective stop, only one of which can
+  // fill); without it, an OTO order (the protective stop only).
   async submitEntry(entry: EntryOrder): Promise<Order> {
     if (!/^[A-Z.]{1,6}$/.test(entry.symbol)) throw new AlpacaError("Bad symbol", 0);
     if (!Number.isInteger(entry.qty) || entry.qty < 1) throw new AlpacaError("Quantity must be a whole number of shares, at least 1", 0);
     if (!(entry.stopPrice > 0) || !(entry.stopPrice < entry.referencePrice)) {
       throw new AlpacaError("Protective stop must be positive and below the reference price", 0);
+    }
+    if (entry.takeProfitPrice !== undefined && !(entry.takeProfitPrice > entry.referencePrice)) {
+      throw new AlpacaError("Take-profit must be above the reference price", 0);
     }
     if (!/^[\w.-]{8,128}$/.test(entry.clientOrderId)) throw new AlpacaError("Bad client order id", 0);
     const body: Json = {
@@ -258,66 +377,63 @@ export class AlpacaTrading {
       side: "buy",
       type: "market",
       time_in_force: "day",
-      order_class: "oto",
-      stop_loss: { stop_price: (Math.floor(entry.stopPrice * 100) / 100).toFixed(2) },
+      order_class: entry.takeProfitPrice !== undefined ? "bracket" : "oto",
+      stop_loss: { stop_price: this.cents(entry.stopPrice) },
       client_order_id: entry.clientOrderId,
     };
-    try {
-      return parseOrder((await this.once("POST", "/v2/orders", undefined, body)) as Json);
-    } catch (err) {
-      // An unclear outcome (network error, timeout, 429, 5xx) or a duplicate id: ask Alpaca before sending again.
-      const unclear = !(err instanceof AlpacaError) || err.status === 429 || err.status >= 500;
-      const duplicate = err instanceof AlpacaError && err.status === 422 && /client_order_id/i.test(err.message);
-      if (!unclear && !duplicate) throw err;
-      // From here the first send may have landed, so whatever goes wrong next is still "unclear" to the caller
-      // (status 502), never a definite refusal: the gate keeps such an entry counted and reconciles it by its id.
-      const stillUnclear = (e: unknown): never => {
-        throw new AlpacaError(`outcome of the first send is still unclear: ${(e as Error).message.slice(0, 160)}`, 502);
-      };
-      let existing: Order | null;
+    if (entry.takeProfitPrice !== undefined) body.take_profit = { limit_price: (Math.ceil(entry.takeProfitPrice * 100 - 1e-9) / 100).toFixed(2) };
+    return this.postOrder(body, entry.clientOrderId, false);
+  }
+
+  // A plain market sell with an explicit quantity. Only the sell gate (sells.ts) may call this: it checks that the
+  // quantity is not more than the shares held, counting sells already open. Safety sells wait out a 429 and retry
+  // with the same id.
+  async submitSell(sell: SellOrder): Promise<Order> {
+    if (!/^[A-Z.]{1,6}$/.test(sell.symbol)) throw new AlpacaError("Bad symbol", 0);
+    if (!(sell.qty > 0) || !Number.isFinite(sell.qty)) throw new AlpacaError("Sell quantity must be positive", 0);
+    if (!/^[\w.-]{8,128}$/.test(sell.clientOrderId)) throw new AlpacaError("Bad client order id", 0);
+    const body: Json = {
+      symbol: sell.symbol,
+      qty: Number.isInteger(sell.qty) ? String(sell.qty) : String(Number(sell.qty.toFixed(9))),
+      side: "sell",
+      type: "market",
+      time_in_force: "day",
+      client_order_id: sell.clientOrderId,
+    };
+    return this.postOrder(body, sell.clientOrderId, true);
+  }
+
+  // Cancels one order. Safe to repeat, so it waits out a 429 and tries again. An order that is already gone (404 or
+  // 422 "already done") counts as cancelled.
+  async cancelOrder(orderId: string): Promise<void> {
+    if (!/^[0-9a-f-]{36}$/.test(orderId)) throw new AlpacaError("Bad order id", 0);
+    for (let attempt = 0; ; attempt++) {
       try {
-        existing = await this.findOrderByClientId(entry.clientOrderId);
-      } catch (e) {
-        return stillUnclear(e);
-      }
-      if (existing) return existing;
-      if (duplicate) throw err;
-      // Not there: the first send did not land. Sending again with the same id cannot create two orders.
-      try {
-        return parseOrder((await this.once("POST", "/v2/orders", undefined, body)) as Json);
-      } catch (e) {
-        const dup2 = e instanceof AlpacaError && e.status === 422 && /client_order_id/i.test(e.message);
-        if (dup2) throw e;
-        return stillUnclear(e);
+        await this.once("DELETE", `/v2/orders/${orderId}`);
+        return;
+      } catch (err) {
+        if (err instanceof AlpacaError && (err.status === 404 || err.status === 422)) return;
+        const retryable = !(err instanceof AlpacaError) || err.status === 429 || err.status >= 500;
+        if (!retryable || attempt >= 5) throw err;
+        await sleep(Math.min(2000, 250 * 2 ** attempt));
       }
     }
   }
 
-  // Alpaca answers these two bulk calls with 207 and one result per item, so a 2xx does not mean every item worked.
-  private assertAllItemsOk(result: unknown, what: string): void {
-    if (!Array.isArray(result)) return;
-    const failed = (result as Json[]).filter((r) => num(r.status) >= 400).map((r) => String(r.symbol ?? r.id ?? "?"));
-    if (failed.length > 0) throw new AlpacaError(`${what} failed for: ${failed.join(", ")}`, 207);
-  }
-
-  // Cancels one order (used by the stop command, for entries that have not filled yet).
-  async cancelOrder(orderId: string): Promise<void> {
-    if (!/^[0-9a-f-]{36}$/.test(orderId)) throw new AlpacaError("Bad order id", 0);
-    await this.once("DELETE", `/v2/orders/${orderId}`);
-  }
-
-  // Sells one position at market (used when a position turns out to have no protective stop).
-  async closePosition(symbol: string): Promise<void> {
-    if (!/^[A-Z.]{1,6}$/.test(symbol)) throw new AlpacaError("Bad symbol", 0);
-    await this.once("DELETE", `/v2/positions/${encodeURIComponent(symbol)}`);
-  }
-
-  async cancelAllOrders(): Promise<void> {
-    this.assertAllItemsOk(await this.once("DELETE", "/v2/orders"), "Cancelling orders");
-  }
-
-  // Sells every position at market and cancels the open orders first. Used by the stop command and the close-out.
-  async closeAllPositions(): Promise<void> {
-    this.assertAllItemsOk(await this.once("DELETE", "/v2/positions", { cancel_orders: "true" }), "Closing positions");
+  // Cancels every open order in one request. Alpaca answers 207 with one result per order, so a 2xx does not
+  // mean each one worked: the per-item answers come back, and the caller checks the orders afterwards.
+  async cancelAllOrders(): Promise<{ attempted: number; failed: string[] }> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const result = await this.once("DELETE", "/v2/orders");
+        const items = Array.isArray(result) ? (result as Json[]) : [];
+        const failed = items.filter((r) => num(r.status) >= 400).map((r) => `${String(r.id ?? "?")}: ${(r.body as Json | undefined)?.message ?? r.status}`);
+        return { attempted: items.length, failed };
+      } catch (err) {
+        const retryable = !(err instanceof AlpacaError) || err.status === 429 || err.status >= 500;
+        if (!retryable || attempt >= 5) throw err;
+        await sleep(Math.min(2000, 250 * 2 ** attempt));
+      }
+    }
   }
 }

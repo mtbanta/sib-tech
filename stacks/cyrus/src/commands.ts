@@ -6,8 +6,8 @@ import type { DiscordBot, DiscordMessage } from "./discord-bot.ts";
 import { isOwnerCommand } from "./discord-bot.ts";
 import type { Settings } from "./config.ts";
 import { decideLimits, limitLines, parseCommand, type NextSessionFinder } from "./morning.ts";
-import { CONTROL_COMMAND_CURSOR, CONTROL_STOP, type StopFlag, type Store } from "./store.ts";
-import { NOT_ADVICE } from "./discord.ts";
+import type { Liquidator, Say } from "./sells.ts";
+import { CONTROL_COMMAND_CURSOR, CONTROL_STOP, type DayRecord, type StopFlag, type Store } from "./store.ts";
 import { describeLimits } from "./limits.ts";
 import { centralClock, dayWord, etDate, sessionPhase } from "./time.ts";
 
@@ -18,6 +18,7 @@ export interface CommandDeps {
   store: Store;
   broker: Broker;
   bot: CommandBot;
+  liquidator: Liquidator;
   now: () => Date;
   // Finds the next trading day that has not opened yet: the day approvals and limit changes apply to.
   sessions: NextSessionFinder;
@@ -33,8 +34,8 @@ const HELP = [
   "`resume` clears the stop (approved limits are still needed)",
   "`flatten` stop, then sell everything now",
   "`limits` today's limits",
-  "`approve` or `approve cap` accept the next trading day's limits; `position 1500`, `loss 150`, `trades 5`, `cap 2` change one (until that day's open)",
-  NOT_ADVICE,
+  "`approve` or `approve cap` accept the next trading day's limits; `position 1500`, `loss 150`, `trades 20`, `cap 2` change one (`trades` is orders a minute, 1 to 100). Until the `Armed` message 5 minutes before the open you can change any limit; after it only tighten (lower) a limit, until the evening post.",
+  "You can send several commands in one message, one per line; I reply to each line.",
 ].join("\n");
 
 export class CommandProcessor {
@@ -43,7 +44,15 @@ export class CommandProcessor {
     this.d = deps;
   }
 
-  private say(text: string): Promise<boolean> {
+  // While one owner message is being handled, replies are collected and posted together as one message.
+  private out: string[] | null = null;
+  private prefix = "";
+
+  private async say(text: string): Promise<boolean> {
+    if (this.out) {
+      this.out.push(this.prefix ? `${this.prefix}${text}` : text);
+      return true;
+    }
     return this.d.bot.post("commands", text);
   }
 
@@ -75,7 +84,44 @@ export class CommandProcessor {
     return handled;
   }
 
+  // One message can hold several commands, one per line. Each line gets its own reply (an unknown line is named),
+  // and the replies go out together in one message so Discord's rate limit is not a limit on commands.
   async handle(m: DiscordMessage): Promise<void> {
+    const lines = m.content.split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== "");
+    if (lines.length <= 1) {
+      await this.handleLine(m);
+      return;
+    }
+    const shown = lines.slice(0, 20);
+    this.out = [];
+    try {
+      for (const line of shown) {
+        this.prefix = `**${line.slice(0, 40)}**: `;
+        try {
+          await this.handleLine({ ...m, content: line });
+        } catch (err) {
+          this.d.log?.("command_failed", { error: (err as Error).message });
+          this.out.push(`${this.prefix}that command failed. Nothing may have changed, so check \`status\`.`);
+        }
+      }
+      if (lines.length > shown.length) this.out.push(`I only read the first ${shown.length} lines; ${lines.length - shown.length} more were ignored.`);
+    } finally {
+      const replies = this.out;
+      this.out = null;
+      this.prefix = "";
+      let chunk = "";
+      for (const r of replies) {
+        if (chunk && chunk.length + r.length + 2 > 1800) {
+          await this.d.bot.post("commands", chunk);
+          chunk = "";
+        }
+        chunk = chunk ? `${chunk}\n\n${r}` : r;
+      }
+      if (chunk) await this.d.bot.post("commands", chunk);
+    }
+  }
+
+  private async handleLine(m: DiscordMessage): Promise<void> {
     if (m.content.trim() === "") {
       // Discord hides message text from a bot whose Message Content switch is off. Say that, not "did not understand".
       this.d.log?.("command", { kind: "empty_text" });
@@ -90,7 +136,7 @@ export class CommandProcessor {
         await this.say(HELP);
         return;
       case "unknown":
-        await this.say(`I did not understand "${cmd.text}". Type \`help\` for the list.`);
+        await this.say(`I did not understand the line "${cmd.text}". Nothing was done for it. Type \`help\` for the list.`);
         return;
       case "stop": {
         const saved = await this.trySetStop(true, "owner command (stop)", now);
@@ -116,18 +162,22 @@ export class CommandProcessor {
         return;
       case "flatten": {
         const saved = await this.trySetStop(true, "owner command (flatten)", now);
-        let sold = true;
+        let flat = false;
+        let remaining: string[] = [];
+        let failed = false;
         try {
-          await this.d.broker.closeAllPositions();
+          const r = await this.d.liquidator.flatten({ reason: "flatten command", tradeDate: etDate(now) });
+          flat = r.flat;
+          remaining = r.remaining;
         } catch {
-          sold = false;
+          failed = true;
         }
         await this.say(
-          !sold
-            ? `${saved ? "Stop flag is set" : "**The stop flag could not be saved**"}, but **selling failed**. Check Alpaca's dashboard and close positions by hand.`
+          failed || !flat
+            ? `${saved ? "Stop flag is set" : "**The stop flag could not be saved**"}, but **the account is not flat yet${remaining.length ? ` (${remaining.join(", ")})` : ""}**. I keep the stop on; check Alpaca's dashboard and close positions by hand if it stays that way.`
             : saved
-              ? "Stopped, and sent orders to sell every position and cancel every open order. Check `status` in a minute."
-              : "Sent orders to sell everything, but **the stop flag could not be saved**: no new entries can happen while the database is down, check `status` once it is back.",
+              ? "Stopped, and sold every position and cancelled every open order: the account is flat."
+              : "Sold everything, but **the stop flag could not be saved**: no new entries can happen while the database is down, check `status` once it is back.",
         );
         return;
       }
@@ -148,19 +198,18 @@ export class CommandProcessor {
         return;
       case "approve":
       case "set": {
-        const next = await this.d.sessions.next(now);
-        if (!next) {
+        const target = await this.targetDay(now);
+        if (!target) {
           await this.say("I cannot find the next trading day in Alpaca's calendar, so there is nothing to approve.");
           return;
         }
-        const date = next.date;
-        const day = await this.d.store.getDay(date);
+        const { date, day, mode } = target;
         if (!day) {
           await this.say(`There is no limits request for ${dayWord(date)} yet, so there is nothing to approve. I post it after the market closes.`);
           return;
         }
         const account = await this.d.broker.getAccount();
-        const decision = decideLimits(day, cmd, account.equity, now, m.at);
+        const decision = decideLimits(day, cmd, account.equity, now, m.at, mode);
         if (!decision.ok) {
           await this.say(decision.reply);
           return;
@@ -168,23 +217,40 @@ export class CommandProcessor {
         // The scheduler may have lapsed the day while we were talking to Alpaca: look again before writing.
         // The borrowing cap itself is set at Alpaca only at 5 minutes before the open (arming), never here.
         const latest = await this.d.store.getDay(date);
-        if (!latest || latest.status === "lapsed" || (latest.openAt && this.d.now() >= latest.openAt)) {
+        const stillOpenForChange = latest && latest.status !== "lapsed" && (mode === "tighten" ? latest.closeAt !== null && this.d.now() < latest.closeAt : !(latest.openAt && this.d.now() >= latest.openAt));
+        if (!latest || !stillOpenForChange) {
           await this.say("Too late: the market opened while I was saving that, so that day's limits are fixed and nothing changed.");
           return;
         }
         // A changed cap after the day was armed must be set at Alpaca again, so arming is undone and the scheduler
         // arms again (the gate refuses entries in between). Other limits are read from the day at each entry.
+        // `rearm` keeps the day in the "armed, tighten only" state while that happens.
         const { armed: _armed, ...phasesWithoutArmed } = latest.phases;
         const rearm = latest.phases.armed !== undefined && decision.patch.limits.borrowingCap !== latest.limits.borrowingCap;
-        await this.d.store.updateDay(date, rearm ? { ...decision.patch, phases: phasesWithoutArmed } : decision.patch);
+        await this.d.store.updateDay(date, rearm ? { ...decision.patch, phases: { ...phasesWithoutArmed, rearm: this.d.now().toISOString() } } : decision.patch);
         if (rearm) decision.reply += "\nThe cap changed after arming, so I will set it at Alpaca again in a few seconds.";
         const flag = await this.d.store.getControl<StopFlag>(CONTROL_STOP).catch(() => null);
         if (flag?.on && decision.patch.status === "approved") decision.reply += `\n**Note: the stop flag is ON (${flag.reason}), so there will be no entries until you type \`resume\`.**`;
-        this.d.log?.("limits_decision", { status: decision.patch.status, limits: decision.patch.limits });
+        this.d.log?.("limits_decision", { status: decision.patch.status, limits: decision.patch.limits, mode, date });
         await this.say(decision.reply);
         return;
       }
     }
+  }
+
+  // Which day a limit command applies to, at this moment:
+  //  - before the "Armed" message (5 minutes before the open): the next session that has not opened, any change allowed;
+  //  - from "Armed" until the close of that session: the day that is running, and a limit may only be tightened;
+  //  - after the close (the evening post): the next session again.
+  private async targetDay(now: Date): Promise<{ date: string; day: DayRecord | null; mode: "edit" | "tighten" } | null> {
+    const today = await this.d.store.getDay(etDate(now));
+    const armed = today && (today.phases.armed !== undefined || today.phases.rearm !== undefined);
+    if (today && today.isTradingDay && today.status === "approved" && armed && today.openAt && today.closeAt && now < today.closeAt) {
+      return { date: today.tradeDate, day: today, mode: "tighten" };
+    }
+    const next = await this.d.sessions.next(now);
+    if (!next) return null;
+    return { date: next.date, day: await this.d.store.getDay(next.date), mode: "edit" };
   }
 
   // The stop flag is the first thing a stop does; if it cannot be saved the broker side still gets its turn.
@@ -236,7 +302,6 @@ export class CommandProcessor {
       `Entries today: ${orders.filter((o) => o.status !== "failed" && o.status !== "rejected").length}; positions now: ${positions.length}`,
       `Equity: ${account.equity.toFixed(2)} (day start ${day?.dayStartEquity?.toFixed(2) ?? "?"})`,
       ...((await this.d.extraStatus?.()) ?? []),
-      NOT_ADVICE,
     ];
     return lines.filter(Boolean).join("\n");
   }

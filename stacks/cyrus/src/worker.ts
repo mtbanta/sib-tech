@@ -9,17 +9,23 @@
 //   close - 5 min   close-out: flat                        close + 5 min  daily summary
 // Commands are read on every tick, at any hour. The heartbeat is sent at the end of a tick that worked, and
 // "fail" after a tick that did not, so Healthchecks hears when the worker is unwell, not only when it is dead.
-import type { GateBroker } from "./broker.ts";
+import type { FullBroker } from "./broker.ts";
+import { BrokerView } from "./broker-view.ts";
 import { CommandProcessor, type CommandBot } from "./commands.ts";
+import { TradeDigest } from "./digest.ts";
+import { addToRunning, CONTROL_FEES, estimateFees, type FeesRunning } from "./fees.ts";
+import type { Governor } from "./governor.ts";
+import { Liquidator, SellGate } from "./sells.ts";
+import { formatLiveList } from "./universe.ts";
 import type { Settings } from "./config.ts";
 import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
-import { armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, type MorningSteps } from "./morning.ts";
+import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
 import { enforceDailyLoss, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
-import { OpeningRangeBreakout } from "./strategy.ts";
+import { BusyPlaceholder } from "./strategy.ts";
 import type { Trade } from "./stream.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
-import { formatSummary } from "./summary.ts";
+import { computeDay, formatSummary } from "./summary.ts";
 import { addMinutes, centralClock, etDate, etInstant, sessionPhase } from "./time.ts";
 import { NOT_ADVICE } from "./discord.ts";
 import type { PingKind } from "./heartbeat.ts";
@@ -32,21 +38,32 @@ export interface StreamLike {
   status(): string;
 }
 
+export interface LiveListResult {
+  symbols: string[];
+  names: Record<string, string>;
+}
+
 export interface WorkerDeps {
   settings: Settings;
-  broker: GateBroker;
+  broker: FullBroker;
+  governor: Governor;
   store: Store;
   bot: CommandBot;
   now: () => Date;
   ping: (kind: PingKind) => Promise<boolean>;
   // Builds the day's live list (universe, daily bars, screen). Slow (minutes), so it runs in the background.
-  buildLiveList: () => Promise<string[]>;
+  buildLiveList: () => Promise<LiveListResult>;
   makeStream: (symbols: string[], onTrade: (t: Trade) => void) => StreamLike;
   sleep?: (ms: number) => Promise<void>;
   log?: (level: "info" | "warn" | "error", event: string, data?: Record<string, unknown>) => void;
 }
 
 const SYNC_EVERY_MS = 30_000;
+const VIEW_EVERY_MS = 5_000;
+const DIGEST_EVERY_MS = 20_000;
+const FLUSH_EVERY_MS = 60_000;
+// Before the close the close-out is retried this often until the account is flat; after the close, every 5 minutes.
+const CLOSEOUT_RETRY_MS = 20_000;
 
 export class Worker {
   private readonly d: WorkerDeps;
@@ -55,7 +72,7 @@ export class Worker {
   private readonly inflight = new Set<string>();
   private stream: StreamLike | null = null;
   private streamDate: string | null = null;
-  private strategy: OpeningRangeBreakout | null = null;
+  private strategy: BusyPlaceholder | null = null;
   private lastSync = 0;
   private lastTradeAt: Date | null = null;
   private lastTickError: string | null = null;
@@ -78,30 +95,79 @@ export class Worker {
   // True while any close-out (regular, carried-over or emergency) is running, so two never overlap.
   private closingOut = false;
   private readonly sessions: NextSessionFinder;
+  private readonly view: BrokerView;
+  private readonly digest = new TradeDigest();
+  private readonly liquidator: Liquidator;
+  private readonly sellGate: SellGate;
+  private migrated = false;
+  private lastView = 0;
+  private lastViewSlow = 0;
+  private lastDigest = 0;
+  private lastFlush = 0;
+  private lastStatsEvent = 0;
+  private lastViewError = 0;
 
   constructor(deps: WorkerDeps) {
     this.d = deps;
     this.sessions = new NextSessionFinder(deps.broker);
+    this.view = new BrokerView(deps.broker, () => deps.now().getTime());
+    this.sellGate = new SellGate({ broker: deps.broker, say: (c, t, o) => this.say(c, t, o), log: (e, data) => deps.log?.("info", e, data) });
+    this.liquidator = new Liquidator({ broker: deps.broker, gate: this.sellGate, now: deps.now, sleep: deps.sleep, log: (e, data) => deps.log?.("info", e, data) });
     this.commands = new CommandProcessor({
       sessions: this.sessions,
       settings: deps.settings,
       store: deps.store,
       broker: deps.broker,
+      liquidator: this.liquidator,
       bot: deps.bot,
       now: deps.now,
       extraStatus: async () => this.statusLines(),
       log: (e, data) => deps.log?.("info", e, data),
     });
-    this.gate = new OrderGate({ broker: deps.broker, store: deps.store, now: deps.now, say: (c, t) => this.say(c, t), log: (e, data) => deps.log?.("info", e, data) });
+    this.gate = new OrderGate({
+      broker: deps.broker,
+      store: deps.store,
+      view: this.view,
+      governor: deps.governor,
+      now: deps.now,
+      say: (c, t) => this.say(c, t),
+      note: (line) => this.digest.add(line),
+      log: (e, data) => deps.log?.("info", e, data),
+    });
   }
 
-  private say(channel: Channel, text: string): Promise<boolean> {
-    return this.d.bot.post(channel, text);
+  private say(channel: Channel, text: string, opts?: { mentionOwner?: boolean }): Promise<boolean> {
+    return this.d.bot.post(channel, text, opts);
+  }
+
+  // Posts the trade digest (one message per batch) and the gate's counted refusals. Never called from the order path.
+  private async flushDigest(force = false): Promise<void> {
+    const t = this.d.now().getTime();
+    if (force || t - this.lastDigest >= DIGEST_EVERY_MS) {
+      this.lastDigest = t;
+      for (const m of this.digest.take()) await this.say("trading", m);
+    }
+    if (force || t - this.lastFlush >= FLUSH_EVERY_MS) {
+      this.lastFlush = t;
+      await this.gate.flush();
+    }
+  }
+
+  private riskDeps() {
+    return { broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c: Channel, t: string, o?: { mentionOwner?: boolean }) => this.say(c, t, o), liquidator: this.liquidator, log: (e: string, data?: Record<string, unknown>) => this.d.log?.("info", e, data) };
+  }
+
+  private closeoutDeps() {
+    return { broker: this.d.broker, liquidator: this.liquidator, store: this.d.store, now: this.d.now, say: (c: Channel, t: string, o?: { mentionOwner?: boolean }) => this.say(c, t, o), sleep: this.d.sleep, log: (e: string, data?: Record<string, unknown>) => this.d.log?.("info", e, data) };
   }
 
   private statusLines(): string[] {
     return [
       `Live prices: ${this.stream ? this.stream.status() : "not started"}${this.lastTradeAt ? `, last trade seen ${centralClock(this.lastTradeAt)}` : ""}`,
+      (() => {
+        const g = this.d.governor.stats();
+        return `Orders in the last minute: ${this.d.governor.tradesInLastMinute()}; Alpaca requests in the last minute: about ${g.requestsLastMinute} of 200`;
+      })(),
       this.lastTickError ? `Last problem: ${this.lastTickError}` : "",
     ].filter(Boolean);
   }
@@ -181,7 +247,7 @@ export class Worker {
     await this.say("alerts", "The database is unreachable near the close, so I am closing everything from the broker's clock alone.");
     this.closingOut = true;
     try {
-      const result = await closeOut({ broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c, t) => this.say(c, t), sleep: this.d.sleep }, date);
+      const result = await closeOut(this.closeoutDeps(), date);
       await this.setNotFlat(!result.flat, result.remaining, date);
     } finally {
       this.closingOut = false;
@@ -210,7 +276,7 @@ export class Worker {
       if (saved?.on) {
         this.notFlat = true;
         this.notFlatSaved = true;
-        await this.say("alerts", `**The worker restarted while the account was NOT FLAT** (${saved.remaining.join(", ") || "positions held"}, since ${centralClock(new Date(saved.since))}). It stays flagged until the account is seen flat. No entries until then. ${NOT_ADVICE}`);
+        await this.say("alerts", `**Michael: the worker restarted while the account was NOT FLAT** (${saved.remaining.join(", ") || "positions held"}, since ${centralClock(new Date(saved.since))}). It stays flagged until the account is seen flat. No entries until then.`, { mentionOwner: true });
       }
     }
     const idle = !this.closingOut && !this.inflight.has("closeout") && !this.inflight.has("carried");
@@ -240,7 +306,7 @@ export class Worker {
     }
     if (!this.notFlat) {
       await this.setNotFlat(true, held, date);
-      await this.say("alerts", `**Positions are held outside the session (${held.join(", ")}) and nothing had flagged it.** Flagged as not flat: no entries until the account is flat, and I will sell at the next open. You can also close by hand in Alpaca. ${NOT_ADVICE}`);
+      await this.say("alerts", `**Michael: positions are held outside the session (${held.join(", ")}) and nothing had flagged it.** Flagged as not flat: no entries until the account is flat, and I will sell at the next open. You can also close by hand in Alpaca.`, { mentionOwner: true });
     } else if (!this.notFlatSaved) {
       await this.setNotFlat(true, held, date); // the earlier save failed (database down): save it again
     }
@@ -251,7 +317,7 @@ export class Worker {
   private async scanForCarried(today: DayRecord, now: Date): Promise<void> {
     if (now.getTime() - this.lastCarriedScan < 30_000) return;
     try {
-      const held = (await this.d.broker.listPositions()).map((p) => p.symbol);
+      const held = (await this.view.freshPositions(10_000)).map((p) => p.symbol);
       let carried: string[] = [];
       if (held.length > 0) {
         const known = new Set((await this.d.store.listOrders(today.tradeDate)).map((o) => o.symbol));
@@ -260,7 +326,7 @@ export class Worker {
       this.lastCarriedScan = now.getTime(); // only a scan that finished counts; a failed one is retried on the next pass
       if (carried.length === 0) return;
       await this.setNotFlat(true, carried, etDate(now));
-      await this.say("alerts", `**Positions are held that this worker did not enter today (${carried.join(", ")}).** Treated as carried over: no entries until the account is flat, and I am selling everything now (nothing here has a protective stop from today). ${NOT_ADVICE}`);
+      await this.say("alerts", `**Michael: positions are held that this worker did not enter today (${carried.join(", ")}).** Treated as carried over: no entries until the account is flat, and I am selling everything now (nothing here has a protective stop from today).`, { mentionOwner: true });
     } catch (err) {
       this.lastTickError = `carried-position scan: ${(err as Error).message.slice(0, 120)}`;
       this.d.log?.("error", "carried_scan_failed", { error: (err as Error).message.slice(0, 200) });
@@ -278,6 +344,13 @@ export class Worker {
 
     const date = etDate(now);
     const today = await ensureDay({ store: this.d.store, broker: this.d.broker, now: this.d.now }, date);
+    if (!this.migrated) {
+      // Once per start: a future day saved by an older release (before build C2) is put in the new shape and its old
+      // request is forgotten, so an old reply cannot count and the request is posted again in the new format.
+      const reset = await resetOldShapeFutureDays(this.d.store, now);
+      this.migrated = true;
+      if (reset.length > 0) this.d.log?.("info", "future_days_reset", { days: reset });
+    }
     try {
       await this.notFlatCheck(today, now);
     } catch (err) {
@@ -329,12 +402,24 @@ export class Worker {
     }
     if (this.stream && (!alive || now >= day.closeAt)) this.endStream();
 
-    if (now >= day.openAt && now < day.closeAt && current.status === "approved" && now.getTime() - this.lastSync >= SYNC_EVERY_MS) {
+    const inSession = now >= day.openAt && now < day.closeAt && current.status === "approved";
+    if (inSession && current.phases.armed) await this.refreshView(now);
+    if (inSession && now.getTime() - this.lastSync >= SYNC_EVERY_MS) {
       this.lastSync = now.getTime();
-      const risk = { broker: this.d.broker, store: this.d.store, now: this.d.now, say: steps.say, log: (e: string, data?: Record<string, unknown>) => this.d.log?.("info", e, data) };
-      await syncOrders(risk, current);
+      const risk = this.riskDeps();
+      // While a close-out is running, and from the close-out time on, the missing-exit check is switched off and
+      // nothing is sold here: the close-out alone flattens the account.
+      const protect = !this.closingOut && !this.inflight.has("closeout") && !this.inflight.has("carried") && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE);
+      await syncOrders(risk, current, { protect });
       await enforceDailyLoss(risk, current);
       await sweepEntriesWhileStopped(risk);
+    }
+    if (inSession || (day.closeAt && now < addMinutes(day.closeAt, 10))) {
+      await this.flushDigest();
+      if (now.getTime() - this.lastStatsEvent >= 5 * 60_000 && inSession) {
+        this.lastStatsEvent = now.getTime();
+        await this.d.store.addEvent("info", "governor_stats", { ...this.d.governor.stats(), tradesLastMinute: this.d.governor.tradesInLastMinute() }).catch(() => undefined);
+      }
     }
 
     // Positions carried over from a close-out that did not get flat: sold as soon as the market is open again.
@@ -346,7 +431,8 @@ export class Worker {
     // Close-out runs until the account is flat: a failed attempt is retried every 5 minutes for 30 minutes
     // past the close (after the close it only reports, it sends nothing), and the heartbeat says "fail" for as
     // long as positions remain.
-    if (now >= addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !current.phases.closeout && !this.closingOut && now.getTime() - this.lastCloseoutAttempt >= 5 * 60_000) {
+    const retryMs = now < day.closeAt ? CLOSEOUT_RETRY_MS : 5 * 60_000;
+    if (now >= addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !current.phases.closeout && !this.closingOut && now.getTime() - this.lastCloseoutAttempt >= retryMs) {
       this.lastCloseoutAttempt = now.getTime();
       this.background("closeout", () => this.closeoutPhase(date, now >= addMinutes(day.closeAt!, 30), day.closeAt));
     }
@@ -377,15 +463,38 @@ export class Worker {
   }
 
   private async screenPhase(date: string): Promise<void> {
-    const list = await this.d.buildLiveList();
+    const { symbols: list, names } = await this.d.buildLiveList();
     await this.d.store.updateDay(date, { liveList: list });
+    await this.d.store.setControl(`live_names:${date}`, names).catch(() => undefined);
     await setPhase(this.d.store, date, "screen", this.d.now().toISOString());
-    await this.say("trading", `Today's live list (${list.length}): ${list.join(" ") || "(empty, nothing passed the screen)"}\n${NOT_ADVICE}`);
+    await this.say("trading", `Today's live list (${list.length}):\n${list.length ? formatLiveList(list, names) : "(empty, nothing passed the screen)"}\n${NOT_ADVICE}`);
+  }
+
+  // Keeps the cached broker view fresh while the session runs: account and positions every few seconds (2 requests),
+  // settings and clock every 30 seconds. Skipped while Alpaca's request budget is down to the safety reserve.
+  private async refreshView(now: Date): Promise<void> {
+    const t = now.getTime();
+    try {
+      if (t - this.lastView >= VIEW_EVERY_MS && this.d.governor.canSpend()) {
+        this.lastView = t;
+        await this.view.refreshFast();
+      }
+      if (t - this.lastViewSlow >= 30_000) {
+        this.lastViewSlow = t;
+        await Promise.all([this.view.refreshConfig(), this.view.refreshClock()]);
+      }
+    } catch (err) {
+      this.lastTickError = `broker view: ${(err as Error).message.slice(0, 120)}`;
+      if (t - this.lastViewError >= 5 * 60_000) {
+        this.lastViewError = t;
+        await this.say("alerts", `I could not refresh my view of the account (${(err as Error).message.slice(0, 100)}). Entries are refused while it is stale; I keep trying.`);
+      }
+    }
   }
 
   private startStream(day: DayRecord, symbols: string[]): void {
     this.streamDate = day.tradeDate;
-    this.strategy = new OpeningRangeBreakout(day.openAt!, symbols, this.d.now());
+    this.strategy = new BusyPlaceholder(symbols);
     this.stream = this.d.makeStream(symbols, (t) => this.onTrade(t));
     this.stream.start();
     this.d.log?.("info", "stream_started", { symbols: symbols.length });
@@ -409,7 +518,7 @@ export class Worker {
     this.endStream();
     this.closingOut = true;
     try {
-      const result = await closeOut({ broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c, t) => this.say(c, t), sleep: this.d.sleep, log: (e, data) => this.d.log?.("info", e, data) }, date, { alert: this.notFlatAlertDate !== date, closeAt: closeAt ?? undefined });
+      const result = await closeOut(this.closeoutDeps(), date, { alert: this.notFlatAlertDate !== date, closeAt: closeAt ?? undefined });
       await this.setNotFlat(!result.flat, result.remaining, date);
       // Recorded as done only when flat (or when this was the last try), so otherwise the next tick tries again.
       if (result.flat || lastTry) await setPhase(this.d.store, date, "closeout", this.d.now().toISOString(), { flat: result.flat ? "yes" : "no" });
@@ -422,7 +531,7 @@ export class Worker {
   private async carriedPhase(date: string): Promise<void> {
     this.closingOut = true;
     try {
-      const result = await closeOut({ broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c, t) => this.say(c, t), sleep: this.d.sleep, log: (e, data) => this.d.log?.("info", e, data) }, date, { alert: this.notFlatAlertDate !== date });
+      const result = await closeOut(this.closeoutDeps(), date, { alert: this.notFlatAlertDate !== date });
       await this.setNotFlat(!result.flat, result.remaining, date);
     } finally {
       this.closingOut = false;
@@ -430,21 +539,31 @@ export class Worker {
   }
 
   private async summaryPhase(date: string): Promise<void> {
+    await this.flushDigest(true);
     const day = (await this.d.store.getDay(date))!;
-    const [account, alpacaOrders, positions] = await Promise.all([this.d.broker.getAccount(), this.d.broker.listOrders("all", etInstant(date, "00:00").toISOString()), this.d.broker.listPositions()]);
-    // Bring the stored entries up to date from the final fills before summarising.
-    await syncOrders({ broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c, t) => this.say(c, t) }, day).catch(() => undefined);
+    const [account, listed, positions] = await Promise.all([this.d.broker.getAccount(), this.d.broker.listOrdersPaged("all", etInstant(date, "00:00").toISOString(), 60), this.d.broker.listPositions()]);
+    // Bring the stored entries up to date from the final fills before summarising (no sells: the day is over).
+    await syncOrders(this.riskDeps(), day, { protect: false }).catch(() => undefined);
+    const result = computeDay(listed.orders);
+    const fees = estimateFees(date, result.fills);
+    const prev = await this.d.store.getControl<FeesRunning>(CONTROL_FEES).catch(() => null);
+    const running = addToRunning(prev, date, fees.total);
+    await this.d.store.setControl(CONTROL_FEES, running).catch(() => undefined);
     const text = formatSummary({
       day,
       stored: await this.d.store.listOrders(date),
       refusals: await this.d.store.listRefusals(date),
-      alpacaOrders,
+      alpacaOrders: listed.orders,
       account,
       peak: await this.d.store.getControl(peakKey(date)),
       stop: await this.d.store.getControl<StopFlag>(CONTROL_STOP),
       flat: positions.length === 0,
+      requests: this.d.governor.stats(),
+      feesRunning: running.total,
+      listComplete: listed.complete,
     });
     await this.say("trading", text);
     await setPhase(this.d.store, date, "summary", this.d.now().toISOString());
+    this.d.governor.resetDayStats();
   }
 }

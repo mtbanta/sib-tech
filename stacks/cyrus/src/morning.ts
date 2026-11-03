@@ -6,10 +6,45 @@
 // account is never left at a raised cap overnight. This file builds the day record, the messages and the
 // decisions (pure where it can be).
 import type { Broker } from "./broker.ts";
-import { LIMIT_NAMES, SUGGESTED_LIMITS, applyOverride, describeLimits, type LimitName, type Limits } from "./limits.ts";
+import { LIMIT_NAMES, MAX_TRADES_PER_MINUTE, SUGGESTED_LIMITS, applyOverride, describeLimits, loosened, type LimitName, type Limits } from "./limits.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
 import { NOT_ADVICE } from "./discord.ts";
+import type { Say } from "./sells.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
+
+const LIMIT_KEY: Record<LimitName, keyof Limits> = { position: "maxPositionUsd", loss: "dailyLossStopUsd", trades: "maxTradesPerMinute", cap: "borrowingCap" };
+
+// Each limit is suggested at the value Michael most recently approved for it (a limit he decided on any earlier day),
+// not at the built-in constant. A limit he has never decided (the first time for trades a minute) uses the constant.
+// Returns which limits were carried forward and from which day, so the evening post can say so.
+export async function suggestedFromHistory(store: Store, date: string): Promise<{ limits: Limits; carried: Partial<Record<LimitName, string>> }> {
+  const days = await store.recentDays(date, 40);
+  const limits: Limits = { ...SUGGESTED_LIMITS };
+  const carried: Partial<Record<LimitName, string>> = {};
+  for (const name of LIMIT_NAMES) {
+    const source = days.find((d) => d.decided[name] === true);
+    if (!source) continue;
+    (limits as unknown as Record<string, unknown>)[LIMIT_KEY[name]] = source.limits[LIMIT_KEY[name]];
+    carried[name] = source.tradeDate;
+  }
+  return { limits, carried };
+}
+
+// Days saved before build C2 have a daily trade count and a request that Michael may already have answered. For
+// every future session saved without the build C2 marker: the limits go back to the suggestions (carried forward from
+// the last approved day), nothing is decided, and the request, review and reminder are forgotten, so the request is
+// posted again in the new format and no old reply can count. Returns the dates it reset.
+export async function resetOldShapeFutureDays(store: Store, now: Date): Promise<string[]> {
+  const reset: string[] = [];
+  for (const d of await store.daysFrom(etDate(now))) {
+    if (!d.isTradingDay || !d.openAt || d.openAt <= now || d.phases.c2) continue;
+    const { limits, carried } = await suggestedFromHistory(store, d.tradeDate);
+    const { request: _r, morning: _m, reminder: _e, armed: _a, ...rest } = d.phases;
+    await store.updateDay(d.tradeDate, { status: "pending", limits, suggested: limits, carried, decided: {}, phases: { ...rest, c2: "1" } });
+    reset.push(d.tradeDate);
+  }
+  return reset;
+}
 
 export interface MorningDeps {
   store: Store;
@@ -28,7 +63,8 @@ export async function ensureDay(deps: MorningDeps, date: string): Promise<DayRec
   const calendar = await deps.broker.getCalendar(date, date);
   const session = calendar.find((c) => c.date === date);
   const account = await deps.broker.getAccount();
-  const base = { tradeDate: date, suggested: SUGGESTED_LIMITS, limits: SUGGESTED_LIMITS, decided: {}, liveList: null, phases: {} as Record<string, string>, dayStartEquity: account.lastEquity > 0 ? account.lastEquity : account.equity };
+  const { limits: suggested, carried } = await suggestedFromHistory(deps.store, date);
+  const base = { tradeDate: date, suggested, limits: suggested, carried, decided: {}, liveList: null, phases: { c2: "1" } as Record<string, string>, dayStartEquity: account.lastEquity > 0 ? account.lastEquity : account.equity };
   if (!session) {
     return deps.store.createDay({ ...base, isTradingDay: false, openAt: null, closeAt: null, status: "not_trading_day" });
   }
@@ -36,7 +72,7 @@ export async function ensureDay(deps: MorningDeps, date: string): Promise<DayRec
   const closeAt = etInstant(date, session.close);
   const now = deps.now?.();
   if (now && now >= closeAt) {
-    return deps.store.createDay({ ...base, phases: { closeout: "skipped", summary: "skipped", request: "skipped" }, isTradingDay: true, openAt, closeAt, status: "lapsed" });
+    return deps.store.createDay({ ...base, phases: { ...base.phases, closeout: "skipped", summary: "skipped", request: "skipped" }, isTradingDay: true, openAt, closeAt, status: "lapsed" });
   }
   return deps.store.createDay({ ...base, isTradingDay: true, openAt, closeAt, status: "pending" });
 }
@@ -70,11 +106,12 @@ export class NextSessionFinder {
 export function limitLines(day: DayRecord): string {
   const l = day.limits;
   const mark = (n: LimitName) => (day.decided[n] ? "decided" : "waiting for you");
+  const from = (n: LimitName) => (day.carried?.[n] ? ` [suggested from your approval on ${day.carried[n]}]` : " [new suggestion: no earlier approved value]");
   return [
-    `1. position: largest single position ${l.maxPositionUsd} dollars (${mark("position")})`,
-    `2. loss: daily loss stop ${l.dailyLossStopUsd} dollars (${mark("loss")})`,
-    `3. trades: entries a day ${l.maxTradesPerDay} (${mark("trades")})`,
-    `4. cap: borrowing cap ${l.borrowingCap}, where 1 means no borrowing (${mark("cap")})`,
+    `1. position: largest single position ${l.maxPositionUsd} dollars (${mark("position")})${from("position")}`,
+    `2. loss: daily loss stop ${l.dailyLossStopUsd} dollars (${mark("loss")})${from("loss")}`,
+    `3. trades: at most ${l.maxTradesPerMinute} orders a minute, no daily total; the ceiling is ${MAX_TRADES_PER_MINUTE} (${mark("trades")})${from("trades")}`,
+    `4. cap: borrowing cap ${l.borrowingCap}, where 1 means no borrowing (${mark("cap")})${from("cap")}`,
   ].join("\n");
 }
 
@@ -121,7 +158,9 @@ export function formatLimitsRequest(day: DayRecord, kind: RequestKind = "evening
     limitLines(day),
     ...(checklist.length > 0 ? ["", "**Checklist**", ...checklist] : []),
     "",
-    "Reply here: `approve` accepts every limit as shown, `approve cap` accepts one, or change one with `position 1500`, `loss 150`, `trades 5`, `cap 2` (that also counts as your decision). You can change any of them again until the open.",
+    "Reply here: `approve` accepts every limit as shown, `approve cap` accepts one, or change one with `position 1500`, `loss 150`, `trades 20`, `cap 2` (that also counts as your decision). You can send several commands in one message, one per line.",
+    "Until the `Armed` message 5 minutes before the open you can change any limit. After it, a limit can only be lowered (tightened), until the next evening post. Loosening is locked.",
+    "`trades` is the most orders I will send in any 60 seconds to open positions; there is no daily total. The loss stop is the main safety net.",
     `**If any limit is still undecided at the open, I will not trade that day.**`,
     NOT_ADVICE,
   ].join("\n");
@@ -173,10 +212,11 @@ export type Decision = { ok: true; patch: Pick<DayRecord, "limits" | "decided" |
 
 // Applies an approve or overrule to a day. Pure: no clock, no network. `messageAt` is when Michael wrote it.
 // Allowed any time before that day's open, including again after the day is already approved.
-export function decideLimits(day: DayRecord, cmd: Extract<Command, { kind: "approve" | "set" }>, equity: number, now: Date, messageAt: Date): Decision {
+export function decideLimits(day: DayRecord, cmd: Extract<Command, { kind: "approve" | "set" }>, equity: number, now: Date, messageAt: Date, mode: "edit" | "tighten" = "edit"): Decision {
   if (!day.isTradingDay) return { ok: false, reply: "That day is not a trading day, so there is nothing to approve." };
   if (day.status === "lapsed") return { ok: false, reply: `Too late: ${dayWord(day.tradeDate)} opened with limits undecided, so there is no trading that day.` };
-  if (!day.openAt || now >= day.openAt) return { ok: false, reply: `Too late: ${dayWord(day.tradeDate)} has already opened and its limits are fixed.` };
+  if (mode === "edit" && (!day.openAt || now >= day.openAt)) return { ok: false, reply: `Too late: ${dayWord(day.tradeDate)} has already opened and its limits are fixed.` };
+  if (mode === "tighten" && (!day.closeAt || now >= day.closeAt)) return { ok: false, reply: `${dayWord(day.tradeDate)} is over, so its limits are fixed.` };
   // A reply written before the request was posted cannot approve it (this guards a restart that re-reads old messages).
   const asked = day.phases.request && day.phases.request !== "skipped" ? new Date(day.phases.request) : null;
   if (!asked || messageAt < asked) return { ok: false, reply: "That message is older than the request for that day, so I ignored it." };
@@ -193,11 +233,17 @@ export function decideLimits(day: DayRecord, cmd: Extract<Command, { kind: "appr
   } else {
     decided[cmd.name] = true;
   }
+  if (mode === "tighten") {
+    const looser = loosened(day.limits, limits);
+    if (looser.length > 0) {
+      return { ok: false, reply: `Locked: the day is armed, so a limit can only be lowered now. Not changed: ${looser.join(", ")} (it is ${describeLimits(day.limits)}). Loosening opens again with the next evening post.` };
+    }
+  }
   const all = LIMIT_NAMES.every((n) => decided[n]);
   const status = all ? "approved" : "pending";
   const next = { ...day, limits, decided, status } as DayRecord;
   const reply = all
-    ? `All four limits decided for ${dayWord(day.tradeDate)}. Trading is allowed that day within: ${describeLimits(limits)}. You can still change any until the open.`
+    ? `All four limits decided for ${dayWord(day.tradeDate)}. Trading is allowed that day within: ${describeLimits(limits)}. ${mode === "tighten" ? "The day is armed, so from now a limit can only be lowered." : "You can still change any until the Armed message, 5 minutes before the open."}`
     : `Noted.\n${limitLines(next)}`;
   return { ok: true, patch: { limits, decided, status }, reply };
 }
@@ -251,7 +297,7 @@ export async function lapseIfUndecided(steps: MorningSteps, day: DayRecord): Pro
   const updated = await steps.store.updateDay(day.tradeDate, { status: "lapsed" });
   let told = false;
   if (phase === "open") {
-    told = await steps.say("commands", `The market opened at ${centralClock(day.openAt!)} and the limits for ${dayWord(day.tradeDate)} were not all decided, so **I will not trade today**. Nothing is open. ${NOT_ADVICE}`);
+    told = await steps.say("commands", `The market opened at ${centralClock(day.openAt!)} and the limits for ${dayWord(day.tradeDate)} were not all decided, so **I will not trade today**. Nothing is open.`);
   }
   await steps.store.addEvent("warn", "day_lapsed", { date: day.tradeDate, phase, told });
   return updated;

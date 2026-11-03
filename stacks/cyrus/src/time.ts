@@ -45,6 +45,11 @@ export function centralClock(d: Date): string {
   return `${s} CT`;
 }
 
+// Central time with seconds, for trade lines: "9:14:03 AM".
+export function centralTime(d: Date): string {
+  return new Intl.DateTimeFormat("en-US", { timeZone: CT, hour: "numeric", minute: "2-digit", second: "2-digit" }).format(d);
+}
+
 // Where a trading day stands at an instant, by the day's own calendar times. Every step that behaves differently
 // before the open, during the session or after the close asks this one function instead of comparing times itself.
 //   no_session   a weekend, a holiday, or no record of the day

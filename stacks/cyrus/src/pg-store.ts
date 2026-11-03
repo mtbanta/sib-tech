@@ -1,7 +1,7 @@
 // The real store: Postgres at Supabase, reached with the project's database address (never the Data API).
 import pg from "pg";
 import type { Limits } from "./limits.ts";
-import type { DayRecord, OrderRecord, RefusalRecord, Store } from "./store.ts";
+import { normalizeDay, type DayRecord, type OrderRecord, type RefusalRecord, type Store } from "./store.ts";
 
 // Anything with a query method: a Pool in the worker, or a single client inside a rolled-back transaction in
 // the check tool.
@@ -31,7 +31,7 @@ const n = (v: unknown): number | null => (v === null || v === undefined ? null :
 const dateOnly = (v: unknown): string => (v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10));
 
 function dayFromRow(r: any): DayRecord {
-  return {
+  return normalizeDay({
     tradeDate: dateOnly(r.trade_date),
     isTradingDay: r.is_trading_day,
     openAt: r.open_at ? new Date(r.open_at) : null,
@@ -43,7 +43,8 @@ function dayFromRow(r: any): DayRecord {
     decided: r.decided ?? {},
     liveList: r.live_list ?? null,
     phases: r.phases ?? {},
-  };
+    carried: r.carried ?? {},
+  });
 }
 
 function orderFromRow(r: any): OrderRecord {
@@ -54,6 +55,10 @@ function orderFromRow(r: any): OrderRecord {
     qty: Number(r.qty),
     referencePrice: Number(r.reference_price),
     stopPrice: Number(r.stop_price),
+    takeProfitPrice: n(r.take_profit_price),
+    createdAt: r.created_at ? new Date(r.created_at).toISOString() : undefined,
+    acceptMs: n(r.accept_ms),
+    closedAt: r.closed_at ? new Date(r.closed_at).toISOString() : null,
     status: r.status,
     alpacaOrderId: r.alpaca_order_id ?? null,
     filledQty: n(r.filled_qty),
@@ -85,10 +90,10 @@ export class PgStore implements Store {
   }
   async createDay(d: DayRecord): Promise<DayRecord> {
     await this.db.query(
-      `insert into trading_days (trade_date, is_trading_day, open_at, close_at, status, day_start_equity, suggested, limits, decided, live_list, phases)
-       values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb)
+      `insert into trading_days (trade_date, is_trading_day, open_at, close_at, status, day_start_equity, suggested, limits, decided, live_list, phases, carried)
+       values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb, $12::jsonb)
        on conflict (trade_date) do nothing`,
-      [d.tradeDate, d.isTradingDay, d.openAt, d.closeAt, d.status, d.dayStartEquity, JSON.stringify(d.suggested), JSON.stringify(d.limits), JSON.stringify(d.decided), d.liveList === null ? null : JSON.stringify(d.liveList), JSON.stringify(d.phases)],
+      [d.tradeDate, d.isTradingDay, d.openAt, d.closeAt, d.status, d.dayStartEquity, JSON.stringify(d.suggested), JSON.stringify(d.limits), JSON.stringify(d.decided), d.liveList === null ? null : JSON.stringify(d.liveList), JSON.stringify(d.phases), JSON.stringify(d.carried ?? {})],
     );
     const got = await this.getDay(d.tradeDate);
     if (!got) throw new Error("day row missing after insert");
@@ -111,6 +116,7 @@ export class PgStore implements Store {
     if (patch.decided !== undefined) add("decided", patch.decided, true);
     if (patch.liveList !== undefined) add("live_list", patch.liveList, true);
     if (patch.phases !== undefined) add("phases", patch.phases, true);
+    if (patch.carried !== undefined) add("carried", patch.carried, true);
     if (cols.length) await this.db.query(`update trading_days set ${cols.join(", ")}, updated_at = now() where trade_date = $1`, vals);
     const got = await this.getDay(tradeDate);
     if (!got) throw new Error(`no such day ${tradeDate}`);
@@ -119,14 +125,14 @@ export class PgStore implements Store {
 
   async insertOrder(o: OrderRecord): Promise<boolean> {
     const r = await this.db.query(
-      `insert into orders (client_order_id, trade_date, symbol, qty, reference_price, stop_price, status, alpaca_order_id, filled_qty, filled_avg_price, note)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) on conflict (client_order_id) do nothing`,
-      [o.clientOrderId, o.tradeDate, o.symbol, o.qty, o.referencePrice, o.stopPrice, o.status, o.alpacaOrderId, o.filledQty, o.filledAvgPrice, o.note],
+      `insert into orders (client_order_id, trade_date, symbol, qty, reference_price, stop_price, take_profit_price, status, alpaca_order_id, filled_qty, filled_avg_price, note, accept_ms)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) on conflict (client_order_id) do nothing`,
+      [o.clientOrderId, o.tradeDate, o.symbol, o.qty, o.referencePrice, o.stopPrice, o.takeProfitPrice ?? null, o.status, o.alpacaOrderId, o.filledQty, o.filledAvgPrice, o.note, o.acceptMs ?? null],
     );
     return (r.rowCount ?? 0) === 1;
   }
   async updateOrder(clientOrderId: string, patch: Partial<Omit<OrderRecord, "clientOrderId" | "tradeDate">>): Promise<void> {
-    const map: Record<string, string> = { symbol: "symbol", qty: "qty", referencePrice: "reference_price", stopPrice: "stop_price", status: "status", alpacaOrderId: "alpaca_order_id", filledQty: "filled_qty", filledAvgPrice: "filled_avg_price", note: "note" };
+    const map: Record<string, string> = { symbol: "symbol", qty: "qty", referencePrice: "reference_price", stopPrice: "stop_price", status: "status", alpacaOrderId: "alpaca_order_id", filledQty: "filled_qty", filledAvgPrice: "filled_avg_price", note: "note", acceptMs: "accept_ms", closedAt: "closed_at", takeProfitPrice: "take_profit_price" };
     const cols: string[] = [];
     const vals: unknown[] = [clientOrderId];
     for (const [k, v] of Object.entries(patch)) {
@@ -145,6 +151,15 @@ export class PgStore implements Store {
   async listOrders(tradeDate: string): Promise<OrderRecord[]> {
     const r = await this.db.query("select * from orders where trade_date = $1 order by created_at, client_order_id", [tradeDate]);
     return r.rows.map(orderFromRow);
+  }
+
+  async recentDays(beforeDate: string, n: number): Promise<DayRecord[]> {
+    const r = await this.db.query("select * from trading_days where trade_date < $1 order by trade_date desc limit $2", [beforeDate, n]);
+    return r.rows.map(dayFromRow);
+  }
+  async daysFrom(date: string): Promise<DayRecord[]> {
+    const r = await this.db.query("select * from trading_days where trade_date >= $1 order by trade_date", [date]);
+    return r.rows.map(dayFromRow);
   }
 
   async addRefusal(x: RefusalRecord): Promise<void> {
