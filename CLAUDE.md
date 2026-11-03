@@ -63,7 +63,7 @@ On 2026-10-29 the owner decided to build two stacks and compare them in paper tr
 - **When limits can change:** from the evening post until the "Armed" message 5 minutes before the open, any limit either way; after "Armed", only tightening (lower) until the next evening post.
 - **Sells.** Alpaca's bulk "close all positions" call is not used (it cancelled the stops and then failed on 2026-11-02). Every sell goes through one checked path (`stacks/cyrus/src/sells.ts`): no sell may exceed the shares held counting sells already open. A structure test enforces this.
 - Stack D, built later, gets the same capability, copied, not imported.
-- **State on 2026-11-02 (night):** Fly runs release v5, the round 5 code (`ac4a576`). The round 6 fixes for the round 5 findings are at `b764741`, pushed, not deployed: review round 6 found one blocking regression (a failing start-up migration skips commands while trading continues). They need that fix and a review before any deploy; Michael decides after Tuesday 2026-11-03's close. See `builds/build-c2-log.md`, "Review round 6".
+- **State on 2026-11-03 (after the close):** Fly runs release v7, the load mode code (`42cd64f`, on top of the round 9 code `5c31aa3`, released as v6 minutes earlier). Both passed `build-reviewer` review. Load mode is off by default: `load on` before the morning screen, approved with the evening limits, makes a day a load day (load-mode.ts). Wednesday's limits wait for Michael, and the stop flag is on until he types `resume`. See `builds/build-c2-log.md`, "Deploys and close-out".
 
 ## Tech stack
 

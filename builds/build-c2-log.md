@@ -983,3 +983,31 @@ On `42cd64f` (on top of `312d9dc`), repo and local suite only. No blocking findi
 4. Michael's 10-position test fits in one message. Splitting is proven by the 40-position, bot and webhook tests.
 5. Older cuts remain, unchanged and outside the two items: the NOT FLAT alert at 1,800, error details, the digest's 60-line cap, and the summary's "...and N more symbols". None removes the paper-only line or the no-trade warning.
 6. Splitting can drop a blank line at a part's start, and can split an over-long single line inside an emoji.
+
+## Deploys and close-out (2026-11-03, after the close)
+
+**Before deploying (read only, 3:15 PM Central):**
+- Today's close-out ran at 2:55 PM ("Close-out done: the account is flat"), with no positions, no open orders, and equity equal to cash at 19,208.31.
+- The summary posted at 3:05 PM.
+- Wednesday's request posted at 3:10 PM: pending, position 2000, loss 500, trades 100, cap 1, all carried from Tuesday and waiting for Michael.
+- The stop flag is still on ("daily loss stop reached (535.15 dollars)", from the 10:31 AM re-fire).
+
+**Round 9, Fly release v6** (3:16 PM Central, market closed):
+- `fly deploy --ha=false` from a separate checkout of `a6adf91`, whose code is identical to `5c31aa3`, with no key file in the checkout.
+- One machine in San Jose, good state. One `worker_started` and no warnings or errors.
+- Discord: "New release 8Y9T0ZQH (it was 7JE19F6D), so this is a deploy". Healthchecks up.
+
+**Load mode, Fly release v7** (3:18 PM Central), a separate release after round 9:
+- From a separate checkout of `a1a9782`, whose code is identical to `42cd64f`.
+- Good state. One `worker_started` and no warnings or errors (no warn or error events in the database since 3:15 PM).
+- Discord: "New release 8M2HSEXX (it was 8Y9T0ZQH), so this is a deploy". Healthchecks up.
+- **The one-time note posted at 3:18 PM:** "Mode for Wednesday 2026-11-04 (new: load mode, added after that day's request was posted): 5. mode: normal (`load on` makes it a load day)". Wednesday's record now carries `loadNote`.
+
+Both deploys were made outside market hours. Paper only.
+
+**For Michael before Wednesday's "Armed" message (8:25 AM Central):**
+1. Type `resume`: the stop flag is on.
+2. To make Wednesday the load day, type `load on` before the 7:45 AM screen.
+3. Approve Wednesday's limits (for the load day at least `trades 100`; `loss 500` and `cap 1` stay; the position limit does not matter, since the code holds every entry to 75 dollars).
+
+If nothing is approved by the open, there is no trading Wednesday.
