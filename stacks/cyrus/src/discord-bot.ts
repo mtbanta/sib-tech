@@ -3,7 +3,7 @@
 // Checked at start: the command channel really belongs to the configured server.
 import type { Settings } from "./config.ts";
 import type { Redactor } from "./redact.ts";
-import { NOT_ADVICE, finalizeMessage } from "./discord.ts";
+import { NOT_ADVICE, splitMessage } from "./discord.ts";
 
 const API = "https://discord.com/api/v10";
 const MAX_CONTENT = 2000;
@@ -73,14 +73,18 @@ export class DiscordBot {
     return id;
   }
 
-  // Posts plain text, redacted, with "Paper trading only." on it, cut to Discord's limit. Mentions are switched off,
+  // Posts plain text, redacted, with "Paper trading only." on it; a text over Discord's limit is sent as consecutive messages. Mentions are switched off,
   // except that a message can ask to mention the owner (and only the owner), for the alerts that need a person now.
   async post(channel: ChannelName, text: string, opts: { mentionOwner?: boolean } = {}): Promise<boolean> {
     const owner = this.settings.discord.ownerUserId;
     const body = opts.mentionOwner ? `<@${owner}> ${text}` : text;
-    const content = finalizeMessage(this.redact(body));
+    // A text over Discord's limit goes out as consecutive messages (splitMessage), in order; the owner is mentioned in the first.
+    const parts = splitMessage(this.redact(body));
     try {
-      await this.call("POST", `/channels/${this.idFor(channel)}/messages`, { content, allowed_mentions: opts.mentionOwner ? { parse: [], users: [owner] } : { parse: [] } });
+      for (let i = 0; i < parts.length; i++) {
+        const mention = opts.mentionOwner && i === 0;
+        await this.call("POST", `/channels/${this.idFor(channel)}/messages`, { content: parts[i], allowed_mentions: mention ? { parse: [], users: [owner] } : { parse: [] } });
+      }
       return true;
     } catch {
       return false;

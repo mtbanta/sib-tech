@@ -915,3 +915,41 @@ On `a6adf91..312d9dc`, repo and local suite only. Checks 2, 7 and 10 clean. 334 
 8. "`load on` makes it a load day" still shows in `status` and in the reminder after the screen time, when `load on` would be refused.
 
 **State:** load mode is committed on `main` (`312d9dc`), **not deployed and not reviewed as passing**. Round 9 deploys tonight from `a6adf91`, whose code is identical to `5c31aa3`, so the load mode code is not shipped. Until Michael decides, any later deploy must be made from round 9's code, not from `main`. A fix and another review round need Michael's approval.
+
+## Michael's decision after the load mode review (2026-11-03, afternoon)
+
+Approved: one more review round, scoped to the message-length fix and a cap change, no other changes.
+1. A post that would pass 2,000 characters is sent as consecutive messages instead of being trimmed, so nothing is lost; the last message ends with "Paper trading only." and any no-trade warning. Drop the redundant `load on` instruction line. Test: a long normal-day post (stop flag on, 10 positions held) arrives complete with both lines.
+2. If load mode was on that morning, the 75 dollar cap stays enforced all day, even after `load off` at any time. Test it.
+
+If the round passes, load mode deploys as a separate release after round 9, outside market hours, no later than 7:30 AM Wednesday, with the one-time note showing Wednesday's mode. If it fails, nothing more is deployed.
+
+## Load mode fixes (built 2026-11-03, afternoon; code only, not deployed)
+
+1. **Long posts** (`discord.ts` `splitMessage`, used by `DiscordBot.post` and `postWebhook`):
+   - A text that fits is sent exactly as before.
+   - A longer one is split at line breaks (a single over-long line inside the line) into consecutive messages, each at most 2,000 characters, sent in order.
+   - Every part carries "Paper trading only."; the earlier parts end with "(continued in the next message)".
+   - The last part keeps the text's own ending (the no-trade warning, then the paper-only and research-input line), and gets "Paper trading only." if its own part lacks it.
+   - The owner is mentioned only in the first part.
+   - A failed part stops the rest and reports failure, as a failed post did before.
+   - `finalizeMessage` (cut to one message) is kept but no longer used by the bot or the webhook.
+   - The test fake bot splits the same way.
+   - The `load on ...` instruction line is removed from `formatLimitsRequest`; line 5 and `help` cover it.
+2. **The cap stays** (`morning.ts` `decideLoad`):
+   - Before "Armed", a `load off` on a load day from the morning screen on (45 minutes before the open, or once the screen has run) now gives `ended`, not `off`: the window ends, and the 75 dollar cap and the 10 second sync stay all day, on the day's cheap list.
+   - After "Armed" it already gave `ended`.
+   - Before the morning screen, `load off` still gives a normal day (the normal list is built).
+   - I read "on that morning" as "the cheap list has been built for the day". Before that, nothing load-specific has happened yet.
+
+**Tests:** `test/load-fix.test.ts`, 9 tests, including Michael's: a normal-day request with the stop flag on (the longest reason) and 10 positions held arrives complete, ending with the warning and the paper-only line. There is also a 40-position request split into consecutive messages with every symbol arriving, and the bot and the webhook sending every part. Changed on purpose: the existing webhook test now expects a 3,000-character text as 2 messages, each redacted, not one cut message. Full suite **343 pass**, type check clean.
+
+| Change taken out | Tests that fail |
+| :-- | :-- |
+| splitting (cut as before) | splitMessage; 40-position request; bot; webhook |
+| bot sends only the first part | bot |
+| webhook sends one cut message | webhook |
+| last part's footer judged on the whole text | footer near the start |
+| instruction line back | 10-position request |
+| `load off` after the screen gives a normal day | cap after the screen |
+| `ended` drops the cap | cap after the screen; cap after Armed |

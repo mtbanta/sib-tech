@@ -20,13 +20,17 @@ function recorder(responses: Array<Response | Error>) {
 }
 
 test("postWebhook sends redacted, bounded text with mentions disabled", async () => {
-  const { calls, impl } = recorder([new Response(null, { status: 204 })]);
+  // Since 2026-11-03 a text over the limit goes out as consecutive messages (here two), never cut.
+  const { calls, impl } = recorder([new Response(null, { status: 204 }), new Response(null, { status: 204 })]);
   const res = await postWebhook(FAKE_WEBHOOK, "hello supersecretvalue123 " + "a".repeat(3000), redact, impl);
   assert.deepEqual(res, { ok: true, status: 204 });
-  const body = JSON.parse(String(calls[0]!.init!.body));
-  assert.ok(!body.content.includes("supersecretvalue123"));
-  assert.ok(body.content.length <= 2000);
-  assert.deepEqual(body.allowed_mentions, { parse: [] });
+  assert.equal(calls.length, 2);
+  for (const c of calls) {
+    const body = JSON.parse(String(c.init!.body));
+    assert.ok(!body.content.includes("supersecretvalue123"));
+    assert.ok(body.content.length <= 2000);
+    assert.deepEqual(body.allowed_mentions, { parse: [] });
+  }
 });
 
 test("postWebhook retries once after a rate limit", async () => {

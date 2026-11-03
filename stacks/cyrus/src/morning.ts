@@ -163,7 +163,6 @@ export function formatLimitsRequest(day: DayRecord, kind: RequestKind = "evening
     "Reply here: `approve` accepts every limit as shown, `approve cap` accepts one, or change one with `position 1500`, `loss 150`, `trades 20`, `cap 2` (that also counts as your decision). You can send several commands in one message, one per line.",
     "Until the `Armed` message 5 minutes before the open you can change any limit. After it, a limit can only be lowered (tightened), until the next evening post. Loosening is locked.",
     "`trades` is the most orders I will send in any 60 seconds to open positions; there is no daily total. The loss stop is the main safety net.",
-    "`load on` makes the day a load day (line 5), `load off` makes it normal; `load on` is accepted until the morning screen, 45 minutes before the open, and after `Armed` only `load off` is.",
     `**If any limit is still undecided at the open, I will not trade that day.**`,
     NOT_ADVICE,
   ].join("\n");
@@ -271,6 +270,11 @@ export function decideLoad(day: DayRecord, on: boolean, now: Date, messageAt: Da
     return { ok: true, value: "ended", reply: `Load window switched off for ${dayWord(day.tradeDate)}: the normal placeholder from now on. Positions stay at most ${LOAD_MAX_POSITION_USD} dollars for the rest of the day (after Armed only the tighter direction is allowed).` };
   }
   if (!day.openAt || now >= day.openAt) return { ok: false, reply: `Too late: ${dayWord(day.tradeDate)} has already opened.` };
+  // Michael's ruling, 2026-11-03: if load mode was on that morning (from the morning screen, when the cheap list is built,
+  // 45 minutes before the open), the 75 dollar cap stays all day whenever `load off` comes: the window ends, the cap does not.
+  if (!on && state !== "off" && (day.phases.screen || now >= addMinutes(day.openAt, -LOAD_SWITCH_DEADLINE_MIN))) {
+    return { ok: true, value: "ended", reply: `Load window switched off for ${dayWord(day.tradeDate)}: the normal placeholder, on today's cheap list. Load mode was on this morning, so positions stay at most ${LOAD_MAX_POSITION_USD} dollars all day.` };
+  }
   if (!on) return { ok: true, value: "off", reply: `${dayWord(day.tradeDate)} is a normal day.\n${loadLine({ ...day, phases: { ...day.phases, [LOAD_PHASE]: "off" } })}` };
   if (day.phases.screen || now >= addMinutes(day.openAt, -LOAD_SWITCH_DEADLINE_MIN)) {
     return { ok: false, reply: `Too late for a load day on ${dayWord(day.tradeDate)}: its live list is built at the morning screen (${centralClock(addMinutes(day.openAt, -LOAD_SWITCH_DEADLINE_MIN))}), and a load day needs the cheap list. It stays a normal day.` };
