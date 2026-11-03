@@ -405,3 +405,150 @@ test("a stop command sets the flag in memory before it does anything else, so th
   assert.equal(r.broker.count("submitEntry"), 0);
   assert.ok((await mem.listRefusals(D)).some((x) => x.reason === "stop flag is set"));
 });
+
+// ---------- review round 2 fixes ----------
+import { syncOrders as syncOrdersR2, enforceDailyLoss as enforceLossR2 } from "../src/risk.ts";
+import { OrderGate as GateR2, clientOrderIdFor as idForR2 } from "../src/gate.ts";
+import { BrokerView as ViewR2 } from "../src/broker-view.ts";
+import { Liquidator as LiqR2, SellGate as SellR2 } from "../src/sells.ts";
+
+test("two first loads of a day's orders share one load, and an entry written meanwhile is not lost", async () => {
+  const inner = new MemoryStore();
+  const s = new CachingStore(inner);
+  let release: () => void = () => undefined;
+  const slow = new Promise<void>((r) => (release = r));
+  const realList = inner.listOrders.bind(inner);
+  let loads = 0;
+  inner.listOrders = async (d: string) => { loads++; const rows = await realList(d); await slow; return rows; };
+  const row = { clientOrderId: "cyrus-20261102-AAA-1", tradeDate: D, symbol: "AAA", qty: 5, referencePrice: 10, stopPrice: 9, status: "intent" as const, alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: null };
+  const syncRead = s.listOrders(D); // the background sync asks first and waits on the database
+  const inserting = s.insertOrder(row); // the gate writes an entry meanwhile
+  release();
+  await Promise.all([syncRead, inserting]);
+  assert.equal(loads, 1, "one load, shared");
+  assert.equal((await s.listOrders(D)).length, 1, "the entry is still in the list");
+  await s.updateOrder(row.clientOrderId, { status: "submitted" });
+  assert.equal((await s.listOrders(D))[0]!.status, "submitted");
+});
+
+async function partialSetup() {
+  const store = new MemoryStore();
+  const broker = new FakeBroker();
+  const say = async () => true;
+  const now = new Date("2026-11-02T16:00:00Z");
+  const deps = { broker, store, now: () => now, say: say as any, liquidator: new LiqR2({ broker, gate: new SellR2({ broker, say }), now: () => now, sleep: async () => undefined }) };
+  await ensureDay(deps, D);
+  await store.updateDay(D, { status: "approved", limits: { ...SUGGESTED_LIMITS, maxPositionUsd: 1000, borrowingCap: 4 }, decided: { position: true, loss: true, trades: true, cap: true }, phases: { request: "x", armed: "x" } });
+  const id = idForR2(D, "AAA", 1);
+  await store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "AAA", qty: 20, referencePrice: 50, stopPrice: 49, status: "submitted", alpacaOrderId: "00000000-0000-0000-0000-0000000000a1", filledQty: null, filledAvgPrice: null, note: null, createdAt: "2026-11-02T15:00:00.000Z" });
+  const gate = new GateR2({ broker, store, view: new ViewR2(broker, () => now.getTime()), governor: new Governor(() => now.getTime()), now: () => now, say: say as any, note: () => undefined });
+  return { store, broker, deps, id, gate, now };
+}
+
+test("a partly filled entry is recorded as it fills and is not closed because a position read was taken before the fill", async () => {
+  const p = await partialSetup();
+  p.broker.positions = []; // read a moment before the fill
+  p.broker.orders = [order({ id: "00000000-0000-0000-0000-0000000000a1", clientOrderId: p.id, symbol: "AAA", status: "partially_filled", filledQty: 7, filledAvgPrice: 50, qty: 20, filledAt: null, legs: [order({ side: "sell", type: "stop", status: "held", qty: 20 })] })];
+  await syncOrdersR2(p.deps, (await p.store.getDay(D))!);
+  const row = (await p.store.getOrder(p.id))!;
+  assert.equal(row.filledQty, 7, "the partial fill is recorded");
+  assert.equal(row.closedAt ?? null, null, "and the entry is still watched");
+  // later it is filled in full, held, and its stop disappears: the missing-exit backstop still works
+  p.broker.positions = [{ symbol: "AAA", qty: 20, marketValue: 1000, avgEntryPrice: 50, unrealizedPl: 0 }];
+  p.broker.orders = [order({ id: "00000000-0000-0000-0000-0000000000a1", clientOrderId: p.id, symbol: "AAA", status: "filled", filledQty: 20, filledAvgPrice: 50, qty: 20, filledAt: "2026-11-02T15:59:00Z", legs: [order({ side: "sell", type: "stop", status: "canceled", qty: 20 })] })];
+  const r = await syncOrdersR2(p.deps, (await p.store.getDay(D))!);
+  assert.deepEqual(r.unprotected, ["AAA"]);
+});
+
+test("an entry cancelled after a partial fill is recorded as the position it made, then closed once that position is gone, and stops blocking its symbol", async () => {
+  const p = await partialSetup();
+  p.broker.positions = [{ symbol: "AAA", qty: 19, marketValue: 950, avgEntryPrice: 50, unrealizedPl: 0 }];
+  p.broker.orders = [order({ id: "00000000-0000-0000-0000-0000000000a1", clientOrderId: p.id, symbol: "AAA", status: "canceled", filledQty: 19, filledAvgPrice: 50, qty: 20, filledAt: null, legs: [order({ side: "sell", type: "stop", status: "new", qty: 19 })] })];
+  await syncOrdersR2(p.deps, (await p.store.getDay(D))!);
+  let row = (await p.store.getOrder(p.id))!;
+  assert.equal(row.status, "filled");
+  assert.equal(row.filledQty, 19);
+  assert.equal(row.closedAt ?? null, null, "the position is still held");
+  p.broker.positions = []; // later its exit filled
+  p.broker.orders[0] = { ...p.broker.orders[0]!, legs: [order({ side: "sell", type: "stop", status: "filled", filledQty: 19, qty: 19 })] };
+  await syncOrdersR2(p.deps, (await p.store.getDay(D))!);
+  row = (await p.store.getOrder(p.id))!;
+  assert.ok(row.closedAt, "closed");
+  assert.equal((await p.gate.enter({ symbol: "AAA", price: 50, tradeTime: new Date(p.now.getTime() - 3000), stopPrice: 49.3, takeProfitPrice: 50.2 })).status, "sent", "the symbol can be entered again");
+});
+
+test("a closed row is never counted as working, whatever its status", async () => {
+  const p = await partialSetup();
+  await p.store.updateOrder(p.id, { closedAt: p.now.toISOString() }); // status still "submitted"
+  assert.equal((await p.gate.enter({ symbol: "AAA", price: 50, tradeTime: new Date(p.now.getTime() - 3000), stopPrice: 49.3, takeProfitPrice: 50.2 })).status, "sent");
+});
+
+test("the gate's late 'submitted' write never moves a row back from what the sync recorded", async () => {
+  const p = await partialSetup();
+  await p.store.updateOrder(p.id, { status: "filled", filledQty: 20, filledAvgPrice: 50 });
+  const bg = (p.gate as unknown as { markSubmitted(id: string, a: string, ms: number): Promise<void> }).markSubmitted(p.id, "00000000-0000-0000-0000-0000000000a1", 42);
+  await bg;
+  const row = (await p.store.getOrder(p.id))!;
+  assert.equal(row.status, "filled");
+  assert.equal(row.acceptMs, 42);
+});
+
+test("the daily loss stop does not go dark while a lowered cap is being set again at Alpaca", async () => {
+  const p = await partialSetup();
+  const { armed: _a, ...rest } = (await p.store.getDay(D))!.phases;
+  await p.store.updateDay(D, { dayStartEquity: 20000, phases: { ...rest, rearm: "2026-11-02T15:30:00.000Z" } });
+  p.broker.positions = [{ symbol: "AAA", qty: 20, marketValue: 1000, avgEntryPrice: 50, unrealizedPl: 0 }];
+  p.broker.account = { ...p.broker.account, equity: 19500 }; // down 500 against a 200 loss stop
+  const day = (await p.store.getDay(D))!;
+  assert.equal(await enforceLossR2(p.deps, day), true, "fires although arming is not currently set");
+  assert.equal(((await p.store.getControl(CONTROL_STOP)) as StopFlag).on, true);
+});
+
+test("a stop that cannot be written to the database is still believed in memory", async () => {
+  const inner = new MemoryStore();
+  const s = new CachingStore(inner);
+  await s.getControl(CONTROL_STOP);
+  inner.failing = true;
+  await assert.rejects(s.setControl(CONTROL_STOP, { on: true, at: "t", reason: "r" }));
+  inner.failing = false;
+  assert.equal(((await s.getControl<StopFlag>(CONTROL_STOP)))?.on, true, "the gate would still refuse");
+});
+
+test("any 429 from a non-clock call empties the governor's budget, even without rate-limit headers", () => {
+  const g = new Governor(() => 1_000_000);
+  g.observe({ path: "/v2/orders", status: 429, limit: null, remaining: null, reset: null });
+  assert.equal(g.canSpend(), false);
+  const h = new Governor(() => 1_000_000);
+  h.observe({ path: "/v2/clock", status: 429, limit: null, remaining: null, reset: null });
+  assert.equal(h.canSpend(), true, "the clock has its own bucket");
+});
+
+test("after Armed time with arming failing, a limit can still only be lowered, and the settings repair is held back at the reserve", async () => {
+  const r = rig();
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("position 1000\nloss 200\ntrades 20\ncap 1", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  r.broker.failOn.add("setAccountConfig"); // arming cannot work
+  await r.at("14:26:00");
+  assert.equal((await r.store.getDay(D))!.phases.armed, undefined);
+  r.ownerSays("position 5000\nposition 500", "14:27:00");
+  await r.at("14:27:05");
+  assert.equal((await r.store.getDay(D))!.limits.maxPositionUsd, 500, "the loosening was refused, the tightening applied, and both went to today, not tomorrow");
+  // the gate holds back a settings repair when the request budget is at the reserve
+  const s = await (async () => {
+    const store = new MemoryStore();
+    const broker = new FakeBroker();
+    const t = new Date("2026-11-02T15:30:00Z");
+    await ensureDay({ store, broker }, D);
+    await store.updateDay(D, { status: "approved", decided: { position: true, loss: true, trades: true, cap: true }, phases: { request: "x", armed: "x" } });
+    broker.config = { maxMarginMultiplier: 4, noShorting: true, suspendTrade: false };
+    const governor = new Governor(() => t.getTime());
+    const view = new ViewR2(broker, () => t.getTime());
+    await view.snapshot({ fastMs: 15000, configMs: 120000, clockMs: 20000 });
+    governor.observe({ path: "/v2/account", status: 200, limit: 200, remaining: 70, reset: 0 });
+    return { gate: new GateR2({ broker, store, view, governor, now: () => t, say: async () => true, note: () => undefined }), broker, t };
+  })();
+  const out = await s.gate.enter({ symbol: "AAA", price: 50, tradeTime: new Date(s.t.getTime() - 3000), stopPrice: 49.3, takeProfitPrice: 50.2 });
+  assert.equal(out.status, "refused");
+  assert.equal(s.broker.count("setAccountConfig"), 0, "no repair request was sent");
+});

@@ -55,6 +55,8 @@ export class CachingStore implements Store {
   async setControl(key: string, value: unknown): Promise<void> {
     const k = `c:${key}`;
     this.bump(k);
+    // A stop is believed at once, even if the database write then fails: the safe direction.
+    if (key === CONTROL_STOP && (value as { on?: boolean } | null)?.on === true) this.controls.set(key, { value: structuredClone(value), at: this.now() });
     await this.inner.setControl(key, value);
     if (FAST_KEYS.has(key)) this.controls.set(key, { value: structuredClone(value), at: this.now() });
     this.bump(k);
@@ -90,13 +92,27 @@ export class CachingStore implements Store {
     return v;
   }
 
-  private async ordersFor(tradeDate: string): Promise<Map<string, OrderRecord>> {
-    let m = this.orders.get(tradeDate);
-    if (!m) {
-      m = new Map((await this.inner.listOrders(tradeDate)).map((o) => [o.clientOrderId, o]));
-      this.orders.set(tradeDate, m);
+  private loading = new Map<string, Promise<Map<string, OrderRecord>>>();
+
+  // A day's orders are loaded once, and two callers that arrive together share the one load (otherwise the slower load
+  // could replace a list that already holds a newer entry). Lists for days before the last two are dropped.
+  private ordersFor(tradeDate: string): Promise<Map<string, OrderRecord>> {
+    const have = this.orders.get(tradeDate);
+    if (have) return Promise.resolve(have);
+    let p = this.loading.get(tradeDate);
+    if (!p) {
+      p = this.inner
+        .listOrders(tradeDate)
+        .then((rows) => {
+          const m = new Map(rows.map((o) => [o.clientOrderId, o] as const));
+          this.orders.set(tradeDate, m);
+          for (const d of [...this.orders.keys()].sort().slice(0, -2)) this.orders.delete(d);
+          return m;
+        })
+        .finally(() => this.loading.delete(tradeDate));
+      this.loading.set(tradeDate, p);
     }
-    return m;
+    return p;
   }
   async insertOrder(order: OrderRecord): Promise<boolean> {
     const m = await this.ordersFor(order.tradeDate);
@@ -106,6 +122,7 @@ export class CachingStore implements Store {
     return inserted;
   }
   async updateOrder(clientOrderId: string, patch: Partial<Omit<OrderRecord, "clientOrderId" | "tradeDate">>): Promise<void> {
+    await Promise.allSettled([...this.loading.values()]); // a load in flight may have read the row before this write
     await this.inner.updateOrder(clientOrderId, patch);
     for (const m of this.orders.values()) {
       const o = m.get(clientOrderId);

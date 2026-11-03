@@ -52,7 +52,7 @@ export function clientOrderIdFor(date: string, symbol: string, n: number): strin
 // as one line per reason per minute, not one row each.
 const FLOW_REASONS = [/^trades-per-minute/, /^holding back for safety/, /^already holding/, /^an entry for this symbol is still working/, /^the signal waited/, /^Alpaca refused this symbol a moment ago/];
 
-const isActive = (o: OrderRecord) => o.status === "intent" || o.status === "submitted" || (o.status === "filled" && !o.closedAt);
+const isActive = (o: OrderRecord) => !o.closedAt && (o.status === "intent" || o.status === "submitted" || o.status === "filled");
 
 export class OrderGate {
   private readonly d: GateDeps;
@@ -121,6 +121,14 @@ export class OrderGate {
     }
   }
 
+  // Records that Alpaca has the order. Never moves a row backwards: if the order sync already recorded a fill or a close, only
+  // the Alpaca id and the time to accept are added.
+  private async markSubmitted(clientOrderId: string, alpacaOrderId: string, acceptMs: number): Promise<void> {
+    const row = await this.d.store.getOrder(clientOrderId);
+    if (row && row.status !== "intent") await this.d.store.updateOrder(clientOrderId, { alpacaOrderId: row.alpacaOrderId ?? alpacaOrderId, acceptMs });
+    else await this.d.store.updateOrder(clientOrderId, { status: "submitted", alpacaOrderId, acceptMs });
+  }
+
   private async run(signal: Signal, queuedAt: number, t0: number): Promise<GateResult> {
     const now = this.d.now();
     const date = etDate(now);
@@ -168,7 +176,7 @@ export class OrderGate {
     }
     // After a restart, tell the governor about the entries sent in the last minute (once).
     if (!this.primed) {
-      this.d.governor.prime(rows.filter((o) => o.status !== "failed" && o.createdAt && now.getTime() - new Date(o.createdAt).getTime() < 60_000 && new Date(o.createdAt).getTime() <= now.getTime()).map((o) => new Date(o.createdAt!).getTime()));
+      this.d.governor.prime(rows.filter((o) => o.status !== "failed" && o.createdAt && now.getTime() - new Date(o.createdAt).getTime() < 60_000).map((o) => Math.min(now.getTime(), new Date(o.createdAt!).getTime())));
       this.primed = true;
     }
     const { account, positions, config, clock } = snap;
@@ -277,7 +285,7 @@ export class OrderGate {
     // The order is at Alpaca. From here on, a problem writing it down must not make it look like it failed, and
     // the write must not hold up the next entry: it runs in the background.
     this.background(
-      this.d.store.updateOrder(clientOrderId, { status: "submitted", alpacaOrderId: sent.id, acceptMs }).catch(() => {
+      this.markSubmitted(clientOrderId, sent.id, acceptMs).catch(() => {
         // The row stays "intent", which still counts, and the order sync fills it in by its id. Say so.
         this.d.log?.("order_record_update_failed", { symbol });
         this.fire("alerts", `The entry for ${symbol} was sent to Alpaca but its record could not be updated. It is still counted, and will be reconciled from Alpaca by its id.`);

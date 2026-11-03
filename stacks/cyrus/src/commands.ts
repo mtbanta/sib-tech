@@ -45,6 +45,12 @@ export class CommandProcessor {
   }
 
   // While one owner message is being handled, replies are collected and posted together as one message.
+  private readonly pending = new Set<Promise<unknown>>();
+  // Resolves when every background flatten started by a command has finished (the tests use it).
+  async idle(): Promise<void> {
+    while (this.pending.size > 0) await Promise.allSettled([...this.pending]);
+  }
+
   private out: string[] | null = null;
   private prefix = "";
 
@@ -162,23 +168,31 @@ export class CommandProcessor {
         return;
       case "flatten": {
         const saved = await this.trySetStop(true, "owner command (flatten)", now);
-        let flat = false;
-        let remaining: string[] = [];
-        let failed = false;
-        try {
-          const r = await this.d.liquidator.flatten({ reason: "flatten command", tradeDate: etDate(now) });
-          flat = r.flat;
-          remaining = r.remaining;
-        } catch {
-          failed = true;
-        }
-        await this.say(
-          failed || !flat
-            ? `${saved ? "Stop flag is set" : "**The stop flag could not be saved**"}, but **the account is not flat yet${remaining.length ? ` (${remaining.join(", ")})` : ""}**. I keep the stop on; check Alpaca's dashboard and close positions by hand if it stays that way.`
-            : saved
-              ? "Stopped, and sold every position and cancelled every open order: the account is flat."
-              : "Sold everything, but **the stop flag could not be saved**: no new entries can happen while the database is down, check `status` once it is back.",
-        );
+        // The sale can take a while (it waits for cancels). It runs in the background so the next command, the heartbeat
+        // and the rest of the pass are not held up; the reply follows when it is done.
+        const task = (async () => {
+          let flat = false;
+          let remaining: string[] = [];
+          let failed = false;
+          try {
+            const r = await this.d.liquidator.flatten({ reason: "flatten command", tradeDate: etDate(now) });
+            flat = r.flat;
+            remaining = r.remaining;
+          } catch {
+            failed = true;
+          }
+          const text =
+            failed || !flat
+              ? `${saved ? "Stop flag is set" : "**The stop flag could not be saved**"}, but **the account is not flat yet${remaining.length ? ` (${remaining.join(", ")})` : ""}**. I keep the stop on; check Alpaca's dashboard and close positions by hand if it stays that way.`
+              : saved
+                ? "Stopped, and sold every position and cancelled every open order: the account is flat."
+                : "Sold everything, but **the stop flag could not be saved**: no new entries can happen while the database is down, check `status` once it is back.";
+          const line = this.prefix ? `${this.prefix}${text}` : text;
+          await this.d.bot.post("commands", line);
+        })();
+        this.pending.add(task);
+        void task.finally(() => this.pending.delete(task));
+        await this.say(saved ? "Stopped. Selling every position and cancelling every open order now; I will say when the account is flat." : "**The stop flag could not be saved.** Selling every position now anyway; I will say when it is done.");
         return;
       }
       case "limits": {

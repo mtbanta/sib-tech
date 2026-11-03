@@ -32,6 +32,15 @@ export class Governor {
 
   // Called with every answer from Alpaca's trading interface (see AlpacaTrading `onRate`).
   observe(info: RateInfo): void {
+    const clockPath = info.path === "/v2/clock" || info.path.startsWith("/v2/calendar");
+    if (info.status === 429 && !clockPath) {
+      // A refusal means the bucket is empty, whatever headers came with it.
+      const t0 = this.now();
+      this.remaining = 0;
+      this.remainingAt = t0;
+      this.lowest = 0;
+      return;
+    }
     if (info.limit !== ALPACA_REQUESTS_PER_MINUTE) return; // the clock and calendar have their own bucket
     const t = this.now();
     this.requestTimes.push(t);

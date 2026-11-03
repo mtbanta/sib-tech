@@ -31,6 +31,10 @@ export class SimBroker implements FullBroker {
   calendar: CalendarDay[] = [{ date: "2026-11-02", open: "09:30", close: "16:00" }];
   requests = 0;
   lowestTokens = 200;
+  // Modes for the things nobody has measured yet: Alpaca may leave a FILLED entry (with its live exits) out of the open list,
+  // and may not report qty_available. The sell tests run in every combination.
+  hideFilledParents = false;
+  reportQtyAvailable = true;
   rejected429 = 0;
   // Fault injection.
   cancelAllFailsAfterCancelling = false;
@@ -194,12 +198,12 @@ export class SimBroker implements FullBroker {
     this.spend();
     return [...this.positionsMap].map(([symbol, p]) => {
       const price = this.prices.get(symbol) ?? p.avg;
-      return { symbol, qty: p.qty, qtyAvailable: Math.max(0, p.qty - this.reservedBySells(symbol)), marketValue: p.qty * price, avgEntryPrice: p.avg, unrealizedPl: (price - p.avg) * p.qty };
+      return { symbol, qty: p.qty, qtyAvailable: this.reportQtyAvailable ? Math.max(0, p.qty - this.reservedBySells(symbol)) : undefined, marketValue: p.qty * price, avgEntryPrice: p.avg, unrealizedPl: (price - p.avg) * p.qty };
     });
   }
   async listOrders(status: "open" | "closed" | "all", afterIso?: string): Promise<Order[]> {
     this.spend();
-    let rows = this.orders.filter((o) => (status === "all" ? true : status === "open" ? OPEN.has(o.status) || o.legs.some((l) => OPEN.has(l.status)) : !OPEN.has(o.status)));
+    let rows = this.orders.filter((o) => (status === "all" ? true : status === "open" ? OPEN.has(o.status) || (!this.hideFilledParents && o.legs.some((l) => OPEN.has(l.status))) : !OPEN.has(o.status)));
     if (afterIso) rows = rows.filter((o) => (o.createdAt ?? "") > afterIso);
     return rows.slice(0, 500).map((o) => structuredClone(o)); // oldest first, at most 500
   }

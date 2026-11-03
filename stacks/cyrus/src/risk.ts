@@ -61,18 +61,28 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     }
     if (o.status === "filled" && s.status !== "filled") {
       await d.store.updateOrder(s.clientOrderId, { status: "filled", filledQty: o.filledQty, filledAvgPrice: o.filledAvgPrice, alpacaOrderId: o.id });
-    } else if ((o.status === "canceled" || o.status === "expired") && s.status !== "canceled" && o.filledQty === 0) {
+    } else if ((o.status === "canceled" || o.status === "expired") && o.filledQty === 0 && s.status !== "canceled") {
       await d.store.updateOrder(s.clientOrderId, { status: "canceled", alpacaOrderId: o.id });
+    } else if ((o.status === "canceled" || o.status === "expired") && o.filledQty > 0 && s.status !== "filled") {
+      // cancelled after a partial fill: what filled is a real position
+      await d.store.updateOrder(s.clientOrderId, { status: "filled", filledQty: o.filledQty, filledAvgPrice: o.filledAvgPrice, alpacaOrderId: o.id, note: "cancelled after a partial fill" });
+    } else if (o.status === "partially_filled" && (s.filledQty ?? 0) !== o.filledQty) {
+      await d.store.updateOrder(s.clientOrderId, { filledQty: o.filledQty, filledAvgPrice: o.filledAvgPrice, alpacaOrderId: o.id });
     } else if (o.status === "rejected" && s.status !== "rejected") {
       await d.store.updateOrder(s.clientOrderId, { status: "rejected", alpacaOrderId: o.id, note: "rejected by Alpaca" });
       await d.say("commands", `Alpaca rejected the entry for ${s.symbol}.`);
     }
     if (!(o.filledQty > 0)) continue;
     // Closed: its exit leg has filled for the whole quantity, or the position is no longer held at all.
-    // ("Not held" only counts once the fill is more than 10 seconds old: the orders and positions are read at nearly the
-    // same moment, and an entry that fills between the two reads would otherwise look closed.)
-    const filledLongAgo = o.filledAt !== null && d.now().getTime() - new Date(o.filledAt).getTime() > 10_000;
-    if (exitFilledQty(o) >= o.filledQty - 1e-9 || (!held.has(s.symbol) && (filledLongAgo || o.filledAt === null))) {
+    // Closed: its exit leg has filled for the whole quantity, or the position is gone. "Gone" counts only when the entry order is
+    // final (not still working at Alpaca) and its fill is clearly old: the orders and positions are read at nearly the same
+    // moment, and an entry that fills between the two reads would otherwise look closed. An unknown fill time is treated as
+    // recent unless the entry itself is more than a minute old.
+    const orderFinal = o.status === "filled" || o.status === "canceled" || o.status === "expired";
+    const ageMs = (iso: string | null) => (iso ? d.now().getTime() - new Date(iso).getTime() : null);
+    const fillAge = ageMs(o.filledAt) ?? ageMs(s.createdAt ?? null);
+    const goneForGood = !held.has(s.symbol) && orderFinal && fillAge !== null && fillAge > (o.filledAt ? 10_000 : 60_000);
+    if (exitFilledQty(o) >= o.filledQty - 1e-9 || goneForGood) {
       await d.store.updateOrder(s.clientOrderId, { closedAt: d.now().toISOString() });
       continue;
     }
@@ -95,7 +105,9 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
 // Runs again and again without harm (once the flag is set it does nothing new).
 export async function enforceDailyLoss(d: RiskDeps, day: DayRecord): Promise<boolean> {
   // Not before arming: until then the starting equity may be an earlier day's number.
-  if (day.status !== "approved" || !day.phases.armed || day.dayStartEquity === null) return false;
+  // (A day that is re-arming after a lowered cap counts as armed: its start equity was read at the first arming, and the loss stop
+  // must not go dark while a re-arm is failing.)
+  if (day.status !== "approved" || !(day.phases.armed || day.phases.rearm) || day.dayStartEquity === null) return false;
   const flag = await d.store.getControl<StopFlag>(CONTROL_STOP);
   if (flag?.on) {
     // The loss stop already fired. If its sale did not finish, try again on every pass. An owner's plain `stop` is

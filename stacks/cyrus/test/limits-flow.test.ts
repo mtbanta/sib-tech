@@ -278,6 +278,7 @@ test("if the record cannot be updated after the order was sent, Michael is told 
   g.store.updateOrder = async (id, patch) => { if (patch.status === "submitted") throw new Error("db blip (test)"); return realUpdate(id, patch); };
   const r = await g.gate.enter(g.signal);
   assert.equal(r.status, "sent");
+  await g.gate.settled();
   assert.ok(g.said.some((m) => m.ch === "alerts" && m.text.includes("record could not be updated")));
   assert.equal((await g.store.listOrders(D))[0]!.status, "intent", "still counted");
 });

@@ -102,9 +102,11 @@ export class SellGate {
   private async read(): Promise<{ positions: Position[]; open: Order[] }> {
     const t = this.nowMs();
     if (this.view && t - this.view.at < VIEW_MAX_AGE_MS) return this.view;
-    const positions = await this.d.broker.listPositions();
+    // Open orders FIRST, then positions: a sell that fills between the two reads then shows up in both (the shares gone
+    // from the position AND the sell still counted as open), so the gate errs toward refusing, never toward overselling.
     const listed = await this.d.broker.listOrdersPaged("open", FAR_PAST, 5);
     if (!listed.complete) throw new Error("the list of open orders is longer than I can read, so I cannot count the sells already open");
+    const positions = await this.d.broker.listPositions();
     this.view = { positions, open: listed.orders, at: t };
     // A sell sent clearly before this read is now part of what the broker shows.
     this.sent = this.sent.filter((x) => x.at + SEEN_MARGIN_MS > t);
@@ -129,7 +131,8 @@ export class SellGate {
       const reason = `refused a sell of ${req.qty} ${req.symbol} (${req.reason}): ${held} held, ${open + unseen} already being sold, so ${Math.max(0, free)} can be sold`;
       this.d.log?.("sell_refused", { symbol: req.symbol, qty: req.qty, held, open, unseen, reason: req.reason });
       this.view = null; // look again next time
-      await this.d.say("alerts", `**Michael: ${reason}.** A sell larger than the position would be a short sale, and this stack is long only. Nothing was sent.`, { mentionOwner: true });
+      // Not awaited: Discord's own rate limit must never hold up the next sell, close-out sells included.
+      void this.d.say("alerts", `**Michael: ${reason}.** A sell larger than the position would be a short sale, and this stack is long only. Nothing was sent.`, { mentionOwner: true }).catch(() => undefined);
       return { status: "refused", reason };
     }
     try {
@@ -254,16 +257,23 @@ export class Liquidator {
       // 1. Cancel what holds the shares (the exits resting at Alpaca) and, for a whole-account sale, any open order at
       //    all. Never a sell this liquidator sent itself in an earlier round: that sale may simply be slow, and cancelling
       //    it would only start the same sale again.
+      let cancelled = false;
       try {
         const open = await this.openOrders();
         const ours = (x: Order) => x.side === "sell" && x.clientOrderId.startsWith("cyrus-x-");
         const others = open.filter((x) => !ours(x));
         const targets = only ? symbols : new Set(others.flatMap((x) => [x.symbol, ...flattenLegs(x).map((l) => l.symbol)]));
-        if (!only && !open.some(ours) && others.length > 0) {
+        // Alpaca's own "cancel every order" reaches a filled entry's resting exits whether or not the open list shows them
+        // (that listing has only been seen to show an UNFILLED bracket with its legs), so a whole-account sale asks for it in
+        // round 1 whatever the list says, and again later if shares are still reported as held by orders that nothing visible
+        // explains. Never while one of our own sells is open: that would cancel the sale itself.
+        const heldByHiddenOrders = positions.some((p) => p.qtyAvailable != null && p.qtyAvailable < p.qty - EPS && openSellQty(open, p.symbol) < p.qty - p.qtyAvailable - EPS);
+        if (!only && !open.some(ours) && (round === 1 || others.length > 0 || heldByHiddenOrders)) {
+          cancelled = true;
           const r = await this.d.broker.cancelAllOrders();
           if (r.failed.length > 0) result.errors.push(`round ${round}: cancel answers: ${r.failed.slice(0, 3).join("; ").slice(0, 200)}`);
         } else {
-          for (const id of openOrderIds(others, targets)) await this.d.broker.cancelOrder(id);
+          for (const id of openOrderIds(others, targets)) (cancelled = true, await this.d.broker.cancelOrder(id));
         }
       } catch (err) {
         result.errors.push(`round ${round}: cancel failed: ${(err as Error).message.slice(0, 120)}`);
@@ -276,6 +286,7 @@ export class Liquidator {
       const t0 = this.d.now().getTime();
       let waited = 0;
       let polls = 0;
+      let blindWaitDone = false;
       for (;;) {
         let held: Position[] = [];
         try {
@@ -285,6 +296,14 @@ export class Liquidator {
           result.errors.push(`round ${round}: could not read open orders or positions: ${(err as Error).message.slice(0, 100)}`);
           readOk = false;
           break;
+        }
+        // If cancels were just asked for and nothing visible shows what they were holding, give them half a second once: a cancel
+        // takes about 0.2 s, and neither the open list nor qty_available is guaranteed to show the exits.
+        if (cancelled && polls === 0 && !blindWaitDone) {
+          blindWaitDone = true;
+          await this.sleep(500);
+          waited += 500;
+          continue;
         }
         const stillHolding = [...symbols].some((sym) => openSellQty(openOrders, sym) > EPS) || held.some((p) => p.qtyAvailable != null && p.qtyAvailable < p.qty - EPS);
         if (!stillHolding || waited >= waitMs) break;

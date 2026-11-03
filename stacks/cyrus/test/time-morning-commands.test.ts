@@ -122,6 +122,9 @@ test("flatten sets the stop flag and sells everything", async () => {
   s.broker.positions = [{ symbol: "AAA", qty: 5, marketValue: 500, avgEntryPrice: 100, unrealizedPl: 0 }];
   s.bot.say("flatten", s.now);
   await s.proc.poll();
+  assert.ok(s.bot.last().includes("Selling every position"), "the first reply comes at once");
+  await s.proc.idle();
+  assert.ok(s.bot.last().includes("the account is flat"), "and the second when the sale is done");
   assert.equal((await s.store.getControl<StopFlag>(CONTROL_STOP))?.on, true);
   assert.equal(s.broker.count("submitSell"), 1);
   assert.equal(s.broker.positions.length, 0);
@@ -315,6 +318,7 @@ test("flatten still tries to sell when the flag cannot be saved", async () => {
   const realSet = s.store.setControl.bind(s.store);
   s.store.setControl = async (k: string, v: unknown) => { if (k === CONTROL_STOP) throw new Error("db down (test)"); return realSet(k, v); };
   await s.proc.poll();
+  await s.proc.idle();
   assert.equal(s.broker.count("submitSell"), 1);
   assert.ok(s.bot.last().includes("could not be saved"));
 });
