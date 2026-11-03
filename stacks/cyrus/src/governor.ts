@@ -54,6 +54,13 @@ export class Governor {
     return this.budget() >= SAFETY_RESERVE + 1;
   }
 
+  // After a restart the governor knows nothing of the entries sent just before it. The gate tells it, from the day's
+  // stored entries, so a restart can never allow a second full minute's worth inside one minute.
+  prime(sentAtMs: number[]): void {
+    this.tradeTimes.push(...sentAtMs);
+    this.tradeTimes.sort((a, b) => a - b);
+  }
+
   tradesInLastMinute(): number {
     const t = this.now();
     this.tradeTimes = this.tradeTimes.filter((x) => t - x < 60_000);

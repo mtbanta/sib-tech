@@ -54,6 +54,14 @@ On 2026-10-29 the owner decided to build two stacks and compare them in paper tr
 
 **Ruling after the first deploy (owner, 2026-10-30, night).** The limits flow moves from the morning to the evening before. After each close the stack posts the next trading day's suggested limits and a checklist to Discord; the owner approves or overrules that evening and can change them again until the open; if any limit is undecided at the open, there is no trading that day. This supersedes the brief's "each morning before the open" for the timing only. The borrowing cap is set at Alpaca at 5 minutes before the open (arming), not at approval. (The one-time extra review round approved earlier that night for the order-recording fix is superseded by the standing review rule below.)
 
+**Build C2 (owner, 2026-11-02): close build C, then upgrade stack C for fast trading.** The brief is `builds/build-c2-brief.md` (saved verbatim, do not edit it) and the running record is `builds/build-c2-log.md`. Everything in this override still applies, with these additions for as long as trading is paper only:
+
+- **Hard stop added:** raising the fixed ceiling of **100 orders a minute** (`MAX_TRADES_PER_MINUTE` in `stacks/cyrus/src/limits.ts`). Michael approves a trades-a-minute limit each evening between 1 and that ceiling; the code never goes above it. There is no daily trade total.
+- **Never deploy, restart or stop the worker during market hours** (8:30 AM to 3:00 PM Central on trading days). Deploys happen after the close (or before 7:30 AM Central if a release has passed review in time).
+- **When limits can change:** from the evening post until the "Armed" message 5 minutes before the open, any limit either way; after "Armed", only tightening (lower) until the next evening post.
+- **Sells.** Alpaca's bulk "close all positions" call is not used (it cancelled the stops and then failed on 2026-11-02). Every sell goes through one checked path (`stacks/cyrus/src/sells.ts`): no sell may exceed the shares held counting sells already open. A structure test enforces this.
+- Stack D, built later, gets the same capability, copied, not imported.
+
 ## Tech stack
 
 **DECIDED for the paper evaluation, 2026-10-29.** Two stacks are compared in paper trading, stack C first.
@@ -65,7 +73,8 @@ On 2026-10-29 the owner decided to build two stacks and compare them in paper tr
 - Broker: Alpaca, paper environment only (`https://paper-api.alpaca.markets`), 20,000 dollar paper account, long only, flat at the close.
 - Messages, alerts and commands: Discord (free plan), one private server for this stack.
 - Heartbeat: Healthchecks.io (free plan), alerting to Discord.
-- Driver: software. Fixed rules in code choose every trade. No language model in the decision or order path.
+- Driver: software. Fixed rules in code choose every trade. No language model in the decision or order path. The strategy is a deliberately meaningless **busy placeholder** (many long-only entries, each a bracket order whose take-profit and protective stop rest at Alpaca, flat at the close); its job is to prove the stack holds up at speed.
+- Speed and volume (build C2): an order-rate governor in fixed code keeps headroom under Alpaca's 200 requests a minute (measured on paper, one bucket for account, order and position calls); the gate reads a cached view of the broker, not four requests per entry; Discord is never waited on in the order path (trade news goes out in batches). The worker runs in San Jose near the Oregon database; Ashburn is about 63 ms faster to Alpaca but only helps once the database write leaves the critical path (see the C2 log).
 - Code in this repo under `stacks/cyrus/`. Dependencies are kept to the few the build needs, and each is named in the build log.
 
 **Stack D (dexter):** not decided in detail, built after stack C passes. Off limits now.

@@ -244,7 +244,9 @@ export class CommandProcessor {
   //  - after the close (the evening post): the next session again.
   private async targetDay(now: Date): Promise<{ date: string; day: DayRecord | null; mode: "edit" | "tighten" } | null> {
     const today = await this.d.store.getDay(etDate(now));
-    const armed = today && (today.phases.armed !== undefined || today.phases.rearm !== undefined);
+    // Armed, re-arming, or an approved day inside its last 5 minutes before the open whose arming has not worked yet: in all
+    // of these a limit may only be tightened.
+    const armed = today && (today.phases.armed !== undefined || today.phases.rearm !== undefined || (today.status === "approved" && today.openAt !== null && now.getTime() >= today.openAt.getTime() - 5 * 60_000));
     if (today && today.isTradingDay && today.status === "approved" && armed && today.openAt && today.closeAt && now < today.closeAt) {
       return { date: today.tradeDate, day: today, mode: "tighten" };
     }

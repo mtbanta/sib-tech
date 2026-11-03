@@ -62,39 +62,83 @@ export interface SellGateDeps {
   broker: SellBroker;
   say: Say;
   log?: (event: string, data?: Record<string, unknown>) => void;
+  // Milliseconds now. The tests use a simulated clock.
+  nowMs?: () => number;
 }
+
+// What the gate reads again at most this often. Inside a burst of sells (a liquidation of many positions) one read
+// serves many sells, and every sell sent since that read is remembered here and subtracted, so nothing is double sold.
+const VIEW_MAX_AGE_MS = 1_000;
+// A sell the gate sent stays in its memory until a read taken clearly after it shows the effect.
+const SEEN_MARGIN_MS = 500;
+const FAR_PAST = "2000-01-01T00:00:00Z";
 
 export class SellGate {
   private readonly d: SellGateDeps;
+  private readonly nowMs: () => number;
+  private chain: Promise<unknown> = Promise.resolve();
+  private view: { positions: Position[]; open: Order[]; at: number } | null = null;
+  private sent: Array<{ symbol: string; qty: number; at: number }> = [];
+
   constructor(deps: SellGateDeps) {
     this.d = deps;
+    this.nowMs = deps.nowMs ?? Date.now;
   }
 
-  // `view` lets a caller that has just read the positions and open orders (a liquidation round) pass them in; without
-  // it the gate reads them fresh. Either way the check is against what the broker said, not against a stored guess.
-  async sell(req: { symbol: string; qty: number; clientOrderId: string; reason: string }, view?: { positions: Position[]; openOrders: Order[] }): Promise<SellResult> {
-    let positions: Position[];
-    let openOrders: Order[];
+  // One sell at a time, for every path (close-out, flatten, loss stop, an unprotected position, a carried position).
+  // The check is made against what the broker says NOW (never against a snapshot a caller built), minus the sells this
+  // gate has sent since that read, and it is also kept below the shares Alpaca itself reports as free.
+  sell(req: { symbol: string; qty: number; clientOrderId: string; reason: string }): Promise<SellResult> {
+    const run = this.chain.then(() => this.run(req));
+    this.chain = run.catch(() => undefined);
+    return run;
+  }
+
+  // Forget the last read (the liquidator calls this after its cancels, so the next sell checks the world as it is now).
+  invalidate(): void {
+    this.view = null;
+  }
+
+  private async read(): Promise<{ positions: Position[]; open: Order[] }> {
+    const t = this.nowMs();
+    if (this.view && t - this.view.at < VIEW_MAX_AGE_MS) return this.view;
+    const positions = await this.d.broker.listPositions();
+    const listed = await this.d.broker.listOrdersPaged("open", FAR_PAST, 5);
+    if (!listed.complete) throw new Error("the list of open orders is longer than I can read, so I cannot count the sells already open");
+    this.view = { positions, open: listed.orders, at: t };
+    // A sell sent clearly before this read is now part of what the broker shows.
+    this.sent = this.sent.filter((x) => x.at + SEEN_MARGIN_MS > t);
+    return this.view;
+  }
+
+  private async run(req: { symbol: string; qty: number; clientOrderId: string; reason: string }): Promise<SellResult> {
+    let v: { positions: Position[]; open: Order[] };
     try {
-      positions = view?.positions ?? (await this.d.broker.listPositions());
-      openOrders = view?.openOrders ?? (await this.d.broker.listOrders("open"));
+      v = await this.read();
     } catch (err) {
+      this.view = null;
       return { status: "error", reason: `could not read the position to check the sell: ${(err as Error).message.slice(0, 120)}` };
     }
-    const held = positions.find((p) => p.symbol === req.symbol)?.qty ?? 0;
-    const open = openSellQty(openOrders, req.symbol);
-    const free = held - open;
+    const pos = v.positions.find((p) => p.symbol === req.symbol);
+    const held = pos?.qty ?? 0;
+    const open = openSellQty(v.open, req.symbol);
+    const unseen = this.sent.filter((x) => x.symbol === req.symbol && x.at >= (this.view?.at ?? 0)).reduce((n, x) => n + x.qty, 0);
+    const byCount = held - open - unseen;
+    const free = pos?.qtyAvailable != null ? Math.min(byCount, pos.qtyAvailable - unseen) : byCount;
     if (!(req.qty > 0) || req.qty > free + EPS) {
-      const reason = `refused a sell of ${req.qty} ${req.symbol} (${req.reason}): ${held} held, ${open} already being sold, so ${Math.max(0, free)} can be sold`;
-      this.d.log?.("sell_refused", { symbol: req.symbol, qty: req.qty, held, open, reason: req.reason });
+      const reason = `refused a sell of ${req.qty} ${req.symbol} (${req.reason}): ${held} held, ${open + unseen} already being sold, so ${Math.max(0, free)} can be sold`;
+      this.d.log?.("sell_refused", { symbol: req.symbol, qty: req.qty, held, open, unseen, reason: req.reason });
+      this.view = null; // look again next time
       await this.d.say("alerts", `**Michael: ${reason}.** A sell larger than the position would be a short sale, and this stack is long only. Nothing was sent.`, { mentionOwner: true });
       return { status: "refused", reason };
     }
     try {
       const order = await this.d.broker.submitSell({ symbol: req.symbol, qty: req.qty, clientOrderId: req.clientOrderId });
+      this.sent.push({ symbol: req.symbol, qty: req.qty, at: this.nowMs() });
       return { status: "sent", order };
     } catch (err) {
       const msg = (err as Error).message.slice(0, 200);
+      this.view = null;
       this.d.log?.("sell_failed", { symbol: req.symbol, qty: req.qty, reason: req.reason, error: msg, status: err instanceof AlpacaError ? err.status : null });
       return { status: "error", reason: msg };
     }
@@ -128,19 +172,60 @@ export interface LiquidatorDeps {
 export class Liquidator {
   private readonly d: LiquidatorDeps;
   private readonly sleep: (ms: number) => Promise<void>;
+  private chain: Promise<unknown> = Promise.resolve();
+  private running = 0;
   constructor(deps: LiquidatorDeps) {
     this.d = deps;
     this.sleep = deps.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
   }
 
-  async flatten(o: LiquidateOptions): Promise<LiquidateResult> {
+  // True from the moment a liquidation is asked for until it has finished (including while it waits its turn). The
+  // order sync's missing-exit check is off for that whole time, whichever path asked: close-out, flatten, loss stop,
+  // carried position, emergency.
+  isLiquidating(): boolean {
+    return this.running > 0;
+  }
+
+  // One liquidation at a time: a second request waits for the first and then looks again (usually it finds the
+  // account flat and has nothing to do), so two can never sell the same shares.
+  flatten(o: LiquidateOptions): Promise<LiquidateResult> {
+    this.running++;
+    const run = this.chain.then(() => this.run(o));
+    this.chain = run.catch(() => undefined);
+    return run.finally(() => void this.running--);
+  }
+
+  private async openOrders(): Promise<Order[]> {
+    const listed = await this.d.broker.listOrdersPaged("open", FAR_PAST, 5);
+    if (!listed.complete) throw new Error("the list of open orders is longer than I can read");
+    return listed.orders;
+  }
+
+  private async run(o: LiquidateOptions): Promise<LiquidateResult> {
     const rounds = o.maxRounds ?? 4;
     const waitMs = o.waitCancelMs ?? 6_000;
     const only = o.only ? new Set(o.only) : null;
     const result: LiquidateResult = { flat: false, remaining: [], sold: [], errors: [] };
     const heldNow = async (): Promise<Position[]> => (await this.d.broker.listPositions()).filter((p) => !only || only.has(p.symbol));
+    const done = (): LiquidateResult => {
+      if (result.sold.length > 0 || result.errors.length > 0) this.d.log?.("liquidation_result", { reason: o.reason, flat: result.flat, remaining: result.remaining, sold: result.sold.length, errors: result.errors.slice(0, 5) });
+      return result;
+    };
 
     for (let round = 1; round <= rounds; round++) {
+      // Nothing is sent while the market is closed: a market sell then queues for the next open (and cancelling the
+      // exits first would leave the position bare overnight). If the clock cannot be read, carry on.
+      const clock = await this.d.broker.getClock().catch(() => null);
+      if (clock && !clock.isOpen) {
+        result.errors.push("the market is closed, so nothing was sent");
+        try {
+          result.remaining = (await heldNow()).map((p) => p.symbol);
+        } catch {
+          result.remaining = ["(could not read positions)"];
+        }
+        result.flat = result.remaining.length === 0;
+        return done();
+      }
       let positions: Position[];
       try {
         positions = await heldNow();
@@ -151,9 +236,17 @@ export class Liquidator {
         continue;
       }
       if (positions.length === 0) {
+        // Nothing to sell. A whole-account request still clears any order left open (an entry that never filled).
+        if (!only && round === 1) {
+          try {
+            if ((await this.openOrders()).length > 0) await this.d.broker.cancelAllOrders();
+          } catch (err) {
+            result.errors.push(`could not cancel the remaining open orders: ${(err as Error).message.slice(0, 100)}`);
+          }
+        }
         result.flat = true;
         result.remaining = [];
-        return result;
+        return done();
       }
       result.remaining = positions.map((p) => p.symbol);
       const symbols = new Set(positions.map((p) => p.symbol));
@@ -162,10 +255,10 @@ export class Liquidator {
       //    all. Never a sell this liquidator sent itself in an earlier round: that sale may simply be slow, and cancelling
       //    it would only start the same sale again.
       try {
-        const open = await this.d.broker.listOrders("open");
-        const ours = (o: Order) => o.side === "sell" && o.clientOrderId.startsWith("cyrus-x-");
-        const others = open.filter((o) => !ours(o));
-        const targets = only ? symbols : new Set(others.flatMap((o) => [o.symbol, ...flattenLegs(o).map((l) => l.symbol)]));
+        const open = await this.openOrders();
+        const ours = (x: Order) => x.side === "sell" && x.clientOrderId.startsWith("cyrus-x-");
+        const others = open.filter((x) => !ours(x));
+        const targets = only ? symbols : new Set(others.flatMap((x) => [x.symbol, ...flattenLegs(x).map((l) => l.symbol)]));
         if (!only && !open.some(ours) && others.length > 0) {
           const r = await this.d.broker.cancelAllOrders();
           if (r.failed.length > 0) result.errors.push(`round ${round}: cancel answers: ${r.failed.slice(0, 3).join("; ").slice(0, 200)}`);
@@ -176,19 +269,24 @@ export class Liquidator {
         result.errors.push(`round ${round}: cancel failed: ${(err as Error).message.slice(0, 120)}`);
       }
 
-      // 2. Wait until Alpaca shows no open order on those symbols: a cancel is not instant.
+      // 2. Wait until Alpaca shows nothing holding those shares (no open order, and no shares reported as held by orders):
+      //    a cancel is not instant. If the open orders cannot be read, no sell is sent this round.
       let openOrders: Order[] = [];
+      let readOk = true;
       const t0 = this.d.now().getTime();
       let waited = 0;
       let polls = 0;
       for (;;) {
+        let held: Position[] = [];
         try {
-          openOrders = await this.d.broker.listOrders("open");
+          openOrders = await this.openOrders();
+          held = await heldNow();
         } catch (err) {
-          result.errors.push(`round ${round}: could not read open orders: ${(err as Error).message.slice(0, 100)}`);
+          result.errors.push(`round ${round}: could not read open orders or positions: ${(err as Error).message.slice(0, 100)}`);
+          readOk = false;
           break;
         }
-        const stillHolding = [...symbols].some((s) => openSellQty(openOrders, s) > EPS);
+        const stillHolding = [...symbols].some((sym) => openSellQty(openOrders, sym) > EPS) || held.some((p) => p.qtyAvailable != null && p.qtyAvailable < p.qty - EPS);
         if (!stillHolding || waited >= waitMs) break;
         // Poll gently: a cancel usually finishes in a fraction of a second, and every look costs one of Alpaca's 200 requests a minute.
         const pause = [250, 400, 600, 800][Math.min(polls++, 3)]!;
@@ -198,20 +296,22 @@ export class Liquidator {
       }
 
       // 3. Sell each symbol with an explicit quantity, through the sell gate (never more than is free).
-      let freshPositions: Position[];
-      try {
-        freshPositions = await heldNow();
-      } catch (err) {
-        result.errors.push(`round ${round}: could not re-read positions: ${(err as Error).message.slice(0, 100)}`);
-        continue;
-      }
-      for (const p of freshPositions) {
-        const free = p.qty - openSellQty(openOrders, p.symbol);
-        if (!(free > EPS)) continue; // something is still holding the shares; the next round cancels again
-        const id = `cyrus-x-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-${round}`;
-        const r = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: id, reason: o.reason }, { positions: freshPositions, openOrders });
-        if (r.status === "sent") result.sold.push({ symbol: p.symbol, qty: free });
-        else result.errors.push(`round ${round}: ${p.symbol}: ${r.reason}`);
+      if (readOk) {
+        this.d.gate.invalidate();
+        let freshPositions: Position[] = [];
+        try {
+          freshPositions = await heldNow();
+        } catch (err) {
+          result.errors.push(`round ${round}: could not re-read positions: ${(err as Error).message.slice(0, 100)}`);
+        }
+        for (const p of freshPositions) {
+          const free = Math.min(p.qty - openSellQty(openOrders, p.symbol), p.qtyAvailable ?? Infinity);
+          if (!(free > EPS)) continue; // something is still holding the shares; the next round cancels again
+          const id = `cyrus-x-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-${round}`;
+          const r = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: id, reason: o.reason });
+          if (r.status === "sent") result.sold.push({ symbol: p.symbol, qty: free });
+          else result.errors.push(`round ${round}: ${p.symbol}: ${r.reason}`);
+        }
       }
 
       // 4. Look again after the sells have had a moment to fill.
@@ -225,6 +325,6 @@ export class Liquidator {
     } catch {
       result.remaining = result.remaining.length > 0 ? result.remaining : ["(could not read positions)"];
     }
-    return result;
+    return done();
   }
 }

@@ -111,7 +111,7 @@ export class Worker {
     this.d = deps;
     this.sessions = new NextSessionFinder(deps.broker);
     this.view = new BrokerView(deps.broker, () => deps.now().getTime());
-    this.sellGate = new SellGate({ broker: deps.broker, say: (c, t, o) => this.say(c, t, o), log: (e, data) => deps.log?.("info", e, data) });
+    this.sellGate = new SellGate({ broker: deps.broker, say: (c, t, o) => this.say(c, t, o), log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime() });
     this.liquidator = new Liquidator({ broker: deps.broker, gate: this.sellGate, now: deps.now, sleep: deps.sleep, log: (e, data) => deps.log?.("info", e, data) });
     this.commands = new CommandProcessor({
       sessions: this.sessions,
@@ -151,6 +151,12 @@ export class Worker {
       this.lastFlush = t;
       await this.gate.flush();
     }
+  }
+
+  // May the order sync sell a position whose exits are gone? Not while any liquidation runs or waits (close-out, flatten, loss
+  // stop, carried, emergency), and not from the close-out time on: the close-out alone flattens the account.
+  protectNow(closeAt: Date): boolean {
+    return !this.closingOut && !this.liquidator.isLiquidating() && !this.inflight.has("closeout") && !this.inflight.has("carried") && this.d.now() < addMinutes(closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE);
   }
 
   private riskDeps() {
@@ -339,18 +345,18 @@ export class Worker {
 
   private async pass(): Promise<void> {
     const now = this.d.now();
+    if (!this.migrated) {
+      // Once per start, before any command is read: a future day saved by an older release (before build C2) is put in the
+      // new shape and its old request is forgotten, so an old reply cannot count and the request is posted again.
+      const reset = await resetOldShapeFutureDays(this.d.store, now);
+      this.migrated = true;
+      if (reset.length > 0) this.d.log?.("info", "future_days_reset", { days: reset });
+    }
     // Commands first, at any hour: a stop must never wait behind anything else.
     await this.commands.poll();
 
     const date = etDate(now);
     const today = await ensureDay({ store: this.d.store, broker: this.d.broker, now: this.d.now }, date);
-    if (!this.migrated) {
-      // Once per start: a future day saved by an older release (before build C2) is put in the new shape and its old
-      // request is forgotten, so an old reply cannot count and the request is posted again in the new format.
-      const reset = await resetOldShapeFutureDays(this.d.store, now);
-      this.migrated = true;
-      if (reset.length > 0) this.d.log?.("info", "future_days_reset", { days: reset });
-    }
     try {
       await this.notFlatCheck(today, now);
     } catch (err) {
@@ -413,7 +419,7 @@ export class Worker {
       // Michael's next command. While a close-out is running, and from the close-out time on, the missing-exit check is
       // switched off and nothing is sold here: the close-out alone flattens the account. It is asked again just before
       // each sale, so a close-out that starts meanwhile switches it off.
-      const protect = () => !this.closingOut && !this.inflight.has("closeout") && !this.inflight.has("carried") && this.d.now() < addMinutes(closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE);
+      const protect = () => this.protectNow(closeAt);
       this.background("risk", async () => {
         await syncOrders(risk, dayNow, { protect });
         await enforceDailyLoss(risk, dayNow);

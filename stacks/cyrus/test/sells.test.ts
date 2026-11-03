@@ -14,13 +14,13 @@ import { SimBroker } from "./sim-broker.ts";
 const D = "2026-11-02";
 
 function world() {
-  const sim = new SimBroker();
+  const sim = new SimBroker(Date.UTC(2026, 10, 2, 20, 55));
   const said: Array<{ ch: string; text: string; mention?: boolean }> = [];
   const say = async (ch: string, text: string, opts?: { mentionOwner?: boolean }) => (said.push({ ch, text, mention: opts?.mentionOwner }), true);
-  const gate = new SellGate({ broker: sim, say });
-  const liquidator = new Liquidator({ broker: sim, gate, now: () => new Date(Date.UTC(2026, 10, 2, 20, 55) + sim.simMs), sleep: sim.sleep });
+  const gate = new SellGate({ broker: sim, say, nowMs: () => sim.simMs });
+  const liquidator = new Liquidator({ broker: sim, gate, now: () => new Date(sim.simMs), sleep: sim.sleep });
   const store = new MemoryStore();
-  const now = () => new Date(Date.UTC(2026, 10, 2, 20, 55) + sim.simMs);
+  const now = () => new Date(sim.simMs);
   return { sim, said, say, gate, liquidator, store, now };
 }
 
@@ -46,34 +46,90 @@ test("open sells are counted per linked group: a bracket's two exits count once,
 test("no sell larger than the position, counting sells already open: refused, alerted to Michael, nothing sent", async () => {
   const w = world();
   await hold(w, "AAA", 10, 50);
-  const view = { positions: await w.sim.listPositions(), openOrders: await w.sim.listOrders("open") };
   // the bracket's exits already cover all 10 shares, so not even 1 more can be sold
-  const r1 = await w.gate.sell({ symbol: "AAA", qty: 1, clientOrderId: "cyrus-x-test-aaa-1", reason: "test" }, view);
+  const r1 = await w.gate.sell({ symbol: "AAA", qty: 1, clientOrderId: "cyrus-x-test-aaa-1", reason: "test" });
   assert.equal(r1.status, "refused");
   assert.equal(w.sim.sellLog.length, 0);
   const alert = w.said.find((m) => m.ch === "alerts")!;
   assert.ok(alert.text.includes("Michael") && alert.mention === true);
   // after the exits are cancelled and gone, 10 can be sold but 11 cannot, and a symbol never held cannot be sold at all
   await w.sim.cancelAllOrders();
-  w.sim.advance(300);
-  const fresh = { positions: await w.sim.listPositions(), openOrders: await w.sim.listOrders("open") };
-  assert.equal((await w.gate.sell({ symbol: "AAA", qty: 11, clientOrderId: "cyrus-x-test-aaa-2", reason: "test" }, fresh)).status, "refused");
-  assert.equal((await w.gate.sell({ symbol: "ZZZ", qty: 1, clientOrderId: "cyrus-x-test-zzz-1", reason: "test" }, fresh)).status, "refused");
-  assert.equal((await w.gate.sell({ symbol: "AAA", qty: 0, clientOrderId: "cyrus-x-test-aaa-3", reason: "test" }, fresh)).status, "refused");
-  assert.equal((await w.gate.sell({ symbol: "AAA", qty: 10, clientOrderId: "cyrus-x-test-aaa-4", reason: "test" }, fresh)).status, "sent");
+  w.sim.advance(1500);
+  assert.equal((await w.gate.sell({ symbol: "AAA", qty: 11, clientOrderId: "cyrus-x-test-aaa-2", reason: "test" })).status, "refused");
+  assert.equal((await w.gate.sell({ symbol: "ZZZ", qty: 1, clientOrderId: "cyrus-x-test-zzz-1", reason: "test" })).status, "refused");
+  assert.equal((await w.gate.sell({ symbol: "AAA", qty: 0, clientOrderId: "cyrus-x-test-aaa-3", reason: "test" })).status, "refused");
+  assert.equal((await w.gate.sell({ symbol: "AAA", qty: 10, clientOrderId: "cyrus-x-test-aaa-4", reason: "test" })).status, "sent");
   assert.equal(w.sim.maxSellQtyEver, 10, "no sell above the position ever reached the broker");
   assert.equal(w.sim.oversellAttempts, 0);
 });
 
-test("a sell cannot be sent twice for the same shares: the second is refused because the first is already open", async () => {
+test("a sell cannot be sent twice for the same shares, even if the second is asked for inside the same second", async () => {
   const w = world();
   await hold(w, "AAA", 10, 50);
   await w.sim.cancelAllOrders();
-  w.sim.advance(300);
-  const a = await w.gate.sell({ symbol: "AAA", qty: 10, clientOrderId: "cyrus-x-test-aaa-1", reason: "test" });
-  const b = await w.gate.sell({ symbol: "AAA", qty: 10, clientOrderId: "cyrus-x-test-aaa-2", reason: "test" });
-  assert.equal(a.status, "sent");
-  assert.equal(b.status, "refused", "the shares are already being sold");
+  w.sim.advance(1500);
+  const [a, b] = await Promise.all([
+    w.gate.sell({ symbol: "AAA", qty: 10, clientOrderId: "cyrus-x-test-aaa-1", reason: "one" }),
+    w.gate.sell({ symbol: "AAA", qty: 10, clientOrderId: "cyrus-x-test-aaa-2", reason: "two" }),
+  ]);
+  assert.deepEqual([a.status, b.status].sort(), ["refused", "sent"], "one sell goes, the other is refused by the gate itself");
+  assert.equal(w.sim.oversellAttempts, 0, "the broker never even saw the second");
+});
+
+test("two liquidations at once never sell the same shares twice: the second waits its turn and finds nothing to do", async () => {
+  const w = world();
+  for (const [sym, qty, px] of [["AAA", 10, 50], ["BBB", 20, 25]] as const) await hold(w, sym, qty, px);
+  const [a, b] = await Promise.all([w.liquidator.flatten({ reason: "close-out", tradeDate: D }), w.liquidator.flatten({ reason: "flatten", tradeDate: D })]);
+  assert.equal(a.flat, true);
+  assert.equal(b.flat, true);
+  assert.equal(w.sim.oversellAttempts, 0);
+  assert.equal(w.sim.sellLog.length, 2, "one sell per symbol, not two");
+  assert.ok(!w.said.some((m) => m.text.includes("refused a sell")));
+  assert.equal(w.liquidator.isLiquidating(), false);
+});
+
+test("while a liquidation runs (or waits), the liquidating flag is on; a single-symbol sale queued behind a whole-account one sells nothing and says nothing false", async () => {
+  const w = world();
+  await hold(w, "AAA", 10, 50);
+  const day = await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
+  const big = w.liquidator.flatten({ reason: "close-out", tradeDate: D });
+  assert.equal(w.liquidator.isLiquidating(), true);
+  const small = w.liquidator.flatten({ reason: "no live protective stop", tradeDate: D, only: ["AAA"] });
+  await Promise.all([big, small]);
+  assert.equal(w.sim.sellLog.length, 1);
+  void day;
+});
+
+test("a failed read of the open orders in the middle of a sale sends no sell that round, and the next round finishes the job", async () => {
+  const w = world();
+  await hold(w, "AAA", 10, 50);
+  const real = w.sim.listOrdersPaged.bind(w.sim);
+  let calls = 0;
+  w.sim.listOrdersPaged = async (...a: Parameters<typeof real>) => {
+    calls++;
+    if (calls === 2) throw new Error("read failed (test)"); // the first look inside the wait loop
+    return real(...a);
+  };
+  const r = await w.liquidator.flatten({ reason: "test", tradeDate: D });
+  assert.equal(r.flat, true);
+  assert.equal(w.sim.oversellAttempts, 0, "no sell was sent against an empty list of open orders");
+  assert.ok(r.errors.some((e) => e.includes("could not read")));
+});
+
+test("the liquidator sends nothing while the market is closed, and an empty account still has its leftover orders cancelled", async () => {
+  const w = world();
+  await hold(w, "AAA", 10, 50);
+  w.sim.clockOpen = false;
+  const r = await w.liquidator.flatten({ reason: "flatten", tradeDate: D });
+  assert.equal(r.flat, false);
+  assert.equal(w.sim.sellLog.length, 0);
+  assert.equal(w.sim.heldQty("AAA"), 10);
+  const w2 = world();
+  await w2.sim.submitEntry({ symbol: "ZZZ", qty: 5, stopPrice: 9, takeProfitPrice: 11, referencePrice: 10, clientOrderId: "cyrus-20261102-ZZZ-1" }); // never filled
+  const r2 = await w2.liquidator.flatten({ reason: "flatten", tradeDate: D });
+  assert.equal(r2.flat, true);
+  w2.sim.advance(500);
+  assert.equal((await w2.sim.listOrders("open")).length, 0, "the unfilled entry was cancelled");
 });
 
 test("the Monday case: five positions with live stops, the close-out alone flattens them, no sell above any position, no false alarm", async () => {
@@ -94,7 +150,7 @@ test("the Monday case: five positions with live stops, the close-out alone flatt
       syncSold += r.unprotected.length;
     }
   };
-  const res = await closeOut({ ...deps, liquidator: new Liquidator({ broker: w.sim, gate: new SellGate({ broker: w.sim, say: w.say }), now: w.now, sleep: deps.sleep }) }, D);
+  const res = await closeOut({ ...deps, liquidator: new Liquidator({ broker: w.sim, gate: new SellGate({ broker: w.sim, say: w.say, nowMs: () => w.sim.simMs }), now: w.now, sleep: deps.sleep }) }, D);
   assert.deepEqual(res, { flat: true, remaining: [] });
   assert.equal((await w.sim.listPositions()).length, 0);
   assert.equal(syncSold, 0);
@@ -165,4 +221,69 @@ test("the close-out sends nothing while the market is closed", async () => {
   assert.equal(res.deferred, true);
   assert.equal(w.sim.sellLog.length, 0);
   assert.equal(w.sim.heldQty("AAA"), 10);
+});
+
+import { rig } from "./rig.ts";
+test("worker level: a sync tick that lands inside the close-out's slow cancels sells nothing and raises no false alarm", async () => {
+  const sim = new SimBroker(Date.UTC(2026, 10, 2, 14, 0));
+  let r: ReturnType<typeof rig<SimBroker>>;
+  let hooked = false;
+  let armedHook = false;
+  const sleep = async (ms: number) => {
+    await sim.sleep(ms);
+    if (armedHook && !hooked) {
+      hooked = true;
+      await r.at("20:55:40"); // the 30 second order sync falls due while the close-out waits for its cancels
+    }
+  };
+  const events: string[] = [];
+  r = rig<SimBroker>({ broker: sim, sleep, log: (_l, e) => void events.push(e) });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("approve", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:25:00");
+  const mk = async (sym: string, n: number) => {
+    const id = clientOrderIdFor(D, sym, 1);
+    await sim.submitEntry({ symbol: sym, qty: n, stopPrice: 9.9, takeProfitPrice: 10.1, referencePrice: 10, clientOrderId: id });
+    sim.fillEntry(id, 10);
+    await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: sym, qty: n, referencePrice: 10, stopPrice: 9.9, status: "submitted", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: null, createdAt: "2026-11-02T14:40:00.000Z" });
+  };
+  await mk("AAA", 10);
+  await mk("BBB", 20);
+  await r.at("20:54:00"); // a normal sync: the exits are live, nothing to do
+  assert.equal(sim.sellLog.length, 0);
+  armedHook = true;
+  await r.at("20:55:00"); // the close-out starts; the hook fires a tick at 20:55:40 inside it
+  await r.at("20:55:50");
+  assert.equal(hooked, true, "the tick really fell inside the close-out");
+  assert.equal((await sim.listPositions()).length, 0);
+  assert.equal(sim.sellLog.length, 2, "exactly one sell per symbol, from the close-out alone");
+  assert.equal(sim.oversellAttempts, 0);
+  assert.ok(!r.said("alerts").some((t) => t.includes("no live protective stop")), "no false alarm");
+  assert.ok(!events.includes("unprotected_position"), "the sync did not even start a sale: the close-out guard is on");
+});
+
+test("the order sync's missing-exit check is off during any liquidation and from the close-out time on, and on otherwise", async () => {
+  const sim = new SimBroker(Date.UTC(2026, 10, 2, 14, 0));
+  const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep });
+  await r.at("14:00:00");
+  const closeAt = new Date("2026-11-02T21:00:00Z");
+  const protect = () => (r.worker as unknown as { protectNow(c: Date): boolean }).protectNow(closeAt);
+  assert.equal(protect(), true, "on in the middle of the session");
+  await r.at("20:54:59");
+  assert.equal(protect(), true, "still on one second before close-out time");
+  await r.at("20:55:00");
+  assert.equal(protect(), false, "off from 5 minutes before the close");
+  await r.at("14:30:00");
+  assert.equal(protect(), true);
+  await hold(world(), "AAA", 1, 1); // (keeps the helper in use)
+  const w = world();
+  await hold(w, "AAA", 10, 50);
+  const worker = r.worker as unknown as { protectNow(c: Date): boolean; liquidator: Liquidator };
+  const real = worker.liquidator;
+  let seen: boolean | null = null;
+  const orig = real.flatten.bind(real);
+  real.flatten = (o) => { const p = orig(o); seen = worker.protectNow(closeAt); return p; };
+  await real.flatten({ reason: "flatten", tradeDate: D });
+  assert.equal(seen, false, "off while a flatten is running or waiting its turn");
 });

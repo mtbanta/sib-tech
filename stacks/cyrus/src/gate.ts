@@ -61,6 +61,8 @@ export class OrderGate {
   private readonly flow = new Map<string, { date: string; reason: string; count: number }>();
   private peak: { date: string; exposureUsd: number; equity: number } | null = null;
   private readonly clockMs: () => number;
+  private primed = false;
+  private lastSnapshotFailure = 0;
 
   constructor(deps: GateDeps) {
     this.d = deps;
@@ -70,7 +72,8 @@ export class OrderGate {
   // One entry at a time, so two signals cannot both pass the same check.
   enter(signal: Signal): Promise<GateResult> {
     const queuedAt = this.d.now().getTime();
-    const run = this.chain.then(() => this.run(signal, queuedAt));
+    const t0 = this.clockMs(); // the time to accept runs from the moment the signal reaches the gate, queue included
+    const run = this.chain.then(() => this.run(signal, queuedAt, t0));
     this.chain = run.catch(() => undefined);
     return run;
   }
@@ -118,8 +121,7 @@ export class OrderGate {
     }
   }
 
-  private async run(signal: Signal, queuedAt: number): Promise<GateResult> {
-    const t0 = this.clockMs();
+  private async run(signal: Signal, queuedAt: number, t0: number): Promise<GateResult> {
     const now = this.d.now();
     const date = etDate(now);
     const symbol = signal.symbol;
@@ -148,12 +150,26 @@ export class OrderGate {
     if (stop?.on) return this.refuse(date, symbol, "stop flag is set");
     if (!limits) return this.refuse(date, symbol, "no limits approved for today");
 
+    // Strategy work never spends Alpaca's last request headroom: if the snapshot would have to ask Alpaca for something
+    // and the budget is down to the safety reserve, refuse before any request is made. After a failed refresh, wait a
+    // few seconds before trying again, so a queue of signals cannot hammer a struggling broker.
+    const VIEW = { fastMs: 15_000, configMs: 120_000, clockMs: 20_000 };
+    if (this.d.view.stale(VIEW)) {
+      if (!this.d.governor.canSpend()) return this.refuse(date, symbol, `holding back for safety: Alpaca's request budget is down to ${Math.floor(this.d.governor.budget())} and my view of the account is too old to trade on`);
+      if (now.getTime() - this.lastSnapshotFailure < 3_000) return this.refuse(date, symbol, "broker or database unavailable, so no entry", undefined, false);
+    }
     let snap, rows;
     try {
-      snap = await this.d.view.snapshot({ fastMs: 15_000, configMs: 120_000, clockMs: 20_000 });
+      snap = await this.d.view.snapshot(VIEW);
       rows = await this.d.store.listOrders(date);
     } catch {
+      this.lastSnapshotFailure = now.getTime();
       return this.refuse(date, symbol, "broker or database unavailable, so no entry", undefined, false);
+    }
+    // After a restart, tell the governor about the entries sent in the last minute (once).
+    if (!this.primed) {
+      this.d.governor.prime(rows.filter((o) => o.status !== "failed" && o.createdAt && now.getTime() - new Date(o.createdAt).getTime() < 60_000 && new Date(o.createdAt).getTime() <= now.getTime()).map((o) => new Date(o.createdAt!).getTime()));
+      this.primed = true;
     }
     const { account, positions, config, clock } = snap;
 
@@ -168,7 +184,15 @@ export class OrderGate {
     const held = new Set(positions.map((p) => p.symbol));
     if (rows.some((o) => o.symbol === symbol && isActive(o) && !held.has(symbol))) return this.refuse(date, symbol, "an entry for this symbol is still working");
     if (rows.some((o) => o.symbol === symbol && o.status === "failed" && o.createdAt && now.getTime() - new Date(o.createdAt).getTime() < 60_000)) return this.refuse(date, symbol, "Alpaca refused this symbol a moment ago, so I wait a minute before trying again");
-    const pendingExposure = rows.filter((o) => (o.status === "intent" || o.status === "submitted") && !held.has(o.symbol)).reduce((s, o) => s + o.qty * o.referencePrice, 0);
+    // Entries not yet in the (up to 15 seconds old) account view: sent but not filled, filled but not shown yet, or partly
+    // filled. A symbol the view already shows is counted from its market value, plus any unfilled remainder.
+    const pendingExposure = rows
+      .filter((o) => isActive(o))
+      .reduce((s, o) => {
+        const filled = o.filledQty ?? 0;
+        if (held.has(o.symbol)) return s + Math.max(0, o.qty - filled) * o.referencePrice;
+        return s + (filled > 0 ? filled * (o.filledAvgPrice ?? o.referencePrice) + Math.max(0, o.qty - filled) * o.referencePrice : o.qty * o.referencePrice);
+      }, 0);
     const ctx: EntryContext = {
       symbol,
       price: signal.price,
@@ -192,6 +216,7 @@ export class OrderGate {
       return this.refuse(date, symbol, "the Alpaca account is not active for trading");
     }
     if (!config.noShorting || config.maxMarginMultiplier > limits!.borrowingCap) {
+      if (!this.d.governor.canSpend()) return this.refuse(date, symbol, "holding back for safety: the broker settings need repair and Alpaca's request budget is at the safety reserve");
       try {
         await this.d.broker.setAccountConfig({ noShorting: true, maxMarginMultiplier: limits!.borrowingCap });
         this.d.view.invalidate();

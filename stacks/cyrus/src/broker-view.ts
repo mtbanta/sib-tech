@@ -61,6 +61,11 @@ export class BrokerView {
     return this.positions!;
   }
 
+  // Would a snapshot with these limits have to ask Alpaca for something?
+  stale(limits: { fastMs: number; configMs: number; clockMs: number }): boolean {
+    return this.fastAgeMs() > limits.fastMs || !this.config || this.now() - this.configAt > limits.configMs || !this.clock || this.now() - this.clockAt > limits.clockMs;
+  }
+
   // Everything an entry decision needs, none of it older than the limits. Refreshes whichever part is too old.
   async snapshot(limits: { fastMs: number; configMs: number; clockMs: number }): Promise<Snapshot> {
     const jobs: Promise<void>[] = [];

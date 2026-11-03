@@ -14,6 +14,8 @@ export const STORED_INFO_EVENTS = new Set([
   "future_days_reset",
   "sell_refused",
   "sell_failed",
+  "liquidation_result",
+  "unprotected_position_already_gone",
   "order_list_incomplete",
   "entries_swept_while_stopped",
   "order_record_update_failed",

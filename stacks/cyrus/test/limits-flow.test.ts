@@ -157,7 +157,7 @@ test("an approval after the close applies to the next trading day, not to the da
   assert.equal((await r.store.getDay("2026-10-30"))!.status, "lapsed");
 });
 
-test("a change after approval applies before the open and is refused at the open", async () => {
+test("a change after approval applies before the open; at the open (the day is armed) only tightening is accepted", async () => {
   const r = rig({ broker: brokerWith() });
   await r.at("2026-11-01T22:10:00Z");
   r.ownerSays("approve", "2026-11-01T22:20:00Z");
@@ -166,9 +166,13 @@ test("a change after approval applies before the open and is refused at the open
   const day = (await r.store.getDay(D))!;
   assert.equal(day.status, "approved");
   assert.equal(day.limits.maxPositionUsd, 1500);
-  r.ownerSays("position 900", "14:30:05"); // the open
+  await r.at("14:25:00"); // Armed
+  r.ownerSays("position 5000", "14:30:05"); // the open: loosening is locked
   await r.at("14:30:10");
-  assert.equal((await r.store.getDay(D))!.limits.maxPositionUsd, 1500, "fixed at the open");
+  assert.equal((await r.store.getDay(D))!.limits.maxPositionUsd, 1500, "loosening is locked from Armed on");
+  r.ownerSays("position 900", "14:30:20"); // tightening is allowed
+  await r.at("14:30:25");
+  assert.equal((await r.store.getDay(D))!.limits.maxPositionUsd, 900);
 });
 
 test("nothing approved before the open means no trading that day, and the checklist warns about a stop flag", async () => {

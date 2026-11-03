@@ -451,3 +451,96 @@ test("the feed alerter: login failure at once, reconnects only when repeated, wi
   b.onStatus("live", 7);
   assert.equal(new FeedAlerter().onStatus("live", 0), null);
 });
+
+// ---- review round 1 fixes ----
+test("the cached stop flag cannot be hidden by a database read that was already in flight when the stop was written", async () => {
+  const { CachingStore } = await import("../src/caching-store.ts");
+  const inner = new MemoryStore();
+  const s = new CachingStore(inner);
+  let release: () => void = () => undefined;
+  const slow = new Promise<void>((r) => (release = r));
+  const realGet = inner.getControl.bind(inner);
+  let first = true;
+  inner.getControl = async <T,>(k: string) => {
+    const v = await realGet<T>(k); // the old value ("nothing set") is read first...
+    if (first) { first = false; await slow; } // ...and the answer is held up
+    return v;
+  };
+  const reading = s.getControl<StopFlagT>(CONTROL_STOP);
+  await s.setControl(CONTROL_STOP, { on: true, at: "t", reason: "stop" }); // the stop command writes while the read waits
+  release();
+  await reading;
+  assert.equal((await s.getControl<StopFlagT>(CONTROL_STOP))?.on, true, "the stop is not overwritten by the older read");
+  // the same for a day's record
+  await inner.createDay({ tradeDate: D, isTradingDay: true, openAt: null, closeAt: null, status: "pending", dayStartEquity: 1, suggested: LIM({}), limits: LIM({}), decided: {}, liveList: null, phases: {} });
+  let release2: () => void = () => undefined;
+  const slow2 = new Promise<void>((r) => (release2 = r));
+  const realDay = inner.getDay.bind(inner);
+  let firstDay = true;
+  inner.getDay = async (d: string) => { const v = await realDay(d); if (firstDay) { firstDay = false; await slow2; } return v; };
+  const readingDay = s.getDay(D);
+  await s.updateDay(D, { limits: LIM({ maxPositionUsd: 300 }) });
+  release2();
+  await readingDay;
+  assert.equal((await s.getDay(D))!.limits.maxPositionUsd, 300, "a tightened limit is not overwritten by an older read");
+});
+type StopFlagT = { on: boolean };
+
+test("exposure counts entries the order sync marked filled but the cached account view does not show yet", async () => {
+  const s = await setup();
+  await s.store.updateDay(D, { limits: LIM({ maxPositionUsd: 10000, borrowingCap: 1 }) });
+  s.broker.account = { ...s.broker.account, equity: 20000 };
+  await s.gate.enter(s.signal("AAA", 100)); // 10,000 dollars
+  await s.gate.settled();
+  const row = (await s.store.listOrders(D))[0]!;
+  await s.store.updateOrder(row.clientOrderId, { status: "filled", filledQty: row.qty, filledAvgPrice: 100 }); // the sync saw the fill; the view (positions) has not caught up
+  assert.equal((await s.gate.enter(s.signal("BBB", 100))).status, "sent", "10,000 + 10,000 is exactly the cap");
+  const third = await s.gate.enter(s.signal("CCC", 100));
+  assert.equal(third.status, "refused");
+  assert.match((third as any).reason, /borrowing cap/);
+});
+
+test("after a restart the governor still counts the entries sent in the last minute", async () => {
+  const s = await setup();
+  await s.store.updateDay(D, { limits: LIM({ maxTradesPerMinute: 3, borrowingCap: 4 }) });
+  for (const sym of ["AAA", "BBB", "CCC"]) assert.equal((await s.gate.enter(s.signal(sym, 20))).status, "sent");
+  s.setNow(new Date(NOW.getTime() + 10_000)); // ten seconds later the worker restarts: a new gate and an empty governor
+  const t = NOW.getTime() + 10_000;
+  const governor = new Governor(() => t);
+  const gate = new OrderGate({ broker: s.broker, store: s.store, view: new BrokerView(s.broker, () => t), governor, now: () => new Date(t), say: async () => true, note: () => undefined });
+  const r = await gate.enter({ ...s.signal("DDD", 20), tradeTime: new Date(t - 2000) });
+  assert.equal(r.status, "refused");
+  assert.match((r as any).reason, /trades-per-minute limit reached/);
+  const later = NOW.getTime() + 62_000;
+  const gate2 = new OrderGate({ broker: s.broker, store: s.store, view: new BrokerView(s.broker, () => later), governor: new Governor(() => later), now: () => new Date(later), say: async () => true, note: () => undefined });
+  assert.equal((await gate2.enter({ ...s.signal("DDD", 20), tradeTime: new Date(later - 2000) })).status, "sent", "a minute later it may send again");
+});
+
+test("strategy work never spends the last request headroom: with the budget at the reserve and a stale view, no request is made, and a failed refresh is not repeated for every queued signal", async () => {
+  const s = await setup();
+  s.governor.observe({ path: "/v2/account", status: 200, limit: 200, remaining: 70, reset: 0 });
+  s.broker.calls.length = 0;
+  const r = await s.gate.enter(s.signal());
+  assert.equal(r.status, "refused");
+  assert.match((r as any).reason, /holding back for safety/);
+  assert.equal(s.broker.calls.length, 0, "not one request was made");
+  // budget fine, but the refresh fails: the next signals within a few seconds do not try again
+  const s2 = await setup();
+  s2.broker.failOn.add("getAccount");
+  s2.broker.calls.length = 0;
+  await s2.gate.enter(s2.signal("AAA"));
+  const before = s2.broker.calls.length;
+  for (const sym of ["BBB", "CCC", "DDD", "EEE"]) await s2.gate.enter(s2.signal(sym));
+  assert.equal(s2.broker.calls.length, before, "no more requests until the pause is over");
+});
+
+test("the order sync does not call an entry closed just because the position is not in a read taken at the same moment as its fill", async () => {
+  const s = await setup();
+  await s.gate.enter(s.signal("AAA", 50));
+  await s.gate.settled();
+  const row = (await s.store.listOrders(D))[0]!;
+  s.broker.positions = []; // the position read comes back empty (taken a moment before the fill)
+  s.broker.orders = [order({ id: row.alpacaOrderId!, clientOrderId: row.clientOrderId, symbol: "AAA", status: "filled", filledQty: 20, filledAvgPrice: 50, filledAt: new Date(NOW.getTime() - 2000).toISOString(), legs: [order({ side: "sell", type: "stop", status: "new" })] })];
+  await syncOrders({ ...s.deps }, (await s.store.getDay(D))!);
+  assert.equal((await s.store.getOrder(row.clientOrderId))?.closedAt ?? null, null, "still watched");
+});

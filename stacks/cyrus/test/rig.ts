@@ -11,7 +11,7 @@ export const D = "2026-11-02";
 export const z = (t: string) => new Date(t.includes("T") ? t : `${D}T${t}Z`);
 export const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setImmediate(r)); };
 
-export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryStore>(opts: { store?: S; bot?: FakeBot; broker?: B; sleep?: (ms: number) => Promise<void>; governor?: Governor; liveList?: string[] } = {}) {
+export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryStore>(opts: { store?: S; bot?: FakeBot; broker?: B; sleep?: (ms: number) => Promise<void>; governor?: Governor; liveList?: string[]; log?: (level: string, event: string, data?: Record<string, unknown>) => void } = {}) {
   const store = (opts.store ?? new MemoryStore()) as S;
   const broker = (opts.broker ?? new FakeBroker()) as B;
   const bot = opts.bot ?? new FakeBot();
@@ -32,6 +32,7 @@ export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryS
       return { start: () => void streamStarts++, stop: () => void streamStops++, status: () => "live" };
     },
     sleep: opts.sleep ?? (async () => undefined),
+    log: opts.log as any,
   });
   return {
     store, broker, bot, worker, pings, governor,

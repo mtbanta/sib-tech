@@ -69,7 +69,10 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     }
     if (!(o.filledQty > 0)) continue;
     // Closed: its exit leg has filled for the whole quantity, or the position is no longer held at all.
-    if (exitFilledQty(o) >= o.filledQty - 1e-9 || !held.has(s.symbol)) {
+    // ("Not held" only counts once the fill is more than 10 seconds old: the orders and positions are read at nearly the
+    // same moment, and an entry that fills between the two reads would otherwise look closed.)
+    const filledLongAgo = o.filledAt !== null && d.now().getTime() - new Date(o.filledAt).getTime() > 10_000;
+    if (exitFilledQty(o) >= o.filledQty - 1e-9 || (!held.has(s.symbol) && (filledLongAgo || o.filledAt === null))) {
       await d.store.updateOrder(s.clientOrderId, { closedAt: d.now().toISOString() });
       continue;
     }
@@ -79,7 +82,8 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       unprotected.push(s.symbol);
       d.log?.("unprotected_position", { symbol: s.symbol });
       const r = await d.liquidator.flatten({ reason: "no live protective stop", tradeDate: day.tradeDate, only: [s.symbol], maxRounds: 3 });
-      if (r.flat) await d.say("alerts", `**${s.symbol} had no live protective stop, so I sold it.**`);
+      if (r.flat && r.sold.length > 0) await d.say("alerts", `**${s.symbol} had no live protective stop, so I sold it.**`);
+      else if (r.flat) d.log?.("unprotected_position_already_gone", { symbol: s.symbol });
       else await d.say("alerts", `**Michael: ${s.symbol} HAS NO PROTECTIVE STOP AND I COULD NOT SELL IT** (${(r.errors.at(-1) ?? "still held").slice(0, 120)}). Please check Alpaca now.`, { mentionOwner: true });
     }
   }
@@ -119,8 +123,13 @@ async function retryLossStopSale(d: RiskDeps, day: DayRecord): Promise<void> {
   if (selling) return;
   const r = await d.liquidator.flatten({ reason: "daily loss stop (retry)", tradeDate: day.tradeDate });
   d.log?.("loss_stop_sale_retried", { positions: positions.length, flat: r.flat });
-  if (!r.flat) await d.say("alerts", `**Michael: daily loss stop: selling is still failing (${r.remaining.join(", ")}).** Check Alpaca now.`, { mentionOwner: true });
+  // At most one nudge every 5 minutes, not one on every pass.
+  if (!r.flat && d.now().getTime() - lastLossRetryAlert >= 5 * 60_000) {
+    lastLossRetryAlert = d.now().getTime();
+    await d.say("alerts", `**Michael: daily loss stop: selling is still failing (${r.remaining.join(", ")}).** Check Alpaca now.`, { mentionOwner: true });
+  }
 }
+let lastLossRetryAlert = 0;
 
 // While the stop flag is on, cancel any entry that has not filled. This catches an entry that passed the gate's
 // last look at the flag just before a stop command and reached Alpaca after the command's own cancel pass.
