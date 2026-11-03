@@ -80,19 +80,19 @@ test("control: the same restart with a working start-up check starts live prices
 });
 
 // ---------- B. the daily loss stop every 10 seconds ----------
-test("the daily loss stop is checked every 10 seconds: a loss just after one check is caught by the next, 10 seconds later", async () => {
+test("the daily loss stop is checked every 5 seconds (round 8; it was 10 in round 7): a loss just after one check is caught by the next", async () => {
   const r = await armedRig();
   await r.at("14:50:00"); // a check runs here (the first of the session)
   r.broker.account = { ...r.broker.account, equity: 19500 }; // down 500 against a 200 loss stop, just after the check
+  await r.at("14:50:02");
+  assert.equal(await stopIn(r.store), false, "a stray tick 2 seconds later: no check yet (checks are at least 4 seconds apart)");
   await r.at("14:50:05");
-  assert.equal(await stopIn(r.store), false, "5 seconds later: not yet (every second pass)");
-  await r.at("14:50:10");
   await settle();
-  assert.equal(await stopIn(r.store), true, "10 seconds later: fired");
+  assert.equal(await stopIn(r.store), true, "5 seconds later: fired");
   assert.ok(r.said("commands").some((t) => t.includes("Daily loss stop reached")), "and said so");
 });
 
-test("a slow pass does not hold the daily loss stop back: it still runs every 10 seconds, long before the 60 second watchdog", { timeout: 10_000 }, async () => {
+test("a slow pass does not hold the daily loss stop back: it still runs on its own schedule, long before the 60 second watchdog", { timeout: 10_000 }, async () => {
   const r = await armedRig();
   await r.at("14:50:00");
   r.store.getDay = () => never(); // the next pass hangs on the database (in production: bounded, but up to about 30 s; or a Discord 429 storm)

@@ -40,6 +40,8 @@ export interface GateDeps {
   // A signal that waited longer than this in the queue is dropped (default 5 seconds).
   maxQueueMs?: number;
   clockMs?: () => number;
+  // Why entries are blocked although nothing else forbids them (the worker: Michael's commands are not being read), or null.
+  entryBlock?: () => string | null;
 }
 
 export const peakKey = (date: string) => `peak_exposure:${date}`;
@@ -50,7 +52,7 @@ export function clientOrderIdFor(date: string, symbol: string, n: number): strin
 
 // Refusals that are normal flow control at volume (a full minute, a held name). They are counted and written down
 // as one line per reason per minute, not one row each.
-const FLOW_REASONS = [/^trades-per-minute/, /^holding back for safety/, /^already holding/, /^an entry for this symbol is still working/, /^the signal waited/, /^Alpaca refused this symbol a moment ago/];
+const FLOW_REASONS = [/^my commands /, /^trades-per-minute/, /^holding back for safety/, /^already holding/, /^an entry for this symbol is still working/, /^the signal waited/, /^Alpaca refused this symbol a moment ago/];
 
 const isActive = (o: OrderRecord) => !o.closedAt && (o.status === "intent" || o.status === "submitted" || o.status === "filled");
 
@@ -157,6 +159,8 @@ export class OrderGate {
     if (notFlat?.on && !stop?.on && limits) return this.refuse(date, symbol, "the account was not flat after the last close-out");
     if (stop?.on) return this.refuse(date, symbol, "stop flag is set");
     if (!limits) return this.refuse(date, symbol, "no limits approved for today");
+    const blocked = this.d.entryBlock?.();
+    if (blocked) return this.refuse(date, symbol, blocked);
 
     // Strategy work never spends Alpaca's last request headroom: if the snapshot would have to ask Alpaca for something
     // and the budget is down to the safety reserve, refuse before any request is made. After a failed refresh, wait a
@@ -255,6 +259,11 @@ export class OrderGate {
       if (again?.on) {
         await this.d.store.updateOrder(clientOrderId, { status: "canceled", note: "stop flag set before sending" });
         return this.refuse(date, symbol, "stop flag is set");
+      }
+      const blockedNow = this.d.entryBlock?.();
+      if (blockedNow) {
+        await this.d.store.updateOrder(clientOrderId, { status: "canceled", note: "commands unreadable before sending" });
+        return this.refuse(date, symbol, blockedNow);
       }
     } catch {
       await this.d.store.updateOrder(clientOrderId, { status: "canceled", note: "database unavailable before sending" }).catch(() => undefined);

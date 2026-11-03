@@ -1,7 +1,8 @@
 // Estimated regulatory fees, from the rates Alpaca's brokerage fee schedule and the regulators' notices gave on
-// 2026-11-02 (sources in builds/build-c2-log.md, "Piece 0"). The paper account charges none of these (Alpaca's
-// paper-trading page says paper does not account for regulatory fees); this is what a live account would be
-// charged, so the daily summary can show it. ESTIMATES, not charges.
+// 2026-11-02 (sources in builds/build-c2-log.md, "Piece 0"). The paper account IS charged these: Alpaca posted Monday
+// 2026-11-02's REG fee (0.56 on 27,100.09 of sales) and CAT fee (0.01) as account activities that evening, although its
+// paper-trading page says paper does not account for regulatory fees (corrected 2026-11-03, see the C2 log). This is the
+// worker's own ESTIMATE of the day's charge, shown in the daily summary; Alpaca's posted figure is the real one.
 //
 //   SEC Section 31 fee   sells only      0.0000206 x the sale value ($20.60 per million, effective 2026-04-04)
 //   FINRA TAF            sells only      0.000195 a share, at most 9.79 a trade; PAUSED to 0 for sales from 2026-10-01

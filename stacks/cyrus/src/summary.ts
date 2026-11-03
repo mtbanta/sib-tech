@@ -114,7 +114,7 @@ export function speedStats(rows: OrderRecord[]): { n: number; median: number; p9
 
 export function feeLines(date: string, fees: FeeEstimate, running: number | null | undefined): string[] {
   return [
-    `Estimated regulatory fees for the day (a live account would pay them; paper pays none): ${fees.total.toFixed(2)} dollars (SEC ${fees.sec.toFixed(2)}, FINRA TAF ${fees.taf.toFixed(2)}${tafActive(date) ? "" : " [paused by FINRA until 2027-01-01]"}, CAT ${fees.cat.toFixed(2)})${running === null || running === undefined ? "" : `. Running total ${running.toFixed(2)} dollars`}`,
+    `Estimated regulatory fees for the day (Alpaca charges them on this paper account too, posted that evening): ${fees.total.toFixed(2)} dollars (SEC ${fees.sec.toFixed(2)}, FINRA TAF ${fees.taf.toFixed(2)}${tafActive(date) ? "" : " [paused by FINRA until 2027-01-01]"}, CAT ${fees.cat.toFixed(2)})${running === null || running === undefined ? "" : `. Running total ${running.toFixed(2)} dollars`}`,
   ];
 }
 

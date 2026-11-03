@@ -39,6 +39,8 @@ export class SimBroker implements FullBroker {
   // Fault injection.
   cancelAllFailsAfterCancelling = false;
   refuseSellsTimes = 0;
+  refuseSellIf: ((s: SellOrder) => boolean) | null = null; // a 403 for any sell this says yes to
+  bucketTimes: number[] = []; // simulated time of every request that counted against the 200 a minute bucket
   sellFillDelayMs = 1500;
   maxSellQtyEver = 0;
   oversellAttempts = 0;
@@ -86,6 +88,7 @@ export class SimBroker implements FullBroker {
       this.requests++;
       if (!this.bucketOn || this.tokens >= 1) {
         if (this.bucketOn) this.tokens -= 1;
+        this.bucketTimes.push(this.simMs);
         this.lowestTokens = Math.min(this.lowestTokens, this.tokens);
         this.onRate?.(Math.floor(this.tokens));
         return;
@@ -251,6 +254,7 @@ export class SimBroker implements FullBroker {
   async submitSell(s: SellOrder): Promise<Order> {
     this.spend("safety");
     this.maxSellQtyEver = Math.max(this.maxSellQtyEver, s.qty);
+    if (this.refuseSellIf?.(s)) throw new AlpacaError("sell refused (test)", 403);
     if (this.refuseSellsTimes > 0) {
       this.refuseSellsTimes--;
       throw new AlpacaError("sell refused (test)", 403);

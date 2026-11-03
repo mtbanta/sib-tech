@@ -56,7 +56,8 @@ export function openOrderIds(orders: Order[], symbols: ReadonlySet<string>): str
   return [...new Set(ids)];
 }
 
-export type SellResult = { status: "sent"; order: Order } | { status: "refused"; reason: string } | { status: "error"; reason: string };
+// `httpStatus` is Alpaca's answer code when Alpaca refused the sell (429 means its request limit was hit).
+export type SellResult = { status: "sent"; order: Order } | { status: "refused"; reason: string } | { status: "error"; reason: string; httpStatus?: number };
 
 export interface SellGateDeps {
   broker: SellBroker;
@@ -94,9 +95,21 @@ export class SellGate {
     return run;
   }
 
+  // True when the next sell will first read the broker again (2 requests: open orders, then positions). The loss stop's retry
+  // counts those reads against its request budget.
+  needsRead(): boolean {
+    return !(this.view && this.nowMs() - this.view.at < VIEW_MAX_AGE_MS);
+  }
+
   // Forget the last read (the liquidator calls this after its cancels, so the next sell checks the world as it is now).
   invalidate(): void {
     this.view = null;
+  }
+
+  // What the gate checks sells against: open orders and positions as the broker shows them (read again if the last read is
+  // more than a second old). The loss stop's retry uses it to decide what is still unsold, so it checks against the same view.
+  look(): Promise<{ positions: Position[]; open: Order[] }> {
+    return this.read();
   }
 
   private async read(): Promise<{ positions: Position[]; open: Order[] }> {
@@ -143,7 +156,7 @@ export class SellGate {
       const msg = (err as Error).message.slice(0, 200);
       this.view = null;
       this.d.log?.("sell_failed", { symbol: req.symbol, qty: req.qty, reason: req.reason, error: msg, status: err instanceof AlpacaError ? err.status : null });
-      return { status: "error", reason: msg };
+      return { status: "error", reason: msg, httpStatus: err instanceof AlpacaError ? err.status : undefined };
     }
   }
 }
@@ -180,6 +193,11 @@ export class Liquidator {
   constructor(deps: LiquidatorDeps) {
     this.d = deps;
     this.sleep = deps.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
+  }
+
+  // The one sell gate every sale goes through (the loss stop's retry uses it directly, see risk.ts retryLossStopSale).
+  get sellGate(): SellGate {
+    return this.d.gate;
   }
 
   // True from the moment a liquidation is asked for until it has finished (including while it waits its turn). The

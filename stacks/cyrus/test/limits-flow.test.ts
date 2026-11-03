@@ -317,10 +317,12 @@ test("the daily loss stop retries its sale until the account is flat, but not fo
   await store.setControl(CONTROL_STOP, { on: true, at: "x", reason: "daily loss stop reached (250.00 dollars)" } satisfies StopFlag);
   await enforceDailyLoss(riskDeps(broker, store, said), approved);
   assert.equal(broker.count("submitSell"), 1, "retried");
+  // Round 8: a market sell already working for all 5 shares: nothing more is sent and it is not cancelled.
   broker.positions = HOLD;
-  broker.orders = [order({ side: "sell", type: "market", status: "accepted", symbol: "AAA" })];
+  broker.orders = [order({ side: "sell", type: "market", status: "accepted", symbol: "AAA", qty: 5 })];
   await enforceDailyLoss(riskDeps(broker, store, said), approved);
   assert.equal(broker.count("submitSell"), 1, "a sell is already working");
+  assert.equal(broker.count("cancelOrder") + broker.count("cancelAllOrders"), 0, "and it is left alone");
   broker.orders = [];
   await store.setControl(CONTROL_STOP, { on: true, at: "x", reason: "owner command (stop)" } satisfies StopFlag);
   await enforceDailyLoss(riskDeps(broker, store, said), approved);

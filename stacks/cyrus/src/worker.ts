@@ -64,10 +64,15 @@ const DIGEST_EVERY_MS = 20_000;
 const FLUSH_EVERY_MS = 60_000;
 // Before the close the close-out is retried this often until the account is flat; after the close, every 5 minutes.
 const CLOSEOUT_RETRY_MS = 20_000;
-// The daily loss stop is checked every 10 seconds (Michael's ruling, 2026-11-03; it was 30). Passes run on a 5 second tick, so the
-// check runs on every second tick; the 1 second allowance keeps a tick that fires a few milliseconds early from pushing it to 15.
-export const LOSS_STOP_EVERY_MS = 10_000;
+// The daily loss stop is checked every 5 seconds (Michael's ruling, 2026-11-03; it was 30, then 10). Passes run on a 5 second
+// tick, so the check runs on every tick; the 1 second allowance keeps a tick that fires a few milliseconds early from pushing it
+// to 10.
+export const LOSS_STOP_EVERY_MS = 5_000;
 const LOSS_STOP_SLACK_MS = 1_000;
+// Michael's ruling, 2026-11-03: if his commands cannot be read for this long, new entries are blocked (one alert) until a read
+// works again. Stops at Alpaca, the daily loss stop and the close-out carry on. After a start, entries also wait for the first
+// read that works: a `stop` sent while the worker was down may be waiting, and the worker cannot know how long it has waited.
+export const COMMANDS_UNREAD_BLOCK_MS = 120_000;
 // A pass that has run this long is stuck (review round 5, finding 1). Every call in a pass has its own time limit now, so this
 // should never happen; if it does, the watchdog takes over the safety work that needs only the broker (see watchdog()).
 export const PASS_WATCHDOG_MS = 60_000;
@@ -114,7 +119,9 @@ export class Worker {
   private lastStatsEvent = 0;
   private lastViewError = 0;
   private lastLossCheckAlert = 0;
-  private lastPollAlert = 0;
+  private lastCommandReadOk: number | null = null;
+  private startedAtMs: number | null = null;
+  private commandsAlerted = false;
   // Review round 5 (finding 1): when the current pass started, and the watchdog's state for a pass that runs too long.
   private passStartedAt = 0;
   private watchdogRunning = false;
@@ -158,6 +165,7 @@ export class Worker {
       say: (c, t) => this.say(c, t),
       note: (line) => this.digest.add(line),
       log: (e, data) => deps.log?.("info", e, data),
+      entryBlock: () => this.entryBlockReason(),
     });
   }
 
@@ -185,7 +193,7 @@ export class Worker {
   }
 
   private riskDeps() {
-    return { broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c: Channel, t: string, o?: { mentionOwner?: boolean }) => this.say(c, t, o), liquidator: this.liquidator, lossMemory: this.lossMemory, log: (e: string, data?: Record<string, unknown>) => this.d.log?.("info", e, data) };
+    return { broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c: Channel, t: string, o?: { mentionOwner?: boolean }) => this.say(c, t, o), liquidator: this.liquidator, lossMemory: this.lossMemory, governor: this.d.governor, log: (e: string, data?: Record<string, unknown>) => this.d.log?.("info", e, data) };
   }
 
   private closeoutDeps() {
@@ -232,10 +240,13 @@ export class Worker {
   }
 
   async tick(): Promise<boolean> {
+    if (this.startedAtMs === null) this.startedAtMs = this.d.now().getTime();
     if (this.ticking) {
+      // A pass that is slow or stuck is not reading commands either: the 2 minute rule is checked from here too.
+      this.commandsWatch(this.d.now());
       // A slow pass is still running: do not start a second one. The daily loss stop does not wait for it (a Discord rate
       // limit in the digest can hold a pass for minutes): it is started from here, from the day record held in memory, on its
-      // usual 10 second schedule. If the pass has run too long, the watchdog acts as well.
+      // usual 5 second schedule. If the pass has run too long, the watchdog acts as well.
       this.lossStopFromMemory(this.d.now());
       await this.watchdog();
       return true;
@@ -267,6 +278,7 @@ export class Worker {
       this.ticking = false;
       this.watchdogAlerted = false;
     }
+    this.commandsWatch(this.d.now()); // after the pass's own read of commands, so a read that worked is counted first
     await this.heartbeat(ok);
     return ok;
   }
@@ -316,6 +328,42 @@ export class Worker {
       .finally(() => void (this.retryingStop = false));
   }
 
+  // True when the daily loss stop has fired today (remembered in this process, or the saved stop flag says so). An owner's
+  // plain `stop` does not count: positions then keep their exits, and the missing-exit check must keep watching them.
+  private async lossStopInForce(date: string): Promise<boolean> {
+    if (this.lossMemory.firedDate === date) return true;
+    const flag = await this.d.store.getControl<StopFlag>(CONTROL_STOP).catch(() => null);
+    return !!flag?.on && flag.reason.startsWith("daily loss stop");
+  }
+
+  // Why new entries are blocked right now because Michael's commands are not being read, or null when they are being read.
+  // Read by the order gate before every entry (twice: at the start and just before sending).
+  entryBlockReason(): string | null {
+    const now = this.d.now().getTime();
+    if (this.lastCommandReadOk === null) return "my commands have not been read since I started, so no entry yet";
+    if (now - this.lastCommandReadOk >= COMMANDS_UNREAD_BLOCK_MS) return "my commands could not be read for 2 minutes, so no new entries";
+    return null;
+  }
+
+  private commandsReadOk(): void {
+    this.lastCommandReadOk = this.d.now().getTime();
+    if (this.commandsAlerted) {
+      this.commandsAlerted = false;
+      this.d.log?.("warn", "commands_readable_again");
+      void this.say("alerts", "I can read your commands again, so new entries are allowed again (within today's limits).").catch(() => undefined);
+    }
+  }
+
+  // Runs on every tick, also while a pass is slow or stuck: one alert when commands have gone unread for 2 minutes.
+  private commandsWatch(now: Date): void {
+    const since = this.lastCommandReadOk ?? this.startedAtMs ?? now.getTime();
+    if (!this.commandsAlerted && now.getTime() - since >= COMMANDS_UNREAD_BLOCK_MS) {
+      this.commandsAlerted = true;
+      this.d.log?.("error", "commands_unread_entries_blocked", { seconds: Math.round((now.getTime() - since) / 1000) });
+      void this.say("alerts", "**Michael: I have not been able to read your commands for 2 minutes, so I have blocked new entries.** Protective stops at Alpaca, the daily loss stop and the close-out carry on. Entries resume as soon as a read works.", { mentionOwner: true }).catch(() => undefined);
+    }
+  }
+
   // While a pass is still running (slow or stuck), the daily loss stop is scheduled from the last copy of today's record held
   // in memory. Only in today's session on an approved day; scheduleLossStop's own timer and the one-at-a-time guard apply.
   private lossStopFromMemory(now: Date): void {
@@ -323,7 +371,7 @@ export class Worker {
     if (day && day.tradeDate === etDate(now) && day.status === "approved" && day.openAt && day.closeAt && now >= day.openAt && now < day.closeAt) this.scheduleLossStop(day, now);
   }
 
-  // The daily loss stop has its own background task every 10 seconds, so a failed or slow order sync can never keep it from
+  // The daily loss stop has its own background task every 5 seconds, so a failed or slow order sync can never keep it from
   // running (round 3 review). One check at a time: while a check is still waiting on Alpaca (each request has a time limit,
   // about 31.5 seconds at worst with retries), later slots are skipped, never queued, so slow checks cannot pile up. Its first run after a start also reads today's equity history (round 5), and until that run has
   // worked the live price stream is not started, so no entry can follow a loss stop that a restart forgot.
@@ -342,7 +390,7 @@ export class Worker {
         this.d.log?.("error", "loss_stop_check_failed", { error: (err as Error).message.slice(0, 200) });
         if (this.d.now().getTime() - this.lastLossCheckAlert >= 5 * 60_000) {
           this.lastLossCheckAlert = this.d.now().getTime();
-          void this.say("alerts", `**Michael: I could not check the daily loss stop** (${(err as Error).message.slice(0, 100)}). I try again in 10 seconds.`, { mentionOwner: true }).catch(() => undefined);
+          void this.say("alerts", `**Michael: I could not check the daily loss stop** (${(err as Error).message.slice(0, 100)}). I try again in 5 seconds.`, { mentionOwner: true }).catch(() => undefined);
         }
       }
     });
@@ -497,13 +545,11 @@ export class Worker {
     if (this.migrated) {
       try {
         await this.commands.poll();
+        this.commandsReadOk();
       } catch (err) {
+        // Logged (and kept in the run log) every time; Michael is told once, when it has lasted 2 minutes (commandsWatch).
         this.lastTickError = `commands: ${(err as Error).message.slice(0, 120)}`;
         this.d.log?.("error", "command_poll_failed", { error: (err as Error).message.slice(0, 200) });
-        if (now.getTime() - this.lastPollAlert >= 10 * 60_000) {
-          this.lastPollAlert = now.getTime();
-          void this.say("alerts", `I could not read your commands (${(err as Error).message.slice(0, 100)}). Trading checks, including the daily loss stop, continue; I keep trying.`).catch(() => undefined);
-        }
       }
     }
 
@@ -605,7 +651,10 @@ export class Worker {
       // each sale, so a close-out that starts meanwhile switches it off.
       const protect = () => this.protectNow(closeAt);
       this.background("risk", async () => {
-        await syncOrders(risk, dayNow, { protect });
+        // While the daily loss stop is in force its own retry re-sells whatever is still held, inside its request budget; the
+        // missing-exit check would otherwise start a liquidation of its own for every such position every 30 seconds (round 8).
+        const lossStopped = await this.lossStopInForce(dayNow.tradeDate);
+        await syncOrders(risk, dayNow, { protect: () => !lossStopped && protect() });
         await sweepEntriesWhileStopped(risk);
       });
     }

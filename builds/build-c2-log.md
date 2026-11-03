@@ -513,3 +513,96 @@ Run on `ac4a576..15fc1bd`, from the repo and the local suite only (no calls to F
 - No test for the `onTrade` backstop alone, or for the new guard in `scheduleLossStop` alone (`background` already prevents a second run).
 - The watchdog alert's "Entries are not being placed by it" is still untrue.
 - The suite ticks on exact 5 second marks, so the 1 second allowance has no test.
+
+## Michael's decisions after round 7 (2026-11-03, morning)
+
+1. Approved: review round 8, scoped to the changes below plus round 7's finding.
+2. The loss stop checks every 5 seconds, not 10.
+3. After a failed sale, retry only the sales that failed, every 5 seconds. The loss stop and its retries share a request budget under Alpaca's limit, set and justified by the builder, leaving room for protective stops, cancels and the close-out. Back off only on a rate-limit error from Alpaca. Test with 40 open positions and repeated refusals: total requests stay under Alpaca's limit and the close-out still gets through.
+4. Discord: if his commands cannot be read for 2 minutes, block new entries and alert once. Stops, the loss stop and the close-out continue. Entries resume when a read succeeds. Also in v5's gap the reviewer found.
+5. Fix the code comment and daily summary wording that say the paper account charges no fees.
+
+Each change gets a test that fails without it; secret scan, full suite, round 8; deploy only after 3:00 PM Central and only if round 8 passes.
+
+## Michael's note at 10:31 AM (logged, not blocking round 8)
+
+At 10:31:34 AM Michael typed `resume`. v5 cleared the flag, and its next 30 second check, at 10:31:50, found the day's loss still at 535.15 (the account flat since 8:53) and fired the loss stop again. The flag is on again: "daily loss stop reached (535.15 dollars)". Behaviour correct. Wording to fix later (not in round 8):
+- a `resume` sent while the day's loss is over the limit should reply that the stop stays on until the next trading day, not "Stop cleared";
+- when the account is already flat, the loss stop message should not say "sold everything".
+
+**When the day rolls over for the loss stop** (read from the code, the same in v5 and in the round 8 code): the loss stop checks only during the session, from the open (8:30 AM Central) to the close (3:00 PM Central), on a day whose limits are approved. Outside those hours nothing checks or re-fires it. Wednesday's loss is measured from Wednesday's start equity, read at arming (8:25 AM Central). With the round 6 code, the first check after a restart also looks at Alpaca's equity history, but only from Wednesday's open, or from the last saved change to the stop flag if that is later. So **a `resume` sent any time after 3:00 PM Central today stays cleared.** To be safe from a check that started a second before the close, send it from 3:01 PM. It must arrive before Wednesday's "Armed" message at 8:25 AM, or Wednesday has no entries.
+
+## Round 8 changes (built 2026-11-03, during market hours; code only, nothing deployed)
+
+### 1. Loss stop every 5 seconds (`worker.ts`)
+`LOSS_STOP_EVERY_MS` is 5,000, so the check runs on every 5 second tick, with the 1 second allowance (checks at least 4 seconds apart). The busy-tick path, the one-at-a-time guard and the governor exemption from round 7 are unchanged. Requests before the stop fires: 12 account reads a minute (2 in v5). Rehearsal at 30 orders a minute: 4,585 requests at 5 seconds, 4,249 at 10 and 4,022 at 30, with no rate-limit answers.
+
+### 2. After a failed sale, retry only what failed, inside a budget (`risk.ts`, small additions in `sells.ts`)
+- **The first sale is one round** of the liquidator: cancel the exits, wait for the cancels, sell each symbol. Before, it was four rounds. With every sell refused, rounds 2 to 4 sent all 40 refused sells again, each followed by a fresh 2-request read in the sell gate: about 500 requests in under a minute, measured in the simulator. The same was true of v5; it just never met a refusal.
+- The first sale's message now separates **sells still filling** ("sent a sell for every position, I will say when the account is flat") from **symbols that could not be sold** (named, with an alert). A one-round sale often ends with sells accepted but not yet filled. When the account is flat, the retry posts "Daily loss stop: everything is sold, the account is flat."
+- **The retry**, run by each 5 second loss stop check:
+  - stands aside entirely while any liquidation runs (the close-out, `flatten`, a carried position, or the first sale);
+  - goes quiet from 6 minutes before the close (the close-out at 5 minutes before sells everything);
+  - reads positions (1 request) and stops there if flat;
+  - otherwise reads through the sell gate (2 requests) and, for each symbol still held, sells the shares no working sell covers, through the one checked sell path, with a `cyrus-x-...-r` id.
+  - Any open market sell (ours, or one placed by hand at Alpaca) counts as working: it is never cancelled. Shares held by a resting exit (an entry that filled late) have that exit cancelled first, and the sale follows on the next check.
+  - Symbols take turns from where the last check stopped, so under a tight budget every symbol gets its turn.
+- **Pauses only on a rate-limit answer:** 10 seconds after a 429, then 20, 40, at most 60. Any other refusal (a 403, say) is tried again on the next 5 second check.
+- **The request budget (`LOSS_STOP_REQUESTS_PER_MINUTE` = 60, at most 15 per check):**
+  - The loss stop's equity checks (counted, never held back), the retry's reads, sells and cancels, and the first sale's requests (charged afterwards from the governor's count of what Alpaca saw) all draw on it.
+  - On top of that, the retry never spends below the governor's 80-request safety reserve, so whatever else has run, the last 80 requests stay free for protective stops, cancels, `stop`, `flatten` and the close-out.
+  - Why 60: after the stop nothing enters, and the worker's other standing work is about 35 a minute (the account view every 5 seconds is 24, settings 2, the order sync and the sweep about 6 to 8). Of 200 that leaves about 105 for the close-out and safety actions, more than a 40-position close-out's first minute needs (measured here: 69 requests in its first 10 seconds).
+- **The missing-exit check stands aside while the daily loss stop is in force** (`worker.ts`, `lossStopInForce`). Found while building the 40-position test, also true of v5: once the loss stop has cancelled the exits and a sale keeps failing, the order sync's missing-exit check started its own 3-round liquidation for every such position every 30 seconds, which alone swamps Alpaca's limit. The loss stop's retry is now the only re-sale. After a plain `stop` from Michael, positions keep their exits and the check stays on.
+
+**Michael's test, simulated** (`round8.test.ts`, "40 positions and repeated refusals"): 40 positions held at Alpaca's simulated broker. The simulator enforces the measured 200-a-minute bucket and answers 429 above it, and the worker runs on its clock. Equity falls past the line at 20:40 UTC. Every sale is refused until the close-out (20:55), and every retry is refused all day. Result:
+- busiest 60 seconds 172 requests (the minute of the first sale), retry minutes about 90 including the other work;
+- lowest bucket 66 of 200, **0 rate-limit answers**;
+- **the close-out sold everything: flat**, with no oversell.
+
+Reverting any of these breaks that test: the round 7 retry (a whole liquidation each time), the first sale back at 4 rounds, the budget removed, the first sale not charged, or the missing-exit stand-aside removed.
+
+### 3. Commands unreadable for 2 minutes: entries blocked (`worker.ts`, `gate.ts`)
+- The worker records the time of the last read of commands that worked. The order gate asks before every entry, twice: at the start, and again just before sending, like the stop flag. If 2 minutes have passed without a read, it refuses with "my commands could not be read for 2 minutes, so no new entries" (counted per minute, not one row each).
+- **One alert** when the 2 minutes pass, from every tick, including a tick that finds a pass stuck. A short note follows when a read works again, and entries resume.
+- The old alert on every first failure, "I could not read your commands ... Trading checks continue", is gone; each failure is still logged and kept in the run log. So last night's single 503 would no longer post anything.
+- **After a start, entries also wait for the first read that works** (the gap the round 7 reviewer found in v5). A `stop` sent while the worker was down may be waiting, and the worker cannot know for how long, so a restart counts as already past the 2 minutes for entries. The one alert still waits the 2 minutes.
+- Stops at Alpaca, the daily loss stop, the missing-exit check and the close-out do not depend on reading commands.
+
+### 4. Fee wording (`fees.ts`, `summary.ts`)
+The comment now says the paper account is charged (Monday's REG 0.56 and CAT 0.01, posted that evening). The summary line reads "Estimated regulatory fees for the day (Alpaca charges them on this paper account too, posted that evening)".
+
+### Tests and the "fails without the fix" check
+New `test/round8.test.ts` (13 tests). Full suite **321 pass**, type check clean.
+
+Existing tests changed on purpose (behaviour changed):
+- the round 7 interval test is now 5 seconds;
+- the Discord read failure test expects the one 2-minute alert;
+- the loss stop retry test now gives the working market sell all 5 shares (a 1-share sell no longer stops the other 4 being sold) and checks the sell is not cancelled;
+- the full-day test runs one pass before its prices, because it jumps 11 minutes without a pass and the gate rightly blocks after 2 minutes without a read.
+
+Test helpers: the rig can run on the simulator's clock, and the simulator records request times and can refuse chosen sells.
+
+| Change taken out | Tests that fail |
+| :-- | :-- |
+| 5 seconds back to 10 | 5 second interval |
+| retry as in round 7 (a whole liquidation) | 40 positions; only failed sales; working market sell; budget; reserve; back-off; quiet before close; the retry until flat (limits-flow) |
+| first sale back to 4 rounds | 40 positions |
+| first sale not charged to the budget | 40 positions |
+| no back-off after a 429 | back-off |
+| no 60 a minute budget | budget; 40 positions |
+| no 15-per-check cap | budget |
+| no safety reserve check | reserve |
+| gate re-reads not counted | budget |
+| no turn-taking | budget (not every symbol tried) |
+| no quiet period before the close | quiet before close |
+| missing-exit check not standing aside | 40 positions |
+| hand-placed market sells not counted as working | the retry until flat (limits-flow) |
+| no flat confirmation; old "still held" message | one-round sale message |
+| the gate given no command check | commands unreadable; restart with failing reads |
+| no wait for the first read after a start | restart with failing reads |
+| no 2-minute alert | commands unreadable; Discord read failure (c2) |
+| no recovery after a read works | commands unreadable and three others |
+| 2-minute check not run from a busy tick | stuck pass |
+| fee summary or comment reverted | fee wording |
+
+The gate's two command checks are duplicates by design (as with the stop flag), so removing only one changes nothing.

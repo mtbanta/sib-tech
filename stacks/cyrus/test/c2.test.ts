@@ -644,5 +644,6 @@ test("a failed read of Discord's commands does not stop the pass: the daily loss
   await r.at("14:50:00");
   await r.at("14:51:00");
   assert.equal(((await r.store.getControl<StopFlag>(CONTROL_STOP)))?.on, true, "the loss stop fired although commands could not be read");
-  assert.ok(r.said("alerts").some((t) => t.includes("could not read your commands")));
+  // Round 8: one alert, once commands have gone unread for 2 minutes (here the last read was at 14:25, so at once).
+  assert.equal(r.said("alerts").filter((t) => t.includes("not been able to read your commands")).length, 1);
 });

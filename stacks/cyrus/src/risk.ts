@@ -1,10 +1,11 @@
 // Watching what the gate set in motion: bring the stored entries up to date from Alpaca, check that every open
 // entry still has a live exit resting at Alpaca, and stop the day if the daily loss limit is reached.
-import type { Order } from "./alpaca-trading.ts";
+import { AlpacaError, type Order } from "./alpaca-trading.ts";
 import type { Broker } from "./broker.ts";
 import { etInstant } from "./time.ts";
 import { CONTROL_STOP, type DayRecord, type OrderRecord, type StopFlag, type Store } from "./store.ts";
-import { OPEN_STATUSES, flattenLegs, type Liquidator, type Say } from "./sells.ts";
+import { OPEN_STATUSES, flattenLegs, openOrderIds, openSellQty, type Liquidator, type Say } from "./sells.ts";
+import { SAFETY_RESERVE } from "./governor.ts";
 
 export interface RiskDeps {
   broker: Broker;
@@ -15,6 +16,9 @@ export interface RiskDeps {
   log?: (event: string, data?: Record<string, unknown>) => void;
   // Optional: the worker passes its own, so the loss stop remembers that it fired even when the stop flag cannot be read.
   lossMemory?: LossStopMemory;
+  // Optional: the order-rate governor. When given, the loss stop's retry never spends Alpaca's last SAFETY_RESERVE requests,
+  // and the first sale's requests (as Alpaca counted them) are charged to the loss stop's budget.
+  governor?: { budget(): number; stats?(): { requestsLastMinute: number } };
 }
 
 // A live exit leg of an entry: a sell leg that can still execute.
@@ -108,7 +112,49 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
 export class LossStopMemory {
   firedDate: string | null = null;
   lastSaveAlert = 0;
+  // The retry of a failed loss stop sale (Michael's ruling, 2026-11-03): its request budget, and the pause after a rate-limit answer.
+  readonly budget = new LossStopBudget();
+  backoffMs = 0;
+  backoffUntil = 0;
+  turn = 0; // where the next retry starts in the list of unsold symbols, so with a tight budget every symbol gets its turn
+  lastRetryAlert = 0;
+  awaitingFlat = false; // the first sale ended with shares still held: say so once the account is flat
 }
+
+// THE LOSS STOP'S REQUEST BUDGET: at most 60 of Alpaca's 200 requests in any minute for the loss stop's own work after a start
+// (its equity check every 5 seconds, 12 a minute) and the retries of a failed sale (reads, sells, cancels), on top of which the
+// retry never spends below the governor's safety reserve. Why 60: after the stop fires nothing enters, and the worker's other
+// standing work (the account view every 5 seconds, settings, the order sync and the sweep) is about 35 a minute, so 60 leaves
+// about 105 a minute for the close-out, Michael's flatten and stop, cancels and protective sells, more than a 40 position
+// close-out asks for in its first minute (about 1 bulk cancel, 10 to 15 reads and 40 sells). The first sale when the stop fires
+// is not held back (it is the stop's whole job): it is ONE round of the liquidator (cancel the exits, wait, sell each symbol),
+// a bounded burst, and what Alpaca counted for it is charged to this budget afterwards, so the retries wait until it has room.
+export const LOSS_STOP_REQUESTS_PER_MINUTE = 60;
+export class LossStopBudget {
+  private times: number[] = [];
+  private readonly perMinute: number;
+  constructor(perMinute = LOSS_STOP_REQUESTS_PER_MINUTE) {
+    this.perMinute = perMinute;
+  }
+  used(nowMs: number): number {
+    this.times = this.times.filter((t) => nowMs - t < 60_000);
+    return this.times.length;
+  }
+  room(nowMs: number): number {
+    return this.perMinute - this.used(nowMs);
+  }
+  spend(nowMs: number, n = 1): void {
+    for (let i = 0; i < n; i++) this.times.push(nowMs);
+  }
+}
+// At most this many requests in one retry check, so the minute's budget is spread over the checks instead of spent in one burst.
+export const LOSS_STOP_RETRY_PER_CHECK = 15;
+// From this long before the close the retry is quiet: the close-out (5 minutes before the close) sells everything still held, and
+// the minute before it is left to it, so the close-out never starts on a request bucket the retry has just used.
+const RETRY_QUIET_BEFORE_CLOSE_MS = 6 * 60_000;
+const RETRY_BACKOFF_FIRST_MS = 10_000;
+const RETRY_BACKOFF_MAX_MS = 60_000;
+const is429 = (err: unknown) => err instanceof AlpacaError && err.status === 429;
 
 export interface LossStopOptions {
   // First check after a start: also look at today's equity history at Alpaca, so a loss stop that fired (or should have) before
@@ -153,6 +199,7 @@ export async function enforceDailyLoss(d: RiskDeps, day: DayRecord, opts: LossSt
     if ((flag?.on && flag.reason.startsWith("daily loss stop")) || (flagUnreadable && firedHere)) await retryLossStopSale(d, day);
     return false;
   }
+  mem?.budget.spend(d.now().getTime(), 1); // the equity check is never held back; it is counted
   const account = await d.broker.getAccount();
   const start = day.dayStartEquity;
   const limit = day.limits.dailyLossStopUsd;
@@ -179,27 +226,133 @@ export async function enforceDailyLoss(d: RiskDeps, day: DayRecord, opts: LossSt
     void d.say("alerts", `**Michael: the daily loss stop was reached but the stop flag could not be saved** (${(err as Error).message.slice(0, 80)}). I sold anyway, I keep the stop in force in memory, and I keep trying to save it.`, { mentionOwner: true }).catch(() => undefined);
   });
   void d.store.addEvent("warn", "daily_loss_stop", { loss, earlier }).catch(() => undefined);
-  const r = await d.liquidator.flatten({ reason: "daily loss stop", tradeDate: day.tradeDate });
-  void d.say("commands", `**Daily loss stop reached** (down ${loss.toFixed(2)} of the ${limit} dollar limit${earlier !== null ? ", seen in today's equity history after a restart" : ""}). Stopped for the day and ${r.flat ? "sold everything" : `sent sells, but still held: ${r.remaining.join(", ")}`}.`).catch(() => undefined);
-  if (!r.flat) void d.say("alerts", `**Michael: daily loss stop reached but still holding ${r.remaining.join(", ")}.** Check Alpaca now. I will keep trying.`, { mentionOwner: true }).catch(() => undefined);
+  // One round (round 8): with sells refused, the liquidator's later rounds would send every refused sell again, with fresh reads
+  // each time (about 500 requests for 40 positions, more than Alpaca allows in a minute). What is still unsold after this round
+  // is retried by retryLossStopSale on the next checks, every 5 seconds, inside the budget.
+  const before = d.governor?.stats?.().requestsLastMinute;
+  const r = await d.liquidator.flatten({ reason: "daily loss stop", tradeDate: day.tradeDate, maxRounds: 1 });
+  if (mem && before !== undefined) mem.budget.spend(d.now().getTime(), Math.max(0, (d.governor!.stats!().requestsLastMinute ?? 0) - before));
+  // Sells that went out but have not filled yet are not failures; only symbols with no sell sent are.
+  const unsold = r.remaining.filter((sym) => !r.sold.some((x) => x.symbol === sym));
+  if (mem && !r.flat) mem.awaitingFlat = true;
+  const outcome = r.flat ? "sold everything" : unsold.length === 0 ? "sent a sell for every position (I will say when the account is flat)" : `sent sells, but could not sell ${unsold.join(", ")} yet (I retry only those, every 5 seconds)`;
+  void d.say("commands", `**Daily loss stop reached** (down ${loss.toFixed(2)} of the ${limit} dollar limit${earlier !== null ? ", seen in today's equity history after a restart" : ""}). Stopped for the day and ${outcome}.`).catch(() => undefined);
+  if (unsold.length > 0) void d.say("alerts", `**Michael: daily loss stop reached but I could not sell ${unsold.join(", ")} yet.** Check Alpaca now. I retry every 5 seconds.`, { mentionOwner: true }).catch(() => undefined);
   return true;
 }
 
-// Sells what the loss stop failed to sell. Does nothing when the account is flat or a market sell is already working.
+// Sells what the loss stop failed to sell (Michael's ruling, 2026-11-03): on every loss stop check (every 5 seconds), only the
+// symbols still held, each with one sell through the sell gate, never another whole-account liquidation. Inside the loss stop's
+// request budget and never below the governor's safety reserve, so it cannot crowd out the close-out, a flatten, a stop or a
+// protective sell; it stands aside completely while any liquidation (close-out, flatten, carried position, the first sale) runs.
+// It pauses only after a rate-limit answer from Alpaca (10 seconds, doubling to 60); any other refusal is simply tried again on
+// the next check. Shares still held by an exit resting at Alpaca (an entry that filled late) have that exit cancelled first; the
+// sale follows on the next check. A sell of ours that is still working is left alone.
 async function retryLossStopSale(d: RiskDeps, day: DayRecord): Promise<void> {
-  const [positions, open] = await Promise.all([d.broker.listPositions(), d.broker.listOrders("open")]);
-  if (positions.length === 0) return;
-  const selling = open.some((o) => o.side === "sell" && OPEN_STATUSES.has(o.status) && o.type === "market");
-  if (selling) return;
-  const r = await d.liquidator.flatten({ reason: "daily loss stop (retry)", tradeDate: day.tradeDate });
-  d.log?.("loss_stop_sale_retried", { positions: positions.length, flat: r.flat });
-  // At most one nudge every 5 minutes, not one on every pass.
-  if (!r.flat && d.now().getTime() - lastLossRetryAlert >= 5 * 60_000) {
-    lastLossRetryAlert = d.now().getTime();
-    await d.say("alerts", `**Michael: daily loss stop: selling is still failing (${r.remaining.join(", ")}).** Check Alpaca now.`, { mentionOwner: true });
+  const mem = d.lossMemory ?? fallbackMemory;
+  const nowMs = d.now().getTime();
+  if (d.liquidator.isLiquidating()) return;
+  if (nowMs < mem.backoffUntil) return;
+  if (day.closeAt && nowMs >= day.closeAt.getTime() - RETRY_QUIET_BEFORE_CLOSE_MS) return;
+  let spentHere = 0;
+  const canSpend = (n: number) => spentHere + n <= LOSS_STOP_RETRY_PER_CHECK && mem.budget.room(nowMs) >= n && (!d.governor || d.governor.budget() - n >= SAFETY_RESERVE);
+  const spend = (n: number) => {
+    spentHere += n;
+    mem.budget.spend(nowMs, n);
+  };
+  const rateLimited = () => {
+    mem.backoffMs = Math.min(RETRY_BACKOFF_MAX_MS, mem.backoffMs > 0 ? mem.backoffMs * 2 : RETRY_BACKOFF_FIRST_MS);
+    mem.backoffUntil = d.now().getTime() + mem.backoffMs;
+    d.log?.("loss_stop_retry_backoff", { ms: mem.backoffMs });
+  };
+  // The cheap look first (1 request): flat means nothing to do, which is every check of a normal afternoon after the stop.
+  if (!canSpend(1)) return;
+  spend(1);
+  let held;
+  try {
+    held = await d.broker.listPositions();
+  } catch (err) {
+    if (is429(err)) return rateLimited();
+    throw err;
+  }
+  if (held.length === 0) {
+    mem.backoffMs = 0;
+    if (mem.awaitingFlat) {
+      mem.awaitingFlat = false;
+      void d.say("commands", "Daily loss stop: everything is sold, the account is flat.").catch(() => undefined);
+    }
+    return;
+  }
+  const gate = d.liquidator.sellGate;
+  if (!canSpend(2)) return;
+  spend(2);
+  let view;
+  try {
+    gate.invalidate();
+    view = await gate.look(); // open orders, then positions, as the gate checks sells against them
+  } catch (err) {
+    if (is429(err)) return rateLimited();
+    throw err;
+  }
+  // A sale already working: any open market sell (ours, or one placed by hand at Alpaca) is left alone, never cancelled; only the
+  // shares no sell covers are sold again.
+  const ours = (o: Order) => o.side === "sell" && (o.type === "market" || o.clientOrderId.startsWith("cyrus-x-"));
+  const others = view.open.filter((o) => !ours(o));
+  const mine = view.open.filter(ours);
+  const n = view.positions.length;
+  const first = n > 0 ? mem.turn % n : 0;
+  const ordered = [...view.positions.slice(first), ...view.positions.slice(0, first)];
+  let sent = 0;
+  let hit429 = false;
+  let looked = 0;
+  const failed: string[] = [];
+  for (const p of ordered) {
+    looked++;
+    const openMine = openSellQty(mine, p.symbol);
+    const openOthers = openSellQty(others, p.symbol);
+    const free = Math.min(p.qty - openMine - openOthers, p.qtyAvailable ?? Infinity);
+    if (free > 1e-6) {
+      const cost = gate.needsRead() ? 3 : 1; // the gate reads again (2 requests) after a refused sell
+      if (!canSpend(cost)) {
+        looked--;
+        break;
+      }
+      spend(cost);
+      const id = `cyrus-x-${day.tradeDate.replaceAll("-", "")}-${p.symbol}-${d.now().getTime().toString(36)}-r`;
+      const r = await gate.sell({ symbol: p.symbol, qty: free, clientOrderId: id, reason: "daily loss stop (retry)" });
+      if (r.status === "sent") sent++;
+      else {
+        failed.push(p.symbol);
+        if (r.status === "error" && r.httpStatus === 429) {
+          hit429 = true;
+          break;
+        }
+      }
+    } else if (openOthers > 1e-6 && openMine <= 1e-6) {
+      for (const id of openOrderIds(others, new Set([p.symbol]))) {
+        if (!canSpend(1)) break;
+        spend(1);
+        try {
+          await d.broker.cancelOrder(id);
+        } catch (err) {
+          if (is429(err)) hit429 = true;
+          break;
+        }
+      }
+      if (hit429) break;
+    }
+  }
+  mem.turn = n > 0 ? (first + looked) % n : 0; // the next check starts where this one stopped
+  if (hit429) rateLimited();
+  else mem.backoffMs = 0;
+  d.log?.("loss_stop_sale_retried", { held: n, sent, failed: failed.length, backoffMs: mem.backoffMs });
+  // At most one nudge every 5 minutes, not one on every check.
+  if (failed.length > 0 && d.now().getTime() - mem.lastRetryAlert >= 5 * 60_000) {
+    mem.lastRetryAlert = d.now().getTime();
+    void d.say("alerts", `**Michael: daily loss stop: selling is still failing (${failed.slice(0, 10).join(", ")}${failed.length > 10 ? ", ..." : ""}).** I retry only those every 5 seconds, inside a fixed request budget. Check Alpaca now.`, { mentionOwner: true }).catch(() => undefined);
   }
 }
-let lastLossRetryAlert = 0;
+const fallbackMemory = new LossStopMemory();
 
 // While the stop flag is on, cancel any entry that has not filled. This catches an entry that passed the gate's
 // last look at the flag just before a stop command and reached Alpaca after the command's own cancel pass.

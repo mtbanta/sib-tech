@@ -43,6 +43,9 @@ test("a full day: request, approval, screen, live list, entry with a stop, a ref
   assert.ok(r.said("commands").at(-1)!.startsWith("Armed for Monday 2026-11-02"));
 
   r.broker.clock = { ...r.broker.clock, isOpen: true };
+  // In production a pass (with its read of commands) runs every 5 seconds; this test jumps ahead, so one pass first, or the
+  // gate rightly blocks entries after 2 minutes with no read of Michael's commands (round 8).
+  await r.at("14:35:55");
   await r.ramp("AAA", [...Array(12).fill(100), 101], "14:36:00"); // twelve prints, then an uptick above the average: a signal
   await settle();
   const sent = r.broker.calls.filter((c) => c.fn === "submitEntry");
