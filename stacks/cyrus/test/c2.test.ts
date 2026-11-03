@@ -552,3 +552,36 @@ test("after Armed time with arming failing, a limit can still only be lowered, a
   assert.equal(out.status, "refused");
   assert.equal(s.broker.count("setAccountConfig"), 0, "no repair request was sent");
 });
+
+// ---------- review round 3 (blocking finding on the daily loss stop) ----------
+test("the daily loss stop runs even when the order sync keeps failing", async () => {
+  const r = rig();
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("loss 200\napprove", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  r.broker.clock = { ...r.broker.clock, isOpen: true };
+  await r.at("14:25:00");
+  await r.store.insertOrder({ clientOrderId: "cyrus-20261102-AAA-1", tradeDate: D, symbol: "AAA", qty: 20, referencePrice: 50, stopPrice: 49, status: "filled", alpacaOrderId: "x", filledQty: 20, filledAvgPrice: 50, note: null, createdAt: "2026-11-02T14:40:00.000Z" });
+  r.broker.positions = [{ symbol: "AAA", qty: 20, marketValue: 1000, avgEntryPrice: 50, unrealizedPl: 0 }];
+  const realPaged = r.broker.listOrdersPaged.bind(r.broker);
+  r.broker.listOrdersPaged = async (status, after, pages) => { if (status === "all") throw new Error("the order sync cannot read (test)"); return realPaged(status, after, pages); }; // only the order sync's read fails
+  r.broker.account = { ...r.broker.account, equity: 19500 }; // down 500 against a 200 loss stop
+  await r.at("14:50:00");
+  await r.at("14:51:00");
+  assert.equal(((await r.store.getControl<StopFlag>(CONTROL_STOP)))?.on, true, "the stop flag is set although the sync failed");
+  assert.equal(r.broker.count("submitSell") > 0, true, "and the position was sold");
+});
+
+test("the daily loss stop still sells when the stop flag cannot be saved", async () => {
+  const p = await partialSetup();
+  await p.store.updateDay(D, { dayStartEquity: 20000 });
+  p.broker.positions = [{ symbol: "AAA", qty: 20, marketValue: 1000, avgEntryPrice: 50, unrealizedPl: 0 }];
+  p.broker.account = { ...p.broker.account, equity: 19500 };
+  const realSet = p.store.setControl.bind(p.store);
+  p.store.setControl = async (k: string, v: unknown) => { if (k === CONTROL_STOP) throw new Error("db down (test)"); return realSet(k, v); };
+  const said: string[] = [];
+  const deps = { ...p.deps, say: (async (_c: string, t: string) => (said.push(t), true)) as any };
+  assert.equal(await enforceLossR2(deps, (await p.store.getDay(D))!), true);
+  assert.equal(p.broker.positions.length, 0, "sold");
+  assert.ok(said.some((t) => t.includes("could not be saved") && t.includes("Selling anyway")));
+});

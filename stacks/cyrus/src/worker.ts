@@ -106,6 +106,7 @@ export class Worker {
   private lastFlush = 0;
   private lastStatsEvent = 0;
   private lastViewError = 0;
+  private lastLossCheckAlert = 0;
 
   constructor(deps: WorkerDeps) {
     this.d = deps;
@@ -420,9 +421,21 @@ export class Worker {
       // switched off and nothing is sold here: the close-out alone flattens the account. It is asked again just before
       // each sale, so a close-out that starts meanwhile switches it off.
       const protect = () => this.protectNow(closeAt);
+      // The daily loss stop has its own task, so a failed or slow order sync can never keep it from running (round 3 review).
+      this.background("lossstop", async () => {
+        try {
+          await enforceDailyLoss(risk, dayNow);
+        } catch (err) {
+          this.lastTickError = `daily loss stop: ${(err as Error).message.slice(0, 120)}`;
+          this.d.log?.("error", "loss_stop_check_failed", { error: (err as Error).message.slice(0, 200) });
+          if (this.d.now().getTime() - this.lastLossCheckAlert >= 5 * 60_000) {
+            this.lastLossCheckAlert = this.d.now().getTime();
+            await this.say("alerts", `**Michael: I could not check the daily loss stop** (${(err as Error).message.slice(0, 100)}). I try again in 30 seconds.`, { mentionOwner: true });
+          }
+        }
+      });
       this.background("risk", async () => {
         await syncOrders(risk, dayNow, { protect });
-        await enforceDailyLoss(risk, dayNow);
         await sweepEntriesWhileStopped(risk);
       });
     }

@@ -119,8 +119,14 @@ export async function enforceDailyLoss(d: RiskDeps, day: DayRecord): Promise<boo
   const loss = day.dayStartEquity - account.equity;
   if (loss < day.limits.dailyLossStopUsd) return false;
   const flagNow: StopFlag = { on: true, at: d.now().toISOString(), reason: `daily loss stop reached (${loss.toFixed(2)} dollars)` };
-  await d.store.setControl(CONTROL_STOP, flagNow);
-  await d.store.addEvent("warn", "daily_loss_stop", { loss });
+  // Selling does not wait on the database: if the stop flag cannot be saved the stack still sells (the caching store already
+  // believes the flag), and says so.
+  try {
+    await d.store.setControl(CONTROL_STOP, flagNow);
+  } catch (err) {
+    await d.say("alerts", `**Michael: the daily loss stop was reached but the stop flag could not be saved** (${(err as Error).message.slice(0, 80)}). Selling anyway.`, { mentionOwner: true });
+  }
+  await d.store.addEvent("warn", "daily_loss_stop", { loss }).catch(() => undefined);
   const r = await d.liquidator.flatten({ reason: "daily loss stop", tradeDate: day.tradeDate });
   await d.say("commands", `**Daily loss stop reached** (down ${loss.toFixed(2)} of the ${day.limits.dailyLossStopUsd} dollar limit). Stopped for the day and ${r.flat ? "sold everything" : `sent sells, but still held: ${r.remaining.join(", ")}`}.`);
   if (!r.flat) await d.say("alerts", `**Michael: daily loss stop reached but still holding ${r.remaining.join(", ")}.** Check Alpaca now. I will keep trying.`, { mentionOwner: true });
