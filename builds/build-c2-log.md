@@ -391,7 +391,7 @@ Sources, all read only: the stack's database (one read-only transaction), Alpaca
 
 ### 1. The loss stop at 8:53 and the 19.71 overshoot
 
-**What happened, second by second** (Alpaca's minute equity history is the reference; a point stamped T is the equity at T, checked against the 8:35 point, which is still 0 although fills began at 8:35:00, and the 8:54 point, which equals the final flat value):
+**What happened, second by second** (Alpaca's minute equity history is the reference; a point stamped T is the equity at T, checked against the 8:35 point, which is still 0 although the first fill came at 8:35:09 (so a point is not the end of its minute), and the 8:54 point, which equals the final flat value):
 
 | Time | Day loss | What |
 | :-- | --: | :-- |
@@ -496,3 +496,20 @@ New file `test/round7.test.ts`, 6 tests. Full suite **308 pass** (302 before), t
 | 5. both one-at-a-time guards | hanging check (more than one account read piled up) |
 
 A control test shows the same restart with a working start-up check starts prices and enters, so the main test does not pass for another reason. Two first-run failures were test mistakes, not code: a restarted worker was given a fresh fake Discord whose message numbers sat behind the saved cursor (in production it is the same channel), and a hung pass was awaited by the test itself.
+
+## Review round 7 (2026-11-03, during market hours): CHANGES REQUIRED. Last round allowed, so nothing is deployed; release v5 stays.
+
+Run on `ac4a576..15fc1bd`, from the repo and the local suite only (no calls to Fly, Alpaca, Supabase or Discord while the market was open). Checks 2, 7, 8 and 10 were clean: no new endpoint, no secret, only stack C's files, the 100 a minute ceiling unchanged, nothing paid or deleted. Full suite 308 pass, type check clean, and the log's numbers were reproduced (lowest budget 137, 4,249 requests). Under Michael's rule a blocking finding in the last round means **no deploy: v5 (`ac4a576`) keeps running**, still without the round 5 fixes.
+
+**Confirmed working:** item 4 (the reviewer re-ran the round 6 reproduction; with the fix taken out its test fails). Item 5: the 10 second check, the busy-tick path, the one-at-a-time guard, and not being held back by the governor; a hang test saw 2 account reads in 95 seconds. Under timer jitter no gap was shorter than 9 seconds; with the 1 second allowance at 0 the gap slipped to 15 seconds. No double sale between the loss stop, the close-out and the missing-exit check (one liquidation queue, `SellGate` fresh reads, `sells.ts` unchanged). Every round 6 fix still fails its tests when taken out at `15fc1bd`. None of round 6's notes got worse; the false-watchdog note is partly better.
+
+**Blocking finding: after the loss stop fires, if a sale keeps failing, the 10 second retry can exceed Alpaca's 200 requests a minute all afternoon** (`risk.ts` `retryLossStopSale`, driven every 10 seconds by `worker.ts` `scheduleLossStop`). My "2 reads, about 12 a minute after the stop" holds only when the account is flat or a market sell is already open. If a position is still held and its sell is refused quickly (a 403, say), nothing stays open, so every check runs a full `Liquidator.flatten` (4 rounds), and that path does not go through the governor. In the reviewer's scratch rig (a 403 on every sell, 60 seconds) that came to about 38 requests a check: **about 260 a minute at 10 seconds, against about 108 at 30**. Estimate, not measured: one check takes about 7 seconds of real time, so it still fits 6 times a minute (about 228 a minute from the retry alone). Cost: the retry starves its own sells, and the 2:55 close-out, Michael's `flatten` and the order sync, of requests (429 answers), every afternoon a sale keeps failing. The money at stake is modest (anything sellable has been sold), but item 5 asked for confirmation that the extra requests fit, and here they do not. **Fix suggested:** keep the 10 second equity check and the 2 cheap reads; after a retry flatten that ends not flat, wait at least 30 seconds before the next full flatten; correct the arithmetic in "Round 7 changes" above; add a test that counts requests a minute while a sale keeps failing.
+
+**Correction to "Round 7 changes" above:** the "12 a minute after it fires" figure is true only while the account is flat or a market sell is already working. See the blocking finding.
+
+**Non-blocking notes (logged, not changed):**
+- **Also in production:** if the start-up check works but the command read fails (Discord down, or the cursor read failing), live prices start and trading continues with a `stop` unread. Reproduced at both `15fc1bd` and `ac4a576`. The line "the same pass reads commands first" above holds only if that read succeeds. Michael's principle ("never trade while it cannot read my commands"), read broadly, would cover this case too: a question for him.
+- If Michael tightens the loss limit and the pass then stalls inside `commands.poll` before `ensureDay`, the busy-tick check uses the older, looser limit for as long as the stall lasts (at most about 30 seconds); the gate is unaffected.
+- No test for the `onTrade` backstop alone, or for the new guard in `scheduleLossStop` alone (`background` already prevents a second run).
+- The watchdog alert's "Entries are not being placed by it" is still untrue.
+- The suite ticks on exact 5 second marks, so the 1 second allowance has no test.
