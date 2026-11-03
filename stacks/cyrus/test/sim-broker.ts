@@ -185,6 +185,11 @@ export class SimBroker implements FullBroker {
     for (const [s, p] of this.positionsMap) equity += p.qty * (this.prices.get(s) ?? p.avg);
     return { status: "ACTIVE", equity, lastEquity: 20000, cash: this.cash, buyingPower: equity, multiplier: this.config.maxMarginMultiplier, tradingBlocked: false, accountBlocked: false, shortingEnabled: !this.config.noShorting };
   }
+  // The simulator keeps no minute-by-minute equity record: an empty history means "nothing crossed earlier".
+  async getEquityHistoryToday(): Promise<Array<{ atMs: number; equity: number }>> {
+    this.spend();
+    return [];
+  }
   async getAccountConfig(): Promise<AccountConfig> {
     this.spend();
     return { ...this.config };

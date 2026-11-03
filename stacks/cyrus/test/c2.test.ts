@@ -16,7 +16,7 @@ import { CONTROL_STOP, MemoryStore, normalizeDay, type DayRecord, type StopFlag 
 import { SUGGESTED_LIMITS } from "../src/limits.ts";
 import { order } from "./helpers.ts";
 import { FakeBroker } from "./helpers.ts";
-import { D, rig } from "./rig.ts";
+import { D, rig, settle } from "./rig.ts";
 
 // ---------- governor ----------
 test("governor: a sliding minute, never above the ceiling, and a slot is taken when granted", () => {
@@ -583,7 +583,8 @@ test("the daily loss stop still sells when the stop flag cannot be saved", async
   const deps = { ...p.deps, say: (async (_c: string, t: string) => (said.push(t), true)) as any };
   assert.equal(await enforceLossR2(deps, (await p.store.getDay(D))!), true);
   assert.equal(p.broker.positions.length, 0, "sold");
-  assert.ok(said.some((t) => t.includes("could not be saved") && t.includes("Selling anyway")));
+  await settle(); // the alert is not waited on by the sale (review round 5)
+  assert.ok(said.some((t) => t.includes("could not be saved") && t.includes("sold anyway")));
 });
 
 // ---------- review round 4 ----------

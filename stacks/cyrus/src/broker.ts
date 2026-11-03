@@ -9,6 +9,7 @@ export type Broker = Pick<
   AlpacaTrading,
   | "getClock"
   | "getAccount"
+  | "getEquityHistoryToday"
   | "getAccountConfig"
   | "setAccountConfig"
   | "getCalendar"

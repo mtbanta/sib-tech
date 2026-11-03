@@ -59,20 +59,55 @@ export class CachingStore implements Store {
   async setControl(key: string, value: unknown): Promise<void> {
     const k = `c:${key}`;
     this.bump(k);
-    // A stop is believed at once, even if the database write then fails: the safe direction.
+    // A stop is believed at once, even if the database write then fails or hangs: the safe direction. This happens before the
+    // first wait in this method, so a caller that does not wait for the write (the daily loss stop) has the stop in force as
+    // soon as the call returns.
     const isStopOn = key === CONTROL_STOP && (value as { on?: boolean } | null)?.on === true;
     if (isStopOn) {
       this.controls.set(key, { value: structuredClone(value), at: this.now() });
       this.unsavedStop = structuredClone(value);
     }
-    try {
-      await this.inner.setControl(key, value);
-    } catch (err) {
-      throw err; // a failed write leaves memory as it was (a stop that was set stays set)
-    }
-    if (key === CONTROL_STOP) this.unsavedStop = null; // saved (on or off): the database is the truth again
-    if (FAST_KEYS.has(key)) this.controls.set(key, { value: structuredClone(value), at: this.now() });
-    this.bump(k);
+    const write = async () => {
+      await this.inner.setControl(key, value); // a failed write leaves memory as it was (a stop that was set stays set)
+      if (key === CONTROL_STOP) this.unsavedStop = null; // saved (on or off): the database is the truth again
+      if (FAST_KEYS.has(key)) this.controls.set(key, { value: structuredClone(value), at: this.now() });
+      this.bump(k);
+    };
+    if (key !== CONTROL_STOP) return write();
+    return this.queueStopWrite(write);
+  }
+
+  // Writes to the stop flag reach the database one at a time, in the order they were asked for, so a retry of an unsaved stop and
+  // Michael's `resume` can never land in the wrong order.
+  private stopChain: Promise<unknown> = Promise.resolve();
+  private queueStopWrite(write: () => Promise<void>): Promise<void> {
+    const p = this.stopChain.then(write, write);
+    this.stopChain = p.catch(() => undefined);
+    return p;
+  }
+
+  // True while a stop is in force that the database has not stored.
+  hasUnsavedStop(): boolean {
+    return this.unsavedStop !== null;
+  }
+
+  // Tries again to store a stop that could not be saved (called on every pass of the worker, review round 5). Never overwrites a
+  // later write: if any other write to the stop flag succeeded meanwhile (Michael's `resume`), or a newer stop replaced it, this
+  // does nothing. Returns true if it stored the stop.
+  async retryUnsavedStop(): Promise<boolean> {
+    const pending = this.unsavedStop;
+    if (pending === null) return false;
+    let saved = false;
+    await this.queueStopWrite(async () => {
+      if (this.unsavedStop !== pending) return;
+      await this.inner.setControl(CONTROL_STOP, pending);
+      if (this.unsavedStop !== pending) return;
+      this.unsavedStop = null;
+      this.controls.set(CONTROL_STOP, { value: structuredClone(pending), at: this.now() });
+      this.bump(`c:${CONTROL_STOP}`);
+      saved = true;
+    });
+    return saved;
   }
 
   async getDay(tradeDate: string): Promise<DayRecord | null> {

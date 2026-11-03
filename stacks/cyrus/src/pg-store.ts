@@ -16,15 +16,30 @@ pg.types.setTypeParser(1082, (v: string) => v);
 // Supabase's pooler and direct hosts require TLS. The connection is encrypted; the server certificate is not
 // pinned yet (Supabase signs with its own authority, which Node does not know). Recorded in the build log as
 // a known gap to close by pinning Supabase's published certificate.
-export function makePool(databaseUrl: string): pg.Pool {
-  return new pg.Pool({
+//
+// Time limits (review round 5, finding 1). The server's own statement limit does nothing if the network path or the
+// pooler goes silent, so the client also gives up: a query with no answer after QUERY_TIMEOUT_MS fails here, and the pool
+// throws that connection away (pg-pool removes a client released with an error) instead of handing it out again. TCP
+// keep-alive makes a dead connection show up as an error instead of waiting forever. Connecting, or waiting for a free
+// connection from the pool, is limited separately (connectionTimeoutMillis).
+export const QUERY_TIMEOUT_MS = 20_000;
+
+export function poolConfig(databaseUrl: string): pg.PoolConfig {
+  return {
     connectionString: databaseUrl,
     ssl: { rejectUnauthorized: false },
     max: 3,
     connectionTimeoutMillis: 10_000,
     idleTimeoutMillis: 30_000,
     statement_timeout: 15_000,
-  });
+    query_timeout: QUERY_TIMEOUT_MS,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10_000,
+  };
+}
+
+export function makePool(databaseUrl: string): pg.Pool {
+  return new pg.Pool(poolConfig(databaseUrl));
 }
 
 const n = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));

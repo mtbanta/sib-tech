@@ -13,6 +13,8 @@ export interface RiskDeps {
   say: Say;
   liquidator: Liquidator;
   log?: (event: string, data?: Record<string, unknown>) => void;
+  // Optional: the worker passes its own, so the loss stop remembers that it fired even when the stop flag cannot be read.
+  lossMemory?: LossStopMemory;
 }
 
 // A live exit leg of an entry: a sell leg that can still execute.
@@ -101,35 +103,85 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   return { unprotected, incomplete: !listed.complete };
 }
 
+// What the loss stop remembers in this process (the worker keeps one). It lets the loss stop keep selling when the stop flag
+// cannot be read: without it, a database that keeps failing would make every pass fire the stop again from scratch.
+export class LossStopMemory {
+  firedDate: string | null = null;
+  lastSaveAlert = 0;
+}
+
+export interface LossStopOptions {
+  // First check after a start: also look at today's equity history at Alpaca, so a loss stop that fired (or should have) before
+  // a restart is found again even if equity has since recovered and the stop flag never reached the database (round 5).
+  rederive?: boolean;
+}
+
+// The lowest equity Alpaca shows for today's session after a moment (the open, or the last saved change to the stop flag,
+// whichever is later, so Michael's own `resume` is respected). Null when there is no point after that moment.
+export async function worstEquitySince(d: Pick<RiskDeps, "broker">, sinceMs: number): Promise<number | null> {
+  const points = (await d.broker.getEquityHistoryToday()).filter((p) => p.atMs > sinceMs);
+  return points.length ? Math.min(...points.map((p) => p.equity)) : null;
+}
+
 // When equity has fallen by the approved daily loss limit, stop the day: set the stop flag, sell everything.
 // Runs again and again without harm (once the flag is set it does nothing new).
-export async function enforceDailyLoss(d: RiskDeps, day: DayRecord): Promise<boolean> {
+//
+// Review round 5: the sale waits on nothing but the broker. The stop-flag write, the run-log event and every Discord post are
+// started and left to finish on their own (each with its own error handling), so a database or Discord that hangs cannot hold
+// the sale back, and cannot leave this task stuck so that it never runs again. The order gate still refuses entries from the
+// moment the stop is decided: the caching store (caching-store.ts) believes a stop as soon as `setControl` is called, before
+// its first wait, and keeps believing it until a later write succeeds. If the stop flag cannot be READ, equity is checked
+// anyway and the stop fires if the line is crossed (the direction of selling).
+export async function enforceDailyLoss(d: RiskDeps, day: DayRecord, opts: LossStopOptions = {}): Promise<boolean> {
   // Not before arming: until then the starting equity may be an earlier day's number.
   // (A day that is re-arming after a lowered cap counts as armed: its start equity was read at the first arming, and the loss stop
   // must not go dark while a re-arm is failing.)
   if (day.status !== "approved" || !(day.phases.armed || day.phases.rearm) || day.dayStartEquity === null) return false;
-  const flag = await d.store.getControl<StopFlag>(CONTROL_STOP);
-  if (flag?.on) {
+  const mem = d.lossMemory;
+  let flag: StopFlag | null = null;
+  let flagUnreadable = false;
+  try {
+    flag = await d.store.getControl<StopFlag>(CONTROL_STOP);
+  } catch (err) {
+    flagUnreadable = true;
+    d.log?.("loss_stop_flag_unreadable", { error: (err as Error).message.slice(0, 120) });
+  }
+  const firedHere = mem?.firedDate === day.tradeDate;
+  if (flag?.on || (flagUnreadable && firedHere)) {
     // The loss stop already fired. If its sale did not finish, try again on every pass. An owner's plain `stop` is
     // left alone: it keeps positions.
-    if (flag.reason.startsWith("daily loss stop")) await retryLossStopSale(d, day);
+    if ((flag?.on && flag.reason.startsWith("daily loss stop")) || (flagUnreadable && firedHere)) await retryLossStopSale(d, day);
     return false;
   }
   const account = await d.broker.getAccount();
-  const loss = day.dayStartEquity - account.equity;
-  if (loss < day.limits.dailyLossStopUsd) return false;
-  const flagNow: StopFlag = { on: true, at: d.now().toISOString(), reason: `daily loss stop reached (${loss.toFixed(2)} dollars)` };
-  // Selling does not wait on the database: if the stop flag cannot be saved the stack still sells (the caching store already
-  // believes the flag), and says so.
-  try {
-    await d.store.setControl(CONTROL_STOP, flagNow);
-  } catch (err) {
-    await d.say("alerts", `**Michael: the daily loss stop was reached but the stop flag could not be saved** (${(err as Error).message.slice(0, 80)}). Selling anyway.`, { mentionOwner: true });
+  const start = day.dayStartEquity;
+  const limit = day.limits.dailyLossStopUsd;
+  let loss = start - account.equity;
+  let earlier: number | null = null;
+  if (loss < limit && opts.rederive && day.openAt) {
+    const savedAt = flag?.at ? Date.parse(flag.at) : NaN;
+    const since = Math.max(day.openAt.getTime(), Number.isFinite(savedAt) ? savedAt : 0);
+    const worst = await worstEquitySince(d, since);
+    if (worst !== null && start - worst >= limit) {
+      earlier = worst;
+      loss = start - worst;
+    }
   }
-  await d.store.addEvent("warn", "daily_loss_stop", { loss }).catch(() => undefined);
+  if (loss < limit) return false;
+  if (mem) mem.firedDate = day.tradeDate;
+  const why = earlier !== null ? `daily loss stop reached earlier today (equity fell to ${earlier.toFixed(2)}, found after a restart)` : `daily loss stop reached (${loss.toFixed(2)} dollars)`;
+  const flagNow: StopFlag = { on: true, at: d.now().toISOString(), reason: why };
+  // Not waited on (see above). The caching store already believes the stop when this call returns.
+  void d.store.setControl(CONTROL_STOP, flagNow).catch((err) => {
+    const t = d.now().getTime();
+    if (mem && t - mem.lastSaveAlert < 5 * 60_000) return;
+    if (mem) mem.lastSaveAlert = t;
+    void d.say("alerts", `**Michael: the daily loss stop was reached but the stop flag could not be saved** (${(err as Error).message.slice(0, 80)}). I sold anyway, I keep the stop in force in memory, and I keep trying to save it.`, { mentionOwner: true }).catch(() => undefined);
+  });
+  void d.store.addEvent("warn", "daily_loss_stop", { loss, earlier }).catch(() => undefined);
   const r = await d.liquidator.flatten({ reason: "daily loss stop", tradeDate: day.tradeDate });
-  await d.say("commands", `**Daily loss stop reached** (down ${loss.toFixed(2)} of the ${day.limits.dailyLossStopUsd} dollar limit). Stopped for the day and ${r.flat ? "sold everything" : `sent sells, but still held: ${r.remaining.join(", ")}`}.`);
-  if (!r.flat) await d.say("alerts", `**Michael: daily loss stop reached but still holding ${r.remaining.join(", ")}.** Check Alpaca now. I will keep trying.`, { mentionOwner: true });
+  void d.say("commands", `**Daily loss stop reached** (down ${loss.toFixed(2)} of the ${limit} dollar limit${earlier !== null ? ", seen in today's equity history after a restart" : ""}). Stopped for the day and ${r.flat ? "sold everything" : `sent sells, but still held: ${r.remaining.join(", ")}`}.`).catch(() => undefined);
+  if (!r.flat) void d.say("alerts", `**Michael: daily loss stop reached but still holding ${r.remaining.join(", ")}.** Check Alpaca now. I will keep trying.`, { mentionOwner: true }).catch(() => undefined);
   return true;
 }
 

@@ -37,6 +37,8 @@ export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryS
   return {
     store, broker, bot, worker, pings, governor,
     at: async (t: string) => { now = z(t); await worker.tick(); await settle(); },
+    // Moves the clock without running a pass (to start a pass that never finishes with `void worker.tick()`).
+    setNow: (t: string) => { now = z(t); },
     trade: async (symbol: string, price: number, t: string) => { now = z(t); onTrade({ symbol, price, size: 100, time: z(t).toISOString() }); await settle(); },
     // Feeds a run of trades for one symbol, one per second from a start time: enough for the busy placeholder to signal.
     ramp: async (symbol: string, prices: number[], startT: string) => { for (let i = 0; i < prices.length; i++) { now = new Date(z(startT).getTime() + i * 1000); onTrade({ symbol, price: prices[i]!, size: 100, time: now.toISOString() }); await settle(); } },

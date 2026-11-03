@@ -21,7 +21,7 @@ import type { Settings } from "./config.ts";
 import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
-import { enforceDailyLoss, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
+import { enforceDailyLoss, LossStopMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import { BusyPlaceholder } from "./strategy.ts";
 import type { Trade } from "./stream.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
@@ -64,6 +64,10 @@ const DIGEST_EVERY_MS = 20_000;
 const FLUSH_EVERY_MS = 60_000;
 // Before the close the close-out is retried this often until the account is flat; after the close, every 5 minutes.
 const CLOSEOUT_RETRY_MS = 20_000;
+const LOSS_STOP_EVERY_MS = 30_000;
+// A pass that has run this long is stuck (review round 5, finding 1). Every call in a pass has its own time limit now, so this
+// should never happen; if it does, the watchdog takes over the safety work that needs only the broker (see watchdog()).
+export const PASS_WATCHDOG_MS = 60_000;
 
 export class Worker {
   private readonly d: WorkerDeps;
@@ -108,6 +112,22 @@ export class Worker {
   private lastViewError = 0;
   private lastLossCheckAlert = 0;
   private lastPollAlert = 0;
+  // Review round 5 (finding 1): when the current pass started, and the watchdog's state for a pass that runs too long.
+  private passStartedAt = 0;
+  private watchdogRunning = false;
+  private watchdogAlerted = false;
+  private lastWatchdogPing = 0;
+  // Review round 5 (finding 3): the last day record read for today, used when the database cannot be read.
+  private lastDay: DayRecord | null = null;
+  private lastDayFallbackAlert = 0;
+  private passDegraded = false;
+  private lastMigrateAlert = 0;
+  // The loss stop's own schedule and memory, and the date its first check after this start (with today's equity history) worked.
+  private lastLossStop = 0;
+  private readonly lossMemory = new LossStopMemory();
+  private lossRederivedDate: string | null = null;
+  private lastBackgroundAlert = new Map<string, number>();
+  private retryingStop = false;
 
   constructor(deps: WorkerDeps) {
     this.d = deps;
@@ -162,7 +182,7 @@ export class Worker {
   }
 
   private riskDeps() {
-    return { broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c: Channel, t: string, o?: { mentionOwner?: boolean }) => this.say(c, t, o), liquidator: this.liquidator, log: (e: string, data?: Record<string, unknown>) => this.d.log?.("info", e, data) };
+    return { broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c: Channel, t: string, o?: { mentionOwner?: boolean }) => this.say(c, t, o), liquidator: this.liquidator, lossMemory: this.lossMemory, log: (e: string, data?: Record<string, unknown>) => this.d.log?.("info", e, data) };
   }
 
   private closeoutDeps() {
@@ -198,31 +218,120 @@ export class Worker {
       .catch((err) => {
         this.lastTickError = `${name}: ${(err as Error).message.slice(0, 150)}`;
         this.d.log?.("error", "background_failed", { name, error: (err as Error).message.slice(0, 200) });
-        void this.say("alerts", `Step "${name}" failed: ${(err as Error).message.slice(0, 150)}`);
+        // At most one alert per step every 5 minutes (a database outage would otherwise post one every 30 seconds).
+        const t = this.d.now().getTime();
+        if (t - (this.lastBackgroundAlert.get(name) ?? -Infinity) >= 5 * 60_000) {
+          this.lastBackgroundAlert.set(name, t);
+          void this.say("alerts", `Step "${name}" failed: ${(err as Error).message.slice(0, 150)}`).catch(() => undefined);
+        }
       })
       .finally(() => this.inflight.delete(name));
   }
 
   async tick(): Promise<boolean> {
-    if (this.ticking) return true; // a slow pass is still running: do not start a second one
+    if (this.ticking) {
+      // A slow pass is still running: do not start a second one. If it has run too long, the watchdog acts.
+      await this.watchdog();
+      return true;
+    }
     this.ticking = true;
+    this.passStartedAt = this.d.now().getTime();
+    this.passDegraded = false;
     let ok = true;
     try {
       await this.pass();
-      this.lastTickError = null;
-      this.failedTicks = 0;
+      if (this.passDegraded) {
+        // The pass ran on the day record held in memory (the database could not be read). It did the safety work, but the
+        // heartbeat must still say the worker is unwell, and the broker-only close-out still stands by near the close.
+        ok = false;
+        this.failedTicks++;
+        await this.emergencyCloseoutIfNeeded("The database is unreachable near the close").catch(() => undefined);
+      } else {
+        this.lastTickError = null;
+        this.failedTicks = 0;
+      }
     } catch (err) {
       ok = false;
       this.failedTicks++;
       this.lastTickError = (err as Error).message.slice(0, 150);
       this.d.log?.("error", "tick_failed", { error: this.lastTickError });
       // The database may be what failed. Selling needs only the broker, so the end of the day does not wait for it.
-      await this.emergencyCloseoutIfNeeded().catch(() => undefined);
+      await this.emergencyCloseoutIfNeeded("The database is unreachable near the close").catch(() => undefined);
     } finally {
       this.ticking = false;
+      this.watchdogAlerted = false;
     }
     await this.heartbeat(ok);
     return ok;
+  }
+
+  // Runs on a tick that finds the previous pass still running. Once that pass is older than PASS_WATCHDOG_MS it is treated as
+  // stuck: the heartbeat says "fail" (so Healthchecks alerts now, not after its grace period), Michael is told once, the daily
+  // loss stop is run from the day record held in memory, and near the close the broker-only close-out runs. The stuck pass is
+  // left alone: starting a second pass beside it could do things twice, and restarting the worker in market hours is not allowed.
+  private async watchdog(): Promise<void> {
+    const now = this.d.now();
+    const stuckMs = now.getTime() - this.passStartedAt;
+    if (stuckMs < PASS_WATCHDOG_MS || this.watchdogRunning) return;
+    this.watchdogRunning = true;
+    try {
+      this.lastTickError = `a pass has been running for ${Math.round(stuckMs / 1000)} seconds`;
+      if (!this.watchdogAlerted) {
+        this.watchdogAlerted = true;
+        this.d.log?.("error", "pass_stuck", { seconds: Math.round(stuckMs / 1000) });
+        void this.say("alerts", `**Michael: my main loop is stuck** (one pass has run for ${Math.round(stuckMs / 1000)} seconds). Entries are not being placed by it. I keep running the daily loss stop and, near the close, the close-out from the broker alone. Check the Fly logs.`, { mentionOwner: true }).catch(() => undefined);
+      }
+      if (now.getTime() - this.lastWatchdogPing >= 30_000) {
+        this.lastWatchdogPing = now.getTime();
+        void this.d.ping("fail").catch(() => false);
+      }
+      this.retryUnsavedStop();
+      const day = this.lastDay;
+      if (day && day.tradeDate === etDate(now) && day.status === "approved" && day.openAt && day.closeAt && now >= day.openAt && now < day.closeAt) this.scheduleLossStop(day, now);
+      await this.emergencyCloseoutIfNeeded("My main loop is stuck near the close").catch(() => undefined);
+    } finally {
+      this.watchdogRunning = false;
+    }
+  }
+
+  // Tries again to save a stop that could not be saved, in the background, one try at a time (review round 5).
+  private retryUnsavedStop(): void {
+    const store = this.d.store;
+    if (this.retryingStop || !store.hasUnsavedStop?.()) return;
+    this.retryingStop = true;
+    void store
+      .retryUnsavedStop!()
+      .then((saved) => {
+        if (saved) {
+          this.d.log?.("info", "unsaved_stop_saved");
+          void this.say("alerts", "The stop flag that could not be saved earlier is now saved in the database.").catch(() => undefined);
+        }
+      })
+      .catch((err) => this.d.log?.("warn", "unsaved_stop_retry_failed", { error: (err as Error).message.slice(0, 120) }))
+      .finally(() => void (this.retryingStop = false));
+  }
+
+  // The daily loss stop has its own background task every 30 seconds, so a failed or slow order sync can never keep it from
+  // running (round 3 review). Its first run after a start also reads today's equity history (round 5), and until that run has
+  // worked the live price stream is not started, so no entry can follow a loss stop that a restart forgot.
+  private scheduleLossStop(day: DayRecord, now: Date): void {
+    if (now.getTime() - this.lastLossStop < LOSS_STOP_EVERY_MS) return;
+    this.lastLossStop = now.getTime();
+    const risk = this.riskDeps();
+    const rederive = this.lossRederivedDate !== day.tradeDate;
+    this.background("lossstop", async () => {
+      try {
+        await enforceDailyLoss(risk, day, { rederive });
+        if (rederive) this.lossRederivedDate = day.tradeDate;
+      } catch (err) {
+        this.lastTickError = `daily loss stop: ${(err as Error).message.slice(0, 120)}`;
+        this.d.log?.("error", "loss_stop_check_failed", { error: (err as Error).message.slice(0, 200) });
+        if (this.d.now().getTime() - this.lastLossCheckAlert >= 5 * 60_000) {
+          this.lastLossCheckAlert = this.d.now().getTime();
+          void this.say("alerts", `**Michael: I could not check the daily loss stop** (${(err as Error).message.slice(0, 100)}). I try again in 30 seconds.`, { mentionOwner: true }).catch(() => undefined);
+        }
+      }
+    });
   }
 
   // "ok" at most every 30 seconds; "fail" after 3 failed passes in a row, or at once while the account is
@@ -244,7 +353,7 @@ export class Worker {
   }
 
   // Needs no database: reads the market clock from the broker and sells everything near the close.
-  private async emergencyCloseoutIfNeeded(): Promise<void> {
+  private async emergencyCloseoutIfNeeded(why: string): Promise<void> {
     const now = this.d.now();
     const date = etDate(now);
     if (this.emergencyDate === date || this.closingOut || this.inflight.has("closeout")) return;
@@ -252,7 +361,7 @@ export class Worker {
     const minutesToClose = (new Date(clock.nextClose).getTime() - now.getTime()) / 60_000;
     if (!clock.isOpen || minutesToClose > CLOSEOUT_MINUTES_BEFORE_CLOSE) return;
     this.emergencyDate = date;
-    await this.say("alerts", "The database is unreachable near the close, so I am closing everything from the broker's clock alone.");
+    await this.say("alerts", `${why}, so I am closing everything from the broker's clock alone.`);
     this.closingOut = true;
     try {
       const result = await closeOut(this.closeoutDeps(), date);
@@ -347,29 +456,63 @@ export class Worker {
 
   private async pass(): Promise<void> {
     const now = this.d.now();
+    // A stop that could not be saved is retried on every pass, at any hour (it carries over to later days until `resume`).
+    this.retryUnsavedStop();
     if (!this.migrated) {
       // Once per start, before any command is read: a future day saved by an older release (before build C2) is put in the
-      // new shape and its old request is forgotten, so an old reply cannot count and the request is posted again.
-      const reset = await resetOldShapeFutureDays(this.d.store, now);
-      this.migrated = true;
-      if (reset.length > 0) this.d.log?.("info", "future_days_reset", { days: reset });
+      // new shape and its old request is forgotten, so an old reply cannot count and the request is posted again. If the
+      // database cannot do it now, commands and the limits flow wait for it (an old reply must not count), but the safety
+      // work below still runs (review round 5 audit).
+      try {
+        const reset = await resetOldShapeFutureDays(this.d.store, now);
+        this.migrated = true;
+        if (reset.length > 0) this.d.log?.("info", "future_days_reset", { days: reset });
+      } catch (err) {
+        this.lastTickError = `start-up check of future days: ${(err as Error).message.slice(0, 120)}`;
+        this.d.log?.("error", "future_days_reset_failed", { error: (err as Error).message.slice(0, 200) });
+        this.passDegraded = true;
+        if (now.getTime() - this.lastMigrateAlert >= 10 * 60_000) {
+          this.lastMigrateAlert = now.getTime();
+          void this.say("alerts", `I could not run my start-up check of future days (${(err as Error).message.slice(0, 100)}). Commands and the limits flow wait for it; the daily loss stop and the close-out continue. I keep trying.`).catch(() => undefined);
+        }
+      }
     }
     // Commands first, at any hour: a stop must never wait behind anything else. A failed read of Discord (or of the database for the
     // command cursor) must not stop the rest of the pass, least of all the daily loss stop: it is reported, rate limited, and the
     // pass goes on.
-    try {
-      await this.commands.poll();
-    } catch (err) {
-      this.lastTickError = `commands: ${(err as Error).message.slice(0, 120)}`;
-      this.d.log?.("error", "command_poll_failed", { error: (err as Error).message.slice(0, 200) });
-      if (now.getTime() - this.lastPollAlert >= 10 * 60_000) {
-        this.lastPollAlert = now.getTime();
-        void this.say("alerts", `I could not read your commands (${(err as Error).message.slice(0, 100)}). Trading checks, including the daily loss stop, continue; I keep trying.`).catch(() => undefined);
+    if (this.migrated) {
+      try {
+        await this.commands.poll();
+      } catch (err) {
+        this.lastTickError = `commands: ${(err as Error).message.slice(0, 120)}`;
+        this.d.log?.("error", "command_poll_failed", { error: (err as Error).message.slice(0, 200) });
+        if (now.getTime() - this.lastPollAlert >= 10 * 60_000) {
+          this.lastPollAlert = now.getTime();
+          void this.say("alerts", `I could not read your commands (${(err as Error).message.slice(0, 100)}). Trading checks, including the daily loss stop, continue; I keep trying.`).catch(() => undefined);
+        }
       }
     }
 
     const date = etDate(now);
-    const today = await ensureDay({ store: this.d.store, broker: this.d.broker, now: this.d.now }, date);
+    // Review round 5 (finding 3): if today's record cannot be read, the pass carries on with the copy held in memory, so the
+    // daily loss stop, the missing-exit check and the close-out are still scheduled. Only a copy of TODAY counts; with none,
+    // the pass fails as before (and the broker-only close-out stands by). The order gate does not use this copy: it reads the
+    // database itself and refuses when it cannot.
+    let today: DayRecord;
+    try {
+      today = await ensureDay({ store: this.d.store, broker: this.d.broker, now: this.d.now }, date);
+      this.lastDay = today;
+    } catch (err) {
+      if (!this.lastDay || this.lastDay.tradeDate !== date) throw err;
+      today = this.lastDay;
+      this.passDegraded = true;
+      this.lastTickError = `day record: ${(err as Error).message.slice(0, 120)}`;
+      this.d.log?.("error", "day_read_failed_using_memory", { error: (err as Error).message.slice(0, 200) });
+      if (now.getTime() - this.lastDayFallbackAlert >= 10 * 60_000) {
+        this.lastDayFallbackAlert = now.getTime();
+        void this.say("alerts", `**Michael: I cannot read today's record from the database** (${(err as Error).message.slice(0, 100)}). I keep running the daily loss stop, the missing-exit check and the close-out from the copy in memory. The order gate refuses any entry it cannot write down first. I keep trying.`, { mentionOwner: true }).catch(() => undefined);
+      }
+    }
     try {
       await this.notFlatCheck(today, now);
     } catch (err) {
@@ -383,7 +526,7 @@ export class Worker {
     // A failure here (the calendar, Discord) must not skip the order sync, the loss stop or the close-out below.
     let current: DayRecord = today;
     try {
-      current = await this.limitsFlow(now, date, today, steps);
+      if (this.migrated) current = await this.limitsFlow(now, date, today, steps);
     } catch (err) {
       this.lastTickError = `limits flow: ${(err as Error).message.slice(0, 120)}`;
       this.d.log?.("error", "limits_flow_failed", { error: (err as Error).message.slice(0, 200) });
@@ -412,16 +555,28 @@ export class Worker {
         }
       }
     }
-    if (at(0)) current = await lapseIfUndecided(steps, current);
+    if (at(0)) {
+      try {
+        current = await lapseIfUndecided(steps, current);
+      } catch (err) {
+        this.lastTickError = `lapse: ${(err as Error).message.slice(0, 120)}`; // retried on the next pass; an undecided day never trades
+      }
+    }
+    if (current.tradeDate === date) this.lastDay = current;
 
     // Live prices: from 5 minutes before the open, only while the day is still alive.
     const alive = current.status === "approved" || current.status === "pending";
-    if (at(-5) && now < day.closeAt && alive && current.liveList && current.liveList.length > 0 && this.streamDate !== date) {
+    // After a start in the middle of the session, live prices wait until the loss stop's first check (with today's equity
+    // history) has worked: no entry may follow a loss stop that the restart forgot (review round 5).
+    const lossReady = now < day.openAt || this.lossRederivedDate === date;
+    if (at(-5) && now < day.closeAt && alive && lossReady && current.liveList && current.liveList.length > 0 && this.streamDate !== date) {
       this.startStream(current, current.liveList);
     }
     if (this.stream && (!alive || now >= day.closeAt)) this.endStream();
 
     const inSession = now >= day.openAt && now < day.closeAt && current.status === "approved";
+    // The loss stop is scheduled first, before anything else in the session that waits on the broker.
+    if (inSession) this.scheduleLossStop(current, now);
     if (inSession && current.phases.armed) await this.refreshView(now);
     if (inSession && now.getTime() - this.lastSync >= SYNC_EVERY_MS) {
       this.lastSync = now.getTime();
@@ -433,19 +588,6 @@ export class Worker {
       // switched off and nothing is sold here: the close-out alone flattens the account. It is asked again just before
       // each sale, so a close-out that starts meanwhile switches it off.
       const protect = () => this.protectNow(closeAt);
-      // The daily loss stop has its own task, so a failed or slow order sync can never keep it from running (round 3 review).
-      this.background("lossstop", async () => {
-        try {
-          await enforceDailyLoss(risk, dayNow);
-        } catch (err) {
-          this.lastTickError = `daily loss stop: ${(err as Error).message.slice(0, 120)}`;
-          this.d.log?.("error", "loss_stop_check_failed", { error: (err as Error).message.slice(0, 200) });
-          if (this.d.now().getTime() - this.lastLossCheckAlert >= 5 * 60_000) {
-            this.lastLossCheckAlert = this.d.now().getTime();
-            await this.say("alerts", `**Michael: I could not check the daily loss stop** (${(err as Error).message.slice(0, 100)}). I try again in 30 seconds.`, { mentionOwner: true });
-          }
-        }
-      });
       this.background("risk", async () => {
         await syncOrders(risk, dayNow, { protect });
         await sweepEntriesWhileStopped(risk);

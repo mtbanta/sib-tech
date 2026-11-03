@@ -28,6 +28,12 @@ export interface Account {
   shortingEnabled: boolean;
 }
 
+// One point of the account's equity during today's session (Alpaca's portfolio history, one point a minute).
+export interface EquityPoint {
+  atMs: number;
+  equity: number;
+}
+
 export interface AccountConfig {
   maxMarginMultiplier: number;
   noShorting: boolean;
@@ -251,6 +257,22 @@ export class AlpacaTrading {
     if (patch.noShorting === true) body.no_shorting = true;
     if (patch.suspendTrade !== undefined) body.suspend_trade = patch.suspendTrade;
     return this.parseConfig((await this.once("PATCH", "/v2/account/configurations", undefined, body)) as Json);
+  }
+
+  // Today's equity, one point a minute over the regular session (measured on paper 2026-11-02 after the close: 391
+  // points from 9:30 to 16:00 New York, no empty values). Used after a restart to see whether the daily loss line was
+  // crossed earlier in the day (review round 5). Points with no usable value are dropped.
+  async getEquityHistoryToday(): Promise<EquityPoint[]> {
+    const h = (await this.read("/v2/account/portfolio/history", { period: "1D", timeframe: "1Min", intraday_reporting: "market_hours" })) as Json;
+    const ts = Array.isArray(h.timestamp) ? (h.timestamp as unknown[]) : [];
+    const eq = Array.isArray(h.equity) ? (h.equity as unknown[]) : [];
+    const out: EquityPoint[] = [];
+    for (let i = 0; i < ts.length; i++) {
+      const t = num(ts[i]);
+      const e = eq[i] === null || eq[i] === undefined ? NaN : num(eq[i]);
+      if (Number.isFinite(t) && Number.isFinite(e) && e > 0) out.push({ atMs: t * 1000, equity: e });
+    }
+    return out;
   }
 
   // The market's sessions between two dates, inclusive. A weekend or holiday is simply absent.

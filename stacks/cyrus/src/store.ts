@@ -89,6 +89,10 @@ export interface Store {
   listRefusals(tradeDate: string): Promise<RefusalRecord[]>;
 
   addEvent(level: string, event: string, data?: Record<string, unknown>): Promise<void>;
+
+  // Only the caching store has these (an unsaved stop lives in its memory). See caching-store.ts.
+  hasUnsavedStop?(): boolean;
+  retryUnsavedStop?(): Promise<boolean>;
 }
 
 // Records that a step of the day finished. Reads the day fresh first, and runs one at a time per day, so two steps

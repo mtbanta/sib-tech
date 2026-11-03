@@ -40,6 +40,9 @@ export class FakeBroker implements FullBroker {
   }
   async getClock() { this.rec("getClock"); return this.clock; }
   async getAccount() { this.rec("getAccount"); return this.account; }
+  // Today's equity a minute at a time (Alpaca's portfolio history). Empty unless a test fills it.
+  equityHistory: Array<{ atMs: number; equity: number }> = [];
+  async getEquityHistoryToday() { this.rec("getEquityHistoryToday"); return this.equityHistory; }
   async getAccountConfig() { this.rec("getAccountConfig"); return this.config; }
   async setAccountConfig(patch: Partial<AccountConfig>) {
     this.rec("setAccountConfig", patch);
