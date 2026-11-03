@@ -375,3 +375,10 @@ The last round Michael allowed, on `ac4a576..b764741`. Checks 2, 7, 8 and 10 cle
 ### What is left (the round 5 findings as they stand in the running v5)
 
 Release v5 has the round 3 and round 4 fixes but none of the round 6 fixes, so all three round 5 blocking findings remain in production: no client-side query time limit or keep-alive and no watchdog (a hanging query freezes the loop; Healthchecks alerting after its grace period is the only warning); a hanging stop-flag write holds back the loss stop's sale; a failed day read in the session switches the loss stop off for the outage. Also not in v5: the unsaved-stop retry and the restart re-derivation from equity history. The round 6 code (`b764741`) is pushed, not deployed; before it can be, it needs the migration fix above and a review. Michael decides after Tuesday's close.
+
+## Close-out (2026-11-02, about 10 PM Central)
+
+- **Fly token rotated by Michael on 2026-11-02; the old token is revoked.** The new token in `stacks/cyrus/.env.local` works: a read-only `fly status` for `sib-tech-cyrus` shows release **v5**, one machine in San Jose, state started; Healthchecks reads `up` (last ping a few seconds old); the Fly logs since the deploy show one start and no pass errors. The token was not printed.
+- **Tuesday 2026-11-03's limits are approved** (read from the database): status `approved`, position 2000 dollars, daily loss stop 500 dollars, trades 100 a minute (the ceiling), borrowing cap 1; all four decided; position, loss and cap carried from 2026-11-02; stop flag off; not-flat flag off. Arming sets the cap at Alpaca at 8:25 AM Central.
+- **v5 runs Tuesday unchanged.** No code changed, nothing deployed or restarted in this close-out.
+- **After Tuesday's close:** review Tuesday's session (database, Fly logs, Discord), then fix round 6's start-up finding in `b764741` (a failing start-up migration must not leave commands unread while arming and trading run) and run a fresh review round before any deploy.

@@ -160,11 +160,11 @@ The full record of each run lives in `runs/`. This table is the index you read f
 
 As of 2026-11-02 (night), after build C2 round 6 and the deploy of release v5:
 
-1. **Michael approves Tuesday's limits** in `commands` (the 8:51 PM Central post: `approve`, or change any line) before the "Armed" message at 8:25 AM Central. Undecided at the open means no trading Tuesday. Replies to the 4:10 PM post do not count.
+1. Done (close-out, about 10 PM Central): Tuesday's limits are approved (position 2000, loss 500, trades 100 a minute, cap 1). Michael rotated the Fly token and revoked the old one; the new one works. v5 runs Tuesday unchanged. After Tuesday's close: review the session, fix round 6's start-up finding in `b764741`, then a fresh review round before any deploy.
 2. Tuesday runs on release v5 (the round 5 code, `ac4a576`): trades per minute, the busy placeholder with bracket entries, the checked sell path and rebuilt close-out, the loss stop on its own schedule, the unsaved-stop memory and the Discord-read catch. It still has the three round 5 findings (no query time limit or watchdog; the loss stop sale waits on the flag write; a failed day read switches the loss stop off).
 3. **After Tuesday's close, Michael decides on the round 6 code** (`b764741`): fix the migration finding (arming and prices wait for the migration, or commands keep being read) and the cheap non-blocking notes, then a review round, then deploy. See the C2 log, "Review round 6".
 4. First C2 trading day (Tuesday): read `status=open&nested=true` once while a bracket position is held and record whether Alpaca lists the filled entry with its live exits, and whether `qty_available` appears on a position. Also whether Alpaca's portfolio history shows the current minute during the session (the round 6 restart check relies on it).
-5. Michael may rotate the Fly token (part of it was echoed into the builder's terminal once).
+5. Fly token: rotated by Michael on 2026-11-02, old one revoked (closed).
 6. Hard stops stay: nothing toward real money, the 100 orders a minute ceiling, no new paid plan, nothing touching stack D.
 
 Earlier entry, superseded by the list above:
