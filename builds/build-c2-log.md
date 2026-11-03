@@ -746,3 +746,76 @@ Individual symbols ranged from 0.04 percent (SHOP, MRVL) to 1.0 percent (AXSM). 
 All of these are paper dollars, and estimates from one day's 91 trips. The load day itself is the measurement.
 
 **Michael's choice (2026-11-03): option A.** A live list of 30 symbols priced well under 75 dollars, positions at most 75 dollars, today's 500 dollar loss stop unchanged. Expected cost about 180 to 360 dollars, central about 225, plus about 2 dollars of fees (paper). The detailed proposal (how the placeholder churns and its hold times, the screen change that picks the cheap list, what is measured, and the result that would show the 200-a-minute budget does not hold) goes to Michael after Wednesday's session, before any code.
+
+## Load mode proposal (2026-11-03, for Michael's approval; no code until he approves)
+
+Michael's change of plan: Wednesday 2026-11-04 is the load day, built as a **load mode** that is off by default and switched on by a command he approves with the evening limits. Normal days stay unchanged. Option A: a cheap-symbol screen only in load mode, a small position size, the 500 dollar loss stop unchanged, every entry keeps its bracket stop. Round 9 deploys after 3:00 PM on its own. If load mode passes review, it deploys as a separate release no later than 7:30 AM Wednesday.
+
+**What limits throughput today (read from the code):** the gate allows one position per symbol at a time. After a symbol's exit fills, its entry row stays "working" until the order sync marks it closed, and that sync runs every 30 seconds. With 30 symbols that caps entries at about 30 × 2 = 60 a minute at best, before hold times. Reaching 100 a minute needs each symbol to cycle (entry, exit, noticed) in about 18 seconds or less.
+
+### 1. The switch
+- **New command `load on` / `load off`**, for the next trading day's record. It is shown as a fifth line in the evening request and in the morning review: "mode: normal" or "mode: LOAD DAY (8:45 to 9:00 AM)".
+- **Default normal every day; never carried forward.** It is decided with the other limits (`approve` covers it).
+- **Up to "Armed" either way; after "Armed" only `load off`** (the tighter direction).
+- The "Armed" message and `status` state the mode.
+- **When the load release starts tonight**, Wednesday's request will already have been posted (at about 3:10 PM). The release posts a one-time note in `commands` showing Wednesday's mode as "normal (type `load on` to make it a load day)". That note is the "limits post shows the switch" confirmation.
+- Stored in the day record's existing `limits` JSON (no schema change). Normal days read it as off.
+
+### 2. The screen (load mode only)
+Same universe (no ETFs, no test issues).
+- Price from 5 to 35 dollars: well under 75, so at least 2 shares, and 1 cent stays at most 0.2 percent of the price.
+- Average daily dollar volume of at least 25 million.
+- **Ranked by average daily share volume** (most shares traded means the most prints on the free feed), instead of today's unusual-volume rank.
+- **30 names**, the free feed's cap; normal days use 20.
+- Runs at the usual morning screen time.
+
+### 3. Churn and hold times (load mode only)
+- **Entries only from 8:45 to 9:00 AM Central** (15 to 30 minutes after the open, after the opening rush). No new entries after 9:00. Positions left close through their own brackets, or at the 2:55 close-out.
+- **Brackets: take-profit 3 cents above, stop 4 cents below the signal price.** Normal days use 0.25 and 0.4 percent. This is a short hold on purpose: on a 5 to 35 dollar stock 3 to 4 cents usually comes within seconds to a minute. Every entry still carries both exits at Alpaca in the same order.
+- **Strategy cooldown 5 seconds per symbol** (15 on normal days). The signal rule is unchanged otherwise.
+- **The order sync runs every 10 seconds in load mode** (30 on normal days), so a closed entry frees its symbol within about 10 seconds. This touches the missing-exit check's timing, which is why it is named here. It is the "faster order check" from Next Steps, limited to load mode.
+- Expected per symbol: fill about 1 second, hold H, noticed within 5 to 10 seconds. 100 a minute needs H at most about 10 seconds on average across 30 names. **A guess:** it depends on how often the free feed prints these names and how fast they move 3 to 4 cents. If holds run longer, the day tops out below 100, and that is measured, not hidden.
+
+### 4. Position size and why
+- **At most 75 dollars an entry, enforced in code in load mode** (the lower of the approved position limit and 75), so a forgotten position limit cannot make a load day expensive.
+- With whole shares from 5 to 35 dollars, the average position is about 64 dollars.
+- Why 75: Tuesday's trading cost (spread, slippage and the stale free price) was 0.21 percent of round-trip value for names under 75 dollars, and 0.27 percent overall. At 0.2 to 0.4 percent, 1,500 entries of about 64 dollars (about 96,000 dollars bought) cost 190 to 385 dollars. That stays under the unchanged 500 dollar loss stop.
+- 30 open positions of about 64 dollars is about 1,900 dollars of exposure, far inside borrowing cap 1.
+
+### 5. Expected cost (paper dollars)
+- Trading cost about 190 to 385 dollars (central about 240).
+- Fees about 2 dollars: SEC fee on about 96,000 dollars of sales about 1.98, CAT a few cents, FINRA TAF paused.
+- Price drift on about 1,900 dollars over 15 minutes: plus or minus tens of dollars.
+- **Worst case is bounded by the 500 dollar loss stop**, plus an overshoot like Tuesday's (about 20 to 35 dollars).
+
+### 6. Requests a minute at 100 entries (load mode)
+- Entries: 100 (one request each, bracket included).
+- Account and positions every 5 seconds: 24.
+- Settings: 2.
+- Order sync every 10 seconds: about 12 (2 a run; more if a page passes 500 orders).
+- Loss stop checks: 12.
+- **Total about 150 of 200.** The governor still holds entries at the 80-request reserve, and sells and cancels can still use the reserve.
+
+### 7. What is measured (written to the log Wednesday after the close)
+- **Entries a minute**, from the orders table, for each minute of the window.
+- **Requests a minute and the lowest remaining stock**, from the governor's stats. Proposed: during the window these are written **every minute** instead of every 5 minutes (logging only), and the governor counts Alpaca rate-limit answers (logging only).
+- Governor refusals ("holding back for safety"), and refusals by reason, to show what limited throughput: one per symbol, the governor, or an Alpaca refusal of the bracket.
+- **Decision to acceptance:** typical, 95th percentile and slowest, against Tuesday's 170, 336 and 431 ms.
+- **Fees:** the estimate, and Alpaca's posted REG and CAT activity that evening.
+- **Hold times** (entry fill to exit fill) and win/loss split, with the same cost split as Tuesday.
+- **The close-out:** flat at 2:55, no oversell, no false "no protective stop" alarms.
+
+### 8. Pass, fail, inconclusive
+- **The 200-a-minute budget does NOT hold if:** Alpaca answers "too many requests" (429) even once; or the remaining stock falls below 80 because of entries and routine work (the governor's reserve was breached, not just reached); or any sell, cancel or close-out request is delayed by a rate limit.
+- **It holds if:** at least about 90 entries a minute for at least 10 of the 15 minutes, 0 rate-limit answers, lowest stock at or above 80, and a flat close-out.
+- **Inconclusive if** entries never get near 90 a minute (limited by the symbols, the free feed or hold times). Then the log reports the highest rate reached and its request count, and says the 100 level was not tested.
+
+### Code changes this needs (money-touching, all only in load mode; none on normal days)
+1. The `load` command, the mode in the day record, and the request, morning, Armed, status and one-time note wording.
+2. The load-mode screen.
+3. The load-mode strategy constants (cooldown, 3 and 4 cent brackets).
+4. The load-mode entry cap (75 dollars) and entry window (8:45 to 9:00) in the gate.
+5. The load-mode sync interval (10 seconds).
+6. Logging only: per-minute governor stats during the window and a 429 counter.
+
+Each gets a test that fails without it, plus a test that a normal day is unchanged. Then the secret scan, the full suite and one build-reviewer round. Nothing else changes.
