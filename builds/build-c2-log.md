@@ -606,3 +606,40 @@ Test helpers: the rig can run on the simulator's clock, and the simulator record
 | fee summary or comment reverted | fee wording |
 
 The gate's two command checks are duplicates by design (as with the stop flag), so removing only one changes nothing.
+
+## Review round 8 (2026-11-03, during market hours): CHANGES REQUIRED. Last round allowed, so nothing is deployed; release v5 stays.
+
+On `ac4a576..5d0fbb5`, from the repo and the local suite only (no vendor calls while the market was open). Checks 2, 7, 8 and 10 clean. Full suite 321 pass, type check clean.
+
+**Confirmed working:**
+- Round 7's blocking finding is fixed: the retry stays inside 60 a minute and the 80-request reserve, and Michael's 40-position test passes (0 rate-limit answers, flat close-out).
+- The 5 second check.
+- The 2-minute commands rule: it blocks only entries. The reviewer found no bypass: a restart, a failing cursor read, a failing start-up check and a stuck pass are all covered. The builder's extra rule (after a start, entries wait for the first read that works) matches Michael's intent and closes v5's gap.
+- The fee wording.
+- No path found where the retry, the close-out, `flatten` or the missing-exit check oversell. This rests on reading the code: every sell goes through the one `SellGate` queue, and the liquidator never cancels a `cyrus-x-` sell.
+- The one-round first sale raises no false alarm in the normal case.
+- The test helpers do not make a test pass by construction.
+- 17 of the builder's 19 fix removals were spot-checked: each fails its test.
+
+**Blocking finding (check 6, protection at the broker), in the stand-aside I added outside the literal scope:**
+- **The fault:** after a loss stop and then a `resume`, the missing-exit check stays off for the rest of the day. `worker.ts` `lossStopInForce` returns true whenever this process's `lossMemory.firedDate` is today, and nothing clears it on `resume`. The retry does not cover the gap either, because it runs only while the stop flag is on.
+- **Reproduced:** the loss stop fires; AAA's sale is refused and its exits are already cancelled; equity recovers; Michael sends `resume`. At `5d0fbb5` AAA sits with no protective order until the 2:55 close-out, with no alert. At `ac4a576` (v5) and `15fc1bd` the missing-exit check sells it within about a minute.
+- **Money at risk:** stays inside the approved loss limit, because the loss stop still checks every 5 seconds. But a position without a stop for hours is a regression from production, outside what Michael approved.
+- **Suggested fix:** use `firedDate` only when the stop flag cannot be read, otherwise require the flag on with a "daily loss stop" reason (or clear `firedDate` when a `resume` is saved). Evaluate it inside the `protect` closure before each sale, not once per sync. Add a test: loss stop, refused sale, recovery, `resume`, then the bare position is sold by the missing-exit check.
+
+**Non-blocking notes (logged, not changed):**
+- `lossStopped` is read once per sync, so a sync already running when the stop fires can still start one 3-round liquidation per position (bounded; the fix above covers it).
+- **The documented 429 back-off never fires for sells in production.** The real client retries a sell's 429 internally (a probe: 9 POSTs and 3 GETs, then status 502), so the retry never sees `httpStatus` 429. One refused sell can cost up to about 13 requests against the 1 or 3 charged, and holds the shared sell queue for about 14 seconds. What really stops the retry is the governor: a 429 empties its budget, so the reserve check fails for about 25 seconds. The fake brokers throw a bare 429, so the back-off test covers a path production does not take.
+- **Test gaps:**
+  - Removing the `isLiquidating()` guard in `retryLossStopSale` fails no test.
+  - The gate's second command check has no test of its own.
+  - The budget and per-check tests compare against the imported constants.
+- The first-sale charge can be under-counted when older requests leave the 60 second window during the sale. The reserve still governs.
+- "Sent a sell for every position" can appear when only part of a symbol's shares were free.
+- Round 6 and round 7 notes are otherwise unchanged. The watchdog wording is now true from 2 minutes after the last read.
+
+**Re-walked audit table at `5d0fbb5`:**
+- Safe: every row of the round 5 audit; the new retry (on requests); the new 2-minute rule; the first sale.
+- **Not safe:** `lossStopInForce`, and the missing-exit check after a loss stop then `resume` (the blocking finding).
+
+**State:** v5 (`ac4a576`) keeps running, still without the round 5, 6, 7 or 8 fixes. The round 8 code is pushed at `5d0fbb5`, not deployed. A round 9 would need Michael's approval: the fix above is small. Alternatively, drop the stand-aside, which would leave the 40-position test exposed to the missing-exit check's own load.
