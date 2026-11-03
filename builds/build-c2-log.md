@@ -1011,3 +1011,22 @@ Both deploys were made outside market hours. Paper only.
 3. Approve Wednesday's limits (for the load day at least `trades 100`; `loss 500` and `cap 1` stay; the position limit does not matter, since the code holds every entry to 75 dollars).
 
 If nothing is approved by the open, there is no trading Wednesday.
+
+## Michael's confirmations (2026-11-03, evening)
+
+**"That morning" for the load-day cap, confirmed by Michael:** it means from the 7:45 AM Central morning screen.
+- A `load off` before 7:45 AM makes the day fully normal: the normal list, normal position sizes, sync every 30 seconds.
+- From 7:45 AM on, `load off` ends the load window but keeps the 75 dollar cap (and the 10 second sync) all day.
+
+This is what the deployed code (release v7, `morning.ts` `decideLoad`) does.
+
+**FINRA Trading Activity Fee (TAF) pause: first-hand source found; the fee estimate stays as it is (TAF counted as 0 for sales from 2026-10-01 to 2026-12-31).**
+- **Source of record:** the SEC's notice in the Federal Register, official GPO copy. "Self-Regulatory Organizations; Financial Industry Regulatory Authority, Inc.; Notice of Filing and Immediate Effectiveness of a Proposed Rule Change to Temporarily Pause Assessment of the Trading Activity Fee", Release No. 34-106409, File No. SR-FINRA-2026-021, 91 FR 60435 to 60438 (Volume 91, Number 183), published Wednesday 2026-09-23. https://www.govinfo.gov/content/pkg/FR-2026-09-23/html/2026-19392.htm (read 2026-11-03).
+- **What it says:**
+  - FINRA filed the change on September 15, 2026, effective on filing under Section 19(b)(3)(A)(ii) and Rule 19b-4(f)(2) ("The effective date and the implementation date will be the date of filing").
+  - It sets the TAF rates in Section 1 of Schedule A to the FINRA By-Laws to $0.00 for transactions "October 1, 2026 through December 31, 2026" (all TAF rates, not only the per-share equity rate).
+  - Firms still report monthly volumes.
+  - TAF resumes "on January 1, 2027", invoiced from February 2027 for January's transactions.
+- **Also read the same day:** FINRA's rule filing page, https://www.finra.org/rules-guidance/rule-filings/sr-finra-2026-021 (title "Proposed Rule Change to Temporarily Pause Assessment of the Trading Activity Fee", linking the Federal Register notice), and the filing's text, https://www.finra.org/sites/default/files/2026-09/SR-FINRA-2026-021.pdf. The PDF was downloaded but not read: no PDF text tool on this machine. The notice above is the source of record.
+- **Consistent with what Alpaca charged:** Monday 2026-11-02's posted fees were a REG fee (0.56) and a CAT fee (0.01) only, with no TAF line, although the day had sales.
+- **Code:** `fees.ts` `tafActive` already treats sales from 2026-10-01 through 2026-12-31 as paused and charges TAF again from 2027-01-01. No change needed. The comment there cites the same filing number.
