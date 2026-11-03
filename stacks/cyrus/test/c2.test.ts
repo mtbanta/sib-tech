@@ -585,3 +585,63 @@ test("the daily loss stop still sells when the stop flag cannot be saved", async
   assert.equal(p.broker.positions.length, 0, "sold");
   assert.ok(said.some((t) => t.includes("could not be saved") && t.includes("Selling anyway")));
 });
+
+// ---------- review round 4 ----------
+test("a stop that could not be saved stays believed until a later write succeeds, so no entry is sent after the loss stop fires", async () => {
+  let now = 1_000_000;
+  const inner = new MemoryStore();
+  const store = new CachingStore(inner, () => now);
+  const realSet = inner.setControl.bind(inner);
+  inner.setControl = async (k: string, v: unknown) => { if (k === CONTROL_STOP && inner.failing) throw new Error("db down (test)"); return realSet(k, v); };
+  inner.failing = false;
+  await store.getControl(CONTROL_STOP);
+  const flaky = { fail: true };
+  inner.setControl = async (k: string, v: unknown) => { if (k === CONTROL_STOP && flaky.fail) throw new Error("db down (test)"); return realSet(k, v); };
+  await assert.rejects(store.setControl(CONTROL_STOP, { on: true, at: "t", reason: "daily loss stop" }));
+  now += 60_000; // a minute later the database is back and still says nothing
+  flaky.fail = false;
+  assert.equal(((await store.getControl<StopFlag>(CONTROL_STOP)))?.on, true, "still believed long after the short cache lifetime");
+  await store.setControl(CONTROL_STOP, { on: false, at: "t", reason: "owner command (resume)" }); // Michael's resume is a successful write
+  now += 5_000;
+  assert.equal(((await store.getControl<StopFlag>(CONTROL_STOP)))?.on, false, "and resume clears it");
+});
+
+test("the loss stop and the gate: after the stop fires with the flag unsaved and the sale failing, a recovered equity does not let an entry through", async () => {
+  const mem = new MemoryStore();
+  const store = new CachingStore(mem);
+  const p = await partialSetup();
+  await store.createDay((await p.store.getDay(D))!);
+  await store.updateDay(D, { dayStartEquity: 20000 });
+  p.broker.positions = [{ symbol: "AAA", qty: 20, marketValue: 1000, avgEntryPrice: 50, unrealizedPl: 0 }];
+  p.broker.account = { ...p.broker.account, equity: 19500 };
+  p.broker.onSell = async () => { throw new Error("sell refused (test)"); };
+  const realSet = mem.setControl.bind(mem);
+  let dbDown = true;
+  mem.setControl = async (k: string, v: unknown) => { if (dbDown && k === CONTROL_STOP) throw new Error("db down (test)"); return realSet(k, v); };
+  const deps = { ...p.deps, store };
+  assert.equal(await enforceLossR2(deps, (await store.getDay(D))!), true);
+  dbDown = false;
+  p.broker.account = { ...p.broker.account, equity: 19990 }; // recovered above the loss line (the position was never sold)
+  assert.equal(await enforceLossR2(deps, (await store.getDay(D))!), false);
+  const gate = new GateR2({ broker: p.broker, store, view: new ViewR2(p.broker, () => p.now.getTime() + 120_000), governor: new Governor(() => p.now.getTime() + 120_000), now: () => new Date(p.now.getTime() + 120_000), say: async () => true, note: () => undefined });
+  const r = await gate.enter({ symbol: "BBB", price: 20, tradeTime: new Date(p.now.getTime() + 118_000), stopPrice: 19.7, takeProfitPrice: 20.1 });
+  assert.equal(r.status, "refused");
+  assert.match((r as any).reason, /stop flag is set/);
+});
+
+test("a failed read of Discord's commands does not stop the pass: the daily loss stop still fires, and Michael is told", async () => {
+  const r = rig();
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("loss 200\napprove", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  r.broker.clock = { ...r.broker.clock, isOpen: true };
+  await r.at("14:25:00");
+  r.broker.positions = [{ symbol: "AAA", qty: 20, marketValue: 1000, avgEntryPrice: 50, unrealizedPl: 0 }];
+  await r.store.insertOrder({ clientOrderId: "cyrus-20261102-AAA-1", tradeDate: D, symbol: "AAA", qty: 20, referencePrice: 50, stopPrice: 49, status: "filled", alpacaOrderId: "x", filledQty: 20, filledAvgPrice: 50, note: null, createdAt: "2026-11-02T14:40:00.000Z" });
+  r.bot.commandMessagesAfter = async () => { throw new Error("Discord answered 503 (test)"); };
+  r.broker.account = { ...r.broker.account, equity: 19500 };
+  await r.at("14:50:00");
+  await r.at("14:51:00");
+  assert.equal(((await r.store.getControl<StopFlag>(CONTROL_STOP)))?.on, true, "the loss stop fired although commands could not be read");
+  assert.ok(r.said("alerts").some((t) => t.includes("could not read your commands")));
+});

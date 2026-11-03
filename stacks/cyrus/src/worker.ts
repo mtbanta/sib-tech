@@ -107,6 +107,7 @@ export class Worker {
   private lastStatsEvent = 0;
   private lastViewError = 0;
   private lastLossCheckAlert = 0;
+  private lastPollAlert = 0;
 
   constructor(deps: WorkerDeps) {
     this.d = deps;
@@ -353,8 +354,19 @@ export class Worker {
       this.migrated = true;
       if (reset.length > 0) this.d.log?.("info", "future_days_reset", { days: reset });
     }
-    // Commands first, at any hour: a stop must never wait behind anything else.
-    await this.commands.poll();
+    // Commands first, at any hour: a stop must never wait behind anything else. A failed read of Discord (or of the database for the
+    // command cursor) must not stop the rest of the pass, least of all the daily loss stop: it is reported, rate limited, and the
+    // pass goes on.
+    try {
+      await this.commands.poll();
+    } catch (err) {
+      this.lastTickError = `commands: ${(err as Error).message.slice(0, 120)}`;
+      this.d.log?.("error", "command_poll_failed", { error: (err as Error).message.slice(0, 200) });
+      if (now.getTime() - this.lastPollAlert >= 10 * 60_000) {
+        this.lastPollAlert = now.getTime();
+        void this.say("alerts", `I could not read your commands (${(err as Error).message.slice(0, 100)}). Trading checks, including the daily loss stop, continue; I keep trying.`).catch(() => undefined);
+      }
+    }
 
     const date = etDate(now);
     const today = await ensureDay({ store: this.d.store, broker: this.d.broker, now: this.d.now }, date);

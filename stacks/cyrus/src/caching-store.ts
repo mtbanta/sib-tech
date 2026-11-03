@@ -18,6 +18,9 @@ export class CachingStore implements Store {
   private readonly controlTtlMs: number;
   private readonly dayTtlMs: number;
   private controls = new Map<string, { value: unknown; at: number }>();
+  // A stop that could not be saved to the database stays believed here, with no expiry, until a later write to that key succeeds
+  // (Michael's own `resume` is such a write). An unsaved stop must not fade after a moment and let entries through.
+  private unsavedStop: unknown = null;
   private days = new Map<string, { value: DayRecord | null; at: number }>();
   private orders = new Map<string, Map<string, OrderRecord>>();
   private gen = new Map<string, number>();
@@ -36,6 +39,7 @@ export class CachingStore implements Store {
   }
 
   async getControl<T = unknown>(key: string): Promise<T | null> {
+    if (key === CONTROL_STOP && this.unsavedStop) return structuredClone(this.unsavedStop) as T | null;
     if (FAST_KEYS.has(key)) {
       const hit = this.controls.get(key);
       if (hit && this.now() - hit.at < this.controlTtlMs) return structuredClone(hit.value) as T | null;
@@ -56,8 +60,17 @@ export class CachingStore implements Store {
     const k = `c:${key}`;
     this.bump(k);
     // A stop is believed at once, even if the database write then fails: the safe direction.
-    if (key === CONTROL_STOP && (value as { on?: boolean } | null)?.on === true) this.controls.set(key, { value: structuredClone(value), at: this.now() });
-    await this.inner.setControl(key, value);
+    const isStopOn = key === CONTROL_STOP && (value as { on?: boolean } | null)?.on === true;
+    if (isStopOn) {
+      this.controls.set(key, { value: structuredClone(value), at: this.now() });
+      this.unsavedStop = structuredClone(value);
+    }
+    try {
+      await this.inner.setControl(key, value);
+    } catch (err) {
+      throw err; // a failed write leaves memory as it was (a stop that was set stays set)
+    }
+    if (key === CONTROL_STOP) this.unsavedStop = null; // saved (on or off): the database is the truth again
     if (FAST_KEYS.has(key)) this.controls.set(key, { value: structuredClone(value), at: this.now() });
     this.bump(k);
   }
