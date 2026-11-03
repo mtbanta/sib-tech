@@ -643,3 +643,20 @@ On `ac4a576..5d0fbb5`, from the repo and the local suite only (no vendor calls w
 - **Not safe:** `lossStopInForce`, and the missing-exit check after a loss stop then `resume` (the blocking finding).
 
 **State:** v5 (`ac4a576`) keeps running, still without the round 5, 6, 7 or 8 fixes. The round 8 code is pushed at `5d0fbb5`, not deployed. A round 9 would need Michael's approval: the fix above is small. Alternatively, drop the stand-aside, which would leave the 40-position test exposed to the missing-exit check's own load.
+
+## Michael's decision after round 8 (2026-11-03, late morning)
+
+Approved: review round 9, scoped only to round 8's blocking finding. Tie the pause on the unprotected-position check to the stop flag itself, so `resume` ends it. One test for exactly that sequence (loss stop fires, a sale fails, `resume`, the unprotected position is sold with an alert), failing without the fix. No other changes. **New standing rule, added to CLAUDE.md:** no change to money-touching code beyond what Michael asked unless the builder asks him first. Deploy only after 3:00 PM Central and only if round 9 passes; if it fails, deploy nothing, leave v5 running, log the findings and stop.
+
+## Round 9 change (built 2026-11-03, during market hours; code only, nothing deployed)
+
+- **The fix (`worker.ts`, `lossStopInForce`, the only code change):** the stop flag decides. The missing-exit check stands aside only while the flag is on with a "daily loss stop" reason, so a `resume` ends the pause. This process's memory that the loss stop fired today counts only when the flag cannot be read, as in `enforceDailyLoss`.
+- **Not changed, on purpose (no other changes):** round 8's non-blocking note that the flag is read once per sync rather than before each sale. One sync already running when the loss stop fires can still start one liquidation per position, bounded to that sync. A change there would touch `syncOrders` (money-touching code) and needs Michael's approval first.
+- **Test:** `test/round9.test.ts`, 1 test, the exact sequence:
+  1. 20 AAA held with its stop at Alpaca.
+  2. The loss stop fires; its sale cancels AAA's exits and Alpaca refuses the sell.
+  3. Equity recovers and sells are accepted again.
+  4. Michael sends `resume`.
+  5. Within the next missing-exit check AAA is sold, with the alert "AAA had no live protective stop, so I sold it."
+  - **With the fix taken out (the round 8 code), it fails:** AAA is still held.
+- Full suite **322 pass**, type check clean. The 40-position rehearsal is unchanged: busiest minute 172, 0 rate-limit answers, flat.

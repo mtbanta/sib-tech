@@ -328,11 +328,17 @@ export class Worker {
       .finally(() => void (this.retryingStop = false));
   }
 
-  // True when the daily loss stop has fired today (remembered in this process, or the saved stop flag says so). An owner's
-  // plain `stop` does not count: positions then keep their exits, and the missing-exit check must keep watching them.
+  // True while the stop flag is on for the daily loss stop. The flag itself decides, so Michael's `resume` ends it and the
+  // missing-exit check watches again (round 8 review). Only if the flag cannot be read does this process's memory that the
+  // loss stop fired today count, as in enforceDailyLoss. An owner's plain `stop` does not count: positions then keep their
+  // exits, and the missing-exit check must keep watching them.
   private async lossStopInForce(date: string): Promise<boolean> {
-    if (this.lossMemory.firedDate === date) return true;
-    const flag = await this.d.store.getControl<StopFlag>(CONTROL_STOP).catch(() => null);
+    let flag: StopFlag | null;
+    try {
+      flag = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
+    } catch {
+      return this.lossMemory.firedDate === date;
+    }
     return !!flag?.on && flag.reason.startsWith("daily loss stop");
   }
 
