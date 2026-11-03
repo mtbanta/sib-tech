@@ -11,7 +11,7 @@ export const D = "2026-11-02";
 export const z = (t: string) => new Date(t.includes("T") ? t : `${D}T${t}Z`);
 export const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setImmediate(r)); };
 
-export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryStore>(opts: { store?: S; bot?: FakeBot; broker?: B; sleep?: (ms: number) => Promise<void>; governor?: Governor } = {}) {
+export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryStore>(opts: { store?: S; bot?: FakeBot; broker?: B; sleep?: (ms: number) => Promise<void>; governor?: Governor; liveList?: string[] } = {}) {
   const store = (opts.store ?? new MemoryStore()) as S;
   const broker = (opts.broker ?? new FakeBroker()) as B;
   const bot = opts.bot ?? new FakeBot();
@@ -26,7 +26,7 @@ export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryS
     settings, broker, store, bot, governor,
     now: () => now,
     ping: async (k) => (pings.push(k), true),
-    buildLiveList: async () => (screens++, { symbols: ["AAA", "BBB"], names: { AAA: "Alpha Corp", BBB: "Beta" } }),
+    buildLiveList: async () => (screens++, opts.liveList ? { symbols: opts.liveList, names: {} as Record<string, string> } : { symbols: ["AAA", "BBB"], names: { AAA: "Alpha Corp", BBB: "Beta" } as Record<string, string> }),
     makeStream: (_symbols, cb): StreamLike => {
       onTrade = cb;
       return { start: () => void streamStarts++, stop: () => void streamStops++, status: () => "live" };

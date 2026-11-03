@@ -407,12 +407,18 @@ export class Worker {
     if (inSession && now.getTime() - this.lastSync >= SYNC_EVERY_MS) {
       this.lastSync = now.getTime();
       const risk = this.riskDeps();
-      // While a close-out is running, and from the close-out time on, the missing-exit check is switched off and
-      // nothing is sold here: the close-out alone flattens the account.
-      const protect = !this.closingOut && !this.inflight.has("closeout") && !this.inflight.has("carried") && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE);
-      await syncOrders(risk, current, { protect });
-      await enforceDailyLoss(risk, current);
-      await sweepEntriesWhileStopped(risk);
+      const dayNow = current;
+      const closeAt = day.closeAt;
+      // Runs in the background: a sale that takes a while (a liquidation waits for cancels) must never hold up reading
+      // Michael's next command. While a close-out is running, and from the close-out time on, the missing-exit check is
+      // switched off and nothing is sold here: the close-out alone flattens the account. It is asked again just before
+      // each sale, so a close-out that starts meanwhile switches it off.
+      const protect = () => !this.closingOut && !this.inflight.has("closeout") && !this.inflight.has("carried") && this.d.now() < addMinutes(closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE);
+      this.background("risk", async () => {
+        await syncOrders(risk, dayNow, { protect });
+        await enforceDailyLoss(risk, dayNow);
+        await sweepEntriesWhileStopped(risk);
+      });
     }
     if (inSession || (day.closeAt && now < addMinutes(day.closeAt, 10))) {
       await this.flushDigest();

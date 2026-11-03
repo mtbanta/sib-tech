@@ -125,7 +125,6 @@ test("flatten sets the stop flag and sells everything", async () => {
   assert.equal((await s.store.getControl<StopFlag>(CONTROL_STOP))?.on, true);
   assert.equal(s.broker.count("submitSell"), 1);
   assert.equal(s.broker.positions.length, 0);
-  assert.equal(s.broker.count("cancelAllOrders"), 1);
 });
 
 test("approve, with an overrule, before the open: approved only when all four are decided", async () => {

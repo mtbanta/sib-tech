@@ -64,7 +64,11 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
 
   const res = await d.liquidator.flatten({ reason: "close-out", tradeDate });
   await d.store.addEvent(res.flat ? "info" : "error", "closeout_result", { flat: res.flat, remaining: res.remaining, sold: res.sold, errors: res.errors.slice(0, 8) }).catch(() => undefined);
-  if (res.flat) return finishFlat(d);
+  if (res.flat) {
+    // Flat, but something went wrong on the way (a cancel or a sell was refused and had to be repeated): say so.
+    if (alert && res.errors.length > 0) await d.say("alerts", `Michael: the close-out had trouble but recovered and the account is flat. First problem: ${res.errors[0]!.slice(0, 200)}`);
+    return finishFlat(d);
+  }
   if (alert) {
     const why = res.errors.length > 0 ? ` Last problem: ${res.errors[res.errors.length - 1]}` : "";
     await d.say("alerts", `**Michael: NOT FLAT after the close-out: ${res.remaining.join(", ")}.** Please check Alpaca now and close by hand.${why}`.slice(0, 1800), { mentionOwner: true });

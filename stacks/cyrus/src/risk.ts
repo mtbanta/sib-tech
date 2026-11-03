@@ -28,7 +28,8 @@ export interface SyncOptions {
   // False while a close-out is running or after the close-out time: the missing-exit check is skipped and NO sell is
   // placed. The close-out alone flattens the account. (On 2026-11-02 this check sold five positions the close-out had
   // just un-protected on purpose, and raised five false alarms.)
-  protect: boolean;
+  // A function is asked again just before each sale, so a close-out that starts while the sync is running switches it off.
+  protect: boolean | (() => boolean);
 }
 
 // Updates stored entries from Alpaca by looking only at orders newer than the oldest entry still being watched
@@ -72,7 +73,8 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       await d.store.updateOrder(s.clientOrderId, { closedAt: d.now().toISOString() });
       continue;
     }
-    if (!opts.protect || latestPerSymbol.get(s.symbol)?.clientOrderId !== s.clientOrderId || sellingSymbols.has(s.symbol)) continue;
+    const protectNow = typeof opts.protect === "function" ? opts.protect() : opts.protect;
+    if (!protectNow || latestPerSymbol.get(s.symbol)?.clientOrderId !== s.clientOrderId || sellingSymbols.has(s.symbol)) continue;
     if (!hasLiveExit(o)) {
       unprotected.push(s.symbol);
       d.log?.("unprotected_position", { symbol: s.symbol });

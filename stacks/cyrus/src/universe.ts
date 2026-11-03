@@ -22,6 +22,8 @@ function keep(symbol: string, name: string, test: string, etf: string): boolean 
 // form (Inc, Corp, Corporation, Company, Ltd, Holdings and so on), so a live list reads like "Intel (INTC)".
 export function cleanCompanyName(raw: string): string {
   let name = raw.split(" - ")[0]!.replace(/\s+/g, " ").trim();
+  // The NYSE file has no " - ": "Hormel Foods Corporation Common Stock". Cut the share description off the end.
+  name = name.replace(/\s+((Class [A-Z]|Series [A-Z0-9]+)\s+)?(Common Stock|Ordinary Shares?|Common Shares?|Capital Stock|American Depositary (Shares|Receipts)|Depositary Shares).*$/i, "").trim() || name;
   const suffix = /[,\s]+(inc\.?|incorporated|corp\.?|corporation|company|co\.?|ltd\.?|limited|plc|n\.?v\.?|s\.?a\.?|holdings?|group|llc|l\.?p\.?|the)$/i;
   for (let i = 0; i < 3 && suffix.test(name) && name.replace(suffix, "").length > 1; i++) name = name.replace(suffix, "").replace(/,$/, "").trim();
   return name.replace(/\s+(and|&)$/i, "").trim();

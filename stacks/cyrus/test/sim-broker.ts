@@ -30,6 +30,7 @@ export class SimBroker implements FullBroker {
   orders: Order[] = [];
   calendar: CalendarDay[] = [{ date: "2026-11-02", open: "09:30", close: "16:00" }];
   requests = 0;
+  lowestTokens = 200;
   rejected429 = 0;
   // Fault injection.
   cancelAllFailsAfterCancelling = false;
@@ -41,6 +42,9 @@ export class SimBroker implements FullBroker {
   onRate: ((remaining: number) => void) | null = null;
   private positionsMap = new Map<string, { qty: number; avg: number }>();
   private n = 0;
+  constructor(startMs = 0) {
+    this.simMs = startMs;
+  }
   private cancels: Pending[] = [];
   private sellFills: Array<{ id: string; at: number }> = [];
 
@@ -62,20 +66,30 @@ export class SimBroker implements FullBroker {
       }
     }
   }
+  advanceTo(ms: number): void {
+    if (ms > this.simMs) this.advance(ms - this.simMs);
+  }
   sleep = async (ms: number): Promise<void> => this.advance(ms);
 
   private refill(ms: number) {
     this.tokens = Math.min(200, this.tokens + (ms * 200) / 60_000);
   }
-  private spend(counted = true) {
-    this.requests++;
-    if (!this.bucketOn || !counted) return;
-    if (this.tokens < 1) {
+  // One request against the bucket. `kind` copies what the real client does on a 429: reads retry 3 times with a
+  // growing pause, safety writes (sells, cancels) wait and retry up to 8 times, and anything else fails at once.
+  private spend(kind: "read" | "safety" | "plain" = "read") {
+    const attempts = kind === "plain" ? 1 : kind === "read" ? 3 : 8;
+    for (let i = 0; i < attempts; i++) {
+      this.requests++;
+      if (!this.bucketOn || this.tokens >= 1) {
+        if (this.bucketOn) this.tokens -= 1;
+        this.lowestTokens = Math.min(this.lowestTokens, this.tokens);
+        this.onRate?.(Math.floor(this.tokens));
+        return;
+      }
       this.rejected429++;
-      throw new AlpacaError("rate limit exceeded", 429);
+      if (i < attempts - 1) this.advance(kind === "read" ? 500 * 2 ** i : Math.min(2000, 250 * 2 ** i));
     }
-    this.tokens -= 1;
-    this.onRate?.(Math.floor(this.tokens));
+    throw new AlpacaError("rate limit exceeded", 429);
   }
 
   // ---- state helpers ----
@@ -213,7 +227,7 @@ export class SimBroker implements FullBroker {
     return structuredClone(this.orders.find((o) => o.clientOrderId === id) ?? null);
   }
   async submitEntry(e: EntryOrder): Promise<Order> {
-    this.spend();
+    this.spend("plain");
     if (this.orders.some((o) => o.clientOrderId === e.clientOrderId)) throw new AlpacaError("client_order_id must be unique", 422);
     const created = new Date(this.simMs + this.n).toISOString();
     const parent = order({ id: this.id(), clientOrderId: e.clientOrderId, symbol: e.symbol, qty: e.qty, status: "accepted", orderClass: e.takeProfitPrice !== undefined ? "bracket" : "oto", createdAt: created });
@@ -226,7 +240,7 @@ export class SimBroker implements FullBroker {
     return structuredClone(parent);
   }
   async submitSell(s: SellOrder): Promise<Order> {
-    this.spend();
+    this.spend("safety");
     this.maxSellQtyEver = Math.max(this.maxSellQtyEver, s.qty);
     if (this.refuseSellsTimes > 0) {
       this.refuseSellsTimes--;
@@ -250,11 +264,11 @@ export class SimBroker implements FullBroker {
     this.cancels.push({ id, doneAt: this.simMs + CANCEL_MS });
   }
   async cancelOrder(id: string): Promise<void> {
-    this.spend();
+    this.spend("safety");
     this.startCancel(id);
   }
   async cancelAllOrders(): Promise<{ attempted: number; failed: string[] }> {
-    this.spend();
+    this.spend("safety");
     let n = 0;
     for (const o of this.all()) if (OPEN.has(o.status) && o.status !== "pending_cancel") (this.startCancel(o.id), n++);
     if (this.cancelAllFailsAfterCancelling) throw new AlpacaError("bulk cancel failed after cancelling (test)", 500);

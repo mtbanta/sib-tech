@@ -14,6 +14,7 @@ import { TradeStream } from "./stream.ts";
 import { fetchUniverseWithNames } from "./universe.ts";
 import { CachingStore } from "./caching-store.ts";
 import { Governor } from "./governor.ts";
+import { shouldStoreEvent } from "./run-log.ts";
 import { FeedAlerter } from "./feed-alert.ts";
 import { Worker } from "./worker.ts";
 import { recordStart, releaseLabel } from "./start-note.ts";
@@ -31,14 +32,10 @@ const broker = new AlpacaTrading(settings, { onRate: (info) => governor.observe(
 const data = new AlpacaData(settings);
 const bot = new DiscordBot(settings, redact);
 
-// Warnings and errors, and the info events that tell the story of a day (commands, limit decisions, arming, the
-// close-out, unprotected positions, the start), go into the database's run log (already redacted). Monday 2026-11-02
-// left the table empty because only warnings and errors were stored. Per-trade events (signals, each entry) are not
-// stored here: the orders table already has every entry, and a busy day would bury the log.
-const STORED_INFO_EVENTS = new Set(["command", "limits_decision", "stream_started", "worker_started", "worker_stopping", "unprotected_position", "loss_stop_sale_retried", "future_days_reset", "sell_refused", "sell_failed", "order_list_incomplete", "entries_swept_while_stopped", "order_record_update_failed"]);
+// Which log lines also go into the database's run log (already redacted). See run-log.ts for why.
 const logAndStore: ConstructorParameters<typeof Worker>[0]["log"] = (level, event, fields) => {
   log(level, event, fields);
-  if (level !== "info" || STORED_INFO_EVENTS.has(event)) void store.addEvent(level, event, JSON.parse(redact(JSON.stringify(fields ?? {})))).catch(() => undefined);
+  if (shouldStoreEvent(level, event)) void store.addEvent(level, event, JSON.parse(redact(JSON.stringify(fields ?? {})))).catch(() => undefined);
 };
 
 async function buildLiveList(): Promise<{ symbols: string[]; names: Record<string, string> }> {

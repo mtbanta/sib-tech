@@ -158,14 +158,19 @@ export class Liquidator {
       result.remaining = positions.map((p) => p.symbol);
       const symbols = new Set(positions.map((p) => p.symbol));
 
-      // 1. Cancel what holds the shares (the exits resting at Alpaca) and, for a whole-account sale, any open order at all.
+      // 1. Cancel what holds the shares (the exits resting at Alpaca) and, for a whole-account sale, any open order at
+      //    all. Never a sell this liquidator sent itself in an earlier round: that sale may simply be slow, and cancelling
+      //    it would only start the same sale again.
       try {
-        if (!only) {
+        const open = await this.d.broker.listOrders("open");
+        const ours = (o: Order) => o.side === "sell" && o.clientOrderId.startsWith("cyrus-x-");
+        const others = open.filter((o) => !ours(o));
+        const targets = only ? symbols : new Set(others.flatMap((o) => [o.symbol, ...flattenLegs(o).map((l) => l.symbol)]));
+        if (!only && !open.some(ours) && others.length > 0) {
           const r = await this.d.broker.cancelAllOrders();
           if (r.failed.length > 0) result.errors.push(`round ${round}: cancel answers: ${r.failed.slice(0, 3).join("; ").slice(0, 200)}`);
         } else {
-          const open = await this.d.broker.listOrders("open");
-          for (const id of openOrderIds(open, symbols)) await this.d.broker.cancelOrder(id);
+          for (const id of openOrderIds(others, targets)) await this.d.broker.cancelOrder(id);
         }
       } catch (err) {
         result.errors.push(`round ${round}: cancel failed: ${(err as Error).message.slice(0, 120)}`);
@@ -175,6 +180,7 @@ export class Liquidator {
       let openOrders: Order[] = [];
       const t0 = this.d.now().getTime();
       let waited = 0;
+      let polls = 0;
       for (;;) {
         try {
           openOrders = await this.d.broker.listOrders("open");
@@ -184,8 +190,10 @@ export class Liquidator {
         }
         const stillHolding = [...symbols].some((s) => openSellQty(openOrders, s) > EPS);
         if (!stillHolding || waited >= waitMs) break;
-        await this.sleep(200);
-        waited += 200;
+        // Poll gently: a cancel usually finishes in a fraction of a second, and every look costs one of Alpaca's 200 requests a minute.
+        const pause = [250, 400, 600, 800][Math.min(polls++, 3)]!;
+        await this.sleep(pause);
+        waited += pause;
         if (this.d.now().getTime() - t0 > waitMs * 3) break; // a clock that moves much faster than the loop
       }
 

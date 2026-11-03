@@ -34,22 +34,28 @@ export async function runStoreContract(store: Store, date = "2099-01-04"): Promi
     decided: {},
     liveList: null,
     phases: {},
+    carried: { position: "2098-12-31" },
   };
   const created = await store.createDay(day);
   expect(created.tradeDate === date && created.status === "pending", "a day is created");
   const again = await store.createDay({ ...day, status: "approved" });
   expect(again.status === "pending", "creating a day twice keeps the first row");
   const upd = await store.updateDay(date, { status: "approved", decided: { position: true }, liveList: ["AAA", "BBB"], phases: { morning: "t" }, limits: { ...SUGGESTED_LIMITS, maxPositionUsd: 500 } });
+  expect(created.carried?.position === "2098-12-31", "the carried-forward note is kept");
   expect(upd.status === "approved" && upd.decided.position === true && upd.liveList?.join() === "AAA,BBB" && upd.phases.morning === "t" && upd.limits.maxPositionUsd === 500, "a day updates");
   const reread = await store.getDay(date);
   expect(reread?.openAt?.toISOString() === "2099-01-04T14:30:00.000Z" && reread.dayStartEquity === 20000 && reread.tradeDate === date, "a day reads back with its times and its date as text");
 
-  const order: OrderRecord = { clientOrderId: `contract-${date}-AAA`, tradeDate: date, symbol: "AAA", qty: 3, referencePrice: 10.5, stopPrice: 10.34, status: "intent", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: null };
+  expect((await store.recentDays("2099-01-05", 5)).some((d) => d.tradeDate === date), "recentDays finds a day before a later date");
+  expect((await store.recentDays(date, 5)).every((d) => d.tradeDate < date), "recentDays only returns earlier days");
+  expect((await store.daysFrom(date)).some((d) => d.tradeDate === date), "daysFrom finds the day");
+  const order: OrderRecord = { clientOrderId: `contract-${date}-AAA-1`, tradeDate: date, symbol: "AAA", qty: 3, referencePrice: 10.5, stopPrice: 10.34, takeProfitPrice: 10.9, status: "intent", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: null };
   expect((await store.insertOrder(order)) === true, "a new order inserts");
   expect((await store.insertOrder({ ...order, qty: 99 })) === false, "the same order id is refused, not overwritten");
   expect((await store.getOrder(order.clientOrderId))?.qty === 3, "the first order is the one kept");
-  await store.updateOrder(order.clientOrderId, { status: "filled", alpacaOrderId: "a-1", filledQty: 3, filledAvgPrice: 10.51 });
+  await store.updateOrder(order.clientOrderId, { status: "filled", alpacaOrderId: "a-1", filledQty: 3, filledAvgPrice: 10.51, acceptMs: 87, closedAt: "2099-01-04T15:00:00.000Z" });
   const o2 = await store.getOrder(order.clientOrderId);
+  expect(o2?.acceptMs === 87 && o2.closedAt === "2099-01-04T15:00:00.000Z" && o2.takeProfitPrice === 10.9, "speed, closed time and take-profit are kept");
   expect(o2?.status === "filled" && o2.filledQty === 3 && o2.filledAvgPrice === 10.51 && o2.alpacaOrderId === "a-1", "an order updates");
   expect((await store.listOrders(date)).length === 1, "orders list by day");
 

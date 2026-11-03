@@ -408,7 +408,6 @@ test("close-out sells everything, checks the account is flat, and resets the cap
   assert.deepEqual(r, { flat: true, remaining: [] });
   assert.equal(s.broker.config.maxMarginMultiplier, 1);
   assert.ok(s.said.some((m) => m.text.includes("account is flat")));
-  assert.equal(s.broker.count("cancelAllOrders"), 1);
 });
 
 test("close-out that cannot get flat retries, then shouts to Michael by name with a mention", async () => {
