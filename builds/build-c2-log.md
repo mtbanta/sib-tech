@@ -877,3 +877,41 @@ Build with a test that fails without each change and a test that a normal day is
 | statistics every 5 minutes around the window | statistics |
 | no rate-limit counter | counter |
 | no summary split | summary |
+
+## Load mode review (2026-11-03, afternoon): CHANGES REQUIRED. The only round allowed, so load mode is not deployed; Wednesday runs normally on round 9.
+
+On `a6adf91..312d9dc`, repo and local suite only. Checks 2, 7 and 10 clean. 334 pass, type check clean. The reviewer spot-checked 17 one-line removals, and every row of the builder's table it checked fails as claimed.
+
+**The trading code passed every money check:**
+- A normal day's gate, strategy, screen, 30 second sync, 5 minute statistics and summary are unchanged.
+- The 75 dollar cap only lowers `maxPositionUsd` inside `OrderGate.run`.
+- Every entry is still a bracket.
+- The 8:45 check sits after the stop flag, arming and the 2-minute commands rule.
+- The loss stop, the governor reserve, `admitTrade` and the 100 ceiling are untouched.
+- `load on` can never land after Armed or carry forward.
+- The 10 second sync cannot overlap itself.
+- All four of the builder's interpretations fit Michael's intent (with the caveats in notes 2 and 3 below).
+
+**Blocking finding: on a normal day, the limits messages can now pass Discord's 2,000-character limit, and then "Paper trading only." and "If any limit is still undecided at the open, I will not trade that day." are cut off.**
+- Line 5 plus the new `load on ...` instruction line add about 240 characters to the evening request, the morning review and the reminder, every day.
+- Measured through `finalizeMessage`:
+  - the base never passes 1,980 characters in the cases tried;
+  - the new code on a normal day, with the stop flag on for the loss stop and 10 symbols held: 2,046 characters, both lines lost;
+  - with the "found after a restart" reason and 3 symbols held: 2,055 characters, the paper-only line lost.
+- `finalizeMessage` decides on the footer before cutting, so a message that already contains the footer loses it to the cut.
+- CLAUDE.md requires the paper-only and research-input line on everything the stack writes, and Michael asked that normal days stay unchanged.
+- **Suggested fix, one line, either:** drop the new `load on ...` instruction line from `formatLimitsRequest` (`help` and line 5 already cover it); or make `finalizeMessage` re-append the footer after cutting (`discord.ts`, not money-touching). Plus a test that a normal-day request with the stop flag on and about 10 symbols held still ends with both lines.
+
+**Non-blocking notes (logged, not changed):**
+1. A busy load day's summary is about 1,950 to 2,000 characters. With the loss stop fired it is cut, and the last line (stop flag, flat or NOT FLAT) is lost. Not-flat has its own alerts that mention Michael.
+2. `load off` after the screen but before Armed gives a normal day with normal position sizes on the cheap 30-name list (allowed under "either way until Armed"). Option: treat it as `ended`, so the cap stays.
+3. `load off` after Armed but before 8:45 lets entries start at 8:35, using the normal placeholder with the cap.
+4. **Test gaps** (the code is correct):
+   - removing the old-message refusal in `decideLoad` fails no test;
+   - making `ended` drop the cap fails no test, because the switch test only checks the phase value.
+5. If one entry stays open from early in the window, `syncOrders` reads 3 to 5 pages a run, so about 165 to 170 requests a minute in total. That is still under 200, and the reserve still protects selling.
+6. Likely, not measured: Alpaca probably checks the bracket against its own current price, which can differ from a stale IEX print. If so, 3 cent take-profits may often be rejected, and each rejection starts the gate's 60 second wait on that symbol. That limits speed, not safety.
+7. Shares are sized from the signal price and entries are market orders, so a fill can land a few cents a share above 75 dollars.
+8. "`load on` makes it a load day" still shows in `status` and in the reminder after the screen time, when `load on` would be refused.
+
+**State:** load mode is committed on `main` (`312d9dc`), **not deployed and not reviewed as passing**. Round 9 deploys tonight from `a6adf91`, whose code is identical to `5c31aa3`, so the load mode code is not shipped. Until Michael decides, any later deploy must be made from round 9's code, not from `main`. A fix and another review round need Michael's approval.
