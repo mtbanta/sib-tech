@@ -1305,3 +1305,122 @@ Ranked. Items 1 to 4 are money-touching (the missing-exit check, the sell path, 
 **On the load test itself (for Michael, no code proposed):** the window showed that the 30-name free feed, one position per symbol and today's hold times cap the busy placeholder at about 45 entries a minute. Reaching 100 needs per-symbol cycles under about 19 seconds. Tighter exits or a faster sync narrow the gap; more than one position per symbol would close it but changes the gate. Each of these is a money-touching design choice for Michael. The budget question (do 200 requests a minute hold at 100 entries) is still open.
 
 Paper only. Everything here is research input for a human decision, never an instruction to act.
+
+## Michael's decisions after the Wednesday review (2026-11-04, evening)
+
+- **A. Approved: fixes 1 to 5 as release A.** Before fix 1: check Alpaca's documentation first hand, run the read-only check of Tuesday's full-size trades, and make fix 1 work even while a partly filled take-profit still holds the remaining shares (cancel it first if needed), with the gap as short as possible. Each fix gets a test that fails without it; then the secret scan, the full suite and one build-reviewer round.
+- **B. Thursday is a load day again, aiming for 100 entries a minute.** Release B is for load days only; normal days stay unchanged. It is proposed first, and built only after Michael approves.
+- **Deploys:** outside market hours, no later than 7:30 AM Central Thursday. A and B are separate releases, each deployed only if its own review passes.
+
+## Release A (built 2026-11-04, evening; code only, not deployed)
+
+### Checks before fix 1
+
+**Alpaca's documentation says the stop is resized, not cancelled. Paper did the opposite.**
+- "Orders at Alpaca", section "Bracket Orders", https://docs.alpaca.markets/docs/orders-at-alpaca (read 2026-11-04):
+  - "If the take-profit order is partially filled, the stop-loss order will be adjusted to the remaining quantity."
+  - "Once one of the exit orders is filled, the other is canceled."
+  - "Order replacement (`PATCH /v2/orders`) is supported to update `limit_price` and `stop_price`."
+- "Paper Trading", https://docs.alpaca.markets/docs/paper-trading (read 2026-11-04): fills are simulated against the best current market price; "When orders are eligible to be filled, they will receive partial fills for a random size 10% of the time." Nothing on that page says brackets behave differently on paper.
+- Forum, "Partial Bracket order fills", https://forum.alpaca.markets/t/partial-bracket-order-fills/12723 (one post, August 2023, no staff answer): about a partly filled entry, not this case.
+- **So:** on 2026-11-04 Alpaca paper cancelled the stop 2 ms after the take-profit's first partial fill, 655 times, against its own documentation. What live trading does is unknown. Fix 1 protects in either case. If the stop is resized and stays live, as documented, fix 1 does nothing.
+
+**Tuesday 2026-11-03, read only (full-size positions, about 2,000 dollars each).** 91 entries filled; 37 had any take-profit fill; 25 of those had the stop cancelled before the take-profit finished:
+- under 1 second: 4;
+- 1 to 10 seconds: 13;
+- 10 to 60 seconds: 6 (the longest was LSCC, 56.6 seconds);
+- over 60 seconds: 2 (SHOP 109.4 seconds, MRVL 62.6 seconds);
+- over 10 minutes: 0.
+
+All 25 ended at their take-profit. So the gap happens on normal days too, with positions about 30 times larger than Wednesday's.
+
+**The wait before selling: 5 seconds from the stop's cancel.** On Wednesday, of the 655 gaps, 305 lasted over 2 seconds, 164 over 3, 90 over 5, 51 over 10 and 34 over 20. 5 seconds leaves alone the many take-profits that finish within a few seconds, and catches the rest quickly.
+
+### What changed
+
+**Fix 1: shares left without a stop after a partial take-profit** (`risk.ts`, `sells.ts`, `worker.ts`).
+- **The rule:** the order sync treats an entry as "bare" when its stop is no longer live (cancelled or expired, and it did not fill), some of its shares are still unsold, and the symbol is still held. This holds even while the take-profit is open.
+  - The old missing-exit rule (no open exit at all: sell at once) is unchanged.
+- **The 5 second wait:** measured from Alpaca's cancel time on the stop leg (`canceledAt`, now read from Alpaca). If Alpaca gives no time, it is measured from when this worker first saw the entry bare, whichever is earlier.
+- **The sale:** after 5 seconds the remaining shares are sold through the existing missing-exit sale, which now also takes the entry's open exit leg ids (`cancelIds`). It cancels them by id, so a take-profit that Alpaca's open list does not show is still cancelled first. Alpaca's "already filled or cancelled" answer counts as done. It then waits until the shares are free and sells through the sell gate, which is still the only sender.
+- **Messages:** "**SYM: Alpaca cancelled its stop when the take-profit partly filled, so I sold the remaining N shares.**"
+  - If the sell went out but Alpaca has not filled it yet, it says so without mentioning Michael (paper has held sells 16 seconds). A real failure keeps the "HAS NO PROTECTIVE STOP AND I COULD NOT SELL IT" alert with the mention.
+- **Bringing the next sync forward:** when the sync finds a bare entry younger than 5 seconds, it returns the moment the wait ends (`recheckAt`). The worker runs the next sync on the first pass at or after that moment, instead of waiting the full 10 or 30 seconds.
+  - Passes run every 5 seconds, so the sale starts 5 to 10 seconds after the stop's cancel, plus the cancel and sell themselves. On normal and load days alike.
+- **Not changed:** the protect switch (off during any sale and from the close-out time), the latest-entry-per-symbol rule and the "a sell is already working" rule all apply as before.
+
+**Fix 2: no NOT FLAT while the close-out's own sells are working** (`closeout.ts`, `sells.ts`).
+- The sale routine has a new option, used only by the close-out: from round 2 on, if every share still held is covered by a sell the stack sent (client id `cyrus-x-`), it stops and returns those symbols as "working", instead of waiting out the remaining rounds.
+  - The loss stop, the missing-exit check, the `flatten` command and the carried-position sale do not use the option and keep their old rounds.
+- The close-out then waits gently, about 0.6 requests a second (positions every 2 seconds, open orders every 10), until the account is flat or until 2 minutes before the close (2:58 PM). Without a known close (the emergency path) it waits at most 60 seconds.
+- **If flat:** "Close-out done", as usual. Alpaca's "order pending cancel" answers no longer count as trouble, so the "had trouble but recovered" note is not posted for them.
+- **If not flat at the deadline with its own sells still working:** NOT FLAT names the true reason, for example "1 sell sent at 2:55 PM CT for ADT; Alpaca had not filled it by 2:58 PM CT. Please check Alpaca now." It does not say "close by hand".
+- **If a sell of ours is gone and shares are still held:** NOT FLAT at once, as before.
+- The not-flat flag and the Healthchecks failure signal therefore come only when NOT FLAT is posted.
+
+**Fix 3: one close-out per day** (`worker.ts`).
+- The carried-position sale runs only before the day's close-out time (2:55 PM), and never once that day's close-out has started (in memory, or the close-out step recorded in the day record).
+- From 2:55 on, the close-out and its 20 second retry alone sell. In Wednesday's case that gives one "Close-out done", and the close-out step is recorded when the account is flat.
+
+**Fix 4: Alpaca's listing checked against the stored entries** (`risk.ts`, `worker.ts`).
+- **The order sync:** a stored entry missing from Alpaca's listing is fetched by its client id if it was sent (submitted or filled), or if it is still an intent after 10 seconds. At most 10 lookups a sync. An id Alpaca does not know is not asked again for 60 seconds. A fetched entry gets the same record update, missing-exit check and bare check as a listed one.
+- **The daily summary:** stored entries missing from the listing are fetched (at most 50), so its counts and profit match the account.
+- How far back the sync reads is unchanged; that waits for the faster-order-check proposal.
+
+**Fix 5: logging and wording.**
+- **The close-out's run-log event** (`closeout_result`) now records:
+  - which path ran it ("close-out", "retry", "carried" or "emergency");
+  - how long it waited for its own sells;
+  - the times its cancels were sent and answered, and each sell sent (symbol, shares, time).
+- **Heartbeat failure signals:** each one is logged, and the first of each episode is kept in the run log (`heartbeat_fail`). The next good heartbeat logs how many failure signals there were.
+- **"Too close to the close for a new entry"** is now counted into one row a minute, like the other routine refusals (2,209 single rows on Wednesday).
+- The NOT FLAT wording change is part of fix 2.
+
+### Tests
+
+New file `test/release-a.test.ts`, 17 tests. The simulated broker (`test/sim-broker.ts`) gained four things:
+- the paper behaviour of a partial take-profit (the stop cancelled at the first partial fill);
+- a cancel time that can be set (11 seconds, as measured on Wednesday);
+- a listing that can leave chosen entries out;
+- Alpaca's "order pending cancel" answer to a second cancel.
+
+Wednesday is recreated twice:
+- **The close-out:** cancels that take 11 seconds, and sells that fill 20 seconds after they are sent. Result: flat, no NOT FLAT, no failure signal, one "Close-out done", the step recorded. This runs both directly and through the whole worker.
+- **CIFR:** a partial take-profit, the stop cancelled, the take-profit hidden from the open list. Result: the remaining 7 shares sold 5 to 7 seconds after the cancel, with no oversell. It also works with the 11 second cancel, and through the worker, where the 30 second sync is brought forward to sell by 15:00:40 instead of at 15:01:00.
+
+Tests that normal behaviour is unchanged:
+- an entry with no live exit is still sold at once, with the old message;
+- the loss stop's sale does not stop early on its own working sells;
+- the documented behaviour (stop resized and live) is left alone;
+- nothing is sold while the protect switch is off;
+- a take-profit that finishes inside the 5 seconds is left alone.
+
+Full suite **360 pass** (343 before), type check clean.
+
+| Change taken out | Tests that fail |
+| :-- | :-- |
+| bare rule off | CIFR case; slow cancel; worker-level re-check |
+| 5 second wait ignored (sell at once) | CIFR case; finishes inside the wait; worker-level re-check |
+| exit leg ids not cancelled | CIFR case; slow cancel; worker-level re-check |
+| no early re-check sync | worker-level re-check |
+| close-out does not ask for the early return | Wednesday close-out; true reason at the deadline; gentle polling; worker-level close-out |
+| close-out does not wait for its own sells | Wednesday close-out; true reason at the deadline; gentle polling; worker-level close-out |
+| early return for every caller | CIFR case; no-exit sale unchanged; loss stop sale unchanged |
+| old NOT FLAT wording | true reason at the deadline |
+| "pending cancel" counted as trouble | Wednesday close-out |
+| carried sale allowed after the close-out | one close-out per day |
+| no lookup of missing entries (sync) | missing entry recorded |
+| no 60 second memory of unknown ids | missing entry recorded |
+| no lookup of missing entries (summary) | summary counts |
+| "too close" written row by row | one row a minute |
+| heartbeat failure not logged | heartbeat logging |
+| path not recorded | Wednesday close-out; one close-out per day |
+| step times not recorded | Wednesday close-out |
+
+**Interpretations (for the reviewer and Michael):**
+1. **The gap:** the early re-check runs on the first 5 second pass after the wait ends, so the sale starts 5 to 10 seconds after the stop's cancel. On paper, cancelling the take-profit can then take about 11 seconds before the sell goes out.
+2. **Where the gentle wait applies:** on for the close-out, its retry and the emergency close-out; off for the carried-position sale. Michael asked that the carried sale keep its old behaviour, and it now never runs after the close-out time anyway.
+3. **Wording for a sell not yet filled:** for a bare remainder, "sell sent, not filled yet" is reported without mentioning Michael. The no-exit case keeps its old wording exactly.
+4. **What is trouble:** only "order pending cancel" answers are treated as not-trouble. Any other cancel or sell problem still gets the "had trouble but recovered" note.
+
+Secret scan clean. Not deployed and not reviewed. Paper only.

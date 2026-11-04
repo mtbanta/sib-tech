@@ -168,6 +168,19 @@ export interface LiquidateOptions {
   only?: string[];
   maxRounds?: number;
   waitCancelMs?: number;
+  // Release A, fix 1: order ids to cancel first in an `only` sale (a filled bracket's exit legs, which Alpaca's open list may
+  // not show). An answer that the order is already filled or cancelled is not a failure.
+  cancelIds?: string[];
+  // Release A, fix 2, set only by the close-out: from round 2 on, if every share still held is covered by a sell this stack
+  // sent (client id cyrus-x-), stop and return those symbols as `working` instead of waiting out the remaining rounds.
+  returnWhenOnlyOwnSells?: boolean;
+}
+
+// What a sale did and when (release A, fix 5: written to the close-out's run-log event).
+export interface LiquidateSteps {
+  cancelsSentAt: string[];
+  cancelsAnsweredAt: string[];
+  sells: Array<{ symbol: string; qty: number; at: string }>;
 }
 
 export interface LiquidateResult {
@@ -175,6 +188,14 @@ export interface LiquidateResult {
   remaining: string[];
   sold: Array<{ symbol: string; qty: number }>;
   errors: string[];
+  // Only with returnWhenOnlyOwnSells: the symbols still held whose every share is covered by a working sell of ours.
+  working?: string[];
+  steps?: LiquidateSteps;
+}
+
+// Shares that sells this stack sent (client id cyrus-x-) could still sell, for one symbol.
+export function ownOpenSellQty(orders: Order[], symbol: string): number {
+  return orders.filter((o) => o.symbol === symbol && o.side === "sell" && o.clientOrderId.startsWith("cyrus-x-") && OPEN_STATUSES.has(o.status)).reduce((n, o) => n + remaining(o), 0);
 }
 
 export interface LiquidatorDeps {
@@ -227,9 +248,13 @@ export class Liquidator {
     const waitMs = o.waitCancelMs ?? 6_000;
     const only = o.only ? new Set(o.only) : null;
     const result: LiquidateResult = { flat: false, remaining: [], sold: [], errors: [] };
+    const steps: LiquidateSteps = { cancelsSentAt: [], cancelsAnsweredAt: [], sells: [] };
+    const stamp = () => this.d.now().toISOString();
+    const cancelIds = [...new Set(o.cancelIds ?? [])];
     const heldNow = async (): Promise<Position[]> => (await this.d.broker.listPositions()).filter((p) => !only || only.has(p.symbol));
     const done = (): LiquidateResult => {
-      if (result.sold.length > 0 || result.errors.length > 0) this.d.log?.("liquidation_result", { reason: o.reason, flat: result.flat, remaining: result.remaining, sold: result.sold.length, errors: result.errors.slice(0, 5) });
+      if (steps.cancelsSentAt.length > 0 || steps.sells.length > 0) result.steps = steps;
+      if (result.sold.length > 0 || result.errors.length > 0) this.d.log?.("liquidation_result", { reason: o.reason, flat: result.flat, remaining: result.remaining, sold: result.sold.length, errors: result.errors.slice(0, 5), ...(result.working ? { working: result.working } : {}) });
       return result;
     };
 
@@ -276,8 +301,12 @@ export class Liquidator {
       //    all. Never a sell this liquidator sent itself in an earlier round: that sale may simply be slow, and cancelling
       //    it would only start the same sale again.
       let cancelled = false;
+      let onlyOwn = false;
       try {
         const open = await this.openOrders();
+        // Release A, fix 2 (the close-out only): every share still held is covered by a sell of ours that is working. Waiting out
+        // the remaining rounds on it does nothing useful; the close-out waits for the fills itself, gently.
+        if (o.returnWhenOnlyOwnSells && round >= 2 && positions.every((p) => ownOpenSellQty(open, p.symbol) >= p.qty - EPS)) onlyOwn = true;
         const ours = (x: Order) => x.side === "sell" && x.clientOrderId.startsWith("cyrus-x-");
         const others = open.filter((x) => !ours(x));
         const targets = only ? symbols : new Set(others.flatMap((x) => [x.symbol, ...flattenLegs(x).map((l) => l.symbol)]));
@@ -286,15 +315,32 @@ export class Liquidator {
         // round 1 whatever the list says, and again later if shares are still reported as held by orders that nothing visible
         // explains. Never while one of our own sells is open: that would cancel the sale itself.
         const heldByHiddenOrders = positions.some((p) => p.qtyAvailable != null && p.qtyAvailable < p.qty - EPS && openSellQty(open, p.symbol) < p.qty - p.qtyAvailable - EPS);
-        if (!only && !open.some(ours) && (round === 1 || others.length > 0 || heldByHiddenOrders)) {
+        if (onlyOwn) {
+          // nothing to cancel: see above
+        } else if (!only && !open.some(ours) && (round === 1 || others.length > 0 || heldByHiddenOrders)) {
           cancelled = true;
+          steps.cancelsSentAt.push(stamp());
           const r = await this.d.broker.cancelAllOrders();
+          steps.cancelsAnsweredAt.push(stamp());
           if (r.failed.length > 0) result.errors.push(`round ${round}: cancel answers: ${r.failed.slice(0, 3).join("; ").slice(0, 200)}`);
         } else {
-          for (const id of openOrderIds(others, targets)) (cancelled = true, await this.d.broker.cancelOrder(id));
+          // In an `only` sale, the ids the caller named are cancelled too (Alpaca's open list may not show a filled bracket's
+          // legs). The client treats "already filled or cancelled" (404, 422) as done.
+          const ids = [...new Set([...openOrderIds(others, targets), ...(only ? cancelIds : [])])];
+          for (const id of ids) {
+            cancelled = true;
+            steps.cancelsSentAt.push(stamp());
+            await this.d.broker.cancelOrder(id);
+            steps.cancelsAnsweredAt.push(stamp());
+          }
         }
       } catch (err) {
         result.errors.push(`round ${round}: cancel failed: ${(err as Error).message.slice(0, 120)}`);
+      }
+      if (onlyOwn) {
+        result.working = positions.map((p) => p.symbol);
+        result.remaining = result.working;
+        return done();
       }
 
       // 2. Wait until Alpaca shows nothing holding those shares (no open order, and no shares reported as held by orders):
@@ -346,7 +392,7 @@ export class Liquidator {
           if (!(free > EPS)) continue; // something is still holding the shares; the next round cancels again
           const id = `cyrus-x-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-${round}`;
           const r = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: id, reason: o.reason });
-          if (r.status === "sent") result.sold.push({ symbol: p.symbol, qty: free });
+          if (r.status === "sent") (result.sold.push({ symbol: p.symbol, qty: free }), steps.sells.push({ symbol: p.symbol, qty: free, at: stamp() }));
           else result.errors.push(`round ${round}: ${p.symbol}: ${r.reason}`);
         }
       }

@@ -42,6 +42,11 @@ export class SimBroker implements FullBroker {
   refuseSellIf: ((s: SellOrder) => boolean) | null = null; // a 403 for any sell this says yes to
   bucketTimes: number[] = []; // simulated time of every request that counted against the 200 a minute bucket
   sellFillDelayMs = 1500;
+  // Release A: how long a cancel takes (2026-11-04 measured about 11 seconds for a resting take-profit at the close-out).
+  cancelMs = CANCEL_MS;
+  // Release A: client ids the "list orders" answer leaves out (2026-11-04: 2 of 2,022 entries were missing from every page).
+  hiddenFromListing = new Set<string>();
+  findCalls = 0;
   maxSellQtyEver = 0;
   oversellAttempts = 0;
   sellLog: Array<{ symbol: string; qty: number; at: number }> = [];
@@ -107,7 +112,25 @@ export class SimBroker implements FullBroker {
     return this.orders.flatMap((o) => [o, ...o.legs]);
   }
   private setStatus(id: string, status: string) {
-    for (const o of this.all()) if (o.id === id) o.status = status;
+    for (const o of this.all()) if (o.id === id) {
+      o.status = status;
+      o.updatedAt = new Date(this.simMs).toISOString();
+      if (status === "canceled") o.canceledAt = o.updatedAt;
+    }
+  }
+  // What Alpaca paper did 655 times on 2026-11-04: the take-profit fills part of the shares and, 2 ms later, the stop is
+  // cancelled (Alpaca's documentation says it should be resized instead). The rest stays on the take-profit alone.
+  partialTakeProfit(clientOrderId: string, qty: number, price: number): void {
+    const o = this.orders.find((x) => x.clientOrderId === clientOrderId);
+    if (!o) throw new Error("no such entry");
+    const tp = o.legs.find((l) => l.type === "limit")!;
+    const stop = o.legs.find((l) => l.type === "stop")!;
+    tp.filledQty += qty;
+    tp.filledAvgPrice = price;
+    tp.status = tp.filledQty >= tp.qty - 1e-9 ? "filled" : "partially_filled";
+    if (tp.status === "filled") tp.filledAt = new Date(this.simMs).toISOString();
+    if (OPEN.has(stop.status)) this.setStatus(stop.id, "canceled");
+    this.removeShares(o.symbol, qty, price);
   }
   position(symbol: string) {
     return this.positionsMap.get(symbol);
@@ -213,6 +236,7 @@ export class SimBroker implements FullBroker {
     this.spend();
     let rows = this.orders.filter((o) => (status === "all" ? true : status === "open" ? OPEN.has(o.status) || (!this.hideFilledParents && o.legs.some((l) => OPEN.has(l.status))) : !OPEN.has(o.status)));
     if (afterIso) rows = rows.filter((o) => (o.createdAt ?? "") > afterIso);
+    rows = rows.filter((o) => !this.hiddenFromListing.has(o.clientOrderId));
     return rows.slice(0, 500).map((o) => structuredClone(o)); // oldest first, at most 500
   }
   async listOrdersPaged(status: "open" | "closed" | "all", afterIso: string, maxPages = 20) {
@@ -236,6 +260,7 @@ export class SimBroker implements FullBroker {
   }
   async findOrderByClientId(id: string): Promise<Order | null> {
     this.spend();
+    this.findCalls++;
     return structuredClone(this.orders.find((o) => o.clientOrderId === id) ?? null);
   }
   async submitEntry(e: EntryOrder): Promise<Order> {
@@ -274,7 +299,7 @@ export class SimBroker implements FullBroker {
     const o = this.all().find((x) => x.id === id);
     if (!o || !OPEN.has(o.status) || o.status === "pending_cancel") return;
     o.status = "pending_cancel";
-    this.cancels.push({ id, doneAt: this.simMs + CANCEL_MS });
+    this.cancels.push({ id, doneAt: this.simMs + this.cancelMs });
   }
   async cancelOrder(id: string): Promise<void> {
     this.spend("safety");
@@ -283,8 +308,12 @@ export class SimBroker implements FullBroker {
   async cancelAllOrders(): Promise<{ attempted: number; failed: string[] }> {
     this.spend("safety");
     let n = 0;
-    for (const o of this.all()) if (OPEN.has(o.status) && o.status !== "pending_cancel") (this.startCancel(o.id), n++);
+    const failed: string[] = [];
+    for (const o of this.all()) {
+      if (o.status === "pending_cancel") failed.push(`${o.id}: order pending cancel`); // what Alpaca answered on 2026-11-04
+      else if (OPEN.has(o.status)) (this.startCancel(o.id), n++);
+    }
     if (this.cancelAllFailsAfterCancelling) throw new AlpacaError("bulk cancel failed after cancelling (test)", 500);
-    return { attempted: n, failed: [] };
+    return { attempted: n, failed };
   }
 }

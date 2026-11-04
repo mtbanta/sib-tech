@@ -53,7 +53,7 @@ export function clientOrderIdFor(date: string, symbol: string, n: number): strin
 
 // Refusals that are normal flow control at volume (a full minute, a held name). They are counted and written down
 // as one line per reason per minute, not one row each.
-const FLOW_REASONS = [/^load day: entries start/, /^my commands /, /^trades-per-minute/, /^holding back for safety/, /^already holding/, /^an entry for this symbol is still working/, /^the signal waited/, /^Alpaca refused this symbol a moment ago/];
+const FLOW_REASONS = [/^load day: entries start/, /^my commands /, /^trades-per-minute/, /^holding back for safety/, /^already holding/, /^an entry for this symbol is still working/, /^the signal waited/, /^Alpaca refused this symbol a moment ago/, /^too close to the close for a new entry/];
 
 const isActive = (o: OrderRecord) => !o.closedAt && (o.status === "intent" || o.status === "submitted" || o.status === "filled");
 

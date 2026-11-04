@@ -78,6 +78,10 @@ export interface Order {
   limitPrice: number | null;
   createdAt: string | null;
   filledAt: string | null;
+  // When Alpaca cancelled the order, and when it last changed (release A: the time a bracket's stop was cancelled after a
+  // partial take-profit). Optional so older test doubles need not set them.
+  canceledAt?: string | null;
+  updatedAt?: string | null;
   legs: Order[];
 }
 
@@ -129,6 +133,8 @@ export function parseOrder(raw: Json): Order {
     limitPrice: numOrNull(raw.limit_price),
     createdAt: raw.created_at ? String(raw.created_at) : null,
     filledAt: raw.filled_at ? String(raw.filled_at) : null,
+    canceledAt: raw.canceled_at ? String(raw.canceled_at) : null,
+    updatedAt: raw.updated_at ? String(raw.updated_at) : null,
     legs,
   };
 }

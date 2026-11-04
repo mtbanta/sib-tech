@@ -21,7 +21,7 @@ import type { Settings } from "./config.ts";
 import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
-import { enforceDailyLoss, LossStopMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
+import { enforceDailyLoss, LossStopMemory, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import { LOAD_NOTE_PHASE, LOAD_STATS_EVERY_MS, LOAD_SYNC_EVERY_MS, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
 import { BusyPlaceholder } from "./strategy.ts";
 import type { Trade } from "./stream.ts";
@@ -136,6 +136,16 @@ export class Worker {
   // The loss stop's own schedule and memory, and the date its first check after this start (with today's equity history) worked.
   private lastLossStop = 0;
   private readonly lossMemory = new LossStopMemory();
+  // Release A, fix 1: what the order sync remembers between runs, and when a bare remainder reaches its grace time (the next
+  // sync runs then instead of waiting the full 10 or 30 seconds).
+  private readonly syncMemory = new SyncMemory();
+  private syncRecheckAt: number | null = null;
+  // Release A, fixes 3 and 5: the day whose close-out has been attempted, and how many times (the first is "close-out", the
+  // rest "retry"). The carried-position sale never runs on a day whose close-out has started.
+  private closeoutAttemptDate: string | null = null;
+  private closeoutAttempts = 0;
+  // Release A, fix 5: heartbeat failure signals sent in the current not-flat episode.
+  private failPings = 0;
   private lossRederivedDate: string | null = null;
   private lastBackgroundAlert = new Map<string, number>();
   private retryingStop = false;
@@ -194,7 +204,7 @@ export class Worker {
   }
 
   private riskDeps() {
-    return { broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c: Channel, t: string, o?: { mentionOwner?: boolean }) => this.say(c, t, o), liquidator: this.liquidator, lossMemory: this.lossMemory, governor: this.d.governor, log: (e: string, data?: Record<string, unknown>) => this.d.log?.("info", e, data) };
+    return { broker: this.d.broker, store: this.d.store, now: this.d.now, say: (c: Channel, t: string, o?: { mentionOwner?: boolean }) => this.say(c, t, o), liquidator: this.liquidator, lossMemory: this.lossMemory, syncMemory: this.syncMemory, governor: this.d.governor, log: (e: string, data?: Record<string, unknown>) => this.d.log?.("info", e, data) };
   }
 
   private closeoutDeps() {
@@ -408,12 +418,25 @@ export class Worker {
   private async heartbeat(ok: boolean): Promise<void> {
     const nowMs = this.d.now().getTime();
     if (this.notFlat) {
+      this.failPings++;
+      // Release A, fix 5: every failure signal is logged, and the first of an episode is kept in the run log.
+      this.d.log?.("warn", "heartbeat_fail", { reason: "not flat", count: this.failPings });
+      if (this.failPings === 1) void this.d.store.addEvent("warn", "heartbeat_fail", { reason: "not flat" }).catch(() => undefined);
       await this.d.ping("fail").catch(() => false);
       return;
     }
     if (!ok) {
-      if (this.failedTicks >= 3) await this.d.ping("fail").catch(() => false);
+      if (this.failedTicks >= 3) {
+        this.failPings++;
+        this.d.log?.("warn", "heartbeat_fail", { reason: "failed passes", failedTicks: this.failedTicks, count: this.failPings });
+        if (this.failPings === 1) void this.d.store.addEvent("warn", "heartbeat_fail", { reason: "failed passes" }).catch(() => undefined);
+        await this.d.ping("fail").catch(() => false);
+      }
       return;
+    }
+    if (this.failPings > 0) {
+      this.d.log?.("info", "heartbeat_recovered", { failSignals: this.failPings });
+      this.failPings = 0;
     }
     if (nowMs - this.lastOkPing >= 30_000) {
       this.lastOkPing = nowMs;
@@ -433,7 +456,7 @@ export class Worker {
     await this.say("alerts", `${why}, so I am closing everything from the broker's clock alone.`);
     this.closingOut = true;
     try {
-      const result = await closeOut(this.closeoutDeps(), date);
+      const result = await closeOut(this.closeoutDeps(), date, { path: "emergency" });
       await this.setNotFlat(!result.flat, result.remaining, date);
     } finally {
       this.closingOut = false;
@@ -649,7 +672,9 @@ export class Worker {
     if (inSession && current.phases.armed) await this.refreshView(now);
     // A load day syncs every 10 seconds (closed entries free their symbol sooner; a bare position is found sooner), all day.
     const syncEvery = isLoadDay(current) ? LOAD_SYNC_EVERY_MS : SYNC_EVERY_MS;
-    if (inSession && now.getTime() - this.lastSync >= syncEvery) {
+    // Release A, fix 1: a bare remainder found by the last sync brings the next one forward to its grace time.
+    const recheckDue = this.syncRecheckAt !== null && now.getTime() >= this.syncRecheckAt && !this.inflight.has("risk");
+    if (inSession && (now.getTime() - this.lastSync >= syncEvery || recheckDue)) {
       this.lastSync = now.getTime();
       const risk = this.riskDeps();
       const dayNow = current;
@@ -663,7 +688,9 @@ export class Worker {
         // While the daily loss stop is in force its own retry re-sells whatever is still held, inside its request budget; the
         // missing-exit check would otherwise start a liquidation of its own for every such position every 30 seconds (round 8).
         const lossStopped = await this.lossStopInForce(dayNow.tradeDate);
-        await syncOrders(risk, dayNow, { protect: () => !lossStopped && protect() });
+        this.syncRecheckAt = null;
+        const synced = await syncOrders(risk, dayNow, { protect: () => !lossStopped && protect() });
+        if (synced.recheckAt !== undefined) this.syncRecheckAt = synced.recheckAt;
         await sweepEntriesWhileStopped(risk);
       });
     }
@@ -679,7 +706,10 @@ export class Worker {
     }
 
     // Positions carried over from a close-out that did not get flat: sold as soon as the market is open again.
-    if (this.notFlat && now >= day.openAt && now < day.closeAt && !this.closingOut && now.getTime() - this.lastCarriedAttempt >= 5 * 60_000) {
+    // Release A, fix 3: only before the day's close-out time, and never once that day's close-out has started; from then on the
+    // close-out and its retry alone sell (on 2026-11-04 both ran and each posted "Close-out done").
+    const closeoutStarted = this.closeoutAttemptDate === date || Boolean(current.phases.closeout);
+    if (this.notFlat && now >= day.openAt && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !closeoutStarted && !this.closingOut && now.getTime() - this.lastCarriedAttempt >= 5 * 60_000) {
       this.lastCarriedAttempt = now.getTime();
       this.background("carried", () => this.carriedPhase(date));
     }
@@ -690,7 +720,13 @@ export class Worker {
     const retryMs = now < day.closeAt ? CLOSEOUT_RETRY_MS : 5 * 60_000;
     if (now >= addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !current.phases.closeout && !this.closingOut && now.getTime() - this.lastCloseoutAttempt >= retryMs) {
       this.lastCloseoutAttempt = now.getTime();
-      this.background("closeout", () => this.closeoutPhase(date, now >= addMinutes(day.closeAt!, 30), day.closeAt));
+      if (this.closeoutAttemptDate !== date) {
+        this.closeoutAttemptDate = date;
+        this.closeoutAttempts = 0;
+      }
+      const path = this.closeoutAttempts === 0 ? "close-out" : "retry";
+      this.closeoutAttempts++;
+      this.background("closeout", () => this.closeoutPhase(date, now >= addMinutes(day.closeAt!, 30), day.closeAt, path));
     }
     if (now >= addMinutes(day.closeAt, 5) && current.phases.closeout && !current.phases.summary) {
       this.background("summary", () => this.summaryPhase(date));
@@ -781,11 +817,11 @@ export class Worker {
     this.gate.enter(signal).catch((err) => this.d.log?.("error", "gate_failed", { error: (err as Error).message.slice(0, 200) }));
   }
 
-  private async closeoutPhase(date: string, lastTry: boolean, closeAt: Date | null = null): Promise<void> {
+  private async closeoutPhase(date: string, lastTry: boolean, closeAt: Date | null = null, path: "close-out" | "retry" = "close-out"): Promise<void> {
     this.endStream();
     this.closingOut = true;
     try {
-      const result = await closeOut(this.closeoutDeps(), date, { alert: this.notFlatAlertDate !== date, closeAt: closeAt ?? undefined });
+      const result = await closeOut(this.closeoutDeps(), date, { alert: this.notFlatAlertDate !== date, closeAt: closeAt ?? undefined, path });
       await this.setNotFlat(!result.flat, result.remaining, date);
       // Recorded as done only when flat (or when this was the last try), so otherwise the next tick tries again.
       if (result.flat || lastTry) await setPhase(this.d.store, date, "closeout", this.d.now().toISOString(), { flat: result.flat ? "yes" : "no" });
@@ -798,7 +834,7 @@ export class Worker {
   private async carriedPhase(date: string): Promise<void> {
     this.closingOut = true;
     try {
-      const result = await closeOut(this.closeoutDeps(), date, { alert: this.notFlatAlertDate !== date });
+      const result = await closeOut(this.closeoutDeps(), date, { alert: this.notFlatAlertDate !== date, path: "carried" });
       await this.setNotFlat(!result.flat, result.remaining, date);
     } finally {
       this.closingOut = false;
@@ -811,6 +847,16 @@ export class Worker {
     const [account, listed, positions] = await Promise.all([this.d.broker.getAccount(), this.d.broker.listOrdersPaged("all", etInstant(date, "00:00").toISOString(), 60), this.d.broker.listPositions()]);
     // Bring the stored entries up to date from the final fills before summarising (no sells: the day is over).
     await syncOrders(this.riskDeps(), day, { protect: false }).catch(() => undefined);
+    // Release A, fix 4: an entry Alpaca's listing left out (2 on 2026-11-04) is fetched by its client id, so the counts and the
+    // profit match the account.
+    const stored = await this.d.store.listOrders(date);
+    const listedIds = new Set(listed.orders.map((o) => o.clientOrderId));
+    const missing = stored.filter((s) => !listedIds.has(s.clientOrderId) && (s.alpacaOrderId || s.status === "filled" || s.status === "submitted")).slice(0, 50);
+    for (const s of missing) {
+      const found = await this.d.broker.findOrderByClientId(s.clientOrderId).catch(() => null);
+      if (found) listed.orders.push(found);
+    }
+    if (missing.length > 0) this.d.log?.("info", "summary_orders_missing_from_listing", { missing: missing.length });
     const result = computeDay(listed.orders);
     const fees = estimateFees(date, result.fills);
     const prev = await this.d.store.getControl<FeesRunning>(CONTROL_FEES).catch(() => null);
@@ -818,7 +864,7 @@ export class Worker {
     await this.d.store.setControl(CONTROL_FEES, running).catch(() => undefined);
     const text = formatSummary({
       day,
-      stored: await this.d.store.listOrders(date),
+      stored,
       refusals: await this.d.store.listRefusals(date),
       alpacaOrders: listed.orders,
       account,
