@@ -6,7 +6,20 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**BUILD C2: ROUND 9 DEPLOYED AS FLY RELEASE V6, AND LOAD MODE AS RELEASE V7 (BOTH REVIEWED PASS); WEDNESDAY'S LIMITS WAIT FOR MICHAEL; THE STOP FLAG IS STILL ON.** As of November 3, 2026 (after the close).
+**BUILD C2: WEDNESDAY 2026-11-04, THE FIRST LOAD DAY, REVIEWED. LOAD TEST INCONCLUSIVE (PEAK 44 ENTRIES A MINUTE); A FALSE NOT FLAT AT THE CLOSE-OUT; FIVE FIXES PROPOSED, NONE BUILT.** As of November 4, 2026 (after the close).
+- **Load window, 8:45 to 9:00 AM (release v7):**
+  - 382 entries, at most 44 in any 60 seconds, against the 90 needed;
+  - 0 rate-limit answers, lowest remaining stock 192, 0 held back by the governor.
+  - The limit was how fast each symbol cycled (holds plus a re-entry lag of about 15 seconds), not the request budget. The 100 level was not tested.
+- **The day:** 2,022 entries, flat at the close, equity -134.62 (0.098 percent of what was bought), about 2.91 dollars of fees to post tonight. The loss stop was never close.
+- **The close-out:** it posted "NOT FLAT: ADT, CIFR" and sent Healthchecks a failure signal at 2:55:36, while its own sells were still working inside Alpaca paper (the cancels took about 11 seconds, then Alpaca held the sells 16 seconds before submitting them). Those sells flattened the account at 2:55:46. Two paths (the carried-position sale, then the close-out retry) each posted "Close-out done".
+- **Found:**
+  - Alpaca cancels a bracket's stop at the take-profit's first partial fill. 655 brackets had their stop missing until the take-profit finished; CIFR's 7 shares went 6 hours without a stop. The missing-exit check counts a take-profit as protection.
+  - Alpaca's order listing left out 2 entries, so the summary undercounted.
+- **Proposed fixes and their ranking:** `builds/build-c2-log.md`, "Wednesday 2026-11-04 session review". Money-touching, so nothing is built until Michael approves.
+- Thursday's limits request is posted and waits for Michael. Thursday is a normal day unless he types `load on` before 7:45 AM. Paper only, nothing live.
+
+Earlier entry, superseded by the paragraph above: **BUILD C2: ROUND 9 DEPLOYED AS FLY RELEASE V6, AND LOAD MODE AS RELEASE V7 (BOTH REVIEWED PASS); WEDNESDAY'S LIMITS WAIT FOR MICHAEL; THE STOP FLAG IS STILL ON.** As of November 3, 2026 (after the close).
 - **Tuesday, the first C2 day, on v5:** the daily loss stop fired at 8:53 AM Central (down 519.71 against 500), sold all 10 positions in about 6 seconds, and left the account flat. The day's loss was 535.15; about three quarters of it was trading cost (spread, slippage and the free feed's stale price), not price moves. The overshoot came from a 5-second burst through the line, mostly a protective stop filling 0.42 a share below its price.
 - **Review rounds today:** round 7 (10 second check) and round 8 (5 second check, budgeted retry, 2-minute commands rule, fee wording) failed review. Round 9 (the missing-exit check's pause follows the stop flag) passed. Load mode failed once on message length, and its fixes (long posts sent as consecutive messages; the 75 dollar cap stays once the morning screen has run) passed.
 - **Deploys after the close:** v6 at 3:16 PM, v7 at 3:18 PM Central. Each had one clean start and Healthchecks up. The one-time note showing Wednesday's mode ("normal") posted at 3:18 PM.
@@ -52,6 +65,7 @@ Earlier entry, superseded by the paragraph above: **NOT STARTED.** Created Octob
 
 ## Completed
 
+- **2026-11-04. Wednesday's session (first load day) reviewed, read only.** Load test inconclusive; close-out false alarm explained; fixes proposed. Record: `builds/build-c2-log.md`, "Wednesday 2026-11-04 session review".
 - **2026-11-03. Build C2 rounds 7 to 9 and load mode.** Tuesday's session reviewed (loss stop at 8:53 AM, flat). Round 9 code deployed as Fly release v6 and load mode as v7, both reviewed PASS. Record: `builds/build-c2-log.md`, from "Tuesday 2026-11-03 session review" to "Deploys and close-out".
 - **2026-11-02. Build C2 release v5 deployed** (the round 5 code, `ac4a576`), after review round 6 of the round 6 fixes (`b764741`) returned CHANGES REQUIRED. Record: `builds/build-c2-log.md`, "Round 6 fixes" and "Review round 6".
 - **2026-11-02. Build C closed.** First paper session run and reviewed from the database, Fly logs and Discord; heartbeat stop and recovery test passed again. Faults and fixes: `builds/build-c-log.md` (closing section) and `builds/build-c2-log.md` (Job 1).
@@ -167,9 +181,17 @@ The full record of each run lives in `runs/`. This table is the index you read f
 
 ## Next Steps
 
-As of 2026-11-03 (after the close): v6 (round 9) and v7 (load mode) are deployed.
+As of 2026-11-04 (after the close): v7 runs; Wednesday reviewed.
 
-0. **Wednesday 2026-11-04:** Michael types `resume`, decides `load on` (before 7:45 AM) and approves the limits. After the session, review it, and the load window separately if it was a load day. Judge the request budget by the pass/fail rule in the log ("Load mode proposal", item 8). Also pending from the load mode review: Michael to confirm that a `load off` on the trading-day morning **before** the 7:45 AM screen should give a normal day (the builder's reading); and the logged message-text notes (the Armed message on an `ended` day, a repeated part after a failed split post).
+0. **Michael decides on the five proposed fixes** in `builds/build-c2-log.md`, "Wednesday 2026-11-04 session review", "Proposed fixes":
+   1. sell the shares left without a stop after a partial take-profit;
+   2. no NOT FLAT while the close-out's own sells are working;
+   3. one close-out per day;
+   4. check Alpaca's order listing against the stored entries;
+   5. logging and wording.
+   Items 1 to 4 are money-touching: nothing is built until he approves. A read-only check of Tuesday's brackets for the missing-stop gap is offered first. Also his call: whether and how to retest 100 entries a minute (the placeholder topped out at about 45). Thursday's limits wait for his approval, and items 1 to 4 below still stand.
+
+Done, superseded by item 0 above: **Wednesday 2026-11-04:** Michael types `resume`, decides `load on` (before 7:45 AM) and approves the limits. After the session, review it, and the load window separately if it was a load day. Judge the request budget by the pass/fail rule in the log ("Load mode proposal", item 8). Also pending from the load mode review: Michael to confirm that a `load off` on the trading-day morning **before** the 7:45 AM screen should give a normal day (the builder's reading); and the logged message-text notes (the Armed message on an `ended` day, a repeated part after a failed split post).
 
 
 **For after Wednesday 2026-11-04's session, not before (Michael, 2026-11-03). No code changes for these until then; under the standing rule, each is proposed to Michael first:**

@@ -1032,3 +1032,276 @@ This is what the deployed code (release v7, `morning.ts` `decideLoad`) does.
 - **Code:** `fees.ts` `tafActive` already treats sales from 2026-10-01 through 2026-12-31 as paused and charges TAF again from 2027-01-01. No change needed. The comment there cites the same filing number.
 
 **Wording fix added to Next Steps (Michael, 2026-11-03 evening; no code today):** when one message holds several limit commands, the bot repeats the full five-line limits list after every line (seen in Michael's "trades 100 / approve" reply on Monday night, and in the several-commands test). Consolidate it: one short line per command (for example "position 500: noted"), then the full list once at the end, showing what is decided and what is still waiting. This also shortens long replies, which since today go out as consecutive messages rather than being cut.
+
+## Wednesday 2026-11-04 session review (release v7, first load day; written after the close, read only)
+
+Sources, all read only, all on 2026-11-04 after the close:
+- **The stack's database**, in one read-only transaction: the day record, every stored entry, the refusals, the events and the control values.
+- **Alpaca paper:**
+  - every order of the day with its exit legs (2,068 listed, plus 2 fetched by client id, see item 4.2);
+  - all 8,142 fills;
+  - the account, positions and open orders;
+  - the one-minute equity history;
+  - posted fees;
+  - IEX minute bars for ADT and CIFR.
+- **Discord:** the three channels, read through the bot (663 messages).
+- **Healthchecks:** its record of when the check went down and up. Its log of single pings keeps only the last 100, back to 4:01 PM, so the close-out's individual pings are gone.
+- **Fly:** status, releases and the 100-line log buffer. The buffer happened to cover 2:54:24 to 2:55:36 PM, which pins the close-out's start.
+
+Times are Central. "Measured" means read from a timestamp. "Inferred" means worked out from the code and the measured times.
+
+**State:**
+- Fly runs release v7 on one machine (San Jose), started 2026-11-03 3:18 PM. No restarts since.
+- The account is flat: 0 positions, 0 open orders, equity 19,070.67.
+- The stop flag is off. Michael's `resume` landed Tuesday at 3:38 PM.
+- The not-flat flag is off, cleared at 2:55:51 PM.
+- Thursday's limits request posted at 3:10 PM and waits for Michael. Thursday is a normal day unless he types `load on` before the 7:45 AM screen.
+
+### 1. The load window, 8:45 to 9:00 AM: INCONCLUSIVE. Highest rate 44 entries in any 60 seconds; the 100 level was not tested.
+
+Against the approved rule ("Load mode proposal", section 8):
+- **"Does not hold" needs any one of these. None happened:**
+  - Alpaca's rate-limit answer (429): **0** all day.
+  - Remaining stock below 80: lowest **192** in the window, **171** all day (during the close-out).
+  - A sell, cancel or close-out delayed by a rate limit: **none**. The governor held nothing back all day (0). The close-out's delays came from Alpaca paper, not a rate limit (see 3).
+- **"Holds" needs about 90 entries a minute for 10 of the 15 minutes.** The busiest calendar minute had 43, and no minute reached 90.
+- **So the result is inconclusive.** The window reached 44 entries in its busiest 60 seconds (8:45:50 to 8:46:50), with at most 88 requests a minute and the stock never below 192. The 200-a-minute budget was never pressed.
+
+**Entries and requests, minute by minute.**
+- Entries: decisions per calendar minute, from the stored entries. Each decision is one order to Alpaca, the bracket included.
+- Requests: the governor's count for the 60 seconds before each per-minute statistics stamp. The stamps drift a few seconds past each minute.
+
+| Minute | Entries | Governor stamp | Requests in the last minute | Lowest remaining (day so far) |
+| :-- | --: | :-- | --: | --: |
+| (before) | | 8:44:03 | 35 | 195 |
+| 8:45 | 43 | 8:45:04 | 43 | 193 |
+| 8:46 | 38 | 8:46:08 | 73 | 192 |
+| 8:47 | 29 | 8:47:08 | **88** | 192 |
+| 8:48 | 23 | 8:48:08 | 77 | 192 |
+| 8:49 | 26 (1 refused by Alpaca) | 8:49:08 | 71 | 192 |
+| 8:50 | 25 | 8:50:08 | 70 | 192 |
+| 8:51 | 26 | 8:51:09 | 75 | 192 |
+| 8:52 | 8 | 8:52:08 | 74 | 192 |
+| 8:53 | 25 | 8:53:08 | 59 | 192 |
+| 8:54 | 19 | 8:54:14 | 65 | 192 |
+| 8:55 | 38 | 8:55:13 | 73 | 192 |
+| 8:56 | 17 | 8:56:13 | 76 | 192 |
+| 8:57 | 26 | 8:57:13 | 69 | 192 |
+| 8:58 | 22 | 8:58:13 | 64 | 192 |
+| 8:59 | 18 | 8:59:18 | 60 | 192 |
+| | | 9:00:18 | 62 | 192 |
+
+The window had 383 entry decisions: 382 accepted by Alpaca and 1 refused. All 382 filled. The window averaged 25.5 entries a minute.
+
+**What limited the rate (measured): each symbol cycled too slowly, not the request budget.**
+- The gate allows one position per symbol, and ADT and CIFR were held from 8:45 to the close, so 28 symbols cycled.
+- Per symbol, from one entry to the next: median 37.4 seconds, mean 62.4.
+- That breaks down as:
+  - **Hold** (entry fill to exit fill): median 18.8 seconds, mean 48.0, 90th percentile 120. 139 of 380 closed within 10 seconds.
+  - **Re-entry lag** (exit fill to the next entry on that symbol): median 14.5 seconds, 90th percentile 43. That is the 10 second order sync noticing the exit, the 5 second cooldown, and waiting for the next signal.
+- 28 symbols over a 62 second mean cycle gives about 27 entries a minute, which matches the 25.5 average.
+- The fast names carried the window: SMCI 44, RIOT 32, IREN 32, WULF 29, APLD 24. The slow ones barely cycled: SNAP 3, F 4, PCG 4, ADT 1, CIFR 1.
+- 90 or more a minute would need a mean cycle under about 19 seconds. Today's re-entry lag alone was about 15.
+
+**Refusals in the window, by reason** (the gate counts flow refusals and writes them as rows with a count):
+- already holding this symbol: 883;
+- an entry for this symbol is still working (the exit filled, the sync had not yet noticed): 129;
+- load day, entries start at 8:45 (signals counted in the opening second): 22;
+- Alpaca refused this symbol a moment ago, wait a minute: 6;
+- held back by the governor: **0**.
+
+**Brackets Alpaca refused:** 1 in the window (RIOT, 8:49:22, "stop_loss.stop_price must be <= base_price") and 3 later in the day, all take-profits ("take_profit.limit_price must be >= base_price": SMCI 9:03, PCG 9:14, APLD 10:16). Each is the IEX price disagreeing with Alpaca's own price, as on Tuesday. 18 window entries filled at or above their own take-profit.
+
+**Decision to acceptance, 382 accepted:**
+- Median 134 ms, mean 169, 95th percentile 325, slowest 1,185 ms, fastest 94.
+- Tuesday: 170, 336 and 431 ms.
+- The slow tail is the opening burst: 8 entries in the first 2 seconds of 8:45 took 263 to 1,185 ms.
+
+**Hold times and win/loss:**
+- 149 closed by take-profit, 231 by stop. 2 were not closed by their own exits: ADT and CIFR, both sold at the close-out.
+- 141 won and 239 lost (a take-profit that filled below the entry price counts as a loss).
+
+**Fees:**
+- Estimate for the whole day: 2.91 dollars (SEC 2.84, CAT 0.07, FINRA TAF 0 while paused). Alpaca posts the day's fees in the evening, and at 5 PM Wednesday's had not posted.
+- Tuesday's posted fees were REG 3.00 and CAT 0.02, exactly the 3.02 estimated. Wednesday's start equity (19,205.29) is Tuesday's flat equity less that 3.02.
+
+**Where the window's cost went: -37.70 dollars on 25,935 dollars bought (0.145 percent).** Each part is measured against the price the signal saw:
+
+| Part | Dollars |
+| :-- | --: |
+| Take-profits at their own limit (3 cents up) | +20.40 |
+| Stops at their own stop price (4 cents down) | -38.68 |
+| Entry fills above the signal price (median half a cent a share) | -6.34 |
+| Stops filled below their stop price | -10.32 |
+| Take-profits filled above their limit | +2.80 |
+| ADT and CIFR sold at the close-out (almost all CIFR, see 4.1) | -5.56 |
+| **Total** | **-37.70** |
+
+The proposal expected 190 to 385 dollars for about 1,500 window entries. The window ran 382 entries at 0.145 percent, under half of Tuesday's 0.27 percent: cheap names, 1 cent spreads, a 75 dollar cap. The largest single loss part is the bracket shape itself (3 up and 4 down, with stops hit 231 times against 149 take-profits). That is the placeholder, not the plumbing.
+
+**What the window shows about requests per entry (an estimate, not a measurement at 100):**
+- Before the window, routine work used about 35 requests a minute.
+- In the busiest stamped minute, 39 entries came with 88 requests: about 1.4 requests an entry above the routine.
+- At 100 entries a minute that projects to roughly 170 to 175, before the sync's paging grows during the day (see 4.3).
+- That is under 200, but with little margin. The window did not test it.
+
+### 2. The rest of the day (9:00 AM to 2:00 PM): the normal placeholder with the 75 dollar cap
+
+- **Entries:** 1,643 decisions, 1,640 accepted and filled, 3 refused by Alpaca (the take-profits above). Busiest minute 22.
+- **No new entries after 2:00 PM**, by design: 60 minutes before the close.
+- **Exits:** 885 take-profits, 755 stops; 882 won, 758 lost.
+- **Holds:** median 97.6 seconds, 90th percentile 635. These are the normal 0.25 and 0.4 percent exits.
+- **Speed:** median 153 ms, 95th percentile 314, slowest 605.
+- **Position size:** average 68.20 dollars. Largest 75.05 dollars, 5 cents over the cap: shares are sized from the signal price, as the load mode review's note 7 said.
+- **Exposure:** peak 2,298 dollars (0.12 times equity).
+- **Result: -96.92 dollars on 111,801 dollars bought (0.087 percent):**
+  - take-profits at their limit +160.46 and stops at their stop price -205.98;
+  - entry fills above the signal price -46.93;
+  - stops filled below their stop price -13.16;
+  - take-profits filled above their limit +8.69.
+- **The loss stop was never close.** The day's lowest equity was 19,069.45 at 2:14 PM, 135.84 below the start, against a 500 dollar limit.
+
+**The day as a whole:**
+- 2,022 entries, 2,022 filled; 11,150 shares sold.
+- Equity 19,205.29 to 19,070.67, **-134.62**. That equals the sum of every fill to the cent and the two parts above (-37.70 and -96.92).
+- Fees of about 2.91 still to post.
+- Requests: about 55 to 78 a minute all day, lowest stock 192 until the close-out, 0 rate-limit answers, 0 held back by the governor.
+
+### 3. The 2:55 PM close-out: a false NOT FLAT, then flat 10 seconds later, then two "Close-out done" messages
+
+**Timeline, to the second** (M = measured, with its source; I = inferred):
+
+| Time | What | |
+| :-- | :-- | :-- |
+| 8:45:07.8 | CIFR entry, 10 shares at 7.269 (take-profit 7.28, stop 7.21) | M, Alpaca |
+| 8:45:19.685 | CIFR take-profit fills 1 share | M, fills |
+| 8:45:19.687 | **Alpaca cancels CIFR's stop**, 2 ms after that partial fill | M, Alpaca leg |
+| 8:45:20.969 | CIFR take-profit fills 2 more (3 of 10). The other 7 shares are left with only the 7.28 take-profit, all day (see 4.1) | M, fills |
+| 8:45:32.3 | ADT entry, 7 shares at 9.90 (take-profit 9.92, stop 9.86). ADT then traded 9.875 to 9.915 on IEX all day, so neither exit was reached | M, Alpaca and IEX bars |
+| 2:55:04.404 | last price signal logged; the close-out starts and ends the price stream | M, Fly log |
+| 2:55:04.9 | round 1: "cancel every order" sent | I, from the next line |
+| 2:55:04.907 | ADT's stop cancelled (done at once) | M, Alpaca leg |
+| 2:55:05 to 2:55:13 | ADT's and CIFR's take-profits sit in "pending cancel". Round 1 waits its 6 seconds, finds the shares still held by them, sells nothing | I, code and next lines |
+| about 2:55:14 | round 2: "cancel every order" again. Alpaca answers "order pending cancel" for both take-profits (bb8bcbc3 ADT, f2d67195 CIFR) | M, the round 2 error text |
+| 2:55:15.921 | ADT's take-profit cancel completes | M, Alpaca leg |
+| 2:55:15.929 | CIFR's take-profit cancel completes, about 11 seconds after it was asked for | M, Alpaca leg |
+| 2:55:17.535 | round 2: market sell, 7 ADT, received by Alpaca | M, Alpaca created time |
+| 2:55:17.603 | round 2: market sell, 7 CIFR, received by Alpaca | M, Alpaca created time |
+| 2:55:18 to 2:55:35 | rounds 3 and 4: each sees the two sells still working, waits its 6 seconds on them, sends nothing | I, code and the next line |
+| 2:55:33.807 and 33.878 | Alpaca paper marks the two sells "submitted", **16 seconds after receiving them** | M, Alpaca submitted time |
+| 2:55:36.522 | liquidation ends after 4 rounds: not flat, ADT and CIFR held, 2 sold | M, Fly log; database 36.533 |
+| 2:55:36.677 | close-out result written: error, not flat | M, database |
+| 2:55:36.830 | `alerts`: "@Michael **NOT FLAT after the close-out: ADT, CIFR.** Please check Alpaca now and close by hand. Last problem: round 2: cancel answers: ... order pending cancel" | M, Discord |
+| 2:55:37.408 | `commands`: "**Michael: NOT FLAT after the close-out: ADT, CIFR.**". Then the not-flat flag is set and saved | M, Discord; I, code |
+| 2:55:37.583 | **CIFR sell fills**: 7 at 6.45 | M, fills |
+| 2:55:38.959, 40.975, 46.012 | **ADT sell fills**: 5, 1 and 1 at 9.90 | M, fills |
+| 2:55:44 | **Healthchecks receives a failure signal and marks the check down** (its record is to the whole second; the worker does not log each heartbeat) | M, Healthchecks |
+| 2:55:45.904 | `alerts`, from Healthchecks: "is DOWN. Reason: received a failure signal." | M, Discord |
+| **2:55:46.012** | **the account is flat** (ADT's last fill) | M, fills |
+| 2:55:48.798 | carried-position path: close-out result "flat", nothing sold. Not-flat flag cleared | M, database; I, which path |
+| 2:55:49.216 | `trading`: "Close-out done: the account is flat." (first) | M, Discord |
+| 2:55:51.431 | close-out retry: result "flat", nothing sold | M, database |
+| 2:55:51.629 | `trading`: "Close-out done: the account is flat." (second) | M, Discord |
+| 2:55:51.777 and 51.801 | not-flat flag saved off; the day's close-out step recorded as done | M, database |
+| 2:55:59 | Healthchecks receives the next good heartbeat and marks the check up (good heartbeats go at most every 30 seconds) | M, Healthchecks |
+| 2:56:00.209 | `alerts`, from Healthchecks: "is UP. The downtime lasted 14 seconds." | M, Discord |
+
+Nothing else was sent. The only sells the stack sent all day were these two close-out sells (`cyrus-x-...-2`). Michael closed nothing by hand. Every other sale was a bracket exit at Alpaca.
+
+**Why it declared NOT FLAT while the market was still open:**
+- The close-out's sale routine (`sells.ts` Liquidator) has a fixed budget: 4 rounds, each a cancel, a wait of up to 6 seconds, a sell and a 1 second pause. That is about 30 seconds, then it reports what is still held.
+- Two delays inside Alpaca paper used up that budget:
+  - the two take-profit cancels took about 11 seconds to complete, so round 1 could not sell and round 2 sold only at 2:55:17;
+  - Alpaca paper then held the two market sells 16 seconds before submitting them (2:55:17.5 to 2:55:33.8).
+- Rounds 3 and 4 did nothing useful. The wait step counts the routine's **own** working sells as "still holding the shares", so each round waited its full 6 seconds on them.
+- At 2:55:36.5 the budget ran out with both sells working and the market open for another 4.5 minutes. The routine does not tell "held, but my own sell for every share is working" apart from "stuck", so it reported not flat.
+- **The alert's stated reason was wrong.** "Last problem: ... order pending cancel" was Alpaca saying the cancel was already under way, a symptom from round 2, not why the account still held shares.
+- **Not a rate limit:** 0 rate-limit answers, 0 governor holds, stock 175 at 2:55:24. The close-out did make 133 requests in the minute to 2:55:24, mostly its own polling, to sell two positions. That is inside the budget, but a lot.
+
+**What flattened ADT and CIFR:** the close-out's own round 2 market sells, received at 2:55:17 and filled at 2:55:37.6 (CIFR) and 2:55:46.0 (ADT). Not the take-profits (both cancelled), not a later sale, not Michael.
+
+**Why "Close-out done" posted twice (inferred from the code and the times above):**
+- Once the failed close-out set the not-flat flag during market hours, two separate paths each set out to sell:
+  - **The carried-position path** (`worker.ts`, "positions carried over from a close-out that did not get flat"). It is checked first in each pass and has no waiting time on its first try.
+    - It started on the first pass after the flag was set and called the same close-out routine.
+    - Round 1 found ADT still held, saw only its own sell working (so it cancelled nothing), and waited until ADT's last fill at 2:55:46.
+    - Its next round found the account flat. The routine then posted "Close-out done" (2:55:49) and cleared the flag. This path never records the day's close-out step as done.
+  - **The close-out retry** (every 20 seconds until the close-out step is recorded). Because the step was still not recorded, it ran on the next pass, found the account flat, and posted "Close-out done" again (2:55:51). It then recorded the step (2:55:51.8).
+- The emergency close-out did not run: no database or stuck-loop events, and its "closing everything from the broker's clock alone" message never posted.
+- The two runs could not sell the same shares: sales run one at a time, and the second found nothing held.
+
+**Is the Healthchecks failure signal by design? Yes. Here a false NOT FLAT triggered it.**
+- The heartbeat sends "fail" on every pass while the not-flat flag is on (`worker.ts` heartbeat: "fail ... at once while the account is still holding positions after the close-out time").
+- That makes Healthchecks alert at once, a second, independent alarm for positions left after the close-out. It worked as built: down at 2:55:44, up at 2:55:59.
+
+**The NOT FLAT alert told Michael to "close by hand" while the stack's own sells were working.** A hand sale in that window could only have met Alpaca's "no shares available", or, through Alpaca's "close position", replaced the stack's sale. Harmless here, but the instruction was wrong.
+
+### 4. What else did not behave as designed
+
+**4.1 Alpaca cancels the protective stop as soon as the take-profit starts to fill, so the rest of the position has no stop until the take-profit finishes. Measured on paper today; not checked against Alpaca's documentation or live trading.**
+- This breaks "every entry carries a protective stop at Alpaca".
+- Of 1,035 brackets whose take-profit filled at all, **655** had their stop cancelled at the first partial fill, before the take-profit had filled every share.
+- How long the remaining shares had no stop:
+
+| Time without a stop | Brackets | In the window |
+| :-- | --: | --: |
+| under 1 second | 132 | 21 |
+| 1 to 10 seconds | 472 | 71 |
+| 10 to 60 seconds | 32 | 3 |
+| 1 to 10 minutes | 11 | 3 |
+| over 10 minutes | 8 | 1 (CIFR) |
+
+- The remaining shares were worth at most about 70 dollars each time (the load day cap).
+- Every one except CIFR ended at its take-profit, so CIFR is the only one that cost money:
+  - 7 shares sat from 8:45:20 to 2:55:15 (6 hours 10 minutes) with only a 7.28 take-profit above the market;
+  - CIFR fell to 6.18 and was sold at 6.45, -5.73 dollars;
+  - its 7.21 stop would have fired at 8:45 (IEX low 7.16 in that minute) for about -0.41 plus slippage.
+- **Why nothing caught it:** the missing-exit check (`risk.ts` `syncOrders`, `hasLiveExit`) treats any open exit leg as protection, the take-profit included. It asks "is any sell leg open?", not "is the stop live?".
+- On a normal day with 500 to 2,000 dollar positions, the same gap exposes far more. Tuesday's brackets have not yet been checked for it. That is one read-only query.
+
+**4.2 Alpaca's order listing left out 2 of the day's 2,022 entries, and the daily summary undercounted because of it.**
+- CMG-7 (8:50:34, closed by its stop, -0.08) and RIVN-7 (8:50:34, closed by its take-profit, +0.22) are missing from the "all orders" listing on every page, whether paged by submitted time or by created time. Fetched by client id, both are there and filled.
+- The summary reads the same listing. So it said "2,022 sent (2,020 filled)" and "-134.76 from closed trades" against the account's -134.62. The 0.14 difference is exactly those two. Its load window line, "closed by take-profit 148, by stop 230", is short by the same two (149 and 231).
+- The order sync also reads the listing, and skips any stored entry it cannot find in it (`if (!o) continue`). An entry missing from the listing therefore gets no missing-exit check on that pass.
+- Today the sync did see both (the database closed them at 8:50:58 and 8:51:28), so the omission seems to depend on the query.
+- **Cause unknown.** It is not a paging gap: the two are absent from a page that covers their time.
+
+**4.3 With one entry open since 8:45, every order sync read the whole day's orders.**
+- The sync reads every order since the oldest entry still open. ADT and CIFR stayed open from 8:45, so by the afternoon each 10 second sync read about 5 pages (2,000 orders).
+- From 2:05 to 2:50 PM there were no entries at all, yet requests ran at 64 to 74 a minute.
+- This is the load mode review's note 5, now measured. It is under the budget today, but it grows with the day's order count and would cut into the headroom on a busy load day.
+
+**4.4 Smaller items:**
+- Discord answered 503 once (2:50:34 PM) to a command read. The next read worked; by design no alert (alerts start after 2 minutes).
+- After 2:00 PM, each "too close to the close for a new entry" refusal is written as its own row: 2,209 rows. Other flow refusals are counted into one row a minute.
+- The summary's "Alpaca requests ... lowest budget seen 171" comes from the close-out minute, not from trading.
+
+### Proposed fixes (under the standing rule: none built until Michael approves)
+
+Ranked. Items 1 to 4 are money-touching (the missing-exit check, the sell path, the close-out); item 5 is logging and wording only.
+
+1. **Remaining shares with no stop after a partial take-profit (4.1).** The missing-exit check would treat "the stop leg is no longer live and shares of this entry are still held" as unprotected, even while the take-profit is open. Two ways to act:
+   - **a. Recommended: sell the remaining shares** through the existing missing-exit path. It cancels the take-profit and sells only that symbol, through the sell gate, and posts "had no live protective stop, so I sold it". To avoid selling shares the take-profit fills a second later (604 of 655 finished within 10 seconds), it acts only when the same entry is seen without a stop on two syncs in a row. On a load day that is 10 to 20 seconds; on a normal day 30 to 60. Today that would have sold CIFR's 7 shares at about 8:45:40, plus a few dozen remainders.
+   - b. Place a new stop for the remaining shares. Alpaca holds those shares for the open take-profit, so this means cancelling it and sending a new pair of exits. That is more requests and new order shapes to test, and the new pair would behave the same way on its next partial fill.
+   - Before building, one read-only check of Tuesday's brackets (full-size positions) measures how often this happens on a normal day.
+2. **No NOT FLAT while the close-out's own sells are working and the market is open (3).**
+   - While every share still held is covered by a sell the close-out sent, keep waiting quietly instead of ending the round budget, and stop waiting at a deadline (for example 2 minutes before the close, about 2:58 PM).
+   - NOT FLAT, the mention and the Healthchecks failure signal would come only for shares with no sell working, or at that deadline.
+   - Rounds that only wait on the stack's own sells would poll gently rather than every fraction of a second.
+   - The alert would give the true reason (for example "2 sells sent at 2:55:17, Alpaca has not filled them yet"), not the last cancel answer.
+3. **One close-out per day (3).**
+   - The carried-position path is meant for shares carried over from an earlier day. It would not run on a day whose close-out has started; that day's close-out retry already handles the rest.
+   - Result: one sale routine at a time and one "Close-out done" message, with the close-out step recorded as soon as the account is flat.
+4. **Check the listing against the stored entries (4.2).**
+   - In the order sync, any open stored entry missing from the listing is fetched by its client id (one request each, rare), so it still gets its missing-exit check.
+   - The summary does the same for any stored entry missing, so its counts match the account.
+   - For 4.3: an entry open for more than a few minutes would be read by its client id instead of setting how far back the listing reads. The paging then covers only recent orders, however long one position is held. This belongs with the "faster order check" item and its request math, and would be proposed with it.
+5. **Logging and wording only:**
+   - log the close-out's cancel and sell request times and which path ran it (close-out, retry, carried, emergency);
+   - log each heartbeat failure signal;
+   - count "too close to the close" refusals into one row a minute like the others;
+   - the NOT FLAT alert says "check Alpaca" without "close by hand" while the stack's own sells are working.
+
+**On the load test itself (for Michael, no code proposed):** the window showed that the 30-name free feed, one position per symbol and today's hold times cap the busy placeholder at about 45 entries a minute. Reaching 100 needs per-symbol cycles under about 19 seconds. Tighter exits or a faster sync narrow the gap; more than one position per symbol would close it but changes the gate. Each of these is a money-touching design choice for Michael. The budget question (do 200 requests a minute hold at 100 entries) is still open.
+
+Paper only. Everything here is research input for a human decision, never an instruction to act.
