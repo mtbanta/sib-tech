@@ -1424,3 +1424,105 @@ Full suite **360 pass** (343 before), type check clean.
 4. **What is trouble:** only "order pending cancel" answers are treated as not-trouble. Any other cancel or sell problem still gets the "had trouble but recovered" note.
 
 Secret scan clean. Not deployed and not reviewed. Paper only.
+
+## Release B proposal: 100 entries a minute on Thursday's load day (2026-11-04, evening; for Michael's approval, no code until he approves)
+
+Michael's ask: cut each symbol's cycle from about 34 seconds to under 17 in the load window, load days only, normal days unchanged, the 100 a minute ceiling kept. Release B is built on top of release A and deploys separately, only if its own review passes.
+
+**How the options were judged (an estimate, not a measurement).**
+- Wednesday's whole window loop was replayed per symbol on the free feed's actual trade prints, 8:45 to 9:00 AM. The replay includes:
+  - the placeholder's signal rule, with the cooldown counted from the last signal (refused ones included);
+  - one position per symbol;
+  - the measured fill delay (median 2.3 seconds from decision to a full fill);
+  - the measured entry slippage;
+  - the exits;
+  - when a closed position frees its symbol.
+- **Calibration:** with Wednesday's settings the replay gives 418 entries against the 382 that happened (about 10 percent high), and a median hold of 18.6 seconds against the actual 18.5.
+- Paper fills against the consolidated quote, not IEX prints, so treat every number below as a guide.
+
+| Option (load window only) | Entries in 15 min | Minutes at 90 or more | Window result (dollars) |
+| :-- | --: | --: | --: |
+| Wednesday: +3/-4 cents, cooldown 5 s, freed by the 10 s order sync | 418 (actual 382) | 0 | -36 (actual -38) |
+| Freed from Alpaca's live order updates, otherwise as Wednesday | 480 | 0 | -39 |
+| Live updates, +1/-2 cents, cooldown 1 s | 962 | 0 | -41 |
+| Live updates, +1/-2, cooldown 1 s, **enter on any new print** | 1,383 | 10 | -69 (-14 at 1 share) |
+| the same, at **1 share**, plus a **60 second time limit** | 1,400 | **13** | **-14** |
+| the same, at 1 share, plus a 30 second time limit | 1,448 | 14 | -14 (but about 15 extra requests a minute) |
+
+What the table shows:
+- The signal rule is the biggest limit. "An uptick at or above the average of the last 12 prints" waits for prints that may not come.
+- Next come the exit width (holds) and the time until a closed symbol is noticed.
+- No single change reaches 90 a minute. Four together do.
+
+**Proposed, load window (8:45 to 9:00 AM) on a load day only:**
+1. **Free a symbol the moment its exit fills, from Alpaca's live order updates.**
+   - Alpaca's `trade_updates` stream (`wss://paper-api.alpaca.markets/stream`) sends a `fill` event for every order, the exit legs included. Each event carries `position_qty`, the position after the fill (Alpaca's "WebSocket Streaming" page, read 2026-11-04). The legs carry the entry's `group_id`.
+   - A sell fill that leaves 0 shares frees that symbol in the gate (the cached positions and the stored entry) within about half a second, instead of waiting for the next 10 second sync.
+   - It is a listener only: it never sends an order. It uses no REST requests (it does not count against the 200 a minute).
+   - It runs from "Armed" to the close on load days only. If it drops, it reconnects, and the 10 second sync still frees symbols as today. The sync stays the record of truth and runs the missing-exit and stop checks.
+   - Not yet seen on paper: whether paper's events carry `position_qty` for bracket legs. If not, the code adds up the exit fills against the entry's filled shares.
+2. **Enter on any new print once the symbol is free**, at least 1 second after its last entry (instead of the uptick rule and the 5 second cooldown). The placeholder stays meaningless by design; this only makes it busier.
+3. **Exits 1 cent above and 2 cents below the signal price** (instead of 3 and 4). Every entry still carries both exits at Alpaca in the same bracket.
+4. **1 share per entry.**
+   - A 1-share order cannot partly fill. So the window has no stranded remainders (the stop problem release A fixes), no partial fills to wait on, and no fix 1 sales eating requests.
+   - The cost falls about five times: positions of 5 to 35 dollars instead of about 68.
+   - Without this, tighter take-profits produce more partial fills. Fix 1 would then sell about 3 remainders a minute at 15 to 25 requests each, and push the window past 200 requests a minute.
+5. **Recommended, a 60 second time limit.**
+   - A position still open after 60 seconds has its take-profit's limit price lowered to a price that sells at once. Alpaca documents replacing a bracket leg's `limit_price` (`PATCH /v2/orders`, "Orders at Alpaca", Bracket Orders, read 2026-11-04).
+   - That is 1 request each, about 5 a minute in the replay. It is not a cancel, which took about 11 seconds on paper at Wednesday's close-out.
+   - The quantity does not change, so it cannot oversell. It goes through `sells.ts` like every sale, and the structure test covers it.
+   - It frees slow symbols (ADT-like names) and lifts the replay from 10 to 13 minutes at 90 or more.
+   - Not yet seen on paper: how long a leg replacement takes there. If it is slow, the limit still frees the symbol, just later.
+
+After 9:00 AM the load day carries on as Wednesday did: the normal placeholder, the 75 dollar cap, the 10 second sync. Normal days are unchanged, and the stream is not connected on them. A test proves a normal day is unchanged.
+
+**The cycle, item by item (replay, recommended set):**
+- decision to fill about 2.3 seconds;
+- hold: median about 1 second, mean about 9 with the 60 second limit;
+- freed about 0.5 seconds after the exit fills;
+- next entry on the next print at least 1 second later.
+- That gives a mean cycle of about 13 to 15 seconds, under Michael's 17, on the active names. The slow names stay slower, and the time limit bounds them.
+
+**Expected cost (paper dollars):**
+- The load window: about **15 dollars** in the replay (1,400 entries of 1 share).
+- The rest of the day, on Wednesday's settings: about 100 dollars, depending on the market.
+- Fees about 3 to 4 dollars.
+- The worst case is still bounded by the unchanged 500 dollar loss stop.
+
+**Requests a minute at 100 entries (estimate):**
+
+| Work | Requests |
+| :-- | --: |
+| Entries (bracket included) | 100 |
+| Account and positions every 5 seconds | 24 |
+| Loss stop checks | 12 |
+| Settings | 2 |
+| Order sync every 10 seconds (1 page: open entries are under a minute old) | 12 |
+| 60 second time limit (replacements) | about 5 |
+| Fix 1 sales (none at 1 share) | 0 |
+| Live order updates (stream, not REST) | 0 |
+| **Total** | **about 155** |
+
+Cross-check from Wednesday's measurement (35 routine plus about 1.4 per entry): about 175. Either way it is under 200. That headroom is what Thursday tests. Wednesday's measurements suggest Alpaca's remaining count refills continuously (192 left in a minute with 88 requests), so the governor's 80 reserve should not bite at about 160. If it does, that is the "does not hold" result, measured.
+
+**The 100 a minute ceiling: it does not block the test.**
+- The replay wants more than 100 in the first 4 to 5 minutes (1,606 uncapped) and is clipped to 100. It still reaches 90 or more in 13 minutes.
+- The pass needs about 90 for 10 of 15 minutes, so 100 is enough.
+- What the ceiling does block is learning anything above 100. That is outside this test, and raising it is a hard stop for Michael.
+
+**Honest odds.** The replay ran 10 percent optimistic on Wednesday. At 13 replay minutes at 90 or more, Thursday plausibly lands at 9 to 13. A pass is likely but not certain, and "inconclusive" again is possible.
+
+**Code changes this needs (all money-touching, load window only):**
+1. A new live order updates listener (`order-stream.ts`): it frees symbols in the gate's cached view and closes the stored entry, with logging (events received, symbols freed, time from exit fill to free, reconnects).
+2. The strategy's load window rule: any new print, 1 second, +1/-2 cents.
+3. The gate's load window size: 1 share.
+4. (If approved) the 60 second time limit in `sells.ts`, through the sell gate, with the structure test extended.
+5. The summary and Armed wording for the new window settings.
+
+Each gets a test that fails without it, plus "a normal day is unchanged". Then the secret scan, the full suite, one build-reviewer round, and a deploy as its own release before 7:30 AM if the review passes.
+
+**One build-order note.** B is built on top of A. If A fails its review and B passes, B would have to be rebuilt on the v7 code before it could deploy alone. I would tell Michael before doing that.
+
+**For Michael to decide:** approve items 1 to 4; and item 5 (60 second time limit) yes or no. Also, Thursday is a load day only once he types `load on` before the 7:45 AM screen and approves Thursday's limits (at least `trades 100`).
+
+Paper only. Research input for a human decision, never an instruction to act.
