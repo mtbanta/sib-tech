@@ -189,7 +189,7 @@ As of 2026-11-04 (after the close): v7 runs; Wednesday reviewed.
    3. one close-out per day;
    4. check Alpaca's order listing against the stored entries;
    5. logging and wording.
-   Items 1 to 4 are money-touching: nothing is built until he approves. A read-only check of Tuesday's brackets for the missing-stop gap is offered first. Also his call: whether and how to retest 100 entries a minute (the placeholder topped out at about 45). Thursday's limits wait for his approval, and items 1 to 4 below still stand.
+   Items 1 to 4 are money-touching: nothing is built until he approves. A read-only check of Tuesday's brackets for the missing-stop gap is offered first. Also his call: whether and how to retest 100 entries a minute (the placeholder topped out at about 45). Thursday's limits wait for his approval, items 1 to 3 below still stand, and item 4 (the load day) ran on 2026-11-04.
 
 Done, superseded by item 0 above: **Wednesday 2026-11-04:** Michael types `resume`, decides `load on` (before 7:45 AM) and approves the limits. After the session, review it, and the load window separately if it was a load day. Judge the request budget by the pass/fail rule in the log ("Load mode proposal", item 8). Also pending from the load mode review: Michael to confirm that a `load off` on the trading-day morning **before** the 7:45 AM screen should give a normal day (the builder's reading); and the logged message-text notes (the Armed message on an `ended` day, a repeated part after a failed split post).
 
