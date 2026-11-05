@@ -51,6 +51,12 @@ export class BrokerView {
     this.configAt = 0;
   }
 
+  // Release B: Alpaca's live order updates said this symbol is now 0 shares, so the cached positions drop it at once (the gate's
+  // "already holding" clears without waiting for the next refresh). Only ever removes; the next refresh brings back what Alpaca shows.
+  dropPosition(symbol: string): void {
+    if (this.positions) this.positions = this.positions.filter((p) => p.symbol !== symbol);
+  }
+
   fastAgeMs(): number {
     return this.account && this.positions ? this.now() - this.fastAt : Infinity;
   }

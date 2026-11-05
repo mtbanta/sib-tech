@@ -8,8 +8,9 @@
 // this name last signalled, propose a buy: a take-profit 0.25 percent above, a stop 0.4 percent below. The gate
 // decides whether it goes out. The same trades always give the same signals (no clock, no randomness).
 //
-// Load day (load-mode.ts): while the load window is on, the cooldown is 5 seconds and the exits sit 3 cents above and 4 cents
-// below the price, so positions turn over fast. Outside the window, and on every normal day, the rule above is unchanged.
+// Load day (load-mode.ts, release B): while the load window is on, ANY new print is a signal once 1 second has passed since that
+// name's last signal, and the exits sit 1 cent above and 2 cents below the price, so positions turn over fast. Outside the window,
+// and on every normal day, the rule above is unchanged.
 import type { Trade } from "./stream.ts";
 import { LOAD_COOLDOWN_SECONDS, LOAD_STOP_CENTS, LOAD_TAKE_PROFIT_CENTS } from "./load-mode.ts";
 
@@ -24,6 +25,8 @@ export interface Signal {
   tradeTime: Date;
   stopPrice: number;
   takeProfitPrice: number;
+  // Release B: made in the load window (the gate then sends 1 share, and the worker applies the 60 second time limit).
+  load?: boolean;
 }
 
 const cents = (x: number) => Math.round(x * 100) / 100;
@@ -49,16 +52,19 @@ export class BusyPlaceholder {
     ring.push(t.price);
     if (ring.length > WINDOW) ring.shift();
     this.prices.set(t.symbol, ring);
-    if (ring.length < WINDOW || previous === undefined || !(t.price > previous)) return null;
-    const mean = ring.reduce((s, x) => s + x, 0) / ring.length;
-    if (t.price < mean) return null;
     const load = this.loadActive(time);
+    // Release B: in the load window any new print is a signal (once the cooldown has passed); outside it, the uptick rule.
+    if (!load) {
+      if (ring.length < WINDOW || previous === undefined || !(t.price > previous)) return null;
+      const mean = ring.reduce((s, x) => s + x, 0) / ring.length;
+      if (t.price < mean) return null;
+    }
     const cooldown = load ? LOAD_COOLDOWN_SECONDS : COOLDOWN_SECONDS;
     const last = this.lastSignal.get(t.symbol);
     if (last !== undefined && time.getTime() - last < cooldown * 1000) return null;
     this.lastSignal.set(t.symbol, time.getTime());
     const stopPrice = load ? cents(t.price - LOAD_STOP_CENTS / 100) : Math.min(cents(t.price * (1 - STOP_FRACTION)), cents(t.price - 0.02));
     const takeProfitPrice = load ? cents(t.price + LOAD_TAKE_PROFIT_CENTS / 100) : Math.max(cents(t.price * (1 + TAKE_PROFIT_FRACTION)), cents(t.price + 0.02));
-    return { symbol: t.symbol, price: t.price, tradeTime: time, stopPrice, takeProfitPrice };
+    return { symbol: t.symbol, price: t.price, tradeTime: time, stopPrice, takeProfitPrice, ...(load ? { load: true } : {}) };
   }
 }

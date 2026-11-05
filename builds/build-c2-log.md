@@ -1565,3 +1565,128 @@ Round 1, the only round Michael allowed, on `4e81d33..a99039d`. No blocking find
 - Stop flag off, not-flat flag off.
 
 Paper only.
+
+## Release B (built 2026-11-04, evening; code only, not deployed)
+
+Michael's approval (2026-11-04, evening):
+- items 1 to 4, load days only, normal days unchanged;
+- item 5, the 60 second time limit, with a guard: a refused or stalled price change leaves the existing stop and take-profit, is logged and counted, and is never retried;
+- a test that the change can never oversell or leave a position without a stop.
+
+Built on top of release A (v8). Everything below applies only on a load day, and only in the window (8:45 to 9:00 AM Central), unless it says "load day".
+
+**1. Live order updates (`src/order-stream.ts`, new).**
+- **What it is:** a listener on Alpaca's paper `trade_updates` stream (`wss://paper-api.alpaca.markets/stream`).
+  - The address is built from the fixed paper host and checked like the trading address (`assertPaperStream`).
+  - It authenticates, listens, and reads the binary frames paper sends.
+  - It never sends an order and never calls REST. A structure test checks that `order-stream.ts` cannot reach the broker.
+- **When it runs:** on a load day from "Armed" to the close. Never on a normal day.
+- **What it does on a sell fill:** when Alpaca says the position is now 0 shares (`position_qty`), the symbol is freed at once:
+  - the gate's cached positions drop it (`BrokerView.dropPosition`);
+  - the entry is recorded as closed, with its own fill written.
+- **Safety rules:**
+  - The entry is found by Alpaca's `group_id` (a bracket's entry and its legs share it), never by symbol. A late or repeated update about an older position cannot close a newer entry on the same symbol, which would otherwise let a second entry go out beside it and take it out of the missing-exit check.
+  - An entry is closed only if its own fill is known, from the stream's buy fill or from the order sync's latest view. Otherwise only the cached position is dropped and the sync closes the record.
+  - If `position_qty` is missing, the symbol is freed only when that group's exit fills add up to the entry's filled shares. If that cannot be decided, nothing happens and the sync takes over.
+- **Resilience:** it reconnects with a growing wait (2, 4, 8 up to 30 seconds) and stops after "not authorized". While it is down, the 10 second sync frees symbols as before. The sync stays the record of truth and still runs the missing-exit and bare-remainder checks.
+- **Logging:** connects and reconnects go to the run log (`order_stream`; reconnects as warnings). Each free is logged with the time from Alpaca's fill to the free. The per-minute statistics carry the counters: events, frees, records closed, reconnects, typical time.
+
+**2. Strategy (`strategy.ts`, `load-mode.ts`).** In the window:
+- any new print is a signal once 1 second has passed since that symbol's last signal (no uptick or 12-print average rule);
+- exits sit 1 cent above and 2 cents below the signal price;
+- the signal is marked as a window signal.
+
+Outside the window the rule is unchanged, byte for byte.
+
+**3. Gate.** A window signal on a load day is 1 share (never more than the checks allow). The 75 dollar cap stays all load day.
+
+**4. Wording:**
+- **Mode line:** "5. mode: **LOAD DAY** (cheap list, at most 75 dollars a position, 1 share churn 8:45 AM CT to 9:00 AM CT, then normal)".
+- **Armed message:** "1 share a trade, any new print, exits 1 cent up and 2 down, symbols freed by Alpaca's live order updates, a 60 second time limit".
+- **Summary:** a window line with the settings, the time limit's outcomes and the live updates' counters.
+- The normal day's mode line and texts are unchanged.
+
+**5. The 60 second time limit (`src/time-limit.ts`, new; `SellGate.lowerTakeProfit` in `sells.ts`; `replaceOrderLimit` in `alpaca-trading.ts`).**
+- **What it does:** a window entry still open 60 seconds after its fill has its take-profit leg's limit price lowered, through `PATCH /v2/orders/{id}` with `limit_price` only. The new price is the lower of the last price minus 5 cents and 98 percent of it, rounded down to the cent, never above the take-profit's own price by the same rule.
+- **Where its data comes from:** the take-profit leg comes from the order sync's latest view (`SyncMemory.lastSeen`, new), so there are no extra lookups.
+- **Cost:** each attempt costs 2 requests, a position check and the change. The proposal counted 1.
+- **When it holds back:** at Alpaca's safety reserve (the attempt is not used up), and while a close-out or any sale runs or from the close-out time on.
+- **Michael's guard:**
+  - **One attempt per entry**, remembered in memory and in the database (`time_limit:<date>`), so a restart does not try again.
+  - **A refusal** (a 4xx, or the sell gate's own refusal) is counted as refused. Both exits stay as they were.
+  - **A stall** is counted once: no answer within the client's 10 second request limit, a server error, a 429, or an accepted change that the next sync still shows unchanged and unfilled. Nothing more is done.
+  - **It cannot oversell.** It sends no quantity (a structure test checks the call's body). The sell gate refuses unless the leg's unfilled shares are no more than the shares held, and refuses any price that is not lower.
+  - **It cannot leave a position without a stop.** It never touches the stop, and does nothing to an entry whose stop is not live; that remainder is release A's bare rule's to sell. A test shows that if the stop goes after a change was accepted, the bare rule sells what is left.
+- **Who may send it:** only `sells.ts` may call `replaceOrderLimit` (structure test).
+- **Summary:** attempts, changed, how many then sold at the take-profit, refused, stalled.
+
+**6. Logging.**
+- Per-minute statistics in the window as before, now with the live updates' and the time limit's counters.
+- New run-log events: `order_stream`, `order_stream_started`, `time_limit`, `time_limit_stalled`, `time_limit_refused`.
+
+**Interpretations (for the reviewer and Michael):**
+1. The live updates run from "Armed" to the close as specified, so after 9:00 they also free symbols for the normal placeholder (a little faster re-entry than today). Everything else after 9:00 is as Wednesday's. The time limit applies only to entries made in the window, which keep it after 9:00.
+2. A stall includes a 429 and a server error (no clear answer, so the outcome is unknown and it is not tried again), as well as the time-out and the unchanged-at-next-sync case.
+3. Not yet seen on paper:
+   - whether `trade_updates` events carry `position_qty` and `group_id` for bracket legs (the code falls back to the sync if not);
+   - how Alpaca lists a replaced take-profit under its entry. If the new leg is not listed there, the summary's "then sold at the take-profit" count reads low. The sync still closes the entry by its existing "position gone" rule.
+4. **Request load:** the proposal's table gave about 155 requests a minute at 100 entries. The time limit's position check adds 1 request per attempt, about 5 a minute in the replay, so about 160. In the simulated window below, the most in any 60 seconds was 150.
+
+**Tests:** `test/release-b.test.ts`, 17 tests :
+- the listener's paper-only address, authentication, binary frames, and that it sends nothing else;
+- reconnects;
+- frees only on 0 shares;
+- group matching (a late update never closes a newer entry);
+- the `position_qty` fallback;
+- structure;
+- worker level: connects at Armed and stops at the close, an exit frees the symbol with no sync in between, the Armed wording and mode line, the counters in the statistics, and the time limit run by the worker's own passes;
+- **a normal day unchanged:** no live updates, the uptick rule, 9 shares at 50.40, normal exits, no time limit;
+- the time limit: once at 60 seconds and closing;
+- the guard: refused and never retried (also after a restart), stalled for both a time-out and an accepted-but-unchanged change, never oversell, never without a stop, held back at the reserve and during a close-out, no time limit after the window;
+- the summary;
+- **the window at volume** on the simulated broker (30 names, a busy market with 1 cent steps every 100 ms): 1,500 entries, 100 in every minute of the window (the ceiling), every entry 1 share, at most 150 requests in any 60 seconds, lowest budget 171, no remainder sales, no rate-limit answers, no false alarm. This is the plumbing in a generous simulated market, not a forecast of Thursday.
+
+Changed on purpose: the two load-mode tests that checked Wednesday's window rules (3 cents up, 4 down, a 5 second cooldown, the uptick rule) now check release B's.
+
+Full suite **377 pass** (360 before), type check clean, secret scan clean, no dashes.
+
+| Change taken out | Tests that fail |
+| :-- | :-- |
+| live updates never connected | worker frees at once; window at volume |
+| live updates also on a normal day | normal day unchanged |
+| live updates not stopped at the close | worker frees at once (stopped at the close) |
+| `position_qty` ignored (any sell fill frees) | frees only on 0 shares |
+| entries matched by symbol, not group | late update never closes a newer entry; worker frees at once |
+| no fallback without `position_qty` | the `position_qty` fallback |
+| record closed without its fill known | the `position_qty` fallback (fill unknown case) |
+| cached position not dropped | worker frees at once |
+| paper-only address check off | listener's paper-only address |
+| uptick rule kept in the window | load-mode window test; strategy rules; worker frees at once; worker time limit |
+| cooldown 5 seconds again | strategy rules; worker frees at once |
+| take-profit 3 cents again | load-mode window test; strategy rules; window at volume |
+| stop 4 cents again | load-mode window test; strategy rules |
+| window signal not marked | strategy rules; window at volume |
+| normal size in the window (no 1 share) | window at volume |
+| old mode line | worker frees at once (wording) |
+| old Armed wording | worker frees at once (wording) |
+| no counters in the per-minute statistics | worker frees at once (statistics) |
+| time limit not run by the worker | worker time limit |
+| time limit at 0 seconds | worker time limit |
+| time limit retried (no memory of attempts) | refused, never retried; stalled, never retried; worker time limit |
+| attempts not saved in the database | refused, never retried (restart part) |
+| stall at the next sync not counted | stalled (accepted but unchanged) |
+| time limit acts without a live stop | never without a stop |
+| time limit ignores the safety reserve | holds back at the reserve |
+| time limit during a close-out or a sale | holds back during a close-out |
+| time limit on entries outside the window | no time limit after the window |
+| sell gate: no shares-held check | never oversell; never without a stop |
+| sell gate: the price may go up | never oversell |
+| sync does not keep its latest view | the 6 time limit tests |
+| no summary lines | the summary |
+
+Three rows failed no test on the first pass, and each test was strengthened until it did:
+- **"time limit acts without a live stop"**: the sell gate's shares-held check had been stopping the change on a stale view. The test now syncs first, so the stop check alone has to hold.
+- **"record closed without its fill known"**: a case was added where the entry was seen only as "new".
+- **"cached position not dropped"**: the worker test now has the cached view show the position first.
+
+Of the two layers that keep the time limit off normal days (the worker runs it only on a load day, and the time limit returns at once on a normal day), taking out one alone fails no test, because the other still holds.

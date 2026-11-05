@@ -6,7 +6,10 @@
 // On a load day:
 //   - the morning screen picks 30 cheap, heavily traded names (5 to 35 dollars) instead of the usual 20;
 //   - no entry before the load window (15 to 30 minutes after the open, 8:45 to 9:00 AM Central);
-//   - in the window the placeholder churns: a 5 second cooldown per name and exits 3 cents above and 4 cents below;
+//   - in the window the placeholder churns (release B, Michael's approval of 2026-11-04): any new print is a signal once 1 second
+//     has passed since that name's last signal, exits sit 1 cent above and 2 cents below, every entry is 1 share, a closed
+//     position frees its symbol from Alpaca's live order updates (order-stream.ts), and a window entry still open 60 seconds
+//     after its fill has its take-profit lowered so it sells at once (one attempt, see sells.ts);
 //   - after the window the normal placeholder runs for the rest of the day;
 //   - every entry is at most 75 dollars, all day (whatever position limit was approved);
 //   - the order sync (which notices closed entries and sells a position left without a protective stop) runs every 10
@@ -30,9 +33,13 @@ export const LOAD_MAX_POSITION_USD = 75;
 export const LOAD_WINDOW_START_MIN = 15; // minutes after the open
 export const LOAD_WINDOW_END_MIN = 30;
 export const LOAD_SWITCH_DEADLINE_MIN = 45; // `load on` is accepted until this many minutes before the open (the morning screen)
-export const LOAD_COOLDOWN_SECONDS = 5;
-export const LOAD_TAKE_PROFIT_CENTS = 3;
-export const LOAD_STOP_CENTS = 4;
+export const LOAD_COOLDOWN_SECONDS = 1;
+export const LOAD_TAKE_PROFIT_CENTS = 1;
+export const LOAD_STOP_CENTS = 2;
+// Release B: shares per entry in the window. A 1-share order cannot partly fill, so no remainder is ever left without its stop.
+export const LOAD_WINDOW_SHARES = 1;
+// Release B: a window entry still open this long after its fill has its take-profit lowered to a price that sells at once.
+export const LOAD_TIME_LIMIT_MS = 60_000;
 export const LOAD_SYNC_EVERY_MS = 10_000;
 export const LOAD_STATS_EVERY_MS = 60_000;
 
@@ -65,12 +72,19 @@ export function beforeLoadWindow(day: Pick<DayRecord, "phases" | "openAt"> | nul
   return !!w && t < w.start;
 }
 
+// Release B: the price a window entry's take-profit is lowered to at its time limit: the lower of the last price minus 5 cents
+// and 98 percent of it, rounded down to the cent, at least 1 cent. A sell limit at or below the market sells at once.
+export function timeLimitPrice(last: number): number | null {
+  if (!(last > 0) || !Number.isFinite(last)) return null;
+  return Math.max(0.01, Math.floor(Math.min(last - 0.05, last * 0.98) * 100 + 1e-9) / 100);
+}
+
 // The fifth line of the limits request, the morning review and every limits reply.
 export function loadLine(day: Pick<DayRecord, "phases" | "openAt">): string {
   const s = loadState(day);
   const w = loadWindow(day);
   const span = w ? `${centralClock(w.start)} to ${centralClock(w.end)}` : "15 to 30 minutes after the open";
-  if (s === "on") return `5. mode: **LOAD DAY** (cheap list, at most ${LOAD_MAX_POSITION_USD} dollars a position, churn ${span}, then normal)`;
+  if (s === "on") return `5. mode: **LOAD DAY** (cheap list, at most ${LOAD_MAX_POSITION_USD} dollars a position, 1 share churn ${span}, then normal)`;
   if (s === "ended") return `5. mode: load window switched off (normal placeholder, still at most ${LOAD_MAX_POSITION_USD} dollars a position)`;
   return "5. mode: normal (`load on` makes it a load day)";
 }

@@ -3,6 +3,7 @@ import { Worker, type StreamLike } from "../src/worker.ts";
 import { Governor } from "../src/governor.ts";
 import { MemoryStore, type Store } from "../src/store.ts";
 import type { Trade } from "../src/stream.ts";
+import type { TradeUpdate } from "../src/order-stream.ts";
 import type { FullBroker } from "../src/broker.ts";
 import { FakeBroker, FakeBot, settings } from "./helpers.ts";
 
@@ -11,7 +12,7 @@ export const D = "2026-11-02";
 export const z = (t: string) => new Date(t.includes("T") ? t : `${D}T${t}Z`);
 export const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setImmediate(r)); };
 
-export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryStore>(opts: { store?: S; bot?: FakeBot; broker?: B; sleep?: (ms: number) => Promise<void>; governor?: Governor; liveList?: string[]; log?: (level: string, event: string, data?: Record<string, unknown>) => void; simClock?: { simMs: number; advanceTo(ms: number): void } } = {}) {
+export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryStore>(opts: { store?: S; bot?: FakeBot; broker?: B; sleep?: (ms: number) => Promise<void>; governor?: Governor; liveList?: string[]; log?: (level: string, event: string, data?: Record<string, unknown>) => void; simClock?: { simMs: number; advanceTo(ms: number): void }; orderStream?: boolean } = {}) {
   const store = (opts.store ?? new MemoryStore()) as S;
   const broker = (opts.broker ?? new FakeBroker()) as B;
   const bot = opts.bot ?? new FakeBot();
@@ -23,6 +24,10 @@ export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryS
   const governor = opts.governor ?? new Governor(() => getNow().getTime());
   const pings: string[] = [];
   let onTrade: (t: Trade) => void = () => undefined;
+  // Release B: a fake of Alpaca's live order updates (only when `orderStream` is set, as main.ts always provides one).
+  let onUpdate: ((u: TradeUpdate) => void) | null = null;
+  let orderStreamStarts = 0;
+  let orderStreamStops = 0;
   let streamStarts = 0;
   let streamStops = 0;
   let screens = 0;
@@ -38,6 +43,7 @@ export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryS
     },
     sleep: opts.sleep ?? (async () => undefined),
     log: opts.log as any,
+    ...(opts.orderStream ? { makeOrderStream: (cb: (u: TradeUpdate) => void): StreamLike => { onUpdate = cb; return { start: () => void orderStreamStarts++, stop: () => void orderStreamStops++, status: () => "live" }; } } : {}),
   });
   return {
     store, broker, bot, worker, pings, governor,
@@ -47,7 +53,9 @@ export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryS
     trade: async (symbol: string, price: number, t: string) => { setNow(z(t)); onTrade({ symbol, price, size: 100, time: z(t).toISOString() }); await settle(); },
     // Feeds a run of trades for one symbol, one per second from a start time: enough for the busy placeholder to signal.
     ramp: async (symbol: string, prices: number[], startT: string) => { for (let i = 0; i < prices.length; i++) { setNow(new Date(z(startT).getTime() + i * 1000)); onTrade({ symbol, price: prices[i]!, size: 100, time: getNow().toISOString() }); await settle(); } },
-    counts: () => ({ streamStarts, streamStops, screens }),
+    counts: () => ({ streamStarts, streamStops, screens, orderStreamStarts, orderStreamStops }),
+    // Delivers one live order update to the worker (release B), then lets it finish.
+    orderUpdate: async (u: TradeUpdate) => { if (!onUpdate) throw new Error("no order stream connected"); onUpdate(u); await settle(); },
     screenOpts,
     said: (ch: string) => bot.posts.filter((p) => p.channel === ch).map((p) => p.text),
     ownerSays: (text: string, t: string) => bot.say(text, z(t)),

@@ -111,16 +111,16 @@ test("the load screen keeps 5 to 35 dollar names and ranks them by shares traded
 });
 
 // ---------- the churn and the gate ----------
-test("a load day: no entry before 8:45, churn exits (3 cents up, 4 down) and at most 75 dollars in the window, the normal placeholder after, still at most 75 dollars", async () => {
+test("a load day: no entry before 8:45, release B churn in the window (1 share, the first new print, exits 1 cent up and 2 down), the normal placeholder after, still at most 75 dollars", async () => {
   const r = await day(true);
   await signal(r, "DDD", "14:40:00");
   assert.equal(entries(r).length, 0, "before the window: refused");
   await signal(r, "BBB", "14:46:00");
   const inWindow = entries(r).at(-1)!;
   assert.equal(inWindow.symbol, "BBB");
-  assert.equal(inWindow.qty, 1, "75 dollars at 50.40 is 1 share (the approved limit is 500)");
-  assert.equal(inWindow.takeProfitPrice, 50.43);
-  assert.equal(inWindow.stopPrice, 50.36);
+  assert.equal(inWindow.qty, 1, "release B: 1 share in the window");
+  assert.equal(inWindow.takeProfitPrice, 50.01, "release B: any new print signals, here the first one at 50.00; 1 cent up");
+  assert.equal(inWindow.stopPrice, 49.98, "and 2 cents down");
   await signal(r, "CCC", "15:10:00");
   const after = entries(r).at(-1)!;
   assert.equal(after.symbol, "CCC");
@@ -129,22 +129,23 @@ test("a load day: no entry before 8:45, churn exits (3 cents up, 4 down) and at 
   assert.equal(after.stopPrice, 50.2, "and 0.4 percent down");
 });
 
-test("the strategy's churn rules apply only while the load window is on", () => {
+test("the strategy's churn rules apply only while the load window is on (release B: any new print after 1 second, exits 1 cent up and 2 down)", () => {
   let on = true;
   const s = new BusyPlaceholder(["X"], { loadActive: () => on });
-  const feed = (base: number, from: number) => {
-    let out = null;
-    for (let i = 0; i < 13; i++) out = s.onTrade({ symbol: "X", price: i < 12 ? base : base + 0.4, size: 100, time: new Date(from + i * 1000).toISOString() }) ?? out;
-    return out;
-  };
-  const a = feed(50, 0)!;
-  assert.deepEqual([a.takeProfitPrice, a.stopPrice], [50.43, 50.36]);
-  // 6 seconds later another signal is allowed in load mode (cooldown 5), not in normal mode (15)
-  const b = s.onTrade({ symbol: "X", price: 50.5, size: 100, time: new Date(18_000).toISOString() });
-  assert.ok(b, "5 second cooldown");
+  const at = (sec: number, price: number) => s.onTrade({ symbol: "X", price, size: 100, time: new Date(sec * 1000).toISOString() });
+  const a = at(0, 50)!;
+  assert.ok(a, "the very first print signals: no warm-up and no uptick needed in the window");
+  assert.deepEqual([a.takeProfitPrice, a.stopPrice, a.load], [50.01, 49.98, true]);
+  assert.equal(at(0.5, 50.1), null, "1 second cooldown");
+  const b = at(1, 49.9);
+  assert.ok(b, "a down-tick 1 second later still signals in the window");
   on = false;
-  const c = s.onTrade({ symbol: "X", price: 50.6, size: 100, time: new Date(24_000).toISOString() });
-  assert.equal(c, null, "15 second cooldown again");
+  for (let i = 0; i < 12; i++) at(2 + i, 49.9);
+  assert.equal(at(14.5, 49.8), null, "outside the window a down-tick is no signal");
+  const c = at(30, 50.5)!;
+  assert.ok(c && c.load === undefined, "outside the window: the uptick rule, and the signal is not marked as a window signal");
+  assert.deepEqual([c.takeProfitPrice, c.stopPrice], [50.63, 50.3], "normal exits");
+  assert.equal(at(35, 50.9), null, "15 second cooldown again");
 });
 
 // ---------- the faster sync and the statistics ----------

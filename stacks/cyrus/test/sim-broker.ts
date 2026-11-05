@@ -267,10 +267,11 @@ export class SimBroker implements FullBroker {
     this.spend("plain");
     if (this.orders.some((o) => o.clientOrderId === e.clientOrderId)) throw new AlpacaError("client_order_id must be unique", 422);
     const created = new Date(this.simMs + this.n).toISOString();
-    const parent = order({ id: this.id(), clientOrderId: e.clientOrderId, symbol: e.symbol, qty: e.qty, status: "accepted", orderClass: e.takeProfitPrice !== undefined ? "bracket" : "oto", createdAt: created });
+    const groupId = `group-${this.n + 1}`; // release B: Alpaca gives a bracket's entry and its legs one group id
+    const parent = order({ id: this.id(), clientOrderId: e.clientOrderId, symbol: e.symbol, qty: e.qty, status: "accepted", orderClass: e.takeProfitPrice !== undefined ? "bracket" : "oto", createdAt: created, groupId });
     parent.legs = [
-      ...(e.takeProfitPrice !== undefined ? [order({ id: this.id(), clientOrderId: `${e.clientOrderId}-tp`, symbol: e.symbol, side: "sell", qty: e.qty, status: "held", type: "limit", limitPrice: e.takeProfitPrice, createdAt: created })] : []),
-      order({ id: this.id(), clientOrderId: `${e.clientOrderId}-sl`, symbol: e.symbol, side: "sell", qty: e.qty, status: "held", type: "stop", stopPrice: e.stopPrice, createdAt: created }),
+      ...(e.takeProfitPrice !== undefined ? [order({ id: this.id(), clientOrderId: `${e.clientOrderId}-tp`, symbol: e.symbol, side: "sell", qty: e.qty, status: "held", type: "limit", limitPrice: e.takeProfitPrice, createdAt: created, groupId })] : []),
+      order({ id: this.id(), clientOrderId: `${e.clientOrderId}-sl`, symbol: e.symbol, side: "sell", qty: e.qty, status: "held", type: "stop", stopPrice: e.stopPrice, createdAt: created, groupId }),
     ];
     this.prices.set(e.symbol, e.referencePrice);
     this.orders.push(parent);
@@ -294,6 +295,39 @@ export class SimBroker implements FullBroker {
     this.sellLog.push({ symbol: s.symbol, qty: s.qty, at: this.simMs });
     this.sellFills.push({ id: o.id, at: this.simMs + this.sellFillDelayMs });
     return structuredClone(o);
+  }
+  // Release B: lowering a take-profit leg's price (the load window's 60 second limit). How Alpaca answers can be set:
+  //   "fill"    accepted; a price at or below the market fills the leg at once (the linked stop is cancelled, as a fill does)
+  //   "refuse"  a 422 refusal, nothing changes
+  //   "timeout" no answer (the client's 10 second limit): nothing changes
+  //   "silent"  accepted, but the leg stays as it was (a stall the next order sync shows)
+  replaceMode: "fill" | "refuse" | "timeout" | "silent" = "fill";
+  replaceCalls: Array<{ id: string; limitPrice: number; at: number }> = [];
+  async replaceOrderLimit(id: string, limitPrice: number): Promise<Order> {
+    this.spend("plain");
+    this.replaceCalls.push({ id, limitPrice, at: this.simMs });
+    if (this.replaceMode === "refuse") throw new AlpacaError("order is not replaceable (test)", 422);
+    if (this.replaceMode === "timeout") {
+      this.advance(10_000);
+      throw new Error("The operation was aborted due to timeout");
+    }
+    const parent = this.orders.find((o) => o.legs.some((l) => l.id === id));
+    const leg = parent?.legs.find((l) => l.id === id);
+    if (!parent || !leg || !OPEN.has(leg.status)) throw new AlpacaError("order not found or not open", 422);
+    if (this.replaceMode === "silent") return structuredClone(leg);
+    leg.limitPrice = limitPrice;
+    leg.updatedAt = new Date(this.simMs).toISOString();
+    const market = this.prices.get(parent.symbol) ?? Infinity;
+    if (limitPrice <= market) {
+      const qty = leg.qty - leg.filledQty;
+      leg.status = "filled";
+      leg.filledQty = leg.qty;
+      leg.filledAvgPrice = market;
+      leg.filledAt = leg.updatedAt;
+      for (const other of parent.legs) if (other !== leg && OPEN.has(other.status)) this.setStatus(other.id, "canceled");
+      this.removeShares(parent.symbol, qty, market);
+    }
+    return structuredClone(leg);
   }
   private startCancel(id: string) {
     const o = this.all().find((x) => x.id === id);

@@ -59,6 +59,9 @@ export function openOrderIds(orders: Order[], symbols: ReadonlySet<string>): str
 // `httpStatus` is Alpaca's answer code when Alpaca refused the sell (429 means its request limit was hit).
 export type SellResult = { status: "sent"; order: Order } | { status: "refused"; reason: string } | { status: "error"; reason: string; httpStatus?: number };
 
+// Release B: the answer to a take-profit price change (the load window's 60 second time limit).
+export type LowerResult = { status: "changed" } | { status: "refused"; reason: string } | { status: "error"; reason: string; httpStatus?: number };
+
 export interface SellGateDeps {
   broker: SellBroker;
   say: Say;
@@ -93,6 +96,39 @@ export class SellGate {
     const run = this.chain.then(() => this.run(req));
     this.chain = run.catch(() => undefined);
     return run;
+  }
+
+  // Release B, the load window's 60 second time limit (Michael's approval with a guard, 2026-11-04): lowers a take-profit leg's
+  // limit price so the leg sells at once. It takes its turn with the sells. It never sends a quantity, so Alpaca cannot sell more
+  // than the leg already holds; on top of that it refuses unless the leg's unfilled shares are no more than the shares held right
+  // now (1 request), and it only ever lowers the price. One attempt: the caller remembers it and never asks again for that entry.
+  // A refusal or a stall leaves the leg (and the stop beside it) exactly as they were.
+  lowerTakeProfit(req: { symbol: string; legId: string; legRemaining: number; currentLimit: number | null; limitPrice: number }): Promise<LowerResult> {
+    const run = this.chain.then(() => this.runLower(req));
+    this.chain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async runLower(req: { symbol: string; legId: string; legRemaining: number; currentLimit: number | null; limitPrice: number }): Promise<LowerResult> {
+    if (!(req.limitPrice > 0) || !(req.legRemaining > 0)) return { status: "refused", reason: "nothing to change" };
+    if (req.currentLimit !== null && !(req.limitPrice < req.currentLimit)) return { status: "refused", reason: `the new price ${req.limitPrice} is not lower than the take-profit's ${req.currentLimit}` };
+    let held: number;
+    try {
+      held = (await this.d.broker.listPositions()).find((p) => p.symbol === req.symbol)?.qty ?? 0;
+    } catch (err) {
+      return { status: "error", reason: `could not read the position: ${(err as Error).message.slice(0, 120)}` };
+    }
+    if (req.legRemaining > held + EPS) {
+      this.d.log?.("time_limit_refused", { symbol: req.symbol, legRemaining: req.legRemaining, held });
+      return { status: "refused", reason: `the take-profit still holds ${req.legRemaining} ${req.symbol} but only ${held} are held, so I leave it alone` };
+    }
+    try {
+      await this.d.broker.replaceOrderLimit(req.legId, req.limitPrice);
+      this.view = null; // the open orders changed
+      return { status: "changed" };
+    } catch (err) {
+      return { status: "error", reason: (err as Error).message.slice(0, 200), httpStatus: err instanceof AlpacaError ? err.status : undefined };
+    }
   }
 
   // True when the next sell will first read the broker again (2 requests: open orders, then positions). The loss stop's retry

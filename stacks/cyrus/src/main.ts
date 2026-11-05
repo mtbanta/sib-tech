@@ -12,6 +12,7 @@ import { makeRedactor } from "./redact.ts";
 import { DEFAULT_SCREEN, liveListSize, screen } from "./screen.ts";
 import { LOAD_SCREEN } from "./load-mode.ts";
 import { TradeStream } from "./stream.ts";
+import { OrderStream } from "./order-stream.ts";
 import { fetchUniverseWithNames } from "./universe.ts";
 import { CachingStore } from "./caching-store.ts";
 import { Governor } from "./governor.ts";
@@ -78,6 +79,16 @@ const worker = new Worker({
       if (msg) void bot.post("alerts", msg);
     });
     return { start: () => s.start(), stop: () => s.stop(), status: () => status };
+  },
+  // Release B: Alpaca's live order updates, used on a load day only (the worker decides when). A listener: it never sends orders.
+  makeOrderStream: (onUpdate) => {
+    let status = "starting";
+    const s = new OrderStream(settings, onUpdate, (st, detail) => {
+      status = st;
+      if (st === "live" || st === "connecting") logAndStore("info", "order_stream", { status: st });
+      else if (st !== "stopped") logAndStore("warn", "order_stream", { status: st, detail });
+    });
+    return { start: () => s.start(), stop: () => s.stop(), status: () => status, reconnects: () => s.reconnects };
   },
   log: logAndStore,
 });

@@ -82,6 +82,9 @@ export interface Order {
   // partial take-profit). Optional so older test doubles need not set them.
   canceledAt?: string | null;
   updatedAt?: string | null;
+  // Release B: Alpaca's group id. A bracket's entry and its two exit legs share it, which is how a live order update about an
+  // exit leg (which carries no client id of ours) is tied back to its entry.
+  groupId?: string | null;
   legs: Order[];
 }
 
@@ -135,6 +138,7 @@ export function parseOrder(raw: Json): Order {
     filledAt: raw.filled_at ? String(raw.filled_at) : null,
     canceledAt: raw.canceled_at ? String(raw.canceled_at) : null,
     updatedAt: raw.updated_at ? String(raw.updated_at) : null,
+    groupId: raw.group_id ? String(raw.group_id) : null,
     legs,
   };
 }
@@ -429,6 +433,16 @@ export class AlpacaTrading {
       client_order_id: sell.clientOrderId,
     };
     return this.postOrder(body, sell.clientOrderId, true);
+  }
+
+  // Release B, the load window's 60 second time limit: lowers the limit price of a take-profit leg so it sells at once. Only the
+  // price is sent, never a quantity, so it cannot sell more than the leg already holds. Only the sell gate (sells.ts) may call
+  // this. A write: never retried here (one attempt per entry, Michael's guard); the 10 second time limit on every request
+  // bounds a stall.
+  async replaceOrderLimit(orderId: string, limitPrice: number): Promise<Order> {
+    if (!/^[0-9a-f-]{36}$/.test(orderId)) throw new AlpacaError("Bad order id", 0);
+    if (!(limitPrice > 0) || !Number.isFinite(limitPrice)) throw new AlpacaError("Limit price must be positive", 0);
+    return parseOrder((await this.once("PATCH", `/v2/orders/${orderId}`, undefined, { limit_price: limitPrice.toFixed(2) })) as Json);
   }
 
   // Cancels one order. Safe to repeat, so it waits out a 429 and tries again. An order that is already gone (404 or

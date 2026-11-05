@@ -39,6 +39,10 @@ export class SyncMemory {
   readonly bareSeen = new Map<string, number>();
   // Client ids Alpaca answered "not found" for, and until when not to ask again.
   readonly notFoundUntil = new Map<string, number>();
+  // Release B: the latest copy of each open entry (with its exit legs) as Alpaca showed it to the last sync, and when that sync
+  // finished. The load window's 60 second time limit and the live order updates read these instead of asking Alpaca again.
+  readonly lastSeen = new Map<string, Order>();
+  lastSyncAt = 0;
 }
 const fallbackSync = new SyncMemory();
 
@@ -78,8 +82,12 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   const active = (await d.store.listOrders(day.tradeDate)).filter((o) => !o.closedAt && (o.status === "intent" || o.status === "submitted" || o.status === "filled"));
   if (active.length === 0) {
     mem.bareSeen.clear();
+    mem.lastSeen.clear();
+    mem.lastSyncAt = d.now().getTime();
     return { unprotected: [], incomplete: false };
   }
+  const activeIds = new Set(active.map((o) => o.clientOrderId));
+  for (const id of [...mem.lastSeen.keys()]) if (!activeIds.has(id)) mem.lastSeen.delete(id);
   const midnight = etInstant(day.tradeDate, "00:00").getTime();
   const oldest = Math.min(...active.map((o) => (o.createdAt ? new Date(o.createdAt).getTime() : midnight)));
   const since = new Date(Math.max(midnight, oldest - 60_000)).toISOString();
@@ -117,6 +125,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   for (const s of active) {
     const o = byClientId.get(s.clientOrderId);
     if (!o) continue;
+    mem.lastSeen.set(s.clientOrderId, o);
     if (s.status === "intent" && o.status !== "filled" && o.status !== "canceled" && o.status !== "expired" && o.status !== "rejected") {
       await d.store.updateOrder(s.clientOrderId, { status: "submitted", alpacaOrderId: o.id, note: null });
     }
@@ -146,6 +155,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     if (exitFilledQty(o) >= o.filledQty - 1e-9 || goneForGood) {
       await d.store.updateOrder(s.clientOrderId, { closedAt: d.now().toISOString() });
       mem.bareSeen.delete(s.clientOrderId);
+      mem.lastSeen.delete(s.clientOrderId);
       continue;
     }
     const protectNow = typeof opts.protect === "function" ? opts.protect() : opts.protect;
@@ -190,6 +200,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     mem.bareSeen.delete(s.clientOrderId);
   }
   if (!listed.complete) d.log?.("order_list_incomplete", { since, pages: listed.pages });
+  mem.lastSyncAt = d.now().getTime();
   return { unprotected, incomplete: !listed.complete, ...(recheckAt !== undefined ? { recheckAt } : {}) };
 }
 

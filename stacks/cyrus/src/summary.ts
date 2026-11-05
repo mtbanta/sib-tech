@@ -21,6 +21,33 @@ export interface SummaryInput {
   listComplete?: boolean;
   // A load day (load-mode.ts): the window is reported apart from the rest of the day.
   loadWindow?: { start: Date; end: Date } | null;
+  // Release B: the load window's 60 second time limit and Alpaca's live order updates.
+  loadExtras?: {
+    timeLimit: { attempts: number; changed: number; refused: number; stalled: number; filled: number };
+    orderStream: { events: number; freed: number; reconnects: number; medianFreeMs: number | null } | null;
+  } | null;
+}
+
+// Release B: of the entries whose take-profit was lowered at the time limit, how many then sold all their shares at a take-profit.
+export function filledAfterChange(attempted: readonly string[], alpacaOrders: Order[]): number {
+  const ids = new Set(attempted);
+  let n = 0;
+  for (const o of alpacaOrders) {
+    if (!ids.has(o.clientOrderId) || !(o.filledQty > 0)) continue;
+    const tpQty = flattenLegs(o).filter((l) => l.side === "sell" && l.type === "limit").reduce((a, l) => a + l.filledQty, 0);
+    if (tpQty >= o.filledQty - 1e-9) n++;
+  }
+  return n;
+}
+
+// Release B: one line describing the window's settings and what the time limit and the live order updates did.
+export function loadExtraLines(x: NonNullable<SummaryInput["loadExtras"]>): string[] {
+  const t = x.timeLimit;
+  const s = x.orderStream;
+  return [
+    `- window settings: 1 share, any new print, exits 1 cent up and 2 down. 60 second limit: ${t.attempts} tried, ${t.changed} changed (${t.filled} then sold at the take-profit), ${t.refused} refused, ${t.stalled} stalled`,
+    s ? `- live order updates: ${s.events} received, ${s.freed} symbols freed${s.medianFreeMs !== null ? `, typically ${s.medianFreeMs} ms after the exit filled` : ""}, ${s.reconnects} reconnects` : "- live order updates: not connected",
+  ];
 }
 
 const money = (x: number) => `${x >= 0 ? "+" : "-"}${Math.abs(x).toFixed(2)}`;
@@ -196,6 +223,7 @@ export function formatSummary(i: SummaryInput): string {
       ? [
           "**Load day**",
           ...partLines(`Load window (${centralClock(i.loadWindow.start)} to ${centralClock(i.loadWindow.end)})`, i.stored.filter((r) => r.createdAt && Date.parse(r.createdAt) >= i.loadWindow!.start.getTime() && Date.parse(r.createdAt) < i.loadWindow!.end.getTime()), i.alpacaOrders),
+          ...(i.loadExtras ? loadExtraLines(i.loadExtras) : []),
           ...partLines("Rest of the day", i.stored.filter((r) => !(r.createdAt && Date.parse(r.createdAt) >= i.loadWindow!.start.getTime() && Date.parse(r.createdAt) < i.loadWindow!.end.getTime())), i.alpacaOrders),
         ]
       : []),

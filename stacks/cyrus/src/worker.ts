@@ -24,9 +24,11 @@ import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessi
 import { enforceDailyLoss, LossStopMemory, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import { LOAD_NOTE_PHASE, LOAD_STATS_EVERY_MS, LOAD_SYNC_EVERY_MS, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
 import { BusyPlaceholder } from "./strategy.ts";
+import { OrderUpdateHandler, type TradeUpdate } from "./order-stream.ts";
+import { TimeLimit } from "./time-limit.ts";
 import type { Trade } from "./stream.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
-import { computeDay, formatSummary } from "./summary.ts";
+import { computeDay, filledAfterChange, formatSummary } from "./summary.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
 import { NOT_ADVICE } from "./discord.ts";
 import type { PingKind } from "./heartbeat.ts";
@@ -55,6 +57,9 @@ export interface WorkerDeps {
   // Builds the day's live list (universe, daily bars, screen). Slow (minutes), so it runs in the background.
   buildLiveList: (opts?: { load?: boolean }) => Promise<LiveListResult>;
   makeStream: (symbols: string[], onTrade: (t: Trade) => void) => StreamLike;
+  // Release B: Alpaca's live order updates (order-stream.ts), connected on a load day from "Armed" to the close, never on a normal
+  // day. Optional: without it the order sync alone frees symbols, as before.
+  makeOrderStream?: (onUpdate: (u: TradeUpdate) => void) => StreamLike & { reconnects?: () => number };
   sleep?: (ms: number) => Promise<void>;
   log?: (level: "info" | "warn" | "error", event: string, data?: Record<string, unknown>) => void;
 }
@@ -149,6 +154,12 @@ export class Worker {
   private lossRederivedDate: string | null = null;
   private lastBackgroundAlert = new Map<string, number>();
   private retryingStop = false;
+  // Release B: the live order updates on a load day, and what they freed; the last price seen per symbol; the 60 second limit.
+  private orderStream: (StreamLike & { reconnects?: () => number }) | null = null;
+  private orderStreamDate: string | null = null;
+  private orderHandler: OrderUpdateHandler | null = null;
+  private readonly lastPrices = new Map<string, number>();
+  private readonly timeLimit: TimeLimit;
 
   constructor(deps: WorkerDeps) {
     this.d = deps;
@@ -178,6 +189,7 @@ export class Worker {
       log: (e, data) => deps.log?.("info", e, data),
       entryBlock: () => this.entryBlockReason(),
     });
+    this.timeLimit = new TimeLimit({ store: deps.store, sellGate: this.sellGate, governor: deps.governor, memory: this.syncMemory, now: deps.now, lastPrice: (sym) => this.lastPrices.get(sym) ?? null, log: (e, data) => deps.log?.("info", e, data) });
   }
 
   private say(channel: Channel, text: string, opts?: { mentionOwner?: boolean }): Promise<boolean> {
@@ -230,6 +242,7 @@ export class Worker {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.stream?.stop();
+    this.orderStream?.stop();
   }
 
   // Runs a long step in the background once; its finish is recorded in the database by the step itself.
@@ -665,6 +678,9 @@ export class Worker {
       this.startStream(current, current.liveList);
     }
     if (this.stream && (!alive || now >= day.closeAt)) this.endStream();
+    // Release B: live order updates on a load day only, from "Armed" to the close.
+    if (this.d.makeOrderStream && isLoadDay(current) && current.phases.armed && now < day.closeAt && alive && this.migrated && this.orderStreamDate !== date) this.startOrderStream(date);
+    if (this.orderStream && (!alive || now >= day.closeAt || this.orderStreamDate !== date)) this.endOrderStream();
 
     const inSession = now >= day.openAt && now < day.closeAt && current.status === "approved";
     // The loss stop is scheduled first, before anything else in the session that waits on the broker.
@@ -694,6 +710,12 @@ export class Worker {
         await sweepEntriesWhileStopped(risk);
       });
     }
+    // Release B: the load window's 60 second time limit (window entries keep it after 9:00). Never during a close-out or a sale.
+    if (inSession && isLoadDay(current) && current.phases.armed) {
+      const dayNow = current;
+      const closeAt = day.closeAt;
+      this.background("timelimit", () => this.timeLimit.run(dayNow, () => this.protectNow(closeAt)));
+    }
     if (inSession || (day.closeAt && now < addMinutes(day.closeAt, 10))) {
       await this.flushDigest();
       // Around a load window (from a minute before to a minute after) the request statistics are written every minute.
@@ -701,7 +723,7 @@ export class Worker {
       const nearWindow = lw !== null && now.getTime() >= lw.start.getTime() - 60_000 && now.getTime() < lw.end.getTime() + 60_000;
       if (now.getTime() - this.lastStatsEvent >= (nearWindow ? LOAD_STATS_EVERY_MS : 5 * 60_000) && inSession) {
         this.lastStatsEvent = now.getTime();
-        await this.d.store.addEvent("info", "governor_stats", { ...this.d.governor.stats(), tradesLastMinute: this.d.governor.tradesInLastMinute() }).catch(() => undefined);
+        await this.d.store.addEvent("info", "governor_stats", { ...this.d.governor.stats(), tradesLastMinute: this.d.governor.tradesInLastMinute(), ...(isLoadDay(current) ? { orderStream: this.orderStreamStats(), timeLimit: this.timeLimit.stats() } : {}) }).catch(() => undefined);
       }
     }
 
@@ -807,8 +829,39 @@ export class Worker {
     this.strategy = null;
   }
 
+  // Release B: Alpaca's live order updates. A fill that leaves a symbol at 0 shares frees it at once (order-stream.ts).
+  private startOrderStream(date: string): void {
+    this.endOrderStream();
+    this.orderStreamDate = date;
+    this.orderHandler = new OrderUpdateHandler({
+      getOrder: (id) => this.d.store.getOrder(id),
+      closeOrder: (id, patch) => this.d.store.updateOrder(id, patch),
+      dropPosition: (symbol) => this.view.dropPosition(symbol),
+      entryForGroup: (groupId) => [...this.syncMemory.lastSeen.values()].find((o) => o.groupId === groupId) ?? null,
+      now: () => this.d.now().getTime(),
+      log: (e, data) => this.d.log?.("info", e, data),
+    });
+    const handler = this.orderHandler;
+    this.orderStream = this.d.makeOrderStream!((u) => {
+      handler.handle(u).catch((err) => this.d.log?.("error", "order_stream_update_failed", { error: (err as Error).message.slice(0, 200) }));
+    });
+    this.orderStream.start();
+    this.d.log?.("info", "order_stream_started", {});
+  }
+
+  private endOrderStream(): void {
+    this.orderStream?.stop();
+    this.orderStream = null;
+  }
+
+  private orderStreamStats(): { status: string; events: number; freed: number; closedRecords: number; reconnects: number; medianFreeMs: number | null } | null {
+    if (!this.orderHandler) return null;
+    return { status: this.orderStream ? this.orderStream.status() : "stopped", ...this.orderHandler.counts, reconnects: this.orderStream?.reconnects?.() ?? 0, medianFreeMs: this.orderHandler.medianFreeMs() };
+  }
+
   private onTrade(t: Trade): void {
     this.lastTradeAt = new Date(t.time);
+    if (t.price > 0) this.lastPrices.set(t.symbol, t.price);
     // Backstop for the rule above: never act on a price while commands are not being read (the start-up check has not worked).
     if (!this.migrated) return;
     const signal = this.strategy?.onTrade(t);
@@ -875,6 +928,7 @@ export class Worker {
       feesRunning: running.total,
       listComplete: listed.complete,
       loadWindow: isLoadDay(day) ? loadWindow(day) : null,
+      ...(isLoadDay(day) ? { loadExtras: { timeLimit: { ...this.timeLimit.stats(), filled: filledAfterChange(this.timeLimit.attemptedIds(), listed.orders) }, orderStream: this.orderStreamStats() } } : {}),
     });
     await this.say("trading", text);
     await setPhase(this.d.store, date, "summary", this.d.now().toISOString());

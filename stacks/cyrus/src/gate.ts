@@ -18,7 +18,7 @@ import type { BrokerView } from "./broker-view.ts";
 import type { GateBroker } from "./broker.ts";
 import type { Governor } from "./governor.ts";
 import { MAX_TRADES_PER_MINUTE, checkEntry, type EntryContext } from "./limits.ts";
-import { LOAD_MAX_POSITION_USD, beforeLoadWindow, isLoadDay, loadWindow } from "./load-mode.ts";
+import { LOAD_MAX_POSITION_USD, LOAD_WINDOW_SHARES, beforeLoadWindow, isLoadDay, loadWindow } from "./load-mode.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, type NotFlatState, type OrderRecord, type StopFlag, type Store } from "./store.ts";
 import type { Signal } from "./strategy.ts";
 import { centralTime, etDate, minutesBetween } from "./time.ts";
@@ -224,8 +224,12 @@ export class OrderGate {
       grossExposure: positions.reduce((s, p) => s + Math.abs(p.marketValue), 0) + pendingExposure,
       priceAgeSeconds: (now.getTime() - signal.tradeTime.getTime()) / 1000,
     };
-    const decision = checkEntry(ctx);
-    if (!decision.ok) return this.refuse(date, symbol, decision.reason, { price: signal.price });
+    const checked = checkEntry(ctx);
+    if (!checked.ok) return this.refuse(date, symbol, checked.reason, { price: signal.price });
+    // Release B: a signal made in the load window is 1 share (never more than the checks above allow). A 1-share order cannot
+    // partly fill, so it never leaves a remainder without its stop.
+    const qty = signal.load && isLoadDay(day) ? Math.min(checked.qty, LOAD_WINDOW_SHARES) : checked.qty;
+    const decision = { ok: true as const, qty, notional: qty * signal.price };
 
     // The broker's own switches must match what Michael approved: long only, cap no higher than approved.
     if (account.status !== "ACTIVE" || account.tradingBlocked || account.accountBlocked || config.suspendTrade) {

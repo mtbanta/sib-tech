@@ -22,5 +22,6 @@ export type Broker = Pick<
 >;
 
 export type GateBroker = Broker & Pick<AlpacaTrading, "submitEntry">;
-export type SellBroker = Broker & Pick<AlpacaTrading, "submitSell">;
-export type FullBroker = Broker & Pick<AlpacaTrading, "submitEntry" | "submitSell">;
+// Release B: `replaceOrderLimit` (lower a take-profit leg's price, the load window's 60 second limit) also only for the sell gate.
+export type SellBroker = Broker & Pick<AlpacaTrading, "submitSell" | "replaceOrderLimit">;
+export type FullBroker = Broker & Pick<AlpacaTrading, "submitEntry" | "submitSell" | "replaceOrderLimit">;
