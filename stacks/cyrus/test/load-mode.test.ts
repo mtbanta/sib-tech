@@ -42,8 +42,8 @@ test("load on: the day becomes a load day, the reply and the morning review show
   assert.equal(d.phases.load, "on");
   assert.equal(d.status, "approved", "approve still covers the four limits");
   assert.ok(r.said("commands").some((t) => t.includes("will be a **load day**")));
-  assert.ok(r.said("commands").some((t) => t.includes("Good morning") && t.includes("5. mode: **LOAD DAY**")), "the morning review shows it");
-  assert.ok(r.said("commands").some((t) => t.startsWith("Armed for") && t.includes("This is a load day")));
+  assert.ok(r.said("commands").some((t) => t.includes("Good morning") && t.includes("mode: **LOAD DAY**")), "the morning review shows it");
+  assert.ok(r.said("commands").some((t) => t.startsWith("Armed for") && t.includes("**Load day:**")));
 });
 
 test("the evening request shows line 5 as normal by default, and a load day is never carried to the next day", async () => {
@@ -77,17 +77,20 @@ test("load on is refused from the morning screen on; after Armed only load off, 
   assert.ok(on.bot.last().includes("Load window switched off"));
 });
 
-test("a day whose request was posted before load mode existed gets one note showing its mode", async () => {
+test("a day whose request was posted before load mode existed gets no separate note since the speed release (one limits post): the mode is line 5 of every list, and the day is marked as shown", async () => {
   const r = rig<FakeBroker, MemoryStore>();
   await r.at("2026-11-01T22:10:00Z");
   const d = (await r.store.getDay(D))!;
   const { [LOAD_NOTE_PHASE]: _gone, ...phases } = d.phases;
   await r.store.updateDay(D, { phases }); // as if an older release had posted the request
+  const before = r.said("commands").length;
   await r.at("2026-11-01T22:15:00Z");
   await r.at("2026-11-01T22:15:05Z");
-  const notes = r.said("commands").filter((t) => t.includes("**Mode for"));
-  assert.equal(notes.length, 1, "once");
-  assert.ok(notes[0]!.includes("5. mode: normal"));
+  assert.equal(r.said("commands").length, before, "nothing posted");
+  assert.ok((await r.store.getDay(D))!.phases[LOAD_NOTE_PHASE], "marked as shown");
+  r.ownerSays("limits", "2026-11-01T22:16:00Z");
+  await r.at("2026-11-01T22:16:05Z");
+  assert.ok(r.bot.last().includes("5. mode: normal"), "the mode is in the list");
 });
 
 // ---------- the screen ----------

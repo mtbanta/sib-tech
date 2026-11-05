@@ -2,7 +2,7 @@
 import type { Account, AccountConfig, CalendarDay, Clock, EntryOrder, Order, Position, SellOrder } from "../src/alpaca-trading.ts";
 import { AlpacaError } from "../src/alpaca-trading.ts";
 import type { FullBroker } from "../src/broker.ts";
-import { splitMessage } from "../src/discord.ts";
+import { messagesFor } from "../src/discord.ts";
 import type { CommandBot } from "../src/commands.ts";
 import type { DiscordMessage } from "../src/discord-bot.ts";
 import { loadSettings } from "../src/config.ts";
@@ -97,8 +97,8 @@ export function liquidatorFor(broker: FakeBroker, say: (ch: any, text: string, o
 export class FakeBot implements CommandBot {
   posts: Array<{ channel: string; text: string; mention: boolean }> = [];
   messages: DiscordMessage[] = [];
-  // Like the real bot: a text over Discord's limit arrives as consecutive messages (splitMessage).
-  async post(channel: "alerts" | "trading" | "commands", text: string, opts: { mentionOwner?: boolean } = {}) { splitMessage(text).forEach((part, i) => this.posts.push({ channel, text: part, mention: opts.mentionOwner === true && i === 0 })); return true; }
+  // Like the real bot: the footer rule, and a text over Discord's limit arrives as consecutive messages (messagesFor).
+  async post(channel: "alerts" | "trading" | "commands", text: string, opts: { mentionOwner?: boolean } = {}) { messagesFor(channel, text).forEach((part, i) => this.posts.push({ channel, text: part, mention: opts.mentionOwner === true && i === 0 })); return true; }
   async latestCommandMessageId() { return this.messages.length ? this.messages[this.messages.length - 1]!.id : null; }
   async commandMessagesAfter(afterId: string) { return this.messages.filter((m) => BigInt(m.id) > BigInt(afterId)); }
   last() { return this.posts[this.posts.length - 1]?.text ?? ""; }

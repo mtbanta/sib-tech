@@ -27,6 +27,9 @@ export interface RiskDeps {
   // The speed release, item 5 (shadow only): told about each account read of the loss stop, so the worker can log its own estimate
   // of equity beside Alpaca's. It never changes what the loss stop does.
   onAccountRead?: (account: { equity: number; cash: number }) => void;
+  // Messaging only (the speed release, decision 6): a successful sale of shares left without a stop is handed here, so the worker can
+  // post them as one alert a minute. Without it the sale is posted to `alerts` at once, as before. Failures are always posted at once.
+  onRemainderSold?: (symbol: string, shares: number) => void;
 }
 
 // Release A, fix 1. On 2026-11-04 Alpaca paper cancelled a bracket's stop 2 ms after its take-profit's first partial fill (655
@@ -254,7 +257,11 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       }
     }
     if (r.yielded && soldQty === 0) d.log?.("bare_remainder_yielded", { symbol: s.symbol });
-    else if (r.flat && soldQty > 0) await d.say("alerts", `**${s.symbol}: Alpaca cancelled its stop when the take-profit partly filled, so I sold the remaining ${soldQty} shares.**`);
+    else if (r.flat && soldQty > 0) {
+      // Messaging only (speed release, decision 6): the worker gathers these into one alert a minute; without it, posted at once.
+      if (d.onRemainderSold) d.onRemainderSold(s.symbol, soldQty);
+      else await d.say("alerts", `**${s.symbol}: Alpaca cancelled its stop when the take-profit partly filled, so I sold the remaining ${soldQty} shares.**`);
+    }
     else if (r.flat) d.log?.("bare_remainder_already_gone", { symbol: s.symbol });
     else if (soldQty > 0 && r.remaining.every((sym) => sym !== s.symbol || r.sold.some((x) => x.symbol === sym))) {
       // The sell went out and Alpaca has not filled it yet (paper has held sells 16 seconds before submitting them): not a failure.
@@ -400,7 +407,7 @@ export async function enforceDailyLoss(d: RiskDeps, day: DayRecord, opts: LossSt
   // Sells that went out but have not filled yet are not failures; only symbols with no sell sent are.
   const unsold = r.remaining.filter((sym) => !r.sold.some((x) => x.symbol === sym));
   if (mem && !r.flat) mem.awaitingFlat = true;
-  const outcome = r.flat ? "sold everything" : unsold.length === 0 ? "sent a sell for every position (I will say when the account is flat)" : `sent sells, but could not sell ${unsold.join(", ")} yet (I retry only those, every 5 seconds)`;
+  const outcome = r.flat ? (r.sold.length > 0 ? "sold everything" : "nothing was held, so nothing needed selling") : unsold.length === 0 ? "sent a sell for every position (I will say when the account is flat)" : `sent sells, but could not sell ${unsold.join(", ")} yet (I retry only those, every 5 seconds)`;
   void d.say("commands", `**Daily loss stop reached** (down ${loss.toFixed(2)} of the ${limit} dollar limit${earlier !== null ? ", seen in today's equity history after a restart" : ""}). Stopped for the day and ${outcome}.`).catch(() => undefined);
   if (unsold.length > 0) void d.say("alerts", `**Michael: daily loss stop reached but I could not sell ${unsold.join(", ")} yet.** Check Alpaca now. I retry every 5 seconds.`, { mentionOwner: true }).catch(() => undefined);
   return true;

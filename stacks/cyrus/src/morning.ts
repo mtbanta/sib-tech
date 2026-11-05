@@ -8,8 +8,8 @@
 import type { Broker } from "./broker.ts";
 import { LIMIT_NAMES, MAX_TRADES_PER_MINUTE, SUGGESTED_LIMITS, applyOverride, describeLimits, loosened, type LimitName, type Limits } from "./limits.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
-import { NOT_ADVICE } from "./discord.ts";
-import { LOAD_MAX_POSITION_USD, LOAD_NOTE_PHASE, LOAD_PHASE, LOAD_SWITCH_DEADLINE_MIN, isLoadDay, loadLine, loadState, loadWindowRules } from "./load-mode.ts";
+import { NOT_ADVICE, PAPER_ONLY } from "./discord.ts";
+import { LOAD_MAX_POSITION_USD, LOAD_NOTE_PHASE, LOAD_PHASE, LOAD_SWITCH_DEADLINE_MIN, isLoadDay, loadLine, loadState, loadWindow, loadWindowRules } from "./load-mode.ts";
 import type { Say } from "./sells.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
 
@@ -164,8 +164,37 @@ export function formatLimitsRequest(day: DayRecord, kind: RequestKind = "evening
     "Until the `Armed` message 5 minutes before the open you can change any limit. After it, a limit can only be lowered (tightened), until the next evening post. Loosening is locked.",
     "`trades` is the most orders I will send in any 60 seconds to open positions; there is no daily total. The loss stop is the main safety net.",
     `**If any limit is still undecided at the open, I will not trade that day.**`,
-    NOT_ADVICE,
+    // The footer rule (discord.ts): the evening post is research input; the full morning review and the reminder are not.
+    kind === "evening" ? NOT_ADVICE : PAPER_ONLY,
   ].join("\n");
+}
+
+// The Armed message, one line (the speed release, decision 6). On a day whose load window Michael switched off (`ended`), it says
+// the window is off and the 75 dollar cap stays, rather than describing a window that will not run (the wording backlog).
+export function armedLine(day: DayRecord, cap: number, start: number): string {
+  const s = loadState(day);
+  const w = loadWindow(day);
+  const span = w ? `${centralClock(w.start)} to ${centralClock(w.end)}` : "the load window";
+  const load =
+    s === "on"
+      ? ` **Load day:** at most ${LOAD_MAX_POSITION_USD} dollars a position all day; in the load window, ${span} (no entries before it), ${loadWindowRules()}; then the normal placeholder.`
+      : s === "ended"
+        ? ` Load window switched off: the normal placeholder all day, still at most ${LOAD_MAX_POSITION_USD} dollars a position.`
+        : "";
+  return `Armed for ${dayWord(day.tradeDate)}: cap ${cap}, long only, the day starts at ${start.toFixed(2)} dollars.${load}`;
+}
+
+// A checklist line that needs no attention (stop flag off, account flat, long only at Alpaca, the feed). The others are warnings.
+const routineCheck = (l: string) => l.startsWith("- Stop flag: off") || l.startsWith("- Account: flat") || (l.startsWith("- Borrowing cap at Alpaca right now:") && l.includes(", long only.")) || l.startsWith("- Price feed:");
+
+// The speed release (decision 6, "one limits post"): the morning review of a day whose four limits are all decided is ONE line,
+// with the values, the mode and the Armed time. Any checklist line that needs attention (the stop flag on, positions held,
+// shorting on, something unreadable) follows it, one line each. A day with anything undecided still gets the full post.
+export function formatMorningLine(day: DayRecord, checklist: string[] = []): string {
+  const open = day.openAt ? centralClock(day.openAt) : "?";
+  const armedAt = day.openAt ? centralClock(addMinutes(day.openAt, -5)) : "?";
+  const warnings = checklist.filter((l) => !routineCheck(l));
+  return [`**Good morning: ${dayWord(day.tradeDate)}**, all four limits decided (${describeLimits(day.limits)}); ${loadLine(day).replace(/^5\. mode: /, "mode: ")}. Armed at ${armedAt}, market opens ${open}. Change a limit before Armed, or type \`limits\` for the list.`, ...warnings].join("\n");
 }
 
 export type Command =
@@ -311,7 +340,8 @@ export async function postMorningReview(steps: MorningSteps, day: DayRecord): Pr
   // A request that itself went out inside this window (the worker was down overnight) already is the review.
   if (new Date(day.phases.request!) >= addMinutes(day.openAt, -60)) return setPhase(steps.store, day.tradeDate, "morning", "skipped");
   const checklist = await buildChecklist({ store: steps.store, broker: steps.broker, feed: steps.feed });
-  if (!(await steps.say("commands", formatLimitsRequest(day, "morning", checklist)))) return day; // not posted: try again next tick
+  const text = day.status === "approved" ? formatMorningLine(day, checklist) : formatLimitsRequest(day, "morning", checklist);
+  if (!(await steps.say("commands", text))) return day; // not posted: try again next tick
   return setPhase(steps.store, day.tradeDate, "morning", t.toISOString());
 }
 
@@ -353,6 +383,6 @@ export async function armDay(steps: MorningSteps, day: DayRecord): Promise<DayRe
   const start = account.lastEquity > 0 ? account.lastEquity : account.equity;
   await steps.store.updateDay(day.tradeDate, { dayStartEquity: start });
   const armed = await setPhase(steps.store, day.tradeDate, "armed", t.toISOString());
-  await steps.say("commands", `Armed for ${dayWord(day.tradeDate)}: borrowing cap ${cap} and long only are set at Alpaca; the day starts at ${start.toFixed(2)} dollars of equity.${isLoadDay(armed) ? ` **This is a load day:** at most ${LOAD_MAX_POSITION_USD} dollars a position all day; in the load window (no entries before it) ${loadWindowRules()}; then the normal placeholder.` : ""}`);
+  await steps.say("commands", armedLine(armed, cap, start));
   return armed;
 }

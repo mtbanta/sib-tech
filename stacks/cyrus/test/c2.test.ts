@@ -115,7 +115,20 @@ test("digest: batches trade news into messages that fit, counts what did not fit
   assert.deepEqual(d.take(), [], "taken once");
   const big = new TradeDigest(100);
   for (let i = 0; i < 100; i++) big.add("x".repeat(50));
-  assert.ok(big.take(400).every((m) => m.length <= 450));
+  assert.ok(big.take("", 400).every((m) => m.length <= 450));
+});
+
+test("digest (speed release): one short line per period with counts, not one line per entry", () => {
+  const d = new TradeDigest();
+  for (let i = 0; i < 212; i++) d.add(`8:45:00 AM BUY 1 X${i} ...`, "entry");
+  for (let i = 0; i < 180; i++) d.count("filled");
+  for (let i = 0; i < 30; i++) d.count("cancelled");
+  for (let i = 0; i < 101; i++) d.count("take_profit");
+  for (let i = 0; i < 98; i++) d.count("stop");
+  d.add("8:46:00 AM F: Alpaca refused the entry ...", "refused");
+  const out = d.take("8:45 AM CT to 8:50 AM CT");
+  assert.deepEqual(out, ["8:45 AM CT to 8:50 AM CT: 212 entries sent, 180 filled, 30 unfilled and cancelled, 101 take-profits, 98 stops, 1 refused by Alpaca."]);
+  assert.ok(!out[0]!.includes("BUY"), "no per-entry lines");
 });
 
 // ---------- fees ----------
@@ -176,7 +189,7 @@ test("the summary of a very busy day stays short and carries the trade count, sp
   assert.ok(text.length < 2000, `fits in one message (${text.length})`);
   for (const w of ["Trades:", "Estimated regulatory fees", "Running total 12.34", "Alpaca requests", "Refused entries: 5000"]) assert.ok(text.includes(w), w);
   assert.ok(text.split("\n").length < 25);
-  assert.ok(!text.includes("never an instruction to act"));
+  assert.ok(text.endsWith("never an instruction to act."), "the summary is research input (the footer rule)");
 });
 
 // ---------- messages ----------
@@ -187,15 +200,18 @@ test("every outgoing message ends with 'Paper trading only.' once, and a long on
   assert.ok(long.length <= 2000 && long.endsWith("Paper trading only.") && long.includes("(cut short)"));
 });
 
-test("reports of what the bot did drop the 'never an instruction to act' line; requests and the live list keep it", async () => {
+test("the footer rule (speed release): the research-input line only on the evening limits post (and the summary); 'Paper trading only.' on alerts and the live list; none on one-line confirmations", async () => {
   const r = rig();
   await r.at("2026-11-01T22:10:00Z");
   r.ownerSays("approve", "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
   await r.at("13:45:00");
   const live = r.said("trading").find((t) => t.includes("live list"))!;
-  assert.ok(live.includes("never an instruction to act"), "the live list is research input");
-  assert.ok(r.said("commands")[0]!.includes("never an instruction to act"), "so is the request for limits");
+  assert.ok(live.endsWith("Paper trading only.") && !live.includes("never an instruction to act"), "the live list: paper only");
+  assert.ok(r.said("commands")[0]!.includes("never an instruction to act"), "the evening request for limits is research input");
+  await r.at("14:25:00");
+  const armed = r.said("commands").find((t) => t.startsWith("Armed for"))!;
+  assert.ok(!armed.includes("Paper trading only.") && !armed.includes("\n"), "Armed: one line, no footer");
   r.broker.positions = [{ symbol: "AAA", qty: 5, marketValue: 500, avgEntryPrice: 100, unrealizedPl: 0 }];
   r.ownerSays("flatten", "14:00:00");
   await r.at("14:00:10");
@@ -203,7 +219,9 @@ test("reports of what the bot did drop the 'never an instruction to act' line; r
   const reports = r.bot.posts.filter((p) => /flat|Stopped|sold|Armed/.test(p.text) && !p.text.includes("Suggested limits") && !p.text.includes("Good morning") && !p.text.includes("live list"));
   assert.ok(reports.length >= 2);
   for (const p of reports) assert.ok(!p.text.includes("never an instruction to act"), p.text.slice(0, 60));
-  for (const p of r.bot.posts) assert.ok(p.text.includes("Paper trading only."), p.text.slice(0, 60));
+  for (const p of r.bot.posts.filter((x) => x.channel === "alerts")) assert.ok(p.text.endsWith("Paper trading only."), p.text.slice(0, 60));
+  const done = r.said("trading").find((t) => t.startsWith("Close-out done"));
+  if (done) assert.equal(done, "Close-out done: the account is flat.", "a one-line confirmation, no footer");
 });
 
 // ---------- run log ----------
