@@ -6,7 +6,18 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**BUILD C2: WEDNESDAY 2026-11-04, THE FIRST LOAD DAY, REVIEWED. LOAD TEST INCONCLUSIVE (PEAK 44 ENTRIES A MINUTE); A FALSE NOT FLAT AT THE CLOSE-OUT; FIVE FIXES PROPOSED, NONE BUILT.** As of November 4, 2026 (after the close).
+**BUILD C2: RELEASE A (FIXES 1 TO 5) REVIEWED PASS AND DEPLOYED AS FLY RELEASE V8; RELEASE B (100 ENTRIES A MINUTE ON LOAD DAYS) PROPOSED, WAITING FOR MICHAEL.** As of November 4, 2026 (6:15 PM Central).
+- **Release A, `a99039d`, running since 6:11 PM** (one clean start, Healthchecks up). It:
+  - sells shares left without a stop after a partial take-profit, 5 to 10 seconds after Alpaca cancels the stop;
+  - raises no NOT FLAT while the close-out's own sells are working (it waits until 2:58 PM);
+  - runs one close-out per day;
+  - looks up entries missing from Alpaca's order list by id;
+  - adds close-out and heartbeat logging.
+- **Alpaca's documentation** says a partial take-profit resizes the stop. Paper cancels it instead (2 ms after the fill, 655 times Wednesday; 25 of 37 on Tuesday at full size).
+- **Release B proposal:** live order updates free a symbol at its exit fill; enter on any new print; exits 1 cent up and 2 cents down; 1 share per entry; an optional 60 second time limit. Replay estimate: 90 or more entries a minute in 13 of 15 minutes, about 15 dollars. Michael approves before any code; deploy by 7:30 AM Thursday if its review passes.
+- Thursday's limits wait for Michael, and `load on` must be typed before 7:45 AM. Details: `builds/build-c2-log.md`, "Release A review" and "Release B proposal". Paper only.
+
+Earlier entry, superseded by the paragraph above: **BUILD C2: WEDNESDAY 2026-11-04, THE FIRST LOAD DAY, REVIEWED. LOAD TEST INCONCLUSIVE (PEAK 44 ENTRIES A MINUTE); A FALSE NOT FLAT AT THE CLOSE-OUT; FIVE FIXES PROPOSED, NONE BUILT.** As of November 4, 2026 (after the close).
 - **Load window, 8:45 to 9:00 AM (release v7):**
   - 382 entries, at most 44 in any 60 seconds, against the 90 needed;
   - 0 rate-limit answers, lowest remaining stock 192, 0 held back by the governor.
@@ -65,6 +76,7 @@ Earlier entry, superseded by the paragraph above: **NOT STARTED.** Created Octob
 
 ## Completed
 
+- **2026-11-04. Release A built, reviewed PASS, deployed as Fly release v8.** Record: `builds/build-c2-log.md`, "Release A" and "Release A review".
 - **2026-11-04. Wednesday's session (first load day) reviewed, read only.** Load test inconclusive; close-out false alarm explained; fixes proposed. Record: `builds/build-c2-log.md`, "Wednesday 2026-11-04 session review".
 - **2026-11-03. Build C2 rounds 7 to 9 and load mode.** Tuesday's session reviewed (loss stop at 8:53 AM, flat). Round 9 code deployed as Fly release v6 and load mode as v7, both reviewed PASS. Record: `builds/build-c2-log.md`, from "Tuesday 2026-11-03 session review" to "Deploys and close-out".
 - **2026-11-02. Build C2 release v5 deployed** (the round 5 code, `ac4a576`), after review round 6 of the round 6 fixes (`b764741`) returned CHANGES REQUIRED. Record: `builds/build-c2-log.md`, "Round 6 fixes" and "Review round 6".

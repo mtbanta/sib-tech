@@ -1526,3 +1526,42 @@ Each gets a test that fails without it, plus "a normal day is unchanged". Then t
 **For Michael to decide:** approve items 1 to 4; and item 5 (60 second time limit) yes or no. Also, Thursday is a load day only once he types `load on` before the 7:45 AM screen and approves Thursday's limits (at least `trades 100`).
 
 Paper only. Research input for a human decision, never an instruction to act.
+
+## Release A review (2026-11-04, evening): PASS. Deployed as Fly release v8.
+
+Round 1, the only round Michael allowed, on `4e81d33..a99039d`. No blocking findings. Checks 2, 7 and 10 clean. 360 pass, type check clean. The reviewer took out 11 rows of the removal table in a scratch copy, and each failed exactly the tests named.
+
+**Confirmed:**
+- **No oversell on any new path.** The sell gate is still the only sender. Probes where the take-profit fills completely, or partly, while its cancel is in flight sold nothing, or only the shares left.
+- **The bare rule stays out of the way:**
+  - it is off during every liquidation and from the close-out time on;
+  - it never fires on a stop that filled or is still live;
+  - it cannot reach a later entry on the same symbol (the gate's "still working" rule).
+- **Fix 2's wait** is bounded by the close minus 2 minutes and reads no clock. It breaks out and alerts if one of the close-out's own sells is cancelled or refused (probe: NOT FLAT with the mention about 6 seconds after Alpaca cancelled the sell). Every not-flat outcome still sets the flag and the failure signal. Only the close-out asks for the early return.
+- **Fix 3** cannot block the next day's carried sale.
+- **Fix 4** is bounded: 10 lookups a sync, a 60 second memory for unknown ids, 50 in the summary.
+- Normal-day behaviour is otherwise unchanged. The builder's interpretations fit, with note 1 below.
+
+**Measured in the simulator:**
+- One bare-remainder sale costs 22 requests over 3 seconds (fast cancel) to 78 over 20 seconds (11 second cancel, sell held 16 seconds). For that time it holds the one-at-a-time sale queue, so a loss stop sale can wait up to about 20 seconds behind it.
+- The close-out wait costs about 36 requests a minute.
+- Only entries are held back by the governor, so these reads take room from entries, never from sells or cancels.
+
+**Non-blocking notes (logged, not changed):**
+1. The remainder sale starts 5 to 10 seconds after the stop's cancel (the next 5 second pass), plus the take-profit cancel time. This is "as short as possible" only loosely.
+2. **For release B:** at 100 entries a minute with bracket sizes as Wednesday's, bare-remainder sales would add about 90 requests a minute and pass 200. B's 1-share entries in the load window avoid this, since a 1-share order cannot partly fill.
+3. The emergency close-out calls the close-out without the close time, so its wait is capped at 60 seconds. If it fires in the last minute, NOT FLAT can come up to about 60 seconds after the close. Passing the broker's close time would fix that, but it is money-touching and needs Michael's approval.
+4. When one of the close-out's own sells disappears during the wait, the NOT FLAT alert gives no reason. Wording only.
+5. The bare rule looks at the first stop leg only. If live trading resizes the stop by replacing the leg, a protected remainder would be sold after 5 seconds. That errs toward selling, never toward overselling.
+6. A Discord stall (up to about 30 seconds worst case) holds the risk task while a remainder-sale message posts, as the old missing-exit message did. Now more frequent.
+7. A clock difference between Fly and Alpaca shifts the 5 second wait.
+
+### Deploy (2026-11-04, 6:10 PM Central, market closed)
+- `fly deploy --ha=false` from a separate checkout of `a99039d` (code identical to `main` at `852b2c0`), with no key file in the checkout.
+- **Fly release v8:** one machine in San Jose, good state. One `worker_started` at 6:11:24 PM; no warnings or errors in the log or the run log.
+- Discord, `commands`, 6:11:23 PM: "New release MPHW9C0F (it was 8M2HSEXX), so this is a deploy. Starts in the last hour: 1."
+- Healthchecks up (last ping 6:12:00 PM).
+- **Limits post:** Thursday 2026-11-05's request (posted 3:10 PM) stands unchanged, every limit waiting for Michael (position 500, loss 500, trades 100, cap 1). The deploy did not repost it.
+- Stop flag off, not-flat flag off.
+
+Paper only.
