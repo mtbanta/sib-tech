@@ -6,7 +6,17 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**BUILD C2: RELEASE A (FIXES 1 TO 5) REVIEWED PASS AND DEPLOYED AS FLY RELEASE V8; RELEASE B (100 ENTRIES A MINUTE ON LOAD DAYS) PROPOSED, WAITING FOR MICHAEL.** As of November 4, 2026 (6:15 PM Central).
+**BUILD C2: RELEASES A AND B REVIEWED PASS; FLY RUNS RELEASE V9 (A PLUS B); THURSDAY 2026-11-05 CAN BE THE SECOND LOAD DAY.** As of November 4, 2026 (7:15 PM Central).
+- **Release A (v8, 6:11 PM):** the shares-without-a-stop fix, the close-out's quiet wait, one close-out a day, missing-entry lookups.
+- **Release B (v9, 7:08 PM), load window only:** 1 share, any new print, exits 1 cent up and 2 down, symbols freed by Alpaca's live order updates, a 60 second time limit with Michael's guard. Normal days unchanged.
+- Each release had one clean start and Healthchecks up. Thursday's limits post shows the load switch. Stop flag and not-flat flag off.
+- **For Michael before 7:45 AM Thursday:** approve the limits (at least `trades 100`) and type `load on`.
+- **Untested on paper until Thursday:**
+  - whether the live updates carry `position_qty` for bracket legs;
+  - whether Alpaca accepts a take-profit lowered below its stop (if refused, the time limit frees nothing, harmlessly).
+- Review notes and the three later proposals are in Next Steps and the C2 log ("Release A review", "Release B review"). Paper only.
+
+Earlier entry, superseded by the paragraph above: **BUILD C2: RELEASE A (FIXES 1 TO 5) REVIEWED PASS AND DEPLOYED AS FLY RELEASE V8; RELEASE B (100 ENTRIES A MINUTE ON LOAD DAYS) PROPOSED, WAITING FOR MICHAEL.** As of November 4, 2026 (6:15 PM Central).
 - **Release A, `a99039d`, running since 6:11 PM** (one clean start, Healthchecks up). It:
   - sells shares left without a stop after a partial take-profit, 5 to 10 seconds after Alpaca cancels the stop;
   - raises no NOT FLAT while the close-out's own sells are working (it waits until 2:58 PM);
@@ -76,6 +86,7 @@ Earlier entry, superseded by the paragraph above: **NOT STARTED.** Created Octob
 
 ## Completed
 
+- **2026-11-04. Release B built, reviewed PASS, deployed as Fly release v9.** Record: `builds/build-c2-log.md`, "Release B" and "Release B review".
 - **2026-11-04. Release A built, reviewed PASS, deployed as Fly release v8.** Record: `builds/build-c2-log.md`, "Release A" and "Release A review".
 - **2026-11-04. Wednesday's session (first load day) reviewed, read only.** Load test inconclusive; close-out false alarm explained; fixes proposed. Record: `builds/build-c2-log.md`, "Wednesday 2026-11-04 session review".
 - **2026-11-03. Build C2 rounds 7 to 9 and load mode.** Tuesday's session reviewed (loss stop at 8:53 AM, flat). Round 9 code deployed as Fly release v6 and load mode as v7, both reviewed PASS. Record: `builds/build-c2-log.md`, from "Tuesday 2026-11-03 session review" to "Deploys and close-out".
@@ -195,7 +206,7 @@ The full record of each run lives in `runs/`. This table is the index you read f
 
 As of 2026-11-04 (after the close): v7 runs; Wednesday reviewed.
 
-0. **Michael decides on the five proposed fixes** in `builds/build-c2-log.md`, "Wednesday 2026-11-04 session review", "Proposed fixes":
+0. **Done 2026-11-04 (releases A and B deployed, v8 and v9). Thursday: review the second load day against the same pass/fail rule, including the stream's frees, the time limit's outcomes and Fly's CPU in the window. Review notes for Michael's decision (money-touching, no code without approval): release B notes 1 (time limit under `stop`) and 2 (time limit after `load off`); release A note 3 is in the proposals below.** Earlier text: Michael decides on the five proposed fixes in `builds/build-c2-log.md`, "Wednesday 2026-11-04 session review", "Proposed fixes":
    1. sell the shares left without a stop after a partial take-profit;
    2. no NOT FLAT while the close-out's own sells are working;
    3. one close-out per day;

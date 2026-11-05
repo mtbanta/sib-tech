@@ -1690,3 +1690,45 @@ Three rows failed no test on the first pass, and each test was strengthened unti
 - **"cached position not dropped"**: the worker test now has the cached view show the position first.
 
 Of the two layers that keep the time limit off normal days (the worker runs it only on a load day, and the time limit returns at once on a normal day), taking out one alone fails no test, because the other still holds.
+
+## Release B review (2026-11-04, evening): PASS. Deployed as Fly release v9.
+
+Round 1, the only round Michael allowed, on `1e2b26a..f66cc60`. No blocking findings. Checks 2, 7 and 10 clean. 377 pass, type check clean. The reviewer took out 9 safeguards one at a time in a scratch copy, and each failed exactly the test named.
+
+**Confirmed:**
+- **Paper only.** The stream address comes from the fixed paper host constant and is checked on every connect. The keys go only into the stream's auth message and are never logged.
+- **The listener** frees a symbol only on a sell fill leaving 0 shares (or exit fills adding up to the entry's shares). It matches the entry by `group_id`, never by symbol. A replayed event is harmless. Only the gate's snapshot and the carried-position scan read the cached view; the close-out, NOT FLAT, the loss stop and the bare rule read Alpaca directly.
+- **The time limit:**
+  - it sends no quantity (a structure test checks the request body);
+  - it refuses a take-profit holding more shares than are held, and any price that is not lower;
+  - one attempt per entry, saved in the database;
+  - it skips an entry without a live stop;
+  - it holds back at the safety reserve, during a close-out or a sale, and from the close-out time on.
+- **Request load:** the simulator peaked at 150 in any 60 seconds, lowest budget 171, no 429s. Sells and cancels are never held back. The 100 a minute ceiling is untouched.
+- **Normal days are unchanged.** Line 5 gains only "1 share".
+
+**Non-blocking notes** (each fix is money-touching and needs Michael's approval):
+1. **The time limit keeps running under a plain `stop`.** It checks only the close-out and sale guard, not the stop flag. It only ever sells, earlier, and the stops stay.
+2. **After `load off` mid-window,** the time limit still applies to entries made between 8:45 and 9:00. Those may then be normal size. It sends no quantity, and release A's bare rule covers any remainder. Found by reading the code; no test covers it.
+3. **Untested on paper.** The new price sits below the sibling stop. If Alpaca refuses a take-profit priced below its stop, every attempt counts as refused and the time limit frees nothing. The guard makes that harmless, and Thursday's summary will show it.
+4. **In a broker stall,** a sale queued behind a time-limit attempt could wait up to about 41 seconds (worked out from the client's time limits, not measured).
+5. **Signal load.**
+   - "Stop flag is set", "not armed" and "not flat" refusals are written row by row, not counted. If the stop flag were on during the window, that could mean about 30 rows a second.
+   - **Correction by the builder:** the reviewer wrote that the stop flag is on now. It is not. It reads off (cleared by Michael's `resume` at 3:38 PM Tuesday), checked after the v9 deploy.
+   - **CPU, a guess:** each gate pass copies and sorts the day's order list (2 to 5 ms on a Mac at 1,500 to 3,000 rows). Fly's CPU graph for the window and the summary's counts will measure it.
+6. **Small gaps:**
+   - a crash during an attempt could allow a second, lower price;
+   - a failed save of attempts is silent;
+   - the order stream is not restarted after a short worker hiccup that day (the 10 second sync takes over).
+
+### Deploy (2026-11-04, 7:08 PM Central, market closed)
+- `fly deploy --ha=false` from a separate checkout of `f66cc60`, with no key file in the checkout.
+- **Fly release v9:** one machine, good state. One `worker_started` at 7:08:51 PM ("Starts in the last hour: 2" counts release A's start at 6:11 PM). No warnings or errors.
+- Discord, `commands`, 7:08:50 PM: "New release RXJ6WWNR (it was MPHW9C0F), so this is a deploy."
+- Healthchecks up (last ping 7:08:51 PM).
+- **Thursday's limits post still shows the load switch.** The 3:10 PM request reads "5. mode: normal (`load on` makes it a load day)", every limit waiting for Michael. v9 shows the same line until `load on`, then "LOAD DAY (cheap list, at most 75 dollars a position, 1 share churn 8:45 AM CT to 9:00 AM CT, then normal)".
+- Stop flag off, not-flat flag off.
+
+**For Thursday to be the load day:** Michael approves the limits (at least `trades 100`) and types `load on` before the 7:45 AM screen. Without approval there is no trading Thursday.
+
+Paper only.
