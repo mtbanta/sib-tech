@@ -987,6 +987,7 @@ export class Worker {
       closeOrder: (id, patch) => (store.updateOrderSoon ? store.updateOrderSoon(id, patch) : store.updateOrder(id, patch)),
       dropPosition: (symbol) => this.view.dropPosition(symbol),
       setPosition: (symbol, qty, price) => this.view.setPositionFromUpdate(symbol, qty, price),
+      onExitEnded: (clientOrderId) => this.syncMemory.mustLook.add(clientOrderId),
       onStopCancelled: (info) => {
         this.d.log?.("info", "stop_cancelled_at_partial_take_profit", { symbol: info.symbol });
         this.syncAt(info.atMs + BARE_GRACE_MS);
@@ -1017,7 +1018,12 @@ export class Worker {
     if (u.raw && nowMs - this.lastRawSampleAt >= 60_000) {
       this.lastRawSampleAt = nowMs;
       try {
-        this.rawSample = JSON.stringify(u.raw).slice(0, 1500);
+        // Only the fields the statistics need (group 1 review note): the event, its time, price, quantity and share count, and the
+        // order's symbol, side, type, status and quantities.
+        const r = u.raw;
+        const ord = (r.order ?? {}) as Record<string, unknown>;
+        const pick = (x: Record<string, unknown>, keys: string[]) => Object.fromEntries(keys.filter((k) => k in x).map((k) => [k, x[k]]));
+        this.rawSample = JSON.stringify({ ...pick(r, ["event", "timestamp", "price", "qty", "position_qty"]), order: pick(ord, ["symbol", "side", "type", "order_class", "status", "qty", "filled_qty", "filled_avg_price", "limit_price", "stop_price"]) }).slice(0, 1500);
       } catch {
         this.rawSample = null;
       }

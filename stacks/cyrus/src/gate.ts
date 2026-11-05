@@ -48,7 +48,7 @@ export interface GateDeps {
   onLimitEntrySent?: (e: { clientOrderId: string; alpacaOrderId: string; symbol: string; qty: number }) => void;
 }
 
-// The speed release (Michael's decision 5, 2026-11-05): after Alpaca refuses an entry, that symbol waits a few seconds before the next
+// The speed release (Michael's decision 5, 2026-11-05), on a load day: after Alpaca refuses an entry, that symbol waits a few seconds before the next
 // try, not a minute: REFUSAL_BACKOFF_BASE_MS after the first refusal, doubling for each further refusal of the same symbol within the
 // last REFUSAL_WINDOW_MS, never more than REFUSAL_BACKOFF_CAP_MS (3, 6, 12, 24, then 30 seconds). Chosen from 2026-11-05's data (the
 // C2 log, "Speed release"): IEX changed a symbol's price about every 1.5 seconds, and an order 2 to 5 seconds after a "price above
@@ -223,7 +223,10 @@ export class OrderGate {
     }
     const held = new Set(positions.map((p) => p.symbol));
     if (rows.some((o) => o.symbol === symbol && isActive(o) && !held.has(symbol))) return this.refuse(date, symbol, "an entry for this symbol is still working");
-    if (refusalWaitMs(rows, symbol, now.getTime()) > 0) return this.refuse(date, symbol, "Alpaca refused this symbol a moment ago, so I wait a few seconds before trying again");
+    // Decision 5's short backoff on a load day; a normal day keeps the minute (the proposal's item 7: normal days unchanged).
+    if (isLoadDay(day)) {
+      if (refusalWaitMs(rows, symbol, now.getTime()) > 0) return this.refuse(date, symbol, "Alpaca refused this symbol a moment ago, so I wait a few seconds before trying again");
+    } else if (rows.some((o) => o.symbol === symbol && o.status === "failed" && o.createdAt && now.getTime() - new Date(o.createdAt).getTime() < 60_000)) return this.refuse(date, symbol, "Alpaca refused this symbol a moment ago, so I wait a minute before trying again");
     // Entries not yet in the (up to 15 seconds old) account view: sent but not filled, filled but not shown yet, or partly
     // filled. A symbol the view already shows is counted from its market value, plus any unfilled remainder.
     const pendingExposure = rows

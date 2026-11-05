@@ -296,9 +296,13 @@ export class Liquidator {
         await this.sleep(ms);
         return ms;
       }
+      if (earlyWakes >= MAX_EARLY_WAKES) {
+        await this.sleep(ms); // after the cap, plain pauses again (group 1 review, round 1)
+        return ms;
+      }
       const t = this.d.now().getTime();
       const woke = await this.d.waitEvent(symbols, ms);
-      if (!woke || earlyWakes >= MAX_EARLY_WAKES) return ms;
+      if (!woke) return ms;
       earlyWakes++;
       return Math.min(ms, Math.max(0, this.d.now().getTime() - t));
     };
@@ -418,7 +422,10 @@ export class Liquidator {
         // takes about 0.2 s, and neither the open list nor qty_available is guaranteed to show the exits.
         if (cancelled && polls === 0 && !blindWaitDone) {
           blindWaitDone = true;
-          waited += await pauseFor(symbols, 500);
+          // A plain half second, never ended early by an update (group 1 review, round 1): Alpaca's open list may not show a filled
+          // entry's exits, so this pause is what lets the cancels land before the first look.
+          await this.sleep(500);
+          waited += 500;
           continue;
         }
         const stillHolding = [...symbols].some((sym) => openSellQty(openOrders, sym) > EPS) || held.some((p) => p.qtyAvailable != null && p.qtyAvailable < p.qty - EPS);

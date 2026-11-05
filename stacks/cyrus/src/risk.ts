@@ -50,6 +50,9 @@ const MISSING_INTENT_AGE_MS = 10_000;
 export const RECENT_WINDOW_MS = 10 * 60_000;
 export const RECENT_MAX_PAGES = 3;
 export const OLD_LOOKUPS_PER_SYNC = 4;
+// Group 1 review, round 1: at least this many, and enough that every older entry is looked up at least every OLD_LOOKUP_EVERY_MS
+// (no slower than the normal-day sync of v9). An entry whose exit Alpaca just reported cancelled, expired or rejected (live updates,
+// `mustLook`) is looked up on the very next sync, outside this budget, so the 3 second stop-gap sale also reaches an older entry.
 export const OLD_LOOKUP_EVERY_MS = 30_000;
 
 export class SyncMemory {
@@ -63,6 +66,8 @@ export class SyncMemory {
   lastSyncAt = 0;
   // The speed release, item 3: when each open entry older than the recent window was last looked up by its id.
   readonly oldLookedAt = new Map<string, number>();
+  // Entries (client ids) whose exit leg the live updates just reported cancelled, expired or rejected: looked up on the next sync.
+  readonly mustLook = new Set<string>();
 }
 const fallbackSync = new SyncMemory();
 
@@ -111,6 +116,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   const activeIds = new Set(active.map((o) => o.clientOrderId));
   for (const id of [...mem.lastSeen.keys()]) if (!activeIds.has(id)) mem.lastSeen.delete(id);
   for (const id of [...mem.oldLookedAt.keys()]) if (!activeIds.has(id)) mem.oldLookedAt.delete(id);
+  for (const id of [...mem.mustLook]) if (!activeIds.has(id)) mem.mustLook.delete(id);
   const midnight = etInstant(day.tradeDate, "00:00").getTime();
   const nowMs = d.now().getTime();
   const createdMs = (o: OrderRecord) => (o.createdAt ? new Date(o.createdAt).getTime() : midnight);
@@ -121,10 +127,14 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   const byClientId = new Map(listed.orders.map((o) => [o.clientOrderId, o]));
   // Item 3: open entries made before the window read above are looked up by id, a few per sync, oldest look first.
   if (opts.streamLive) {
-    const old = active.filter((s) => createdMs(s) < fromMs && !byClientId.has(s.clientOrderId) && nowMs - (mem.oldLookedAt.get(s.clientOrderId) ?? 0) >= OLD_LOOKUP_EVERY_MS);
-    old.sort((a, b) => (mem.oldLookedAt.get(a.clientOrderId) ?? 0) - (mem.oldLookedAt.get(b.clientOrderId) ?? 0) || createdMs(a) - createdMs(b));
-    for (const s of old.slice(0, OLD_LOOKUPS_PER_SYNC)) {
+    const older = active.filter((s) => createdMs(s) < fromMs && !byClientId.has(s.clientOrderId));
+    const must = older.filter((s) => mem.mustLook.has(s.clientOrderId));
+    const due = older.filter((s) => !mem.mustLook.has(s.clientOrderId) && nowMs - (mem.oldLookedAt.get(s.clientOrderId) ?? 0) >= OLD_LOOKUP_EVERY_MS);
+    due.sort((a, b) => (mem.oldLookedAt.get(a.clientOrderId) ?? 0) - (mem.oldLookedAt.get(b.clientOrderId) ?? 0) || createdMs(a) - createdMs(b));
+    const budget = Math.max(OLD_LOOKUPS_PER_SYNC, Math.ceil(older.length / 3));
+    for (const s of [...must, ...due.slice(0, budget)]) {
       mem.oldLookedAt.set(s.clientOrderId, nowMs);
+      mem.mustLook.delete(s.clientOrderId);
       try {
         const found = await d.broker.findOrderByClientId(s.clientOrderId);
         if (found) byClientId.set(s.clientOrderId, found);

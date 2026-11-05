@@ -186,6 +186,9 @@ export interface FreeDeps {
   // The speed release (decision 3): a bracket's stop was cancelled while its take-profit had partly filled, so shares are left
   // without a stop. The worker brings the order sync forward to 3 seconds after `atMs`.
   onStopCancelled?: (info: { clientOrderId: string; symbol: string; atMs: number }) => void;
+  // Group 1 review, round 1: an exit leg of a filled entry of ours was cancelled, expired or rejected. The worker has the next sync
+  // look that entry up even if it is older than the sync's 10 minute read (risk.ts SyncMemory.mustLook).
+  onExitEnded?: (clientOrderId: string) => void;
   // The entry (Alpaca's parent order, with its fill) for a group id, from the order sync's latest view, if the stream has not seen it.
   entryForGroup?: (groupId: string) => Order | null;
   now: () => number;
@@ -277,6 +280,10 @@ export class OrderUpdateHandler {
       return;
     }
     if (o.side !== "sell") return;
+    if ((u.event === "canceled" || u.event === "expired" || u.event === "rejected") && g) {
+      const info = this.entry(g);
+      if (info && info.filledQty > 0) this.d.onExitEnded?.(info.clientOrderId);
+    }
     // A bracket's stop cancelled while the take-profit has partly filled: shares are left without a stop (release A, fix 1). Only
     // that case is reported: a stop cancelled because the take-profit filled completely, or by one of our own sales, is not.
     if (u.event === "canceled" && g && (o.type === "stop" || o.stopPrice !== null)) {

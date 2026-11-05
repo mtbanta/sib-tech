@@ -431,7 +431,8 @@ test("item 9: a sale's wait for its cancels ends at a live update for that symbo
   const liq = new Liquidator({ broker: fb, gate, now: () => new Date(0), sleep: async (ms) => void sleeps.push(ms), waitEvent: async (syms, ms) => (assert.ok(syms.has("AAA")), waits.push(ms), true) });
   const res = await liq.flatten({ reason: "test", tradeDate: D, only: ["AAA"], maxRounds: 1 });
   assert.ok(!res.flat, "the shares stay held by an order nothing cancels (a stuck exit)");
-  assert.ok(waits.length > 0 && sleeps.length === 0, "every pause is a wait that an update can end");
+  assert.equal(waits.length, 20, "the first 20 pauses are waits that an update can end");
+  assert.ok(sleeps.length > 0 && sleeps.every((ms) => ms >= 250), "after that, plain pauses again (group 1 review, round 1)");
   const looks = fb.count("listPositions");
   assert.ok(looks <= 2 * (20 + 12) + 4, `bounded: ${looks} position reads`);
 });
@@ -458,7 +459,7 @@ test("item 10: one statistics line a minute, all session, with the live updates,
   r.broker.positions = [{ symbol: "BBB", qty: 2, marketValue: 100, avgEntryPrice: 50, unrealizedPl: 0 }];
   await r.at("15:00:10");
   await r.trade("BBB", 50.5, "15:00:11");
-  const raw = { event: "fill", position_qty: "0" };
+  const raw = { event: "fill", position_qty: "0", account_id: "should-not-be-kept", order: { symbol: "BBB", side: "sell", client_order_id: "leg" } };
   await r.orderUpdate({ ...upd("fill", { clientOrderId: "leg", symbol: "BBB", side: "sell", type: "limit", status: "filled", qty: 2, filledQty: 2, filledAvgPrice: 50.5, groupId: "g" }, 0, z("15:00:11").getTime()), raw });
   await r.at("15:01:05");
   const stats = r.store.events.filter((e) => e.event === "governor_stats").map((e) => e.data as any);
@@ -466,6 +467,102 @@ test("item 10: one statistics line a minute, all session, with the live updates,
   for (const k of ["orderStream", "freesThisMinute", "databaseCloses", "entryExpiry", "lossStopShadow", "viewEveryMs", "rawUpdate"]) assert.ok(k in last, `${k} in ${JSON.stringify(last).slice(0, 400)}`);
   assert.equal(last.freesThisMinute.n, 1);
   assert.ok(last.lossStopShadow.n >= 1, "the estimate was logged beside the loss stop's reads");
-  assert.equal(last.rawUpdate, JSON.stringify(raw));
+  assert.equal(last.rawUpdate, JSON.stringify({ event: "fill", position_qty: "0", order: { symbol: "BBB", side: "sell" } }), "only the chosen fields are kept");
   assert.ok(stats.length >= 2, "one a minute");
+});
+
+// ------------------------------------------------ group 1 review, round 1: regressions ---------------------------------------------
+
+test("review 1, finding 1: a stop cancelled on an entry older than the sync's 10 minute read is still sold about 3 seconds after the cancel", async () => {
+  const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
+  sim.hideFilledParents = true;
+  const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, orderStream: true });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("approve", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:25:00");
+  sim.advanceTo(z("14:40:00").getTime());
+  const id = clientOrderIdFor(D, "CIFR", 1);
+  await sim.submitEntry({ symbol: "CIFR", qty: 10, stopPrice: 7.21, takeProfitPrice: 7.28, referencePrice: 7.27, clientOrderId: id });
+  sim.fillEntry(id, 7.27);
+  await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "CIFR", qty: 10, referencePrice: 7.27, stopPrice: 7.21, takeProfitPrice: 7.28, status: "filled", alpacaOrderId: null, filledQty: 10, filledAvgPrice: 7.27, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+  const o = sim.orders.find((x) => x.clientOrderId === id)!;
+  await r.orderUpdate(upd("fill", { id: o.id, clientOrderId: id, symbol: "CIFR", side: "buy", status: "filled", qty: 10, filledQty: 10, filledAvgPrice: 7.27, groupId: o.groupId }, 10));
+  await r.at("15:00:00"); // a sync; the entry is 20 minutes old, so it is looked up by id
+  for (let i = 0; i < 5; i++) await settle();
+  sim.advanceTo(z("15:00:01").getTime());
+  sim.partialTakeProfit(id, 3, 7.28);
+  const tp = o.legs.find((l) => l.type === "limit")!;
+  const sl = o.legs.find((l) => l.type === "stop")!;
+  await r.orderUpdate(upd("partial_fill", { ...structuredClone(tp), groupId: o.groupId }, 7, sim.simMs));
+  await r.orderUpdate(upd("canceled", { ...structuredClone(sl), groupId: o.groupId }, null, sim.simMs));
+  r.setNow("15:00:04.3");
+  for (let i = 0; i < 10 && sim.sellLog.length === 0; i++) await settle();
+  assert.deepEqual(sim.sellLog.map((x) => [x.symbol, x.qty]), [["CIFR", 7]]);
+  assert.ok(sim.sellLog[0]!.at < z("15:00:05").getTime(), `sold at ${new Date(sim.sellLog[0]!.at).toISOString()}`);
+});
+
+test("review 1, finding 1: every open entry older than the 10 minute read is looked up at least every 30 seconds, however many there are", async () => {
+  const T0 = Date.UTC(2026, 10, 2, 15, 0);
+  const sim = new SimBroker(T0);
+  const store = new MemoryStore();
+  const say = async () => true;
+  const liquidator = new Liquidator({ broker: sim, gate: new SellGate({ broker: sim, say, nowMs: () => sim.simMs }), now: () => new Date(sim.simMs), sleep: sim.sleep });
+  const mem = new SyncMemory();
+  const risk = { broker: sim, store, now: () => new Date(sim.simMs), say, liquidator, syncMemory: mem };
+  await ensureDay({ store, broker: sim, now: risk.now }, D);
+  const day = (await store.getDay(D))!;
+  const syms = Array.from({ length: 21 }, (_, i) => `S${String(i).padStart(2, "0")}`);
+  for (const sym of syms) {
+    const id = clientOrderIdFor(D, sym, 1);
+    await sim.submitEntry({ symbol: sym, qty: 1, stopPrice: 9.98, takeProfitPrice: 10.01, referencePrice: 10, clientOrderId: id });
+    sim.fillEntry(id, 10);
+    await store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: sym, qty: 1, referencePrice: 10, stopPrice: 9.98, takeProfitPrice: 10.01, status: "filled", alpacaOrderId: null, filledQty: 1, filledAvgPrice: 10, note: null, createdAt: new Date(sim.simMs).toISOString() });
+  }
+  sim.advance(30 * 60_000);
+  const looked = new Map<string, number[]>();
+  const realFind = sim.findOrderByClientId.bind(sim);
+  sim.findOrderByClientId = async (id) => (looked.set(id, [...(looked.get(id) ?? []), sim.simMs]), realFind(id));
+  for (let k = 0; k < 6; k++) {
+    await syncOrders(risk, day, { protect: true, streamLive: true });
+    sim.advance(10_000);
+  }
+  for (const sym of syms) {
+    const at = looked.get(clientOrderIdFor(D, sym, 1)) ?? [];
+    assert.ok(at.length >= 2 && at[1]! - at[0]! <= 30_000, `${sym}: looked up at ${at.map((t) => (t - T0) / 1000)}`);
+  }
+});
+
+test("review 1, finding 2: the half second after a sale's cancels is a plain pause, so a whole-account sale still sells when updates arrive at once", async () => {
+  const sim = new SimBroker(Date.UTC(2026, 10, 2, 15, 0));
+  sim.hideFilledParents = true;
+  sim.reportQtyAvailable = false;
+  sim.cancelMs = 300;
+  const gate = new SellGate({ broker: sim, say: async () => true, nowMs: () => sim.simMs });
+  const waitEvent = async (_s: ReadonlySet<string>, ms: number) => (sim.advance(Math.min(ms, 20)), true);
+  const liq = new Liquidator({ broker: sim, gate, now: () => new Date(sim.simMs), sleep: sim.sleep, waitEvent });
+  for (const [sym, p] of [["AAA", 10], ["BBB", 20], ["CCC", 30]] as const) {
+    const id = clientOrderIdFor(D, sym, 1);
+    await sim.submitEntry({ symbol: sym, qty: 5, stopPrice: p - 0.1, takeProfitPrice: p + 0.1, referencePrice: p, clientOrderId: id });
+    sim.fillEntry(id, p);
+  }
+  const r = await liq.flatten({ reason: "daily loss stop", tradeDate: D, maxRounds: 1, priority: true });
+  assert.deepEqual(r.sold.map((x) => x.symbol).sort(), ["AAA", "BBB", "CCC"], JSON.stringify(r.errors));
+});
+
+test("review 1, finding 3: on a normal day a refused symbol still waits a minute (the short backoff is a load-day setting)", async () => {
+  const r = await day(false);
+  await r.at("15:00:00");
+  const real = r.broker.submitEntry.bind(r.broker);
+  let refuse = true;
+  r.broker.submitEntry = async (e) => {
+    if (refuse) { refuse = false; r.broker.calls.push({ fn: "submitEntry", args: [e] }); throw new AlpacaError("Alpaca POST /v2/orders answered 422: refused (test)", 422); }
+    return real(e);
+  };
+  await r.ramp("DDD", [...Array(12).fill(50), 50.4], "15:00:01");
+  assert.equal(entries(r).length, 1);
+  await r.ramp("DDD", [...Array(12).fill(50), 50.4], "15:00:20");
+  assert.equal(entries(r).length, 1, "about 30 seconds later: still waiting");
+  await r.ramp("DDD", [...Array(12).fill(50), 50.5], "15:01:10");
+  assert.equal(entries(r).length, 2, "after a minute: tried again");
 });

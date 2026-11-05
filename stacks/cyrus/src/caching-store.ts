@@ -209,8 +209,14 @@ export class CachingStore implements Store {
     }
   }
   // Tries again every close that could not be written yet (called on every pass of the worker).
-  async retrySoonWrites(): Promise<void> {
-    for (const id of [...this.soonPending.keys()]) await this.writeSoon(id);
+  // One run at a time (group 1 review note): a database that hangs cannot pile up a new waiting write on every pass.
+  private retrying: Promise<void> | null = null;
+  retrySoonWrites(): Promise<void> {
+    if (this.retrying) return this.retrying;
+    this.retrying = (async () => {
+      for (const id of [...this.soonPending.keys()]) await this.writeSoon(id);
+    })().finally(() => void (this.retrying = null));
+    return this.retrying;
   }
   // How long each background write took (milliseconds) since the last call, for the per-minute statistics.
   takeSoonWriteTimes(): number[] {
