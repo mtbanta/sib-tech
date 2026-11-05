@@ -203,6 +203,11 @@ As of 2026-11-04 (after the close): v7 runs; Wednesday reviewed.
    5. logging and wording.
    Items 1 to 4 are money-touching: nothing is built until he approves. A read-only check of Tuesday's brackets for the missing-stop gap is offered first. Also his call: whether and how to retest 100 entries a minute (the placeholder topped out at about 45). Thursday's limits wait for his approval, items 1 to 3 below still stand, and item 4 (the load day) ran on 2026-11-04.
 
+**Proposals for later (Michael, 2026-11-04 evening). No code now; each is proposed to Michael first under the standing rule:**
+- **Live order updates on normal days.** Use release B's `trade_updates` listener on normal days too, so release A's fix 1 reacts to a cancelled stop within about a second instead of 5 to 10 seconds plus a sync.
+- **The daily loss stop goes first.** Its sale always goes ahead of a remainder sale (release A's fix 1) in the one-at-a-time sale queue. Release A's review measured a wait of up to about 20 seconds behind one.
+- **No emergency NOT FLAT after 3:00 for sells sent before the close.** The emergency close-out calls the close-out without the close time, so its wait is capped at 60 seconds and can run past 3:00 (release A review, note 3).
+
 Done, superseded by item 0 above: **Wednesday 2026-11-04:** Michael types `resume`, decides `load on` (before 7:45 AM) and approves the limits. After the session, review it, and the load window separately if it was a load day. Judge the request budget by the pass/fail rule in the log ("Load mode proposal", item 8). Also pending from the load mode review: Michael to confirm that a `load off` on the trading-day morning **before** the 7:45 AM screen should give a normal day (the builder's reading); and the logged message-text notes (the Armed message on an `ended` day, a repeated part after a failed split post).
 
 
