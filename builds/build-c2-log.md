@@ -2016,12 +2016,12 @@ Three wording notes, none affecting the numbers:
 | Item | Today | Proposed | Data behind it | Requests a minute |
 | :-- | :-- | :-- | :-- | :-- |
 | 1. Freeing a symbol | Live updates on load days only; normal days wait for the 30 second sync | Live updates every day, Armed to the close. The gate frees the symbol in memory at the update; the stored entry is written after, without the gate waiting on it. The sync stays the record of truth | 3,952 of 4,055 freed by updates, typical 47 ms; window always under 2.05 s; about 115 waited 2 to 21 s behind the database close; 0 reconnects all day | 0 (the stream is not a request) |
-| 2. Load-day time limit | 60 s; lowers the take-profit 5 cents under the last price: 19 tried, 19 refused | **Recommended:** keep 60 s, one try, Michael's guard unchanged, but lower the take-profit only to **1 cent above the stop**, the lowest price Alpaca's rule allows. Alternative: remove it | Alpaca: "take_profit.limit_price must be > stop_loss.stop_price". 22 of 886 window holds passed 60 s (2.5 percent). A price 1 cent above the stop sells at once whenever the market is above it. Not yet tested on paper | about 2 (1 position check plus the change, about 1 a minute) |
+| 2. Load-day time limit | 60 s; lowers the take-profit 5 cents under the last price: 19 tried, 19 refused | **Recommended: remove it.** Alternative: keep 60 s, one try, Michael's guard unchanged, but lower the take-profit only to 1 cent above the stop | Alpaca: "take_profit.limit_price must be > stop_loss.stop_price". 22 of 886 window holds passed 60 s (2.5 percent), so the gain is small. The alternative is untested: at entry Alpaca also requires a take-profit at least 1 cent above its own current price (140 refusals today). If it applies that check to a change too, any price low enough to sell at once is refused, and the alternative frees nothing (harmless under the guard) | about 2 with the alternative (1 position check plus the change, about 1 a minute); 0 if removed |
 | 3. Normal-day order check (the sync) | 30 s on normal days; 10 s on load days. Each sync reads every order since the oldest open entry (6 pages by 2:00 PM today) | **10 s on every day**, reading only the last 10 minutes of orders (1 page). Any open entry older than that is looked up by id (release A's lookup) | With events doing the fast work, the sync is the backstop for a dropped stream and the record of truth. Today it closed only 103 records. Afternoon routine requests 65 to 78 a minute with no entries, against 32 to 40 before the open. The 30 s value was not exercised today | 12 (1 page plus positions, 6 times a minute), against today's 12 plus up to 36 of paging |
 | 4. The stop gap after a partial take-profit | Seen at the next sync (10 s load, 30 s normal), then a 5 s grace from Alpaca's cancel. Today: sale sent 6.5 to 21.7 s after the cancel, filled by 24.8 s | Triggered by the live update of the stop's cancel, then **5 s grace**. The sync stays the backstop | Of 1,100 stop cancels at a partial take-profit, the take-profit finished on its own within 1 s in 216, 3 s in 827, 5 s in 963, 10 s in 995, 15 s in 999. With 5 s from the event: about 137 sales a day instead of 101, and the longest gap about 7 s instead of 25 (estimate: 5 s plus a measured fill of about 2 s). With 3 s: about 273 sales, gap about 5 s | 0 to detect. Each sale costs about 15 to 25 (Wednesday's estimate, not measured today). At 100 entries a minute (the load window, 1 share) there are none; on a normal day about 1 sale every 3 minutes on average, at most 3 in a minute today |
 | 5. Loss stop | Reads the account every 5 s (12 a minute), plus budgeted retries | Estimated equity on every price print: cash plus held shares (from the live updates' `position_qty`) times the last print. A cross of the limit triggers one account read at once, and the sale if the read confirms it. The **account read every 15 s** stays as the backstop and keeps the cash figure current. First a shadow day: log the estimate beside each account read, before the estimate may trigger anything | Today's lowest equity was 247.74 below the start (limit 500), so the loss stop did not run. Tuesday's overshoot came from 5 s between checks during a fast fall. How far the free feed's price is from Alpaca's own price is not measured; the shadow day measures it | 4 plus 1 per trigger, against 12 |
 | 6. Loss stop ahead of remainder sales | One sale at a time; a loss stop waits behind a remainder sale (release A review: up to about 20 s) | The loss stop's sale goes first. A remainder sale under way is dropped at its next step; the loss stop sells those shares anyway | 101 remainder sales today, each holding the sale queue for about 2 to 15 s after it was sent | 0 |
-| 7. The gate's wait after Alpaca refuses a symbol | 60 s | **10 s** on load days (normal days unchanged) | Refusals depend on Alpaca's price at that moment, which moves within seconds. The 60 s wait covered 34 percent of window symbol time. Each refused order costs a request and a slot under the 100 ceiling, so a shorter wait lets more refused orders through | At today's 15 percent refusal rate, about 15 of every 100 orders would be refused, inside the 100 ceiling |
+| 7. The gate's wait after Alpaca refuses a symbol | 60 s | **10 s** on load days (normal days unchanged). A guess, not a measurement | Refusals depend on Alpaca's price at that moment. How fast that changes was not measured today; the next load day measures it as the share of tries after the wait that Alpaca refuses again. The 60 s wait covered 34 percent of window symbol time. Each refused order costs a request and a slot under the 100 ceiling, so a shorter wait lets more refused orders through | At today's 15 percent refusal rate, about 15 of every 100 orders would be refused, inside the 100 ceiling |
 | 8. Account and positions read (the gate's cached view) | Every 5 s (about 24 a minute) | **Every 15 s.** Positions come from the live updates in between | The stream was live all day with 0 reconnects and 47,704 updates. The sync and the 15 s read correct any drift | 8, against 24 |
 | 9. The sale routine's waits (close-out and remainder sales) | Polls every 6 s round, and every 2 s for the close-out's own sells | End the wait at the live update of the cancel or the fill; the polls stay as the backstop | Today's close-out sent its sell 2.7 s after ADT's take-profit cancel completed (11.248 to 13.906); an event would cut that to well under a second (estimate). The 7.6 s cancel and Alpaca paper holding the sell 12.6 s are Alpaca's and do not change | fewer polls: the close-out minute ran 110 against about 70 routine |
 | 10. Logging only | Free times kept as a median; raw updates not logged | Log each free's time (slowest per minute in the statistics); one raw update per minute; per-minute statistics all session; the database close time of each free | Turns 2's guesses (the bursts, the share count) into measurements | 0 |
@@ -2043,19 +2043,19 @@ Three wording notes, none affecting the numbers:
 
 **Request math at 100 entries a minute (the load window, proposed against today's measurement):**
 
-| Work | Today (measured fit) | Proposed (estimate) |
+| Work | Today (the total is measured; the parts are the design figures that add up to it) | Proposed (estimate) |
 | :-- | --: | --: |
 | Entries (bracket included; refused orders inside the 100) | 100 | 100 |
 | Account and positions (the gate's view) | 24 | 8 |
 | Loss stop account reads | 12 | 4, plus 1 per trigger |
 | Settings | 2 | 2 |
 | Order sync | 12, plus up to 36 of paging later in the day | 12 |
-| Time limit | about 2 | about 2 |
+| Time limit | about 2 | 0 if removed (about 2 with the alternative) |
 | Remainder sales (none at 1 share) | 0 | 0 |
 | Live order updates and the price stream | 0 | 0 |
-| **Total** | **about 145 early, about 165 later in the day** | **about 128** |
+| **Total** | **about 145 early, about 165 later in the day** | **about 126 to 128** |
 
-- The proposal frees about 20 to 35 requests a minute of headroom under 200, and the governor's 80 reserve.
+- The proposal frees about 20 to 40 requests a minute of headroom under 200, and the governor's 80 reserve.
 - On a normal day (at most 43 entries a minute today) the same settings use about 70.
 - What it cannot change: Alpaca paper's own delays (cancels of 7 to 11 seconds, sells held 12 to 16 seconds at the close-out) and the 100 ceiling.
 
@@ -2068,7 +2068,7 @@ Three wording notes, none affecting the numbers:
 
 **For Michael to decide:**
 1. Items 1 to 10, or a subset. Each is money-touching except 10. Each gets a test that fails without it, a normal-day test, the secret scan, the full suite and one build-reviewer round. Deploys happen outside market hours.
-2. Item 2: lower to 1 cent above the stop (recommended), or remove the time limit.
+2. Item 2: remove the time limit (recommended), or lower it to 1 cent above the stop (untested, may be refused the same way).
 3. Item 4: a 5 second grace (recommended) or 3 seconds.
 4. The window's take-profit: 1 cent or 2 cents.
 5. Whether the next load day waits for this release.
