@@ -156,8 +156,8 @@ async function withActiveEntry(load: boolean) {
 }
 const syncs = (r: { broker: FakeBroker }) => r.broker.calls.filter((c) => c.fn === "listOrdersPaged" && c.args[0] === "all").length;
 
-test("a load day syncs orders every 10 seconds; a normal day every 30", async () => {
-  for (const [load, expected] of [[true, 6], [false, 2]] as const) {
+test("orders are synced every 10 seconds on a load day and, since the speed release, on a normal day too", async () => {
+  for (const [load, expected] of [[true, 6], [false, 6]] as const) {
     const r = await withActiveEntry(load);
     await r.at("16:00:00");
     const before = syncs(r);
@@ -167,8 +167,8 @@ test("a load day syncs orders every 10 seconds; a normal day every 30", async ()
   }
 });
 
-test("request statistics are written every minute around the load window, every 5 minutes otherwise", async () => {
-  for (const [load, atLeast, atMost] of [[true, 17, 30], [false, 3, 4]] as const) {
+test("request statistics are written every minute of the session, on a load day and a normal day alike (speed release, item 10)", async () => {
+  for (const [load, atLeast, atMost] of [[true, 17, 30], [false, 17, 30]] as const) {
     const r = await day(load);
     const stats = () => r.store.events.filter((e) => e.event === "governor_stats").length;
     const before = stats();
@@ -194,8 +194,8 @@ test("a load day's summary reports the window and the rest of the day apart; a n
   const alpacaOrders = [parent("a", 50.03, "limit"), parent("b", 49.96, "stop"), parent("c", 50.1, "limit")];
   const input = { day: base, stored, refusals: [], alpacaOrders, account: { equity: 20000 } as never, peak: null, stop: null, flat: true, loadWindow: { start: z("14:45:00"), end: z("15:00:00") } };
   const text = formatSummary(input);
-  assert.ok(text.includes("**Load window (8:45 AM CT to 9:00 AM CT):** 2 entries sent, busiest minute 2. Closed by take-profit 1, by stop 1 (-0.01 on those)"), text);
-  assert.ok(text.includes("**Rest of the day:** 1 entries sent, busiest minute 1. Closed by take-profit 1, by stop 0 (+0.10 on those)"), text);
+  assert.ok(text.includes("**Load window (8:45 AM CT to 9:00 AM CT):** 2 entries sent (2 filled), busiest minute 2. Closed by take-profit 1, by stop 1 (-0.01 on those)"), text);
+  assert.ok(text.includes("**Rest of the day:** 1 entries sent (1 filled), busiest minute 1. Closed by take-profit 1, by stop 0 (+0.10 on those)"), text);
   assert.ok(!formatSummary({ ...input, loadWindow: null }).includes("Load"), "normal day: no load part");
 });
 

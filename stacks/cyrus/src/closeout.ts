@@ -18,6 +18,9 @@ export interface CloseoutDeps {
   say: Say;
   sleep?: (ms: number) => Promise<void>;
   log?: (event: string, data?: Record<string, unknown>) => void;
+  // The speed release, item 9: a pause that ends early (true) at a live order update for one of these symbols (a fill of the
+  // close-out's own sell), so the wait for those fills ends at the event; the 2 second look stays as the backstop.
+  waitEvent?: (symbols: ReadonlySet<string>, ms: number) => Promise<boolean>;
 }
 
 export interface CloseoutResult {
@@ -98,8 +101,14 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
     const sleep = d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
     const maxLooks = Math.max(0, Math.ceil((deadline - t0) / OWN_SELLS_POLL_MS)) + 1; // bounded even if the clock does not move
     stillWorking = true;
+    let earlyWakes = 0; // at most 20 looks are brought forward by updates; after that every look waits its 2 seconds again
     for (let look = 1; look <= maxLooks && d.now().getTime() < deadline; look++) {
-      await sleep(OWN_SELLS_POLL_MS);
+      if (d.waitEvent && earlyWakes < 20) {
+        if (await d.waitEvent(new Set(remaining), OWN_SELLS_POLL_MS)) {
+          earlyWakes++;
+          look--; // a look brought forward by an update does not use up one of the timed looks
+        }
+      } else await sleep(OWN_SELLS_POLL_MS);
       try {
         const held = await d.broker.listPositions();
         remaining = held.map((p) => p.symbol);

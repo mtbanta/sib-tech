@@ -1,12 +1,16 @@
-// LIVE ORDER UPDATES (release B, Michael's approval of 2026-11-04). On a load day, from "Armed" to the close, the worker listens
-// to Alpaca's paper `trade_updates` stream. When an exit fills and leaves no shares of that symbol, the symbol is freed at once
-// (its entry is recorded as closed and the gate's cached positions drop it), so the next entry on it need not wait up to 10
-// seconds for the order sync. On Wednesday 2026-11-04 that wait was most of the 15 second lag between an exit and the next entry.
+// LIVE ORDER UPDATES (release B, Michael's approval of 2026-11-04; every day since the speed release of 2026-11-05). From "Armed"
+// to the close the worker listens to Alpaca's paper `trade_updates` stream. When an exit fills and leaves no shares of that symbol,
+// the symbol is freed at once (its entry is closed in memory, the database write follows, and the gate's cached positions drop
+// it), so the next entry on it need not wait for the order sync. Since the speed release it also:
+//   - closes an entry that never filled when Alpaca reports it cancelled or expired (a load-window limit buy cancelled after its
+//     wait), which frees the symbol the same way;
+//   - keeps the gate's cached positions current from each fill's share count (`position_qty`), between the 10 second reads;
+//   - reports a protective stop that Alpaca cancelled while the take-profit had partly filled (shares left without a stop), so the
+//     worker runs the order sync 3 seconds after the cancel instead of at the next 10 second sync.
 //
 // It is a listener only. It never sends an order and never calls Alpaca's REST interface, so it costs none of the 200 requests a
-// minute. The order sync stays the record of truth: it still runs every 10 seconds on a load day, still frees what this misses
-// (while the stream is down, everything), and still runs the missing-exit and bare-remainder checks. It is never connected on a
-// normal day.
+// minute. The order sync stays the record of truth: it runs every 10 seconds, still frees what this misses (while the stream is
+// down, everything), and still runs the missing-exit and bare-remainder checks.
 //
 // PAPER ONLY: the address is built from the fixed paper host and checked; nothing can point it anywhere else.
 import { PAPER_TRADING_HOST, ConfigError, type Settings } from "./config.ts";
@@ -35,6 +39,10 @@ export interface TradeUpdate {
   positionQty: number | null;
   // When Alpaca says the event happened (milliseconds), or null.
   atMs: number | null;
+  // The price of this fill (fill and partial_fill events), or null.
+  price?: number | null;
+  // The message as Alpaca sent it (one a minute is kept in the statistics, item 10). It holds order data only, no keys.
+  raw?: Record<string, unknown>;
 }
 
 export function parseTradeUpdate(data: Record<string, unknown>): TradeUpdate | null {
@@ -43,7 +51,8 @@ export function parseTradeUpdate(data: Record<string, unknown>): TradeUpdate | n
   const pq = data.position_qty;
   const positionQty = pq === undefined || pq === null || pq === "" ? null : Number(pq);
   const at = typeof data.timestamp === "string" ? Date.parse(data.timestamp) : NaN;
-  return { event: data.event, order, positionQty: Number.isFinite(positionQty as number) ? (positionQty as number) : null, atMs: Number.isFinite(at) ? at : null };
+  const px = data.price === undefined || data.price === null || data.price === "" ? NaN : Number(data.price);
+  return { event: data.event, order, positionQty: Number.isFinite(positionQty as number) ? (positionQty as number) : null, atMs: Number.isFinite(at) ? at : null, price: Number.isFinite(px) ? px : null, raw: data };
 }
 
 export type OrderStreamStatus = "connecting" | "authenticating" | "live" | "reconnecting" | "auth_failed" | "stopped";
@@ -172,6 +181,11 @@ export interface FreeDeps {
   closeOrder: (clientOrderId: string, patch: Partial<OrderRecord>) => Promise<void>;
   // Drops a symbol from the gate's cached positions (Alpaca has just said none are held).
   dropPosition: (symbol: string) => void;
+  // The speed release, item 8: sets a symbol's share count in the gate's cached positions from a fill's `position_qty` (0 drops it).
+  setPosition?: (symbol: string, qty: number, price: number | null) => void;
+  // The speed release (decision 3): a bracket's stop was cancelled while its take-profit had partly filled, so shares are left
+  // without a stop. The worker brings the order sync forward to 3 seconds after `atMs`.
+  onStopCancelled?: (info: { clientOrderId: string; symbol: string; atMs: number }) => void;
   // The entry (Alpaca's parent order, with its fill) for a group id, from the order sync's latest view, if the stream has not seen it.
   entryForGroup?: (groupId: string) => Order | null;
   now: () => number;
@@ -195,14 +209,30 @@ interface EntryInfo {
 //   - an entry is closed only if its own fill is known, so its record is written correctly; otherwise only the cached position is
 //     dropped and the order sync closes the record.
 export class OrderUpdateHandler {
-  readonly counts = { events: 0, freed: 0, closedRecords: 0 };
+  readonly counts = { events: 0, freed: 0, closedRecords: 0, cancelledEntries: 0, stopGaps: 0 };
   private readonly freeMs: number[] = [];
+  // Free times since the per-minute statistics last took them (the slowest of each minute is logged).
+  private minuteFreeMs: number[] = [];
+  // Entries (client ids) a fill was seen for, so the load window's expiry knows not to cancel them.
+  private readonly filledIds = new Set<string>();
   private readonly entries = new Map<string, EntryInfo>(); // by group id
   private readonly exitLegs = new Map<string, Map<string, number>>(); // group id -> leg id -> filled qty
   private readonly d: FreeDeps;
 
   constructor(deps: FreeDeps) {
     this.d = deps;
+  }
+
+  // True once a fill of this entry has arrived on the stream.
+  wasFilled(clientOrderId: string): boolean {
+    return this.filledIds.has(clientOrderId);
+  }
+
+  // Free times (milliseconds) since the last call, for the per-minute statistics.
+  takeMinuteFrees(): number[] {
+    const t = this.minuteFreeMs;
+    this.minuteFreeMs = [];
+    return t;
   }
 
   // Typical (median) time from the exit fill (Alpaca's timestamp) to the free, in milliseconds.
@@ -224,16 +254,47 @@ export class OrderUpdateHandler {
     this.counts.events++;
     const o = u.order;
     const g = o.groupId ?? null;
+    const isFill = u.event === "fill" || u.event === "partial_fill";
+    const fillPrice = u.price ?? o.filledAvgPrice ?? null;
     if (o.side === "buy") {
-      if (g && o.clientOrderId.startsWith("cyrus-")) this.entries.set(g, { clientOrderId: o.clientOrderId, symbol: o.symbol, filledQty: o.filledQty, filledAvgPrice: o.filledAvgPrice, final: o.status === "filled" });
+      const ours = o.clientOrderId.startsWith("cyrus-") && !o.clientOrderId.startsWith("cyrus-x-");
+      if (g && ours) this.entries.set(g, { clientOrderId: o.clientOrderId, symbol: o.symbol, filledQty: o.filledQty, filledAvgPrice: o.filledAvgPrice, final: o.status === "filled" });
+      if (isFill) {
+        if (ours) this.filledIds.add(o.clientOrderId);
+        if (u.positionQty !== null) this.d.setPosition?.(o.symbol, u.positionQty, fillPrice);
+      }
+      // An entry of ours that never filled and is now final (a load-window limit buy cancelled after its wait): its record is closed
+      // as cancelled, which frees the symbol at once. One that partly filled is left to the order sync.
+      if ((u.event === "canceled" || u.event === "expired") && ours && !(o.filledQty > 0) && !this.filledIds.has(o.clientOrderId)) {
+        if (g) this.entries.delete(g);
+        const row = await this.d.getOrder(o.clientOrderId);
+        if (row && !row.closedAt && row.symbol === o.symbol && row.status !== "filled" && !(row.filledQty && row.filledQty > 0)) {
+          await this.d.closeOrder(o.clientOrderId, { closedAt: new Date(this.d.now()).toISOString(), status: "canceled", alpacaOrderId: o.id });
+          this.counts.cancelledEntries++;
+          this.d.log?.("order_stream_entry_cancelled", { symbol: o.symbol });
+        }
+      }
       return;
     }
-    if (o.side !== "sell" || (u.event !== "fill" && u.event !== "partial_fill")) return;
+    if (o.side !== "sell") return;
+    // A bracket's stop cancelled while the take-profit has partly filled: shares are left without a stop (release A, fix 1). Only
+    // that case is reported: a stop cancelled because the take-profit filled completely, or by one of our own sales, is not.
+    if (u.event === "canceled" && g && (o.type === "stop" || o.stopPrice !== null)) {
+      const info = this.entry(g);
+      const exited = [...(this.exitLegs.get(g) ?? new Map<string, number>()).values()].reduce((a, b) => a + b, 0);
+      if (info && info.final && info.filledQty > 0 && exited > 1e-9 && exited < info.filledQty - 1e-9) {
+        this.counts.stopGaps++;
+        this.d.onStopCancelled?.({ clientOrderId: info.clientOrderId, symbol: o.symbol, atMs: u.atMs ?? this.d.now() });
+      }
+      return;
+    }
+    if (!isFill) return;
     if (g) {
       const legs = this.exitLegs.get(g) ?? new Map<string, number>();
       legs.set(o.id, o.filledQty);
       this.exitLegs.set(g, legs);
     }
+    if (u.positionQty !== null && u.positionQty > 1e-9) this.d.setPosition?.(o.symbol, u.positionQty, fillPrice);
     const info = g ? this.entry(g) : null;
     let flat: boolean;
     if (u.positionQty !== null) flat = u.positionQty <= 1e-9;
@@ -244,8 +305,11 @@ export class OrderUpdateHandler {
     this.d.dropPosition(o.symbol);
     this.counts.freed++;
     if (u.atMs !== null) {
-      this.freeMs.push(Math.max(0, this.d.now() - u.atMs));
+      const ms = Math.max(0, this.d.now() - u.atMs);
+      this.freeMs.push(ms);
       if (this.freeMs.length > 2_000) this.freeMs.shift();
+      this.minuteFreeMs.push(ms);
+      if (this.minuteFreeMs.length > 5_000) this.minuteFreeMs.shift();
     }
     let closed = false;
     if (g && info && info.final && info.filledQty > 0 && info.symbol === o.symbol) {

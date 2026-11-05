@@ -43,6 +43,30 @@ export interface GateDeps {
   clockMs?: () => number;
   // Why entries are blocked although nothing else forbids them (the worker: Michael's commands are not being read), or null.
   entryBlock?: () => string | null;
+  // The speed release (decision 4): told about each 1-share limit entry Alpaca accepted, so the worker can cancel it if it has not
+  // filled within the load day's wait (entry-expiry.ts). Never waits.
+  onLimitEntrySent?: (e: { clientOrderId: string; alpacaOrderId: string; symbol: string; qty: number }) => void;
+}
+
+// The speed release (Michael's decision 5, 2026-11-05): after Alpaca refuses an entry, that symbol waits a few seconds before the next
+// try, not a minute: REFUSAL_BACKOFF_BASE_MS after the first refusal, doubling for each further refusal of the same symbol within the
+// last REFUSAL_WINDOW_MS, never more than REFUSAL_BACKOFF_CAP_MS (3, 6, 12, 24, then 30 seconds). Chosen from 2026-11-05's data (the
+// C2 log, "Speed release"): IEX changed a symbol's price about every 1.5 seconds, and an order 2 to 5 seconds after a "price above
+// the print" order was no likelier to meet it again than any other order. It is read from the stored refusals, so a restart keeps it.
+// Every refused order still took its slot under the trades-a-minute ceiling (the governor counts it when it is sent).
+export const REFUSAL_BACKOFF_BASE_MS = 3_000;
+export const REFUSAL_BACKOFF_CAP_MS = 30_000;
+export const REFUSAL_WINDOW_MS = 60_000;
+
+// How long this symbol must still wait after Alpaca's refusals (0: no wait).
+export function refusalWaitMs(rows: OrderRecord[], symbol: string, nowMs: number): number {
+  const times = rows
+    .filter((o) => o.symbol === symbol && o.status === "failed" && o.createdAt)
+    .map((o) => Math.min(nowMs, new Date(o.createdAt!).getTime()))
+    .filter((t) => nowMs - t < REFUSAL_WINDOW_MS);
+  if (times.length === 0) return 0;
+  const wait = Math.min(REFUSAL_BACKOFF_CAP_MS, REFUSAL_BACKOFF_BASE_MS * 2 ** (times.length - 1));
+  return Math.max(0, Math.max(...times) + wait - nowMs);
 }
 
 export const peakKey = (date: string) => `peak_exposure:${date}`;
@@ -199,7 +223,7 @@ export class OrderGate {
     }
     const held = new Set(positions.map((p) => p.symbol));
     if (rows.some((o) => o.symbol === symbol && isActive(o) && !held.has(symbol))) return this.refuse(date, symbol, "an entry for this symbol is still working");
-    if (rows.some((o) => o.symbol === symbol && o.status === "failed" && o.createdAt && now.getTime() - new Date(o.createdAt).getTime() < 60_000)) return this.refuse(date, symbol, "Alpaca refused this symbol a moment ago, so I wait a minute before trying again");
+    if (refusalWaitMs(rows, symbol, now.getTime()) > 0) return this.refuse(date, symbol, "Alpaca refused this symbol a moment ago, so I wait a few seconds before trying again");
     // Entries not yet in the (up to 15 seconds old) account view: sent but not filled, filled but not shown yet, or partly
     // filled. A symbol the view already shows is counted from its market value, plus any unfilled remainder.
     const pendingExposure = rows
@@ -244,7 +268,13 @@ export class OrderGate {
         return this.refuse(date, symbol, "could not set long only and the approved borrowing cap at Alpaca");
       }
     }
-    if (!(signal.stopPrice > 0 && signal.stopPrice < signal.price && signal.takeProfitPrice > signal.price)) return this.refuse(date, symbol, "the exits are not on the right sides of the price");
+    // A limit entry (the load window) is checked against its own limit price, at or below the price seen: Alpaca checks its exits
+    // against that limit price too.
+    const limitPrice = signal.limitPrice !== undefined && signal.load && isLoadDay(day) && decision.qty === 1 ? signal.limitPrice : undefined;
+    if (signal.limitPrice !== undefined && limitPrice === undefined) return this.refuse(date, symbol, "a limit entry is only sent in the load window, 1 share");
+    const base = limitPrice ?? signal.price;
+    if (limitPrice !== undefined && !(limitPrice > 0 && limitPrice <= signal.price)) return this.refuse(date, symbol, "the limit price is not at or below the price seen");
+    if (!(signal.stopPrice > 0 && signal.stopPrice < base && signal.takeProfitPrice > base && signal.stopPrice < signal.price && signal.takeProfitPrice > signal.price)) return this.refuse(date, symbol, "the exits are not on the right sides of the price");
 
     // The governor: a slot under the per-minute cap (never above the fixed ceiling) and headroom under Alpaca's limit.
     const slot = this.d.governor.admitTrade(Math.min(limits!.maxTradesPerMinute, MAX_TRADES_PER_MINUTE));
@@ -280,7 +310,7 @@ export class OrderGate {
 
     let sent;
     try {
-      sent = await this.d.broker.submitEntry({ symbol, qty: decision.qty, stopPrice: signal.stopPrice, takeProfitPrice: signal.takeProfitPrice, referencePrice: signal.price, clientOrderId });
+      sent = await this.d.broker.submitEntry({ symbol, qty: decision.qty, stopPrice: signal.stopPrice, takeProfitPrice: signal.takeProfitPrice, referencePrice: signal.price, clientOrderId, ...(limitPrice !== undefined ? { limitPrice } : {}) });
     } catch (err) {
       const reason = (err as Error).message.slice(0, 200);
       // Only a definite "no" from Alpaca (a local refusal, or a 4xx other than 429) means nothing was sent.
@@ -308,10 +338,17 @@ export class OrderGate {
         this.fire("alerts", `The entry for ${symbol} was sent to Alpaca but its record could not be updated. It is still counted, and will be reconciled from Alpaca by its id.`);
       }),
     );
+    if (limitPrice !== undefined) {
+      try {
+        this.d.onLimitEntrySent?.({ clientOrderId, alpacaOrderId: sent.id, symbol, qty: decision.qty });
+      } catch {
+        /* the cancel timer must never break the gate; the order sync and the close-out still see the entry */
+      }
+    }
     const exposure = ctx.grossExposure + decision.notional;
     if (!this.peak || this.peak.date !== date || exposure > this.peak.exposureUsd) this.peak = { date, exposureUsd: exposure, equity: account.equity };
     this.d.log?.("entry_sent", { symbol, qty: decision.qty, stop: signal.stopPrice, target: signal.takeProfitPrice, acceptMs });
-    this.d.note(`${centralTime(now)} BUY ${decision.qty} ${symbol} at about ${signal.price.toFixed(2)}, target ${signal.takeProfitPrice.toFixed(2)}, stop ${signal.stopPrice.toFixed(2)} (both held at Alpaca), accepted in ${acceptMs} ms`);
+    this.d.note(`${centralTime(now)} BUY ${decision.qty} ${symbol} ${limitPrice !== undefined ? `limit ${limitPrice.toFixed(2)}` : `at about ${signal.price.toFixed(2)}`}, target ${signal.takeProfitPrice.toFixed(2)}, stop ${signal.stopPrice.toFixed(2)} (both held at Alpaca), accepted in ${acceptMs} ms`);
     return { status: "sent", clientOrderId, qty: decision.qty, acceptMs };
   }
 }

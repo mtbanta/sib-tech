@@ -19,12 +19,9 @@ export const STORED_INFO_EVENTS = new Set([
   "order_list_incomplete",
   "entries_swept_while_stopped",
   "order_record_update_failed",
-  // Release B (load days): the live order updates connecting, and the 60 second limit's outcomes.
+  // The live order updates connecting (every day since the speed release).
   "order_stream",
   "order_stream_started",
-  "time_limit",
-  "time_limit_stalled",
-  "time_limit_refused",
 ]);
 
 export function shouldStoreEvent(level: "info" | "warn" | "error", event: string): boolean {

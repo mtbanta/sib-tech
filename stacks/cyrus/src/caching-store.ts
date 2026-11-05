@@ -177,6 +177,48 @@ export class CachingStore implements Store {
       if (o) m.set(clientOrderId, { ...o, ...structuredClone(patch) });
     }
   }
+  // THE SPEED RELEASE, ITEM 1 (Michael's approval of 2026-11-05). Alpaca's live order updates close an entry (its exit filled and
+  // Alpaca says no shares are held, or an entry that never filled was cancelled) in this memory AT ONCE, so the order gate sees the
+  // symbol free without waiting for the database; the database write follows in the background. On 2026-11-05 about 115 entries
+  // waited 2 to 21 seconds behind that write. This is the one exception to "write first, then memory", and it is safe in one
+  // direction only: until the write lands, anything read back from the database (after a restart, or a day not loaded yet) can only
+  // show the entry as still active, which makes the gate REFUSE that symbol, never send beside it. A write that fails is kept and
+  // tried again on the worker's next pass (retrySoonWrites). The returned promise never rejects.
+  private soonPending = new Map<string, Partial<Omit<OrderRecord, "clientOrderId" | "tradeDate">>>();
+  private soonTimes: number[] = [];
+  updateOrderSoon(clientOrderId: string, patch: Partial<Omit<OrderRecord, "clientOrderId" | "tradeDate">>): Promise<void> {
+    for (const m of this.orders.values()) {
+      const o = m.get(clientOrderId);
+      if (o) m.set(clientOrderId, { ...o, ...structuredClone(patch) });
+    }
+    this.soonPending.set(clientOrderId, { ...(this.soonPending.get(clientOrderId) ?? {}), ...structuredClone(patch) });
+    return this.writeSoon(clientOrderId);
+  }
+  private async writeSoon(clientOrderId: string): Promise<void> {
+    const patch = this.soonPending.get(clientOrderId);
+    if (!patch) return;
+    const t0 = this.now();
+    try {
+      await Promise.allSettled([...this.loading.values()]);
+      await this.inner.updateOrder(clientOrderId, patch);
+      if (this.soonPending.get(clientOrderId) === patch) this.soonPending.delete(clientOrderId);
+      this.soonTimes.push(Math.max(0, this.now() - t0));
+      if (this.soonTimes.length > 5_000) this.soonTimes.shift();
+    } catch {
+      /* kept in soonPending: tried again by retrySoonWrites */
+    }
+  }
+  // Tries again every close that could not be written yet (called on every pass of the worker).
+  async retrySoonWrites(): Promise<void> {
+    for (const id of [...this.soonPending.keys()]) await this.writeSoon(id);
+  }
+  // How long each background write took (milliseconds) since the last call, for the per-minute statistics.
+  takeSoonWriteTimes(): number[] {
+    const t = this.soonTimes;
+    this.soonTimes = [];
+    return t;
+  }
+
   async getOrder(clientOrderId: string): Promise<OrderRecord | null> {
     for (const m of this.orders.values()) {
       const o = m.get(clientOrderId);

@@ -21,18 +21,36 @@ export interface RiskDeps {
   governor?: { budget(): number; stats?(): { requestsLastMinute: number } };
   // Optional: the worker passes its own, so the order sync remembers between runs (release A, fixes 1 and 4).
   syncMemory?: SyncMemory;
+  // The speed release (Michael's decision 3): told about each sale of shares left without a stop, so the worker can measure it
+  // against waiting 5 more seconds.
+  onBareSale?: (sale: { symbol: string; shares: number; takeProfit: number | null; atMs: number }) => void;
+  // The speed release, item 5 (shadow only): told about each account read of the loss stop, so the worker can log its own estimate
+  // of equity beside Alpaca's. It never changes what the loss stop does.
+  onAccountRead?: (account: { equity: number; cash: number }) => void;
 }
 
 // Release A, fix 1. On 2026-11-04 Alpaca paper cancelled a bracket's stop 2 ms after its take-profit's first partial fill (655
 // times that day; Alpaca's documentation says the stop is "adjusted to the remaining quantity" instead). Until the take-profit
 // finishes, the rest of the position has no stop. If it is still like that this long after the stop was cancelled, the rest is
 // sold. 604 of the 655 finished within 10 seconds, 90 took longer than 5.
-export const BARE_GRACE_MS = 5_000;
+// The speed release (Michael's decision 3, 2026-11-05): 3 seconds, counted from Alpaca's cancel. The live update of the stop's cancel
+// brings the next sync forward to that moment (worker.ts); the 10 second sync stays the backstop. On 2026-11-05, of 1,100 such
+// cancels the take-profit finished on its own within 3 seconds in 827.
+export const BARE_GRACE_MS = 3_000;
 // Release A, fix 4: at most this many entries missing from Alpaca's listing are looked up by id in one sync, and an id Alpaca
 // does not know is not asked again for this long.
 export const MISSING_LOOKUPS_PER_SYNC = 10;
 const MISSING_RETRY_MS = 60_000;
 const MISSING_INTENT_AGE_MS = 10_000;
+// The speed release, item 3: while Alpaca's live order updates are connected (they free symbols and report a stop's cancel at once),
+// the 10 second sync is the backstop and reads only the orders of the last 10 minutes (at most 3 pages). An open entry older than
+// that is looked up by its id instead: at most OLD_LOOKUPS_PER_SYNC in one sync, each at most every OLD_LOOKUP_EVERY_MS (as often as
+// the normal-day sync used to read it). While the updates are NOT connected the sync reads everything since the oldest open entry,
+// as before. On 2026-11-05 one entry held from 9:33 made every sync read about 2,600 entries (6 pages) by 2:00 PM.
+export const RECENT_WINDOW_MS = 10 * 60_000;
+export const RECENT_MAX_PAGES = 3;
+export const OLD_LOOKUPS_PER_SYNC = 4;
+export const OLD_LOOKUP_EVERY_MS = 30_000;
 
 export class SyncMemory {
   // When this worker first saw an entry with its stop gone and shares left (used when Alpaca gives no cancel time).
@@ -40,9 +58,11 @@ export class SyncMemory {
   // Client ids Alpaca answered "not found" for, and until when not to ask again.
   readonly notFoundUntil = new Map<string, number>();
   // Release B: the latest copy of each open entry (with its exit legs) as Alpaca showed it to the last sync, and when that sync
-  // finished. The load window's 60 second time limit and the live order updates read these instead of asking Alpaca again.
+  // finished. The live order updates read these instead of asking Alpaca again.
   readonly lastSeen = new Map<string, Order>();
   lastSyncAt = 0;
+  // The speed release, item 3: when each open entry older than the recent window was last looked up by its id.
+  readonly oldLookedAt = new Map<string, number>();
 }
 const fallbackSync = new SyncMemory();
 
@@ -70,6 +90,8 @@ export interface SyncOptions {
   // just un-protected on purpose, and raised five false alarms.)
   // A function is asked again just before each sale, so a close-out that starts while the sync is running switches it off.
   protect: boolean | (() => boolean);
+  // The speed release, item 3: true while Alpaca's live order updates are connected; then only the last 10 minutes are read.
+  streamLive?: boolean;
 }
 
 // Updates stored entries from Alpaca by looking only at orders newer than the oldest entry still being watched
@@ -88,17 +110,36 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   }
   const activeIds = new Set(active.map((o) => o.clientOrderId));
   for (const id of [...mem.lastSeen.keys()]) if (!activeIds.has(id)) mem.lastSeen.delete(id);
+  for (const id of [...mem.oldLookedAt.keys()]) if (!activeIds.has(id)) mem.oldLookedAt.delete(id);
   const midnight = etInstant(day.tradeDate, "00:00").getTime();
-  const oldest = Math.min(...active.map((o) => (o.createdAt ? new Date(o.createdAt).getTime() : midnight)));
-  const since = new Date(Math.max(midnight, oldest - 60_000)).toISOString();
-  const [listed, positions] = await Promise.all([d.broker.listOrdersPaged("all", since), d.broker.listPositions()]);
-  const byClientId = new Map(listed.orders.map((o) => [o.clientOrderId, o]));
-  // Release A, fix 4: on 2026-11-04 Alpaca's listing left out 2 of the day's entries. An entry that should be at Alpaca but is
-  // missing from the listing is fetched by its client id, so it still gets its record update and its missing-exit check.
   const nowMs = d.now().getTime();
+  const createdMs = (o: OrderRecord) => (o.createdAt ? new Date(o.createdAt).getTime() : midnight);
+  const oldest = Math.min(...active.map(createdMs));
+  const fromMs = Math.max(midnight, oldest - 60_000, opts.streamLive ? nowMs - RECENT_WINDOW_MS : midnight);
+  const since = new Date(fromMs).toISOString();
+  const [listed, positions] = await Promise.all([d.broker.listOrdersPaged("all", since, opts.streamLive ? RECENT_MAX_PAGES : 20), d.broker.listPositions()]);
+  const byClientId = new Map(listed.orders.map((o) => [o.clientOrderId, o]));
+  // Item 3: open entries made before the window read above are looked up by id, a few per sync, oldest look first.
+  if (opts.streamLive) {
+    const old = active.filter((s) => createdMs(s) < fromMs && !byClientId.has(s.clientOrderId) && nowMs - (mem.oldLookedAt.get(s.clientOrderId) ?? 0) >= OLD_LOOKUP_EVERY_MS);
+    old.sort((a, b) => (mem.oldLookedAt.get(a.clientOrderId) ?? 0) - (mem.oldLookedAt.get(b.clientOrderId) ?? 0) || createdMs(a) - createdMs(b));
+    for (const s of old.slice(0, OLD_LOOKUPS_PER_SYNC)) {
+      mem.oldLookedAt.set(s.clientOrderId, nowMs);
+      try {
+        const found = await d.broker.findOrderByClientId(s.clientOrderId);
+        if (found) byClientId.set(s.clientOrderId, found);
+      } catch (err) {
+        d.log?.("order_lookup_failed", { clientOrderId: s.clientOrderId, error: (err as Error).message.slice(0, 120) });
+      }
+    }
+  }
+  // Release A, fix 4: on 2026-11-04 Alpaca's listing left out 2 of the day's entries. An entry that should be at Alpaca but is
+  // missing from the listing is fetched by its client id, so it still gets its record update and its missing-exit check. (An entry
+  // older than the window read above is not "missing": item 3's lookups above take care of it.)
   let lookups = 0;
   for (const s of active) {
     if (byClientId.has(s.clientOrderId) || lookups >= MISSING_LOOKUPS_PER_SYNC) continue;
+    if (createdMs(s) < fromMs) continue;
     const age = s.createdAt ? nowMs - new Date(s.createdAt).getTime() : Infinity;
     if (!(s.status === "submitted" || s.status === "filled" || (s.status === "intent" && age > MISSING_INTENT_AGE_MS))) continue;
     if ((mem.notFoundUntil.get(s.clientOrderId) ?? 0) > nowMs) continue;
@@ -163,8 +204,9 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     if (!hasLiveExit(o)) {
       unprotected.push(s.symbol);
       d.log?.("unprotected_position", { symbol: s.symbol });
-      const r = await d.liquidator.flatten({ reason: "no live protective stop", tradeDate: day.tradeDate, only: [s.symbol], maxRounds: 3 });
-      if (r.flat && r.sold.length > 0) await d.say("alerts", `**${s.symbol} had no live protective stop, so I sold it.**`);
+      const r = await d.liquidator.flatten({ reason: "no live protective stop", tradeDate: day.tradeDate, only: [s.symbol], maxRounds: 3, yieldToPriority: true });
+      if (r.yielded) d.log?.("unprotected_position_yielded", { symbol: s.symbol });
+      else if (r.flat && r.sold.length > 0) await d.say("alerts", `**${s.symbol} had no live protective stop, so I sold it.**`);
       else if (r.flat) d.log?.("unprotected_position_already_gone", { symbol: s.symbol });
       else await d.say("alerts", `**Michael: ${s.symbol} HAS NO PROTECTIVE STOP AND I COULD NOT SELL IT** (${(r.errors.at(-1) ?? "still held").slice(0, 120)}). Please check Alpaca now.`, { mentionOwner: true });
       continue;
@@ -189,9 +231,20 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     unprotected.push(s.symbol);
     d.log?.("bare_remainder", { symbol: s.symbol, shares: bare.shares, stopCancelledAt: cancelTime });
     const cancelIds = flattenLegs(o).filter((l) => l.side === "sell" && OPEN_STATUSES.has(l.status)).map((l) => l.id);
-    const r = await d.liquidator.flatten({ reason: "stop cancelled after a partial take-profit", tradeDate: day.tradeDate, only: [s.symbol], maxRounds: 3, cancelIds });
+    const r = await d.liquidator.flatten({ reason: "stop cancelled after a partial take-profit", tradeDate: day.tradeDate, only: [s.symbol], maxRounds: 3, cancelIds, yieldToPriority: true });
     const soldQty = r.sold.filter((x) => x.symbol === s.symbol).reduce((n, x) => n + x.qty, 0);
-    if (r.flat && soldQty > 0) await d.say("alerts", `**${s.symbol}: Alpaca cancelled its stop when the take-profit partly filled, so I sold the remaining ${soldQty} shares.**`);
+    if (soldQty > 0) {
+      const tp = flattenLegs(o).find((l) => l.side === "sell" && l.type === "limit");
+      try {
+        const sentAt = r.steps?.sells.find((x) => x.symbol === s.symbol)?.at;
+        const atMs = sentAt ? Date.parse(sentAt) : NaN;
+        d.onBareSale?.({ symbol: s.symbol, shares: soldQty, takeProfit: tp?.limitPrice ?? null, atMs: Number.isFinite(atMs) ? atMs : d.now().getTime() });
+      } catch {
+        /* a measurement must never break the sync */
+      }
+    }
+    if (r.yielded && soldQty === 0) d.log?.("bare_remainder_yielded", { symbol: s.symbol });
+    else if (r.flat && soldQty > 0) await d.say("alerts", `**${s.symbol}: Alpaca cancelled its stop when the take-profit partly filled, so I sold the remaining ${soldQty} shares.**`);
     else if (r.flat) d.log?.("bare_remainder_already_gone", { symbol: s.symbol });
     else if (soldQty > 0 && r.remaining.every((sym) => sym !== s.symbol || r.sold.some((x) => x.symbol === sym))) {
       // The sell went out and Alpaca has not filled it yet (paper has held sells 16 seconds before submitting them): not a failure.
@@ -298,6 +351,11 @@ export async function enforceDailyLoss(d: RiskDeps, day: DayRecord, opts: LossSt
   }
   mem?.budget.spend(d.now().getTime(), 1); // the equity check is never held back; it is counted
   const account = await d.broker.getAccount();
+  try {
+    d.onAccountRead?.(account);
+  } catch {
+    /* shadow logging must never break the loss stop */
+  }
   const start = day.dayStartEquity;
   const limit = day.limits.dailyLossStopUsd;
   let loss = start - account.equity;
@@ -327,7 +385,7 @@ export async function enforceDailyLoss(d: RiskDeps, day: DayRecord, opts: LossSt
   // each time (about 500 requests for 40 positions, more than Alpaca allows in a minute). What is still unsold after this round
   // is retried by retryLossStopSale on the next checks, every 5 seconds, inside the budget.
   const before = d.governor?.stats?.().requestsLastMinute;
-  const r = await d.liquidator.flatten({ reason: "daily loss stop", tradeDate: day.tradeDate, maxRounds: 1 });
+  const r = await d.liquidator.flatten({ reason: "daily loss stop", tradeDate: day.tradeDate, maxRounds: 1, priority: true });
   if (mem && before !== undefined) mem.budget.spend(d.now().getTime(), Math.max(0, (d.governor!.stats!().requestsLastMinute ?? 0) - before));
   // Sells that went out but have not filled yet are not failures; only symbols with no sell sent are.
   const unsold = r.remaining.filter((sym) => !r.sold.some((x) => x.symbol === sym));

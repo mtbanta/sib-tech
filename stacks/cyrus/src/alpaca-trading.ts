@@ -97,6 +97,9 @@ export interface EntryOrder {
   // With a take-profit price the entry is a bracket (two linked exits held at Alpaca, only one can fill);
   // without it, an OTO order with the protective stop only.
   takeProfitPrice?: number;
+  // The speed release (the load window): a limit buy at this price, at or below the reference price, instead of a market buy.
+  // Alpaca then checks the exits against this limit price.
+  limitPrice?: number;
 }
 
 export interface SellOrder {
@@ -390,9 +393,9 @@ export class AlpacaTrading {
     }
   }
 
-  // The only way this client opens a position: a long, whole-share market buy that carries its exits held at
-  // Alpaca. With `takeProfitPrice` it is a bracket (a take-profit limit and a protective stop, only one of which can
-  // fill); without it, an OTO order (the protective stop only).
+  // The only way this client opens a position: a long, whole-share market buy (or, with `limitPrice`, a limit buy at or below the
+  // reference price) that carries its exits held at Alpaca. With `takeProfitPrice` it is a bracket (a take-profit limit and a
+  // protective stop, only one of which can fill); without it, an OTO order (the protective stop only).
   async submitEntry(entry: EntryOrder): Promise<Order> {
     if (!/^[A-Z.]{1,6}$/.test(entry.symbol)) throw new AlpacaError("Bad symbol", 0);
     if (!Number.isInteger(entry.qty) || entry.qty < 1) throw new AlpacaError("Quantity must be a whole number of shares, at least 1", 0);
@@ -402,12 +405,17 @@ export class AlpacaTrading {
     if (entry.takeProfitPrice !== undefined && !(entry.takeProfitPrice > entry.referencePrice)) {
       throw new AlpacaError("Take-profit must be above the reference price", 0);
     }
+    if (entry.limitPrice !== undefined) {
+      if (!(entry.limitPrice > 0) || !Number.isFinite(entry.limitPrice) || entry.limitPrice > entry.referencePrice) throw new AlpacaError("Limit price must be positive and at or below the reference price", 0);
+      if (!(entry.stopPrice < entry.limitPrice) || (entry.takeProfitPrice !== undefined && !(entry.takeProfitPrice > entry.limitPrice))) throw new AlpacaError("The exits must be on either side of the limit price", 0);
+    }
     if (!/^[\w.-]{8,128}$/.test(entry.clientOrderId)) throw new AlpacaError("Bad client order id", 0);
     const body: Json = {
       symbol: entry.symbol,
       qty: String(entry.qty),
       side: "buy",
-      type: "market",
+      type: entry.limitPrice !== undefined ? "limit" : "market",
+      ...(entry.limitPrice !== undefined ? { limit_price: this.cents(entry.limitPrice) } : {}),
       time_in_force: "day",
       order_class: entry.takeProfitPrice !== undefined ? "bracket" : "oto",
       stop_loss: { stop_price: this.cents(entry.stopPrice) },
@@ -433,16 +441,6 @@ export class AlpacaTrading {
       client_order_id: sell.clientOrderId,
     };
     return this.postOrder(body, sell.clientOrderId, true);
-  }
-
-  // Release B, the load window's 60 second time limit: lowers the limit price of a take-profit leg so it sells at once. Only the
-  // price is sent, never a quantity, so it cannot sell more than the leg already holds. Only the sell gate (sells.ts) may call
-  // this. A write: never retried here (one attempt per entry, Michael's guard); the 10 second time limit on every request
-  // bounds a stall.
-  async replaceOrderLimit(orderId: string, limitPrice: number): Promise<Order> {
-    if (!/^[0-9a-f-]{36}$/.test(orderId)) throw new AlpacaError("Bad order id", 0);
-    if (!(limitPrice > 0) || !Number.isFinite(limitPrice)) throw new AlpacaError("Limit price must be positive", 0);
-    return parseOrder((await this.once("PATCH", `/v2/orders/${orderId}`, undefined, { limit_price: limitPrice.toFixed(2) })) as Json);
   }
 
   // Cancels one order. Safe to repeat, so it waits out a 429 and tries again. An order that is already gone (404 or

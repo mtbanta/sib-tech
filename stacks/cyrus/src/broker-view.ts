@@ -23,6 +23,10 @@ export class BrokerView {
   private fastAt = 0;
   private configAt = 0;
   private clockAt = 0;
+  // The speed release, item 8: the share count Alpaca's live order updates gave last for each symbol, and when. A read of the
+  // positions that STARTED before such an update is overlaid with it, so the read (which may be older than the update) cannot bring
+  // back a position an exit just closed, or hide one an entry just opened. Updates older than a minute are forgotten.
+  private fromUpdates = new Map<string, { qty: number; price: number | null; at: number }>();
 
   constructor(broker: BrokerView["broker"], now: () => number = Date.now) {
     this.broker = broker;
@@ -31,10 +35,33 @@ export class BrokerView {
 
   // Account and positions: the two things that change as the stack trades.
   async refreshFast(): Promise<void> {
+    const started = this.now();
     const [account, positions] = await Promise.all([this.broker.getAccount(), this.broker.listPositions()]);
     this.account = account;
     this.positions = positions;
+    for (const [symbol, u] of [...this.fromUpdates]) {
+      if (started - u.at > 60_000) this.fromUpdates.delete(symbol);
+      else if (u.at >= started) this.apply(symbol, u.qty, u.price);
+    }
     this.fastAt = this.now();
+  }
+
+  private apply(symbol: string, qty: number, price: number | null): void {
+    if (!this.positions) return;
+    const rest = this.positions.filter((p) => p.symbol !== symbol);
+    if (!(qty > 1e-9)) {
+      this.positions = rest;
+      return;
+    }
+    const was = this.positions.find((p) => p.symbol === symbol);
+    const perShare = price ?? (was && was.qty > 0 ? was.marketValue / was.qty : 0);
+    this.positions = [...rest, { symbol, qty, qtyAvailable: null, marketValue: qty * perShare, avgEntryPrice: was?.avgEntryPrice ?? perShare, unrealizedPl: was?.unrealizedPl ?? 0 }];
+  }
+
+  // Item 8: a fill's share count from the live order updates (0 drops the symbol). Remembered so the next read cannot undo it.
+  setPositionFromUpdate(symbol: string, qty: number, price: number | null): void {
+    this.fromUpdates.set(symbol, { qty, price, at: this.now() });
+    this.apply(symbol, qty, price);
   }
   async refreshConfig(): Promise<void> {
     this.config = await this.broker.getAccountConfig();
@@ -52,9 +79,15 @@ export class BrokerView {
   }
 
   // Release B: Alpaca's live order updates said this symbol is now 0 shares, so the cached positions drop it at once (the gate's
-  // "already holding" clears without waiting for the next refresh). Only ever removes; the next refresh brings back what Alpaca shows.
+  // "already holding" clears without waiting for the next refresh). A read that started before the update cannot bring it back
+  // (item 8); a read that started after it shows what Alpaca shows.
   dropPosition(symbol: string): void {
-    if (this.positions) this.positions = this.positions.filter((p) => p.symbol !== symbol);
+    this.setPositionFromUpdate(symbol, 0, null);
+  }
+
+  // The positions as last seen (with the live updates applied), or null before the first read. For the shadow loss-stop estimate.
+  cachedPositions(): Position[] | null {
+    return this.positions;
   }
 
   fastAgeMs(): number {

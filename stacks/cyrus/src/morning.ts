@@ -9,7 +9,7 @@ import type { Broker } from "./broker.ts";
 import { LIMIT_NAMES, MAX_TRADES_PER_MINUTE, SUGGESTED_LIMITS, applyOverride, describeLimits, loosened, type LimitName, type Limits } from "./limits.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
 import { NOT_ADVICE } from "./discord.ts";
-import { LOAD_MAX_POSITION_USD, LOAD_NOTE_PHASE, LOAD_PHASE, LOAD_SWITCH_DEADLINE_MIN, isLoadDay, loadLine, loadState } from "./load-mode.ts";
+import { LOAD_MAX_POSITION_USD, LOAD_NOTE_PHASE, LOAD_PHASE, LOAD_SWITCH_DEADLINE_MIN, isLoadDay, loadLine, loadState, loadWindowRules } from "./load-mode.ts";
 import type { Say } from "./sells.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
 
@@ -353,6 +353,6 @@ export async function armDay(steps: MorningSteps, day: DayRecord): Promise<DayRe
   const start = account.lastEquity > 0 ? account.lastEquity : account.equity;
   await steps.store.updateDay(day.tradeDate, { dayStartEquity: start });
   const armed = await setPhase(steps.store, day.tradeDate, "armed", t.toISOString());
-  await steps.say("commands", `Armed for ${dayWord(day.tradeDate)}: borrowing cap ${cap} and long only are set at Alpaca; the day starts at ${start.toFixed(2)} dollars of equity.${isLoadDay(armed) ? ` **This is a load day:** at most ${LOAD_MAX_POSITION_USD} dollars a position all day; in the load window (no entries before it) 1 share a trade, any new print, exits 1 cent up and 2 down, symbols freed by Alpaca's live order updates, a 60 second time limit; then the normal placeholder.` : ""}`);
+  await steps.say("commands", `Armed for ${dayWord(day.tradeDate)}: borrowing cap ${cap} and long only are set at Alpaca; the day starts at ${start.toFixed(2)} dollars of equity.${isLoadDay(armed) ? ` **This is a load day:** at most ${LOAD_MAX_POSITION_USD} dollars a position all day; in the load window (no entries before it) ${loadWindowRules()}; then the normal placeholder.` : ""}`);
   return armed;
 }

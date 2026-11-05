@@ -6,6 +6,7 @@ import { describeLimits } from "./limits.ts";
 import type { DayRecord, OrderRecord, RefusalRecord, StopFlag } from "./store.ts";
 import { flattenLegs } from "./sells.ts";
 import { centralClock } from "./time.ts";
+import { loadWindowRules } from "./load-mode.ts";
 
 export interface SummaryInput {
   day: DayRecord;
@@ -21,33 +22,42 @@ export interface SummaryInput {
   listComplete?: boolean;
   // A load day (load-mode.ts): the window is reported apart from the rest of the day.
   loadWindow?: { start: Date; end: Date } | null;
-  // Release B: the load window's 60 second time limit and Alpaca's live order updates.
+  // A load day: the window's settings and Alpaca's live order updates.
   loadExtras?: {
-    timeLimit: { attempts: number; changed: number; refused: number; stalled: number; filled: number };
     orderStream: { events: number; freed: number; reconnects: number; medianFreeMs: number | null } | null;
+    // The speed release: window entries that were limit buys and were cancelled unfilled after the wait.
+    entryExpiry?: { scheduled: number; cancelled: number; filledFirst: number; failed: number } | null;
   } | null;
+  // The speed release (Michael's decision 3): the shares sold 3 seconds after Alpaca cancelled their stop, against waiting 5 more seconds.
+  stopGap?: StopGapDay | null;
 }
 
-// Release B: of the entries whose take-profit was lowered at the time limit, how many then sold all their shares at a take-profit.
-export function filledAfterChange(attempted: readonly string[], alpacaOrders: Order[]): number {
-  const ids = new Set(attempted);
-  let n = 0;
-  for (const o of alpacaOrders) {
-    if (!ids.has(o.clientOrderId) || !(o.filledQty > 0)) continue;
-    const tpQty = flattenLegs(o).filter((l) => l.side === "sell" && l.type === "limit").reduce((a, l) => a + l.filledQty, 0);
-    if (tpQty >= o.filledQty - 1e-9) n++;
-  }
-  return n;
-}
-
-// Release B: one line describing the window's settings and what the time limit and the live order updates did.
+// A load day: one line with the window's settings and one with what the live order updates did.
 export function loadExtraLines(x: NonNullable<SummaryInput["loadExtras"]>): string[] {
-  const t = x.timeLimit;
   const s = x.orderStream;
+  const e = x.entryExpiry;
   return [
-    `- window settings: 1 share, any new print, exits 1 cent up and 2 down. 60 second limit: ${t.attempts} tried, ${t.changed} changed (${t.filled} then sold at the take-profit), ${t.refused} refused, ${t.stalled} stalled`,
+    `- window settings: ${loadWindowRules()}${e ? `. Unfilled and cancelled: ${e.cancelled} of ${e.scheduled} (${e.filledFirst} filled before the cancel${e.failed ? `, ${e.failed} cancels failed` : ""})` : ""}`,
     s ? `- live order updates: ${s.events} received, ${s.freed} symbols freed${s.medianFreeMs !== null ? `, typically ${s.medianFreeMs} ms after the exit filled` : ""}, ${s.reconnects} reconnects` : "- live order updates: not connected",
   ];
+}
+
+// The speed release (Michael's decision 3): what selling 3 seconds after Alpaca cancelled a stop did, against waiting 5 more seconds.
+export interface StopGapDay {
+  sales: number;
+  shares: number;
+  // Sales whose take-profit price printed within 5 seconds after the sale (so waiting would likely have filled there).
+  wouldHaveFilled: number;
+  // Sales still being measured (the 5 seconds or the fill price not seen yet) when the summary was written.
+  unmeasured: number;
+  // Dollars the sales made against waiting 5 seconds (positive means selling at once did better).
+  dollarsVsWaiting: number;
+}
+
+export function stopGapLine(g: StopGapDay): string {
+  if (g.sales === 0) return "Shares left without a stop (sold 3 seconds after Alpaca cancelled the stop): none today.";
+  const sign = g.dollarsVsWaiting >= 0 ? "+" : "-";
+  return `Shares left without a stop, sold 3 seconds after Alpaca cancelled the stop: ${g.sales} sales, ${g.shares} shares; ${g.wouldHaveFilled} would have filled at their take-profit within the next 5 seconds; selling at once came out ${sign}${Math.abs(g.dollarsVsWaiting).toFixed(2)} dollars against waiting 5 seconds${g.unmeasured ? ` (${g.unmeasured} not measured)` : ""}. Estimate from the free feed's prints.`;
 }
 
 const money = (x: number) => `${x >= 0 ? "+" : "-"}${Math.abs(x).toFixed(2)}`;
@@ -169,9 +179,11 @@ export function partLines(label: string, rows: OrderRecord[], alpacaOrders: Orde
   let stop = 0;
   let other = 0;
   let pnl = 0;
+  let filled = 0;
   for (const r of sent) {
     const o = byId.get(r.clientOrderId);
     if (!o || !(o.filledQty > 0) || o.filledAvgPrice === null) continue;
+    filled++;
     const legs = flattenLegs(o).filter((l) => l.side === "sell" && l.filledQty > 0 && l.filledAvgPrice !== null);
     const exitQty = legs.reduce((n, l) => n + l.filledQty, 0);
     if (exitQty >= o.filledQty - 1e-9) {
@@ -182,7 +194,7 @@ export function partLines(label: string, rows: OrderRecord[], alpacaOrders: Orde
   }
   const speed = speedStats(sent);
   return [
-    `**${label}:** ${sent.length} entries sent, busiest minute ${busiestMinute(sent)}. Closed by take-profit ${tp}, by stop ${stop} (${money(pnl)} on those), closed later or still open ${other}.`,
+    `**${label}:** ${sent.length} entries sent (${filled} filled), busiest minute ${busiestMinute(sent)}. Closed by take-profit ${tp}, by stop ${stop} (${money(pnl)} on those), closed later or still open ${other}.`,
     speed ? `- speed: typical ${speed.median} ms, 95th percentile ${speed.p95} ms, slowest ${speed.slowest} ms` : "- speed: no orders",
   ];
 }
@@ -218,6 +230,7 @@ export function formatSummary(i: SummaryInput): string {
     speed ? `Speed (decision to Alpaca accepting the order, ${speed.n} orders): typical ${speed.median} ms, 95th percentile ${speed.p95} ms, slowest ${speed.slowest} ms` : "Speed: no orders were sent",
     ...feeLines(i.day.tradeDate, fees, i.feesRunning),
     i.peak ? `Borrowing used: peak exposure ${i.peak.exposureUsd.toFixed(0)} dollars, ${i.peak.ratio.toFixed(2)} times equity (approved cap ${i.day.limits.borrowingCap})` : "Borrowing used: no entries, none",
+    i.stopGap ? stopGapLine(i.stopGap) : "",
     i.requests ? `Alpaca requests: about ${i.requests.requestsLastMinute} in the last minute at the close; lowest budget seen ${i.requests.lowestBudget === null ? "unknown" : Math.floor(i.requests.lowestBudget)} of 200; busiest minute ${i.requests.peakTradesPerMinute} orders; held back by the governor ${i.requests.refusedByGovernor} times${i.requests.rateLimitAnswers !== undefined ? `; rate-limit answers from Alpaca ${i.requests.rateLimitAnswers}` : ""}` : "",
     ...(i.loadWindow
       ? [

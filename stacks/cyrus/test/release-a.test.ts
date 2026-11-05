@@ -137,7 +137,7 @@ test("normal behaviour unchanged: an entry with no live exit at all is still sol
   assert.ok(w.said.some((m) => m.text.includes("AAA had no live protective stop, so I sold it")));
 });
 
-test("fix 1, worker level: a bare remainder found by the 30 second sync brings the next sync forward to its grace time", async () => {
+test("fix 1, worker level: a bare remainder found by a sync before its grace is over is sold by a timer at the grace time (3 seconds since the speed release), not at the next sync", async () => {
   const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
   sim.hideFilledParents = true;
   const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim });
@@ -151,14 +151,16 @@ test("fix 1, worker level: a bare remainder found by the 30 second sync brings t
   sim.fillEntry(id, 7.27);
   await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "CIFR", qty: 10, referencePrice: 7.27, stopPrice: 7.21, takeProfitPrice: 7.28, status: "filled", alpacaOrderId: null, filledQty: 10, filledAvgPrice: 7.27, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
   await r.at("15:00:00"); // a regular sync: nothing wrong yet
-  sim.advanceTo(z("15:00:27").getTime());
+  sim.advanceTo(z("15:00:28").getTime());
   sim.partialTakeProfit(id, 3, 7.28);
-  await r.at("15:00:30"); // the regular sync sees it 3 seconds old
+  await r.at("15:00:30"); // the regular sync sees it 2 seconds old: not yet
+  for (let i = 0; i < 5; i++) await settle();
   assert.equal(sim.sellLog.length, 0);
-  await r.at("15:00:35"); // not a regular sync time (that is 15:01:00): the recheck
-  for (let i = 0; i < 5 && sim.sellLog.length === 0; i++) await settle();
+  assert.ok(r.timers().some((t) => t >= z("15:00:31").getTime() && t <= z("15:00:31.5").getTime()), "a timer at the grace time (the cancel plus 3 seconds, plus a quarter second for the clocks)");
+  r.setNow("15:00:32"); // the timer fires; no pass runs (the next 5 second pass would be 15:00:35)
+  for (let i = 0; i < 10 && sim.sellLog.length === 0; i++) await settle();
   assert.deepEqual(sim.sellLog.map((x) => [x.symbol, x.qty]), [["CIFR", 7]]);
-  assert.ok(sim.sellLog[0]!.at < z("15:00:40").getTime(), "sold within about 13 seconds of the stop's cancel, not at the next 30 second sync");
+  assert.ok(sim.sellLog[0]!.at < z("15:00:33").getTime(), "sold within about 4 seconds of the stop's cancel, not at the next sync");
 });
 
 // ---------------- Fix 2: no NOT FLAT while the close-out's own sells are working ----------------

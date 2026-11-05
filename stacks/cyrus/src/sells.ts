@@ -59,9 +59,6 @@ export function openOrderIds(orders: Order[], symbols: ReadonlySet<string>): str
 // `httpStatus` is Alpaca's answer code when Alpaca refused the sell (429 means its request limit was hit).
 export type SellResult = { status: "sent"; order: Order } | { status: "refused"; reason: string } | { status: "error"; reason: string; httpStatus?: number };
 
-// Release B: the answer to a take-profit price change (the load window's 60 second time limit).
-export type LowerResult = { status: "changed" } | { status: "refused"; reason: string } | { status: "error"; reason: string; httpStatus?: number };
-
 export interface SellGateDeps {
   broker: SellBroker;
   say: Say;
@@ -96,39 +93,6 @@ export class SellGate {
     const run = this.chain.then(() => this.run(req));
     this.chain = run.catch(() => undefined);
     return run;
-  }
-
-  // Release B, the load window's 60 second time limit (Michael's approval with a guard, 2026-11-04): lowers a take-profit leg's
-  // limit price so the leg sells at once. It takes its turn with the sells. It never sends a quantity, so Alpaca cannot sell more
-  // than the leg already holds; on top of that it refuses unless the leg's unfilled shares are no more than the shares held right
-  // now (1 request), and it only ever lowers the price. One attempt: the caller remembers it and never asks again for that entry.
-  // A refusal or a stall leaves the leg (and the stop beside it) exactly as they were.
-  lowerTakeProfit(req: { symbol: string; legId: string; legRemaining: number; currentLimit: number | null; limitPrice: number }): Promise<LowerResult> {
-    const run = this.chain.then(() => this.runLower(req));
-    this.chain = run.catch(() => undefined);
-    return run;
-  }
-
-  private async runLower(req: { symbol: string; legId: string; legRemaining: number; currentLimit: number | null; limitPrice: number }): Promise<LowerResult> {
-    if (!(req.limitPrice > 0) || !(req.legRemaining > 0)) return { status: "refused", reason: "nothing to change" };
-    if (req.currentLimit !== null && !(req.limitPrice < req.currentLimit)) return { status: "refused", reason: `the new price ${req.limitPrice} is not lower than the take-profit's ${req.currentLimit}` };
-    let held: number;
-    try {
-      held = (await this.d.broker.listPositions()).find((p) => p.symbol === req.symbol)?.qty ?? 0;
-    } catch (err) {
-      return { status: "error", reason: `could not read the position: ${(err as Error).message.slice(0, 120)}` };
-    }
-    if (req.legRemaining > held + EPS) {
-      this.d.log?.("time_limit_refused", { symbol: req.symbol, legRemaining: req.legRemaining, held });
-      return { status: "refused", reason: `the take-profit still holds ${req.legRemaining} ${req.symbol} but only ${held} are held, so I leave it alone` };
-    }
-    try {
-      await this.d.broker.replaceOrderLimit(req.legId, req.limitPrice);
-      this.view = null; // the open orders changed
-      return { status: "changed" };
-    } catch (err) {
-      return { status: "error", reason: (err as Error).message.slice(0, 200), httpStatus: err instanceof AlpacaError ? err.status : undefined };
-    }
   }
 
   // True when the next sell will first read the broker again (2 requests: open orders, then positions). The loss stop's retry
@@ -210,6 +174,12 @@ export interface LiquidateOptions {
   // Release A, fix 2, set only by the close-out: from round 2 on, if every share still held is covered by a sell this stack
   // sent (client id cyrus-x-), stop and return those symbols as `working` instead of waiting out the remaining rounds.
   returnWhenOnlyOwnSells?: boolean;
+  // The speed release, item 6 (Michael's approval of 2026-11-05): the daily loss stop's sale is marked `priority`. It is never held
+  // behind a remainder sale: a sale marked `yieldToPriority` (the order sync's sales of one position left without a stop) that is
+  // running or waiting while a priority sale is waiting or running stops at its next step and returns `yielded`, and the loss
+  // stop's whole-account sale sells those shares as well. Before, the loss stop could wait about 20 seconds behind such a sale.
+  priority?: boolean;
+  yieldToPriority?: boolean;
 }
 
 // What a sale did and when (release A, fix 5: written to the close-out's run-log event).
@@ -227,6 +197,8 @@ export interface LiquidateResult {
   // Only with returnWhenOnlyOwnSells: the symbols still held whose every share is covered by a working sell of ours.
   working?: string[];
   steps?: LiquidateSteps;
+  // Only with yieldToPriority: the sale stopped early because the daily loss stop's sale goes first.
+  yielded?: boolean;
 }
 
 // Shares that sells this stack sent (client id cyrus-x-) could still sell, for one symbol.
@@ -240,13 +212,22 @@ export interface LiquidatorDeps {
   now: () => Date;
   sleep?: (ms: number) => Promise<void>;
   log?: (event: string, data?: Record<string, unknown>) => void;
+  // The speed release, item 9: waits up to `ms`, ending early (true) when a live order update arrives for one of these symbols, so a
+  // wait for a cancel or a fill ends at the event; the timed look stays as the backstop. Without it (or with the stream down) this is
+  // a plain pause.
+  waitEvent?: (symbols: ReadonlySet<string>, ms: number) => Promise<boolean>;
 }
+
+// At most this many early wake-ups in one wait for cancels, so a burst of updates cannot turn the wait into a run of extra looks.
+const MAX_EARLY_WAKES = 20;
 
 export class Liquidator {
   private readonly d: LiquidatorDeps;
   private readonly sleep: (ms: number) => Promise<void>;
   private chain: Promise<unknown> = Promise.resolve();
   private running = 0;
+  // Priority sales (the daily loss stop) asked for and not finished yet.
+  private priorityPending = 0;
   constructor(deps: LiquidatorDeps) {
     this.d = deps;
     this.sleep = deps.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -266,11 +247,21 @@ export class Liquidator {
 
   // One liquidation at a time: a second request waits for the first and then looks again (usually it finds the
   // account flat and has nothing to do), so two can never sell the same shares.
+  // A priority sale still waits for the sale running ahead of it, but a remainder sale (`yieldToPriority`) gives way at its next step.
   flatten(o: LiquidateOptions): Promise<LiquidateResult> {
     this.running++;
+    if (o.priority) this.priorityPending++;
     const run = this.chain.then(() => this.run(o));
     this.chain = run.catch(() => undefined);
-    return run.finally(() => void this.running--);
+    return run.finally(() => {
+      this.running--;
+      if (o.priority) this.priorityPending--;
+    });
+  }
+
+  // True while a priority sale (the daily loss stop) is waiting or running.
+  priorityWaiting(): boolean {
+    return this.priorityPending > 0;
   }
 
   private async openOrders(): Promise<Order[]> {
@@ -288,6 +279,29 @@ export class Liquidator {
     const stamp = () => this.d.now().toISOString();
     const cancelIds = [...new Set(o.cancelIds ?? [])];
     const heldNow = async (): Promise<Position[]> => (await this.d.broker.listPositions()).filter((p) => !only || only.has(p.symbol));
+    // Item 6: a remainder sale stops at its next step while the daily loss stop's sale waits or runs; that sale sells these shares too.
+    const yieldNow = (): boolean => o.yieldToPriority === true && !o.priority && this.priorityPending > 0;
+    const yielded = (): LiquidateResult => {
+      result.yielded = true;
+      result.flat = false;
+      result.errors.push("stopped: the daily loss stop's sale goes first and sells these shares");
+      this.d.log?.("liquidation_yielded", { reason: o.reason, only: o.only ?? null });
+      return done();
+    };
+    let earlyWakes = 0;
+    // Item 9: a pause that ends early at a live update for these symbols. Returns the time to count as waited: the full pause when it
+    // ran out, the time that really passed when an update ended it (at most MAX_EARLY_WAKES times, then the full pause again).
+    const pauseFor = async (symbols: ReadonlySet<string>, ms: number): Promise<number> => {
+      if (!this.d.waitEvent) {
+        await this.sleep(ms);
+        return ms;
+      }
+      const t = this.d.now().getTime();
+      const woke = await this.d.waitEvent(symbols, ms);
+      if (!woke || earlyWakes >= MAX_EARLY_WAKES) return ms;
+      earlyWakes++;
+      return Math.min(ms, Math.max(0, this.d.now().getTime() - t));
+    };
     const done = (): LiquidateResult => {
       if (steps.cancelsSentAt.length > 0 || steps.sells.length > 0) result.steps = steps;
       if (result.sold.length > 0 || result.errors.length > 0) this.d.log?.("liquidation_result", { reason: o.reason, flat: result.flat, remaining: result.remaining, sold: result.sold.length, errors: result.errors.slice(0, 5), ...(result.working ? { working: result.working } : {}) });
@@ -295,6 +309,7 @@ export class Liquidator {
     };
 
     for (let round = 1; round <= rounds; round++) {
+      if (yieldNow()) return yielded();
       // Nothing is sent while the market is closed: a market sell then queues for the next open (and cancelling the
       // exits first would leave the position bare overnight). If the clock cannot be read, carry on.
       const clock = await this.d.broker.getClock().catch(() => null);
@@ -378,6 +393,7 @@ export class Liquidator {
         result.remaining = result.working;
         return done();
       }
+      if (yieldNow()) return yielded();
 
       // 2. Wait until Alpaca shows nothing holding those shares (no open order, and no shares reported as held by orders):
       //    a cancel is not instant. If the open orders cannot be read, no sell is sent this round.
@@ -388,6 +404,7 @@ export class Liquidator {
       let polls = 0;
       let blindWaitDone = false;
       for (;;) {
+        if (yieldNow()) return yielded();
         let held: Position[] = [];
         try {
           openOrders = await this.openOrders();
@@ -401,16 +418,14 @@ export class Liquidator {
         // takes about 0.2 s, and neither the open list nor qty_available is guaranteed to show the exits.
         if (cancelled && polls === 0 && !blindWaitDone) {
           blindWaitDone = true;
-          await this.sleep(500);
-          waited += 500;
+          waited += await pauseFor(symbols, 500);
           continue;
         }
         const stillHolding = [...symbols].some((sym) => openSellQty(openOrders, sym) > EPS) || held.some((p) => p.qtyAvailable != null && p.qtyAvailable < p.qty - EPS);
         if (!stillHolding || waited >= waitMs) break;
         // Poll gently: a cancel usually finishes in a fraction of a second, and every look costs one of Alpaca's 200 requests a minute.
         const pause = [250, 400, 600, 800][Math.min(polls++, 3)]!;
-        await this.sleep(pause);
-        waited += pause;
+        waited += await pauseFor(symbols, pause);
         if (this.d.now().getTime() - t0 > waitMs * 3) break; // a clock that moves much faster than the loop
       }
 
@@ -424,6 +439,7 @@ export class Liquidator {
           result.errors.push(`round ${round}: could not re-read positions: ${(err as Error).message.slice(0, 100)}`);
         }
         for (const p of freshPositions) {
+          if (yieldNow()) return yielded();
           const free = Math.min(p.qty - openSellQty(openOrders, p.symbol), p.qtyAvailable ?? Infinity);
           if (!(free > EPS)) continue; // something is still holding the shares; the next round cancels again
           const id = `cyrus-x-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-${round}`;
@@ -433,8 +449,8 @@ export class Liquidator {
         }
       }
 
-      // 4. Look again after the sells have had a moment to fill.
-      await this.sleep(1_000);
+      // 4. Look again after the sells have had a moment to fill (sooner if a fill or cancel for these symbols arrives).
+      await pauseFor(symbols, 1_000);
     }
 
     try {

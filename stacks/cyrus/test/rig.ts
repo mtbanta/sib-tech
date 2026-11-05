@@ -20,7 +20,18 @@ export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryS
   // With `simClock` the worker's clock is the simulated broker's own (it moves during the broker's simulated pauses too).
   const sim = opts.simClock;
   const getNow = () => (sim ? new Date(sim.simMs) : fixed);
-  const setNow = (d: Date) => { if (sim) sim.advanceTo(d.getTime()); else fixed = d; };
+  // Timers (the entry wait, the sync brought forward by a stop's cancel) run on the rig's clock: each fires when the clock passes it.
+  const timers: Array<{ due: number; fn: () => void }> = [];
+  const runTimers = () => {
+    for (;;) {
+      timers.sort((a, b) => a.due - b.due);
+      const t = timers[0];
+      if (!t || t.due > getNow().getTime()) return;
+      timers.shift();
+      t.fn();
+    }
+  };
+  const setNow = (d: Date) => { if (sim) sim.advanceTo(d.getTime()); else fixed = d; runTimers(); };
   const governor = opts.governor ?? new Governor(() => getNow().getTime());
   const pings: string[] = [];
   let onTrade: (t: Trade) => void = () => undefined;
@@ -42,6 +53,8 @@ export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryS
       return { start: () => void streamStarts++, stop: () => void streamStops++, status: () => "live" };
     },
     sleep: opts.sleep ?? (async () => undefined),
+    setTimer: (fn: () => void, ms: number) => { const h = { due: getNow().getTime() + ms, fn }; timers.push(h); return h; },
+    clearTimer: (h: unknown) => { const i = timers.indexOf(h as { due: number; fn: () => void }); if (i >= 0) timers.splice(i, 1); },
     log: opts.log as any,
     ...(opts.orderStream ? { makeOrderStream: (cb: (u: TradeUpdate) => void): StreamLike => { onUpdate = cb; return { start: () => void orderStreamStarts++, stop: () => void orderStreamStops++, status: () => "live" }; } } : {}),
   });
@@ -54,6 +67,7 @@ export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryS
     // Feeds a run of trades for one symbol, one per second from a start time: enough for the busy placeholder to signal.
     ramp: async (symbol: string, prices: number[], startT: string) => { for (let i = 0; i < prices.length; i++) { setNow(new Date(z(startT).getTime() + i * 1000)); onTrade({ symbol, price: prices[i]!, size: 100, time: getNow().toISOString() }); await settle(); } },
     counts: () => ({ streamStarts, streamStops, screens, orderStreamStarts, orderStreamStops }),
+    timers: () => timers.map((t) => t.due),
     // Delivers one live order update to the worker (release B), then lets it finish.
     orderUpdate: async (u: TradeUpdate) => { if (!onUpdate) throw new Error("no order stream connected"); onUpdate(u); await settle(); },
     screenOpts,

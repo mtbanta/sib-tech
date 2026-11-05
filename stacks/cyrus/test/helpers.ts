@@ -78,16 +78,6 @@ export class FakeBroker implements FullBroker {
     if (!this.sellsStick) this.positions = this.positions.filter((p) => p.symbol !== s.symbol);
     return o;
   }
-  // Release B: a take-profit leg's price change (the load window's 60 second limit). `replaceError` makes Alpaca refuse it.
-  replaceError: Error | null = null;
-  async replaceOrderLimit(id: string, limitPrice: number) {
-    this.rec("replaceOrderLimit", id, limitPrice);
-    if (this.replaceError) throw this.replaceError;
-    let found: Order | null = null;
-    this.orders = this.orders.map((o) => ({ ...o, legs: o.legs.map((l) => (l.id === id ? (found = { ...l, limitPrice }) : l)) }));
-    if (!found) throw new AlpacaError("order not found", 404);
-    return found;
-  }
   async cancelOrder(id: string) { this.rec("cancelOrder", id); this.orders = this.orders.map((o) => (o.id === id ? { ...o, status: "canceled" } : { ...o, legs: o.legs.map((l) => (l.id === id ? { ...l, status: "canceled" } : l)) })); }
   async cancelAllOrders() {
     this.rec("cancelAllOrders");

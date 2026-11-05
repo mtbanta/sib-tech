@@ -93,6 +93,10 @@ export interface Store {
   // Only the caching store has these (an unsaved stop lives in its memory). See caching-store.ts.
   hasUnsavedStop?(): boolean;
   retryUnsavedStop?(): Promise<boolean>;
+  // The speed release, item 1, also only the caching store: close an entry in memory at once and write it to the database after.
+  updateOrderSoon?(clientOrderId: string, patch: Partial<Omit<OrderRecord, "clientOrderId" | "tradeDate">>): Promise<void>;
+  retrySoonWrites?(): Promise<void>;
+  takeSoonWriteTimes?(): number[];
 }
 
 // Records that a step of the day finished. Reads the day fresh first, and runs one at a time per day, so two steps
