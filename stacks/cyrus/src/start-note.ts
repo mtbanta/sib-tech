@@ -29,12 +29,13 @@ export async function recordStart(store: Store, now: Date, release: string): Pro
   const starts = [...(history?.starts ?? []), now.toISOString()].slice(-10);
   const recentStarts = starts.filter((t) => now.getTime() - new Date(t).getTime() <= HOUR_MS).length;
   let reason: string;
-  if (!history) reason = `Release ${release}. This is the first start on record.`;
-  else if (history.release !== release) reason = `New release ${release} (it was ${history.release}), so this is a deploy.`;
-  else reason = `Release ${release} again: the same code started again (a stop and start, a crash, or Fly moving the machine). If you did not do that, check the Fly logs.`;
+  if (!history) reason = `release ${release}, the first start on record`;
+  else if (history.release !== release) reason = `new release ${release} (was ${history.release}): a deploy`;
+  else reason = `release ${release} again (a restart, a crash or Fly moving the machine; if you did not do that, check the Fly logs)`;
   await store.setControl(CONTROL_START_HISTORY, { release, starts } satisfies StartHistory).catch(() => undefined);
+  // One line (the speed release, decision 6: routine confirmations on one line, no footer). A run of starts raises an alert in main.ts.
   return {
-    text: `Stack C worker started at ${centralClock(now)} (paper trading only). ${reason} Starts in the last hour: ${recentStarts}. Type \`help\` for commands. Research input for a human decision, never an instruction to act.`,
+    text: `Worker started at ${centralClock(now)} (paper): ${reason}. Starts in the last hour: ${recentStarts}.`,
     recentStarts,
     repeated: recentStarts >= 3,
   };

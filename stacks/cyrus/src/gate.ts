@@ -36,7 +36,7 @@ export interface GateDeps {
   now: () => Date;
   say: (channel: "commands" | "trading" | "alerts", text: string) => Promise<boolean>;
   // Adds a line to the trade digest. Instant; never waits.
-  note: (line: string) => void;
+  note: (line: string, kind?: "entry" | "refused") => void;
   log?: (event: string, data?: Record<string, unknown>) => void;
   // A signal that waited longer than this in the queue is dropped (default 5 seconds).
   maxQueueMs?: number;
@@ -321,7 +321,7 @@ export class OrderGate {
       const definite = err instanceof AlpacaError && !duplicate && (err.status === 0 || (err.status >= 400 && err.status < 500 && err.status !== 429));
       if (definite) {
         await this.d.store.updateOrder(clientOrderId, { status: "failed", note: reason }).catch(() => undefined);
-        this.d.note(`${centralTime(now)} ${symbol}: Alpaca refused the entry and it was not retried: ${reason.slice(0, 100)}`);
+        this.d.note(`${centralTime(now)} ${symbol}: Alpaca refused the entry and it was not retried: ${reason.slice(0, 100)}`, "refused");
         return { status: "error", reason };
       }
       await this.d.store.updateOrder(clientOrderId, { note: `outcome unclear: ${reason}` }).catch(() => undefined);
@@ -348,7 +348,7 @@ export class OrderGate {
     const exposure = ctx.grossExposure + decision.notional;
     if (!this.peak || this.peak.date !== date || exposure > this.peak.exposureUsd) this.peak = { date, exposureUsd: exposure, equity: account.equity };
     this.d.log?.("entry_sent", { symbol, qty: decision.qty, stop: signal.stopPrice, target: signal.takeProfitPrice, acceptMs });
-    this.d.note(`${centralTime(now)} BUY ${decision.qty} ${symbol} ${limitPrice !== undefined ? `limit ${limitPrice.toFixed(2)}` : `at about ${signal.price.toFixed(2)}`}, target ${signal.takeProfitPrice.toFixed(2)}, stop ${signal.stopPrice.toFixed(2)} (both held at Alpaca), accepted in ${acceptMs} ms`);
+    this.d.note(`${centralTime(now)} BUY ${decision.qty} ${symbol} ${limitPrice !== undefined ? `limit ${limitPrice.toFixed(2)}` : `at about ${signal.price.toFixed(2)}`}, target ${signal.takeProfitPrice.toFixed(2)}, stop ${signal.stopPrice.toFixed(2)} (both held at Alpaca), accepted in ${acceptMs} ms`, "entry");
     return { status: "sent", clientOrderId, qty: decision.qty, acceptMs };
   }
 }

@@ -144,7 +144,7 @@ test("approve, with an overrule, before the open: approved only when all four ar
   await s.proc.poll();
   day = (await s.store.getDay(D))!;
   assert.equal(day.status, "approved");
-  assert.ok(s.bot.last().includes("All four limits decided"));
+  assert.ok(s.bot.last().startsWith("approve cap: accepted.") && s.bot.last().includes("All four decided: trading is allowed within these"), s.bot.last());
   assert.equal(s.broker.count("setAccountConfig"), 0, "approving never touches Alpaca; the cap is set when the day is armed");
 });
 
@@ -237,7 +237,8 @@ test("status reports the stop flag, limits and positions, and never a secret", a
   s.bot.say("status", s.now);
   await s.proc.poll();
   const t = s.bot.last();
-  for (const w of ["Stop flag: off", "pending", "Equity", "Paper trading only."]) assert.ok(t.includes(w), w);
+  for (const w of ["Stop flag: off", "pending", "Equity"]) assert.ok(t.includes(w), w);
+  assert.ok(!t.includes("Paper trading only."), "a command reply carries no footer (the footer rule)");
   assert.ok(!t.includes("never an instruction to act"), "a status report is not research input");
 });
 

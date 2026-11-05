@@ -12,7 +12,7 @@
 import type { FullBroker } from "./broker.ts";
 import { BrokerView } from "./broker-view.ts";
 import { CommandProcessor, type CommandBot } from "./commands.ts";
-import { TradeDigest } from "./digest.ts";
+import { DIGEST_PERIOD_MS, TradeDigest } from "./digest.ts";
 import { addToRunning, CONTROL_FEES, estimateFees, type FeesRunning } from "./fees.ts";
 import type { Governor } from "./governor.ts";
 import { Liquidator, SellGate } from "./sells.ts";
@@ -31,7 +31,7 @@ import type { Trade } from "./stream.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
 import { computeDay, formatSummary, type StopGapDay } from "./summary.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
-import { NOT_ADVICE } from "./discord.ts";
+import { PAPER_ONLY } from "./discord.ts";
 import type { PingKind } from "./heartbeat.ts";
 
 export type Channel = "commands" | "trading" | "alerts";
@@ -79,7 +79,16 @@ export const VIEW_EVERY_NO_STREAM_MS = 5_000;
 // The speed release, item 10: the request and stream statistics are written every minute of the session (they were every 5 minutes,
 // and every minute only around a load window).
 export const STATS_EVERY_MS = 60_000;
-const DIGEST_EVERY_MS = 20_000;
+// Successful remainder sales (shares left without a stop, sold by the order sync) are gathered into one alert a minute (the speed
+// release, decision 6): on 2026-11-05 they were 101 separate alerts, and at the 3 second grace about 270 a day are expected.
+// Failures ("could not sell", "not filled yet") are still posted one by one, at once.
+export const REMAINDER_ALERT_EVERY_MS = 60_000;
+
+// The batched alert: one line listing each symbol and the shares sold.
+export function remainderAlert(sales: Array<{ symbol: string; shares: number }>): string {
+  const n = sales.length;
+  return `**Sold ${n} remainder${n === 1 ? "" : "s"} left without a stop** (Alpaca cancelled the stop when the take-profit partly filled): ${sales.map((s) => `${s.symbol} ${s.shares}`).join(", ")}.`;
+}
 const FLUSH_EVERY_MS = 60_000;
 // Before the close the close-out is retried this often until the account is flat; after the close, every 5 minutes.
 const CLOSEOUT_RETRY_MS = 20_000;
@@ -133,6 +142,8 @@ export class Worker {
   private migrated = false;
   private lastViewSlow = 0;
   private lastDigest = 0;
+  private remainderSales: Array<{ symbol: string; shares: number }> = [];
+  private lastRemainderAlert = 0;
   private lastFlush = 0;
   private lastStatsEvent = 0;
   private lastViewError = 0;
@@ -211,7 +222,7 @@ export class Worker {
       governor: deps.governor,
       now: deps.now,
       say: (c, t) => this.say(c, t),
-      note: (line) => this.digest.add(line),
+      note: (line, kind) => this.digest.add(line, kind),
       log: (e, data) => deps.log?.("info", e, data),
       entryBlock: () => this.entryBlockReason(),
       onLimitEntrySent: (e) => this.entryExpiry.schedule(e, LOAD_ENTRY_WAIT_MS),
@@ -253,12 +264,20 @@ export class Worker {
     return this.d.bot.post(channel, text, opts);
   }
 
-  // Posts the trade digest (one message per batch) and the gate's counted refusals. Never called from the order path.
+  // Posts the trade digest (one line per 5 minute period, digest.ts), the batched remainder-sale alert (one a minute) and the
+  // gate's counted refusals. Never called from the order path.
   private async flushDigest(force = false): Promise<void> {
     const t = this.d.now().getTime();
-    if (force || t - this.lastDigest >= DIGEST_EVERY_MS) {
+    if (force || t - this.lastDigest >= DIGEST_PERIOD_MS) {
+      const from = this.lastDigest > 0 ? centralClock(new Date(this.lastDigest)) : null;
       this.lastDigest = t;
-      for (const m of this.digest.take()) await this.say("trading", m);
+      for (const m of this.digest.take(from ? `${from} to ${centralClock(new Date(t))}` : `To ${centralClock(new Date(t))}`)) await this.say("trading", m);
+    }
+    if (this.remainderSales.length > 0 && (force || t - this.lastRemainderAlert >= REMAINDER_ALERT_EVERY_MS)) {
+      this.lastRemainderAlert = t;
+      const sales = this.remainderSales;
+      this.remainderSales = [];
+      await this.say("alerts", remainderAlert(sales));
     }
     if (force || t - this.lastFlush >= FLUSH_EVERY_MS) {
       this.lastFlush = t;
@@ -284,6 +303,7 @@ export class Worker {
       governor: this.d.governor,
       log: (e: string, data?: Record<string, unknown>) => this.d.log?.("info", e, data),
       onBareSale: (sale: { symbol: string; shares: number; takeProfit: number | null; atMs: number }) => this.stopGap.onSale(sale),
+      onRemainderSold: (symbol: string, shares: number) => void this.remainderSales.push({ symbol, shares }),
       onAccountRead: (account: { equity: number; cash: number }) => this.shadowEstimate(account),
     };
   }
@@ -923,11 +943,12 @@ export class Worker {
     return cur;
   }
 
-  // Once per day record: if its request was posted before load mode existed (by an older release), show the day's mode now.
+  // Once per day record: a request posted before load mode existed (by an older release) did not show the day's mode. Since the
+  // speed release (decision 6, "one limits post") no separate note is posted for it: the mode is line 5 of every limits list (the
+  // morning review, every limits reply, `limits`), so the day is only marked as shown.
   private async loadNoteIfNeeded(steps: MorningSteps, day: DayRecord, now: Date): Promise<DayRecord> {
     if (!day.isTradingDay || !day.phases.request || day.phases.request === "skipped" || day.phases[LOAD_NOTE_PHASE] || day.status === "lapsed" || !day.openAt || now >= day.openAt) return day;
-    if (!(await steps.say("commands", `**Mode for ${dayWord(day.tradeDate)}** (new: load mode, added after that day's request was posted):\n${loadLine(day)}\n${NOT_ADVICE}`))) return day;
-    return setPhase(this.d.store, day.tradeDate, LOAD_NOTE_PHASE, now.toISOString());
+    return setPhase(steps.store, day.tradeDate, LOAD_NOTE_PHASE, `folded into the limits lists ${now.toISOString()}`);
   }
 
   private async screenPhase(date: string, load = false): Promise<void> {
@@ -935,7 +956,7 @@ export class Worker {
     await this.d.store.updateDay(date, { liveList: list });
     await this.d.store.setControl(`live_names:${date}`, names).catch(() => undefined);
     await setPhase(this.d.store, date, "screen", this.d.now().toISOString());
-    await this.say("trading", `Today's live list (${list.length})${load ? ", a load day: cheap, heavily traded names" : ""}:\n${list.length ? formatLiveList(list, names) : "(empty, nothing passed the screen)"}\n${NOT_ADVICE}`);
+    await this.say("trading", `Today's live list (${list.length})${load ? ", a load day: cheap, heavily traded names" : ""}:\n${list.length ? formatLiveList(list, names) : "(empty, nothing passed the screen)"}\n${PAPER_ONLY}`);
   }
 
   // Keeps the cached broker view fresh while the session runs: account and positions every 10 seconds while the live order updates
@@ -1013,6 +1034,14 @@ export class Worker {
     if (o.side === "sell" && o.clientOrderId.startsWith("cyrus-x-") && u.event === "fill") {
       const px = o.filledAvgPrice ?? u.price ?? null;
       if (px !== null && px > 0) this.stopGap.onOwnSellFill(o.symbol, px, u.atMs ?? nowMs);
+    }
+    // The trade digest's counts (messaging only): entries filled, never-filled entries cancelled, and exits by take-profit or stop.
+    const entryOfOurs = o.side === "buy" && o.clientOrderId.startsWith("cyrus-") && !o.clientOrderId.startsWith("cyrus-x-");
+    if (entryOfOurs && u.event === "fill") this.digest.count("filled");
+    else if (entryOfOurs && (u.event === "canceled" || u.event === "expired") && !(o.filledQty > 0)) this.digest.count("cancelled");
+    else if (o.side === "sell" && u.event === "fill" && o.groupId) {
+      if (o.type === "stop" || o.stopPrice !== null) this.digest.count("stop");
+      else if (o.type === "limit") this.digest.count("take_profit");
     }
     if (u.raw && nowMs - this.lastRawSampleAt >= 60_000) {
       this.lastRawSampleAt = nowMs;

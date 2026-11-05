@@ -3,7 +3,7 @@
 // Checked at start: the command channel really belongs to the configured server.
 import type { Settings } from "./config.ts";
 import type { Redactor } from "./redact.ts";
-import { NOT_ADVICE, splitMessage } from "./discord.ts";
+import { NOT_ADVICE, messagesFor, type ChannelName } from "./discord.ts";
 
 const API = "https://discord.com/api/v10";
 const MAX_CONTENT = 2000;
@@ -17,7 +17,7 @@ export interface DiscordMessage {
   at: Date;
 }
 
-export type ChannelName = "alerts" | "trading" | "commands";
+export type { ChannelName };
 
 export class DiscordBot {
   private readonly settings: Settings;
@@ -73,20 +73,32 @@ export class DiscordBot {
     return id;
   }
 
-  // Posts plain text, redacted, with "Paper trading only." on it; a text over Discord's limit is sent as consecutive messages. Mentions are switched off,
-  // except that a message can ask to mention the owner (and only the owner), for the alerts that need a person now.
+  // A long post whose later part failed: the parts already sent, so that the caller's retry of the same text sends only the rest
+  // (the speed release: before, a retry posted the first parts again). Forgotten after 10 minutes, or once the post completes.
+  private partlySent = new Map<string, { sent: number; at: number }>();
+
+  // Posts plain text, redacted, with the footer rule applied (discord.ts footerFor); a text over Discord's limit is sent as
+  // consecutive messages. Mentions are switched off, except that a message can ask to mention the owner (and only the owner), for
+  // the alerts that need a person now.
   async post(channel: ChannelName, text: string, opts: { mentionOwner?: boolean } = {}): Promise<boolean> {
     const owner = this.settings.discord.ownerUserId;
     const body = opts.mentionOwner ? `<@${owner}> ${text}` : text;
-    // A text over Discord's limit goes out as consecutive messages (splitMessage), in order; the owner is mentioned in the first.
-    const parts = splitMessage(this.redact(body));
+    // A text over Discord's limit goes out as consecutive messages, in order; the owner is mentioned in the first.
+    const parts = messagesFor(channel, this.redact(body));
+    const key = `${channel}\n${body}`;
+    const now = Date.now();
+    for (const [k, v] of [...this.partlySent]) if (now - v.at > 10 * 60_000) this.partlySent.delete(k);
+    const from = parts.length > 1 ? (this.partlySent.get(key)?.sent ?? 0) : 0;
+    let i = from;
     try {
-      for (let i = 0; i < parts.length; i++) {
+      for (; i < parts.length; i++) {
         const mention = opts.mentionOwner && i === 0;
         await this.call("POST", `/channels/${this.idFor(channel)}/messages`, { content: parts[i], allowed_mentions: mention ? { parse: [], users: [owner] } : { parse: [] } });
       }
+      this.partlySent.delete(key);
       return true;
     } catch {
+      if (i > 0 && parts.length > 1) this.partlySent.set(key, { sent: i, at: now });
       return false;
     }
   }

@@ -423,9 +423,9 @@ test("the start message says whether it is a new release or the same one again, 
   const first = await recordStart(store, t0, "abc12345");
   assert.ok(first.text.includes("first start on record") && first.text.includes("4:32 PM CT") && !first.repeated);
   const deploy = await recordStart(store, new Date(t0.getTime() + 5 * 60_000), "def67890");
-  assert.ok(deploy.text.includes("New release def67890") && deploy.text.includes("it was abc12345") && deploy.text.includes("deploy"));
+  assert.ok(deploy.text.includes("new release def67890") && deploy.text.includes("was abc12345") && deploy.text.includes("deploy"));
   const same = await recordStart(store, new Date(t0.getTime() + 10 * 60_000), "def67890");
-  assert.ok(same.text.includes("same code started again") && same.text.includes("Starts in the last hour: 3"));
+  assert.ok(same.text.includes("release def67890 again") && !same.text.includes("\n") && same.text.includes("Starts in the last hour: 3"));
   assert.equal(same.repeated, true, "three starts in an hour");
   const later = await recordStart(store, new Date(t0.getTime() + 5 * 3600_000), "def67890");
   assert.equal(later.repeated, false);

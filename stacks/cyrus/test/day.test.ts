@@ -25,7 +25,7 @@ test("a full day: request, approval, screen, live list, entry with a stop, a ref
   await r.at("12:00:00"); // 7:00 New York: before the review
   assert.equal(r.said("commands").length, before);
   await r.at("13:30:00"); // 8:30 New York, an hour before the open: the review
-  assert.ok(r.said("commands").at(-1)!.includes("Good morning") && r.said("commands").at(-1)!.includes("all four are decided"));
+  assert.ok(r.said("commands").at(-1)!.includes("Good morning") && r.said("commands").at(-1)!.includes("all four limits decided") && !r.said("commands").at(-1)!.includes("\n"), "one line when all four are decided");
   await r.at("13:31:00");
   assert.equal(r.said("commands").filter((t) => t.includes("Good morning")).length, 1, "the review is posted once");
 
@@ -52,9 +52,9 @@ test("a full day: request, approval, screen, live list, entry with a stop, a ref
   assert.equal(sent.length, 1);
   assert.equal((sent[0]!.args[0] as any).qty, 4, "500 dollar limit at 101 dollars is 4 shares");
   assert.ok((sent[0]!.args[0] as any).stopPrice < 101);
-  await r.worker.tick(); // the digest of trade news goes out in a batch
+  await r.worker.tick(); // the digest of trade news goes out in a batch, one line per 5 minutes (speed release)
   await r.at("14:37:00");
-  assert.ok(r.said("trading").some((t) => t.includes("BUY 4 AAA")), "trade news arrives as a digest");
+  assert.ok(!r.said("trading").some((t) => t.includes("1 entry sent")), "not before the 5 minutes are over");
 
   // a fill arrives; the next sync marks it
   const row = (await r.store.listOrders(D))[0]!;
@@ -70,6 +70,8 @@ test("a full day: request, approval, screen, live list, entry with a stop, a ref
   await r.ramp("BBB", [...Array(12).fill(50), 50.6], "14:40:00");
   assert.equal(r.broker.calls.filter((c) => c.fn === "submitEntry").length, 1);
   assert.equal((await r.store.listRefusals(D)).at(-1)!.reason, "stop flag is set");
+  await r.at("14:41:00");
+  assert.ok(r.said("trading").some((t) => /^8:35 AM CT to 8:41 AM CT: 1 entry sent\.$/.test(t)), `trade news arrives as one digest line: ${r.said("trading").slice(-2).join(" | ")}`);
 
   await r.at("20:54:00"); // 3:54 PM New York: not yet
   assert.equal(r.broker.count("submitSell"), 0);
@@ -84,8 +86,8 @@ test("a full day: request, approval, screen, live list, entry with a stop, a ref
   r.broker.account = { ...r.broker.account, equity: 20012 };
   await r.at("21:05:00");
   const summary = r.said("trading").find((t) => t.includes("Daily summary"))!;
-  for (const w of ["AAA", "Trades: 1 entry orders sent", "Refused entries: 1", "stop flag is set", "Borrowing used", "flat", "Speed", "Estimated regulatory fees", "Running total", "Paper trading only."]) assert.ok(summary.includes(w), w);
-  assert.ok(!summary.includes("never an instruction to act"), "a report of what was done is not research input");
+  for (const w of ["AAA", "Trades: 1 entry orders sent", "Refused entries: 1", "stop flag is set", "Borrowing used", "flat", "Speed", "Estimated regulatory fees", "Running total", "broke even"]) assert.ok(summary.includes(w), w);
+  assert.ok(summary.endsWith("Research input for a human decision, never an instruction to act."), "the summary is research input (the footer rule)");
   await r.at("21:10:00");
   assert.equal(r.said("trading").filter((t) => t.includes("Daily summary")).length, 1, "the summary is posted once");
   assert.ok(r.pings.every((p) => p === "ok"));

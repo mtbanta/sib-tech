@@ -37,8 +37,21 @@ const HELP = [
   "`limits` today's limits",
   "`approve` or `approve cap` accept the next trading day's limits; `position 1500`, `loss 150`, `trades 20`, `cap 2` change one (`trades` is orders a minute, 1 to 100). Until the `Armed` message 5 minutes before the open you can change any limit; after it only tighten (lower) a limit, until the evening post.",
   "`load on` / `load off` make the next trading day a load day or a normal day (see line 5 of the limits); `load on` until the morning screen, 45 minutes before the open; after `Armed` only `load off`.",
-  "You can send several commands in one message, one per line; I reply to each line.",
+  "You can send several commands in one message, one per line; I answer each line in one short reply and then show the limits once.",
 ].join("\n");
+
+// The limits list that ends a reply to a limit or load command (once per message), with a closing line on what it means.
+export function limitsListFor(day: DayRecord, mode: "edit" | "tighten"): string {
+  const closing =
+    day.status === "approved"
+      ? mode === "tighten"
+        ? "All four decided. The day is armed, so a limit can only be lowered until the next evening post."
+        : "All four decided: trading is allowed within these. You can change any of them until the Armed message, 5 minutes before the open."
+      : day.status === "pending"
+        ? "Not all decided yet: if any limit is still waiting at the open, I will not trade that day."
+        : "";
+  return [`**${dayWord(day.tradeDate)}** (${day.status}):`, limitLines(day), closing].filter(Boolean).join("\n");
+}
 
 export class CommandProcessor {
   private readonly d: CommandDeps;
@@ -92,41 +105,57 @@ export class CommandProcessor {
     return handled;
   }
 
-  // One message can hold several commands, one per line. Each line gets its own reply (an unknown line is named),
-  // and the replies go out together in one message so Discord's rate limit is not a limit on commands.
+  // The speed release (decision 6, "one consolidated reply per message"): the day whose limits list ends the reply (set by a limit
+  // or load command in the message), and whether that day is armed (only tightening allowed).
+  private listDate: string | null = null;
+  private listMode: "edit" | "tighten" = "edit";
+
+  // One message can hold several commands, one per line. The whole message gets ONE reply: one short line per command (an unknown
+  // line is named), then, if any limit or load command was in it, the limits list once at the end (before, every line repeated the
+  // full five-line list). It goes out as one message, so Discord's rate limit is not a limit on commands. What each command DOES is
+  // unchanged.
   async handle(m: DiscordMessage): Promise<void> {
     const lines = m.content.split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== "");
-    if (lines.length <= 1) {
-      await this.handleLine(m);
-      return;
-    }
-    const shown = lines.slice(0, 20);
+    const multi = lines.length > 1;
+    const shown = multi ? lines.slice(0, 20) : [m.content];
     this.out = [];
+    this.listDate = null;
     try {
       for (const line of shown) {
-        this.prefix = `**${line.slice(0, 40)}**: `;
+        this.prefix = multi ? `**${line.slice(0, 40)}**: ` : "";
         try {
           await this.handleLine({ ...m, content: line });
         } catch (err) {
           this.d.log?.("command_failed", { error: (err as Error).message });
-          this.out.push(`${this.prefix}that command failed. Nothing may have changed, so check \`status\`.`);
+          this.out.push(`${this.prefix}${multi ? "that" : "That"} command failed. Nothing may have changed, so check \`status\`.`);
         }
       }
       if (lines.length > shown.length) this.out.push(`I only read the first ${shown.length} lines; ${lines.length - shown.length} more were ignored.`);
+      if (this.listDate) {
+        const day = await this.d.store.getDay(this.listDate).catch(() => null);
+        if (day) this.out.push(`\n${limitsListFor(day, this.listMode)}`);
+      }
     } finally {
       const replies = this.out;
       this.out = null;
       this.prefix = "";
+      this.listDate = null;
       let chunk = "";
       for (const r of replies) {
-        if (chunk && chunk.length + r.length + 2 > 1800) {
+        if (chunk && chunk.length + r.length + 1 > 1800) {
           await this.d.bot.post("commands", chunk);
           chunk = "";
         }
-        chunk = chunk ? `${chunk}\n\n${r}` : r;
+        chunk = chunk ? `${chunk}\n${r}` : r;
       }
       if (chunk) await this.d.bot.post("commands", chunk);
     }
+  }
+
+  // A limit or load command was in this message: show that day's list once at the end of the reply.
+  private showList(date: string, mode: "edit" | "tighten"): void {
+    this.listDate = date;
+    this.listMode = mode;
   }
 
   private async handleLine(m: DiscordMessage): Promise<void> {
@@ -164,10 +193,14 @@ export class CommandProcessor {
         }
         return;
       }
-      case "resume":
+      case "resume": {
         await this.setStop(false, "owner command (resume)", now);
-        await this.say("Stop cleared. New entries still need today's limits approved before the open.");
+        // Wording only (the 10:31 AM note of 2026-11-03): if today's loss is still past the limit, the daily loss stop puts the stop
+        // back on at its next check, so the reply says so. The resume itself is done above and is not changed by this look.
+        const past = await this.lossStillPast(now);
+        await this.say(past ? `Stop cleared, but today's loss (${past.loss.toFixed(2)} dollars) is still past the ${past.limit} dollar daily limit, so the daily loss stop will put the stop back on within about 5 seconds, and it stays on until the next trading day.` : "Stop cleared. Entries still need the day's limits approved.");
         return;
+      }
       case "flatten": {
         const saved = await this.trySetStop(true, "owner command (flatten)", now);
         // The sale can take a while (it waits for cancels). It runs in the background so the next command, the heartbeat
@@ -226,13 +259,15 @@ export class CommandProcessor {
         // Decided again on the record as it is now, just before writing (the clock may have passed a deadline meanwhile).
         const latest = await this.d.store.getDay(date);
         const decision = latest ? decideLoad(latest, cmd.on, this.d.now(), m.at, mode) : decideLoad(day, cmd.on, now, m.at, mode);
+        this.showList(date, mode);
         if (!decision.ok || !latest) {
           await this.say(decision.reply);
           return;
         }
         await setPhase(this.d.store, date, LOAD_PHASE, decision.value);
         this.d.log?.("load_mode", { date, value: decision.value, mode });
-        await this.say(decision.reply);
+        // One short line (the mode line itself is in the list at the end of the reply).
+        await this.say(decision.reply.split("\n")[0]!);
         return;
       }
       case "approve":
@@ -247,6 +282,7 @@ export class CommandProcessor {
           await this.say(`There is no limits request for ${dayWord(date)} yet, so there is nothing to approve. I post it after the market closes.`);
           return;
         }
+        this.showList(date, mode);
         const account = await this.d.broker.getAccount();
         const decision = decideLimits(day, cmd, account.equity, now, m.at, mode);
         if (!decision.ok) {
@@ -267,11 +303,15 @@ export class CommandProcessor {
         const { armed: _armed, ...phasesWithoutArmed } = latest.phases;
         const rearm = latest.phases.armed !== undefined && decision.patch.limits.borrowingCap !== latest.limits.borrowingCap;
         await this.d.store.updateDay(date, rearm ? { ...decision.patch, phases: { ...phasesWithoutArmed, rearm: this.d.now().toISOString() } } : decision.patch);
-        if (rearm) decision.reply += "\nThe cap changed after arming, so I will set it at Alpaca again in a few seconds.";
+        // One short line per command; the full list (with what is decided and what is waiting) ends the reply once.
+        // In a several-command message each reply is already named by its line, so the line is not repeated.
+        const what = cmd.kind === "set" ? `${cmd.name} ${cmd.value}` : cmd.name === "all" ? "approve" : `approve ${cmd.name}`;
+        let reply = `${this.prefix ? "" : `${what}: `}${cmd.kind === "approve" && cmd.name === "all" ? "all four limits accepted." : cmd.kind === "approve" ? "accepted." : "noted."}`;
+        if (rearm) reply += " The cap changed after arming, so I will set it at Alpaca again in a few seconds.";
         const flag = await this.d.store.getControl<StopFlag>(CONTROL_STOP).catch(() => null);
-        if (flag?.on && decision.patch.status === "approved") decision.reply += `\n**Note: the stop flag is ON (${flag.reason}), so there will be no entries until you type \`resume\`.**`;
+        if (flag?.on && decision.patch.status === "approved") reply += ` **Note: the stop flag is ON (${flag.reason}), so there will be no entries until you type \`resume\`.**`;
         this.d.log?.("limits_decision", { status: decision.patch.status, limits: decision.patch.limits, mode, date });
-        await this.say(decision.reply);
+        await this.say(reply);
         return;
       }
     }
@@ -307,6 +347,24 @@ export class CommandProcessor {
   private async setStop(on: boolean, reason: string, now: Date): Promise<void> {
     const flag: StopFlag = { on, at: now.toISOString(), reason };
     await this.d.store.setControl(CONTROL_STOP, flag);
+  }
+
+  // For the `resume` reply only: today's loss if it is still at or past the approved daily limit on an armed day, else null. Never
+  // throws, and gives up after 3 seconds (then the plain reply is used), so it can neither fail nor hold up the resume.
+  private async lossStillPast(now: Date): Promise<{ loss: number; limit: number } | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const look = (async () => {
+      const day = await this.d.store.getDay(etDate(now));
+      if (!day || day.status !== "approved" || !(day.phases.armed || day.phases.rearm) || day.dayStartEquity === null) return null;
+      const account = await this.d.broker.getAccount();
+      const loss = day.dayStartEquity - account.equity;
+      return loss >= day.limits.dailyLossStopUsd ? { loss, limit: day.limits.dailyLossStopUsd } : null;
+    })().catch(() => null);
+    try {
+      return await Promise.race([look, new Promise<null>((r) => (timer = setTimeout(() => r(null), 3_000)))]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   // Cancels buy orders that have not filled at all. Protective stops of filled entries are left alone.

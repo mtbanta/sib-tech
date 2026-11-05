@@ -7,6 +7,7 @@ import type { DayRecord, OrderRecord, RefusalRecord, StopFlag } from "./store.ts
 import { flattenLegs } from "./sells.ts";
 import { centralClock } from "./time.ts";
 import { loadWindowRules } from "./load-mode.ts";
+import { NOT_ADVICE } from "./discord.ts";
 
 export interface SummaryInput {
   day: DayRecord;
@@ -80,6 +81,8 @@ export interface DayResult {
   realized: number;
   wins: number;
   losses: number;
+  // Closing sells that made exactly nothing (the summary's wording notes of 2026-11-05: 78 such trades were left out of won and lost).
+  breakEven: number;
   buys: number;
   sells: number;
   unmatchedSellShares: number;
@@ -102,6 +105,7 @@ export function computeDay(alpacaOrders: Order[]): DayResult {
   let realized = 0;
   let wins = 0;
   let losses = 0;
+  let evens = 0;
   let unmatched = 0;
   const get = (s: string) => per.get(s) ?? (per.set(s, { symbol: s, bought: 0, sold: 0, net: 0, trades: 0 }), per.get(s)!);
   for (const e of events) {
@@ -128,6 +132,7 @@ export function computeDay(alpacaOrders: Order[]): DayResult {
       realized += pnl;
       if (pnl > 0) wins++;
       else if (pnl < 0) losses++;
+      else if (left < e.qty - 1e-9) evens++;
     }
   }
   const stillHeld = [...lots.entries()].filter(([, q]) => q.reduce((s, l) => s + l.qty, 0) > 1e-9).map(([s]) => s);
@@ -137,6 +142,7 @@ export function computeDay(alpacaOrders: Order[]): DayResult {
     realized,
     wins,
     losses,
+    breakEven: evens,
     buys: events.filter((e) => e.side === "buy").length,
     sells: events.filter((e) => e.side === "sell").length,
     unmatchedSellShares: unmatched,
@@ -207,6 +213,7 @@ export function formatSummary(i: SummaryInput): string {
   }
   const result = computeDay(i.alpacaOrders);
   const sent = i.stored.filter((r) => r.status !== "failed" && !(r.status === "canceled" && !r.alpacaOrderId));
+  const refusedByAlpaca = i.stored.filter((r) => r.status === "failed").length;
   const change = i.day.dayStartEquity === null ? null : i.account.equity - i.day.dayStartEquity;
   const reasons = new Map<string, number>();
   let refusedTotal = 0;
@@ -222,7 +229,7 @@ export function formatSummary(i: SummaryInput): string {
   const lines = [
     head,
     `Limits: ${describeLimits(i.day.limits)}`,
-    `Trades: ${sent.length} entry orders sent (${result.buys} filled), ${result.sells} sells filled. Closed trades: ${result.wins} won, ${result.losses} lost.`,
+    `Trades: ${sent.length} entry orders sent (${result.buys} filled)${refusedByAlpaca > 0 ? `; Alpaca refused ${refusedByAlpaca} more` : ""}, ${result.sells} sells filled. Closed trades: ${result.wins} won, ${result.losses} lost, ${result.breakEven} broke even.`,
     ...shown.map((s) => `- ${s.symbol}: bought ${s.bought}, sold ${s.sold}, ${money(s.net)}`),
     bySize.length > shown.length ? `- ...and ${bySize.length - shown.length} more symbols` : "",
     `Profit or loss: ${money(result.realized)} from closed trades${change === null ? "" : `; account equity ${i.day.dayStartEquity!.toFixed(2)} to ${i.account.equity.toFixed(2)} (${money(change)})`}`,
@@ -244,5 +251,6 @@ export function formatSummary(i: SummaryInput): string {
     i.listComplete === false ? "**Warning: the day's order list was longer than I could read, so the totals above may be incomplete.**" : "",
     `Stop flag: ${i.stop?.on ? `ON (${i.stop.reason})` : "off"}. End of day: ${i.flat === null ? "flat status not checked" : i.flat ? "flat" : "**NOT FLAT**"}.`,
   ];
-  return lines.filter(Boolean).join("\n");
+  // The footer rule (discord.ts): the daily summary is research input for Michael's next decisions.
+  return [...lines.filter(Boolean), NOT_ADVICE].join("\n");
 }

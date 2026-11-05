@@ -5,7 +5,7 @@
 //   2. If load mode was on that morning, the 75 dollar cap stays all day, whenever `load off` comes.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CONTINUED, NOT_ADVICE, PAPER_ONLY, splitMessage } from "../src/discord.ts";
+import { CONTINUED, NOT_ADVICE, PAPER_ONLY, messagesFor, splitMessage } from "../src/discord.ts";
 import { DiscordBot } from "../src/discord-bot.ts";
 import { makeRedactor } from "../src/redact.ts";
 import { CONTROL_STOP, MemoryStore, type StopFlag } from "../src/store.ts";
@@ -18,19 +18,26 @@ const RESTART_REASON = "daily loss stop reached earlier today (equity fell to 19
 const symbols = (n: number) => Array.from({ length: n }, (_, i) => `SY${String.fromCharCode(65 + (i % 26))}${String.fromCharCode(65 + Math.floor(i / 26))}`);
 
 // ---------- 1. long posts ----------
-test("splitMessage: a long text becomes consecutive messages, each within the limit and carrying the paper-only line, nothing lost", () => {
+test("splitMessage: a long text becomes consecutive messages, each within the limit, the earlier ones saying it continues, the last ending as the text did, nothing lost", () => {
   const text = Array.from({ length: 120 }, (_, i) => `line ${i}: ${"x".repeat(30)}`).join("\n") + `\n${WARNING}\n${NOT_ADVICE}`;
   const parts = splitMessage(text);
   assert.ok(parts.length >= 3, `${parts.length} parts`);
-  for (const p of parts) assert.ok(p.length <= 2000 && p.includes(PAPER_ONLY), `${p.length}`);
-  for (const p of parts.slice(0, -1)) assert.ok(p.endsWith(`${CONTINUED}\n${PAPER_ONLY}`));
+  for (const p of parts) assert.ok(p.length <= 2000, `${p.length}`);
+  for (const p of parts.slice(0, -1)) assert.ok(p.endsWith(`\n${CONTINUED}`));
   assert.ok(parts.at(-1)!.endsWith(`${WARNING}\n${NOT_ADVICE}`), "the last part ends as the text did");
-  const rebuilt = parts.map((p, i) => (i < parts.length - 1 ? p.slice(0, -(`\n${CONTINUED}\n${PAPER_ONLY}`.length)) : p)).join("\n");
+  const rebuilt = parts.map((p, i) => (i < parts.length - 1 ? p.slice(0, -(`\n${CONTINUED}`.length)) : p)).join("\n");
   assert.equal(rebuilt, text, "nothing lost");
-  assert.deepEqual(splitMessage("short"), ["short\nPaper trading only."], "a short text is sent as before");
+  assert.deepEqual(splitMessage("short"), ["short"], "a short text is sent exactly as it is (the speed release: no footer added here)");
   const oneLine = splitMessage("y".repeat(4500));
-  assert.ok(oneLine.every((p) => p.length <= 2000) && oneLine.at(-1)!.endsWith(PAPER_ONLY));
-  assert.equal(oneLine.map((p) => p.replace(`\n${CONTINUED}\n${PAPER_ONLY}`, "").replace(`\n${PAPER_ONLY}`, "")).join(""), "y".repeat(4500));
+  assert.ok(oneLine.every((p) => p.length <= 2000));
+  assert.equal(oneLine.map((p) => p.replace(`\n${CONTINUED}`, "")).join(""), "y".repeat(4500));
+});
+
+test("the footer rule (speed release): alerts end with 'Paper trading only.' (added once, at the end); other channels carry only what the text says", () => {
+  assert.deepEqual(messagesFor("alerts", "**Michael: NOT FLAT**"), [`**Michael: NOT FLAT**\n${PAPER_ONLY}`]);
+  assert.deepEqual(messagesFor("alerts", `Already ends with it.\n${PAPER_ONLY}`), [`Already ends with it.\n${PAPER_ONLY}`]);
+  assert.deepEqual(messagesFor("trading", "Close-out done: the account is flat."), ["Close-out done: the account is flat."], "a one-line confirmation has no footer");
+  assert.deepEqual(messagesFor("commands", `Suggested limits\n${NOT_ADVICE}`), [`Suggested limits\n${NOT_ADVICE}`]);
 });
 
 test("the bot sends every part of a long post, in order, mentioning the owner only in the first", async () => {
@@ -142,9 +149,9 @@ test("the alerts webhook also sends a long post as consecutive messages", async 
   assert.ok(sent.at(-1)!.endsWith("alert row 99 " + "w".repeat(40) + `\n${PAPER_ONLY}`));
 });
 
-test("a long text that says 'Paper trading only.' near its start still ends its last part with it", () => {
+test("a long alert that says 'Paper trading only.' near its start still ends its last part with it", () => {
   const text = `${PAPER_ONLY} header\n` + Array.from({ length: 100 }, (_, i) => `entry ${i} ${"v".repeat(40)}`).join("\n");
-  const parts = splitMessage(text);
+  const parts = messagesFor("alerts", text);
   assert.ok(parts.length >= 2);
   assert.ok(parts.at(-1)!.endsWith(`\n${PAPER_ONLY}`), parts.at(-1)!.slice(-80));
 });
