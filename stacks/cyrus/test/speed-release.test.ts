@@ -566,3 +566,35 @@ test("review 1, finding 3: on a normal day a refused symbol still waits a minute
   await r.ramp("DDD", [...Array(12).fill(50), 50.5], "15:01:10");
   assert.equal(entries(r).length, 2, "after a minute: tried again");
 });
+
+test("review 2: a regular sync inside the 3 second grace does not make an older entry wait 30 seconds; the grace-time sync looks it up again and sells", async () => {
+  const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
+  sim.hideFilledParents = true;
+  const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, orderStream: true });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("approve", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:25:00");
+  sim.advanceTo(z("14:40:00").getTime());
+  const id = clientOrderIdFor(D, "CIFR", 1);
+  await sim.submitEntry({ symbol: "CIFR", qty: 10, stopPrice: 7.21, takeProfitPrice: 7.28, referencePrice: 7.27, clientOrderId: id });
+  sim.fillEntry(id, 7.27);
+  await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "CIFR", qty: 10, referencePrice: 7.27, stopPrice: 7.21, takeProfitPrice: 7.28, status: "filled", alpacaOrderId: null, filledQty: 10, filledAvgPrice: 7.27, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+  const o = sim.orders.find((x) => x.clientOrderId === id)!;
+  await r.orderUpdate(upd("fill", { id: o.id, clientOrderId: id, symbol: "CIFR", side: "buy", status: "filled", qty: 10, filledQty: 10, filledAvgPrice: 7.27, groupId: o.groupId }, 10));
+  await r.at("15:00:00");
+  for (let i = 0; i < 5; i++) await settle();
+  sim.advanceTo(z("15:00:09").getTime());
+  sim.partialTakeProfit(id, 3, 7.28);
+  const tp = o.legs.find((l) => l.type === "limit")!;
+  const sl = o.legs.find((l) => l.type === "stop")!;
+  await r.orderUpdate(upd("partial_fill", { ...structuredClone(tp), groupId: o.groupId }, 7, sim.simMs));
+  await r.orderUpdate(upd("canceled", { ...structuredClone(sl), groupId: o.groupId }, null, sim.simMs));
+  await r.at("15:00:10"); // the regular 10 second sync lands inside the grace
+  for (let i = 0; i < 10; i++) await settle();
+  assert.equal(sim.sellLog.length, 0, "nothing sold inside the grace");
+  r.setNow("15:00:12.3");
+  for (let i = 0; i < 20 && sim.sellLog.length === 0; i++) await settle();
+  assert.deepEqual(sim.sellLog.map((x) => [x.symbol, x.qty]), [["CIFR", 7]]);
+  assert.ok(sim.sellLog[0]!.at < z("15:00:13").getTime(), `sold at ${new Date(sim.sellLog[0]!.at).toISOString()}`);
+});

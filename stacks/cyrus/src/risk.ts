@@ -239,6 +239,8 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     if (nowMs - since < BARE_GRACE_MS) {
       const due = since + BARE_GRACE_MS;
       recheckAt = recheckAt === undefined ? due : Math.min(recheckAt, due);
+      // Group 1 review, round 2: the sync at the grace time must look this entry up again, even if it is older than the 10 minute read.
+      mem.mustLook.add(s.clientOrderId);
       continue;
     }
     unprotected.push(s.symbol);
