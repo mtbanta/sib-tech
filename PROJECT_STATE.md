@@ -6,7 +6,14 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**BUILD C2: THURSDAY 2026-11-05, THE SECOND LOAD DAY (V9), REVIEWED. LOAD TEST INCONCLUSIVE (PEAK 86 ACCEPTED ENTRIES, 93 ORDERS, IN ANY 60 SECONDS); CLOSE-OUT CLEAN; A SPEED RELEASE FOR ALL DAYS PROPOSED, NOTHING BUILT.** As of November 5, 2026 (after the close).
+**BUILD C2: THE SPEED RELEASE IS DEPLOYED AS FLY RELEASE V10 (GROUP 1 PASS IN ROUND 3, APPROVED BY MICHAEL; GROUP 2 PASS IN ROUND 1). FRIDAY 2026-11-06 IS A LOAD DAY ONLY IF MICHAEL APPROVES THE LIMITS AND TYPES `load on` BEFORE 7:45 AM.** As of November 5, 2026 (6:15 PM Central).
+- **Money part (all days):** live order updates every day, a close written to memory first; the order sync every 10 seconds (last 10 minutes only while the updates are live, older entries by id); shares left without a stop sold 3 seconds after Alpaca's cancel, with a daily measurement against waiting 5 seconds; the loss stop's sale goes ahead of remainder sales; the gate's account view every 10 seconds; sale waits end at the live update; per-minute statistics. The 60 second time limit is removed. The loss-stop estimate is shadow only (the 5 second account read is kept).
+- **Load days only:** window entries are 1-share limit buys at or below the price seen, take-profit 1 cent, stop 2 cents, cancelled after 5 seconds if unfilled (chosen from a replay of Thursday's prints); a refused symbol waits 3 seconds, doubling to 30 (normal days keep the minute).
+- **Discord, quieter:** a 5 minute trade line instead of a line per entry; remainder sales batched into one alert a minute (failures stay immediate); a one-line morning review when all limits are decided; one consolidated reply per message; one-line confirmations; the footer only where it applies.
+- **Reviews:** group 1 round 1 CHANGES REQUIRED (3 findings, fixed), round 2 STOP AND FLAG MICHAEL (one finding, partly fixed), Michael approved round 3: PASS. Group 2 round 1 PASS. 407 tests.
+- **Deploy:** v10 at 6:11 PM, one clean start, Healthchecks up, Friday's post shows the load switch, the "speed release is live" line posted. Details: `builds/build-c2-log.md`, from "Michael's decisions for the speed release" to "Deploy (2026-11-05, 6:11 PM Central". Paper only.
+
+Earlier entry, superseded by the paragraph above: **BUILD C2: THURSDAY 2026-11-05, THE SECOND LOAD DAY (V9), REVIEWED. LOAD TEST INCONCLUSIVE (PEAK 86 ACCEPTED ENTRIES, 93 ORDERS, IN ANY 60 SECONDS); CLOSE-OUT CLEAN; A SPEED RELEASE FOR ALL DAYS PROPOSED, NOTHING BUILT.** As of November 5, 2026 (after the close).
 - **Load window, 8:45 to 9:00 AM:**
   - 886 entries accepted (1,042 orders sent), 59 a minute on average against Wednesday's 25.5;
   - 0 rate-limit answers, lowest remaining 185, at most 128 requests a minute, 0 held back.
@@ -102,6 +109,7 @@ Earlier entry, superseded by the paragraph above: **NOT STARTED.** Created Octob
 
 ## Completed
 
+- **2026-11-05. The speed release built, reviewed (group 1 PASS in round 3, group 2 PASS) and deployed as Fly release v10.** Record: `builds/build-c2-log.md`, "Michael's decisions for the speed release" to "Deploy (2026-11-05, 6:11 PM Central".
 - **2026-11-05. Thursday's session (second load day, v9) reviewed, read only, from a scheduled run.** Load test inconclusive (peak 86 accepted entries a minute); speed release proposed. Record: `builds/build-c2-log.md`, "Thursday 2026-11-05 session review".
 - **2026-11-04. Release B built, reviewed PASS, deployed as Fly release v9.** Record: `builds/build-c2-log.md`, "Release B" and "Release B review".
 - **2026-11-04. Release A built, reviewed PASS, deployed as Fly release v8.** Record: `builds/build-c2-log.md`, "Release A" and "Release A review".
@@ -221,9 +229,11 @@ The full record of each run lives in `runs/`. This table is the index you read f
 
 ## Next Steps
 
-As of 2026-11-05 (after the close): v9 runs; Thursday reviewed.
+As of 2026-11-05 (6:15 PM Central): v10 (the speed release) runs.
 
-00. **Michael decides on the speed release** (`builds/build-c2-log.md`, "Thursday 2026-11-05 session review", section 5): items 1 to 10, the time limit (remove, recommended, or 1 cent above the stop, untested), the remainder grace (5 seconds, recommended, or 3), the window's take-profit (1 or 2 cents), and whether the next load day waits for it. All money-touching except the logging: no code until he approves. Friday 2026-11-06's limits wait for him; Friday is a normal day unless he types `load on` before 7:45 AM.
+000. **Friday 2026-11-06:** Michael approves the limits and decides `load on` before 7:45 AM (consider `trades 80`: the replay estimates about 193 requests a minute at 100, 163 at 80). After the session, review it, measuring what the C2 log's deploy section lists (limit brackets accepted, fill and cancel times, the entry wait, the 3 second remainder sales and their stop-gap line, the shadow loss-stop difference, database close times, requests a minute, Discord volume). **Michael's questions from the speed release:** (1) does the load-day pass rule count accepted orders or filled entries (the replay: orders reach 100 a minute, filled entries about 54 at best); (2) extend the 3 second refusal backoff to normal days; (3) after a shadow day, let the loss-stop estimate trigger and move the account read to 15 seconds (item 5's second half). Logged non-blocking review notes are in the C2 log's three round sections and the group 2 section.
+
+00. Done 2026-11-05 (the speed release, v10). Earlier text: **Michael decides on the speed release** (`builds/build-c2-log.md`, "Thursday 2026-11-05 session review", section 5): items 1 to 10, the time limit (remove, recommended, or 1 cent above the stop, untested), the remainder grace (5 seconds, recommended, or 3), the window's take-profit (1 or 2 cents), and whether the next load day waits for it. All money-touching except the logging: no code until he approves. Friday 2026-11-06's limits wait for him; Friday is a normal day unless he types `load on` before 7:45 AM.
 
 0. **Done 2026-11-04 (releases A and B deployed, v8 and v9). Thursday: review the second load day against the same pass/fail rule, including the stream's frees, the time limit's outcomes and Fly's CPU in the window. Review notes for Michael's decision (money-touching, no code without approval): release B notes 1 (time limit under `stop`) and 2 (time limit after `load off`); release A note 3 is in the proposals below.** Earlier text: Michael decides on the five proposed fixes in `builds/build-c2-log.md`, "Wednesday 2026-11-04 session review", "Proposed fixes":
    1. sell the shares left without a stop after a partial take-profit;
@@ -233,7 +243,7 @@ As of 2026-11-05 (after the close): v9 runs; Thursday reviewed.
    5. logging and wording.
    Items 1 to 4 are money-touching: nothing is built until he approves. A read-only check of Tuesday's brackets for the missing-stop gap is offered first. Also his call: whether and how to retest 100 entries a minute (the placeholder topped out at about 45). Thursday's limits wait for his approval, items 1 to 3 below still stand, and item 4 (the load day) ran on 2026-11-04.
 
-**Proposals for later (Michael, 2026-11-04 evening). No code now; each is proposed to Michael first under the standing rule:**
+**Proposals for later (Michael, 2026-11-04 evening). The first two were built in the speed release (v10); the third still stands. Each is proposed to Michael first under the standing rule:**
 - **Live order updates on normal days.** Use release B's `trade_updates` listener on normal days too, so release A's fix 1 reacts to a cancelled stop within about a second instead of 5 to 10 seconds plus a sync.
 - **The daily loss stop goes first.** Its sale always goes ahead of a remainder sale (release A's fix 1) in the one-at-a-time sale queue. Release A's review measured a wait of up to about 20 seconds behind one.
 - **No emergency NOT FLAT after 3:00 for sells sent before the close.** The emergency close-out calls the close-out without the close time, so its wait is capped at 60 seconds and can run past 3:00 (release A review, note 3).

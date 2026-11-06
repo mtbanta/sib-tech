@@ -2074,3 +2074,306 @@ Three wording notes, none affecting the numbers:
 5. Whether the next load day waits for this release.
 
 Paper only. Everything here is research input for a human decision, never an instruction to act.
+
+## Michael's decisions for the speed release (2026-11-05, evening)
+
+Build now; no proposal step; choices reported here.
+1. Scope: all 10 items of "Thursday 2026-11-05 session review", section 5, plus the Discord changes in point 6. Events first (live order updates, the price stream); timers only as backstops sized by the request budget; every interval set from Thursday's measurements.
+2. Remove the load-day 60 second time limit.
+3. Stop-gap wait: sell shares left without a stop 3 seconds after Alpaca cancels the stop. Measure and report daily how many of those sold shares would have filled at their take-profit within the next 5 seconds, and the dollars gained or lost versus waiting.
+4. Load-day entries become limit orders at or below the price seen, with the take-profit set from that price. Replay Thursday's prints to choose the take-profit width (1 to 5 cents, at least 1, 2, 3 and 5 tested) and how long an unfilled entry waits before it is cancelled (1 to 5 seconds). Record the replay table. Both become load-day settings.
+5. Cut the 60 second wait after a refused entry to a short backoff justified from the data (seconds, not a minute). The 100 a minute ceiling stays and still counts refused orders.
+6. Discord, quieter: one limits post; one consolidated reply per message (one short line per command, then the full list once); routine confirmations on one line; alerts kept full and loud; the footer only where it applies. Fold in the wording backlog (resume while over the loss limit, no "sold everything" when already flat, Armed text after a load off, the duplicate part of split posts, fewer "Research input" lines). Before and after of the main messages in this log.
+
+Review: two build-reviewer groups (1: all money-touching code; 2: messaging only), up to two rounds each, pre-approved. A messaging finding does not block the money changes. Deploy outside market hours, no later than 7:30 AM Central Friday, as one release, only if group 1 passes; if only group 2 fails, deploy without the messaging changes. Standing rule: no change to money-touching code beyond this list without asking.
+
+## Speed release, money-touching part (built 2026-11-05, evening; commit `e558b82` on branch `speed-release`; group 1 review)
+
+Everything here is paper only, and research input for a human decision, never an instruction to act.
+
+### The replay that chose the load-day settings (decision 4) and the backoff (decision 5)
+
+Read only, on Thursday's own data: the 886 accepted window entries, their fills, and the free feed's 30,892 prints for the 30 symbols from 8:44 to 9:06 AM (pulled from Alpaca's market data, 4 requests). Scripts and the full tables: the session's scratchpad, `replay/replay-report.md` (not in the repo). "Measured" is read from Thursday's data; "estimate" is a replay result; "guess" is an assumption nothing measured.
+
+**Why limit entries remove Thursday's refusals (documentation, not yet measured on paper).** Alpaca's "Orders at Alpaca" page (docs.alpaca.markets/docs/orders-at-alpaca, read 2026-11-05): the base price the exits are checked against "is the limit price of the entry order, for bracket or OTO orders if the entry type is limit", and the current market price for a market entry. An Alpaca staff forum answer (2023-10-25) says the same for the take-profit rule. So a limit entry at L, take-profit L + 1 cent, stop L - 2 cents always passes both checks. Friday's first window orders measure it.
+
+**Calibration (measured).** Paper took a median 1.41 seconds from decision to fill on Thursday (10th percentile 0.67, 90th 2.33). A limit at the print rounded down would have filled at the moment paper filled the market order in 334 of 886 cases (37.7 percent). Paper's prices sit within about a cent of the free feed's prints either way, so the replay runs three fill models (touch, middle, through) and uses the middle one as the central estimate. Run on Thursday's actual design, the replay gave 892 accepted against 886 measured, 59.5 a minute against 59, and -11.46 dollars against -11.14.
+
+**The grid (estimate, middle model, trades limit 100, 0 refusals under limit entries):**
+
+| Take-profit | Wait | Filled a minute | Cancels a minute | Requests a minute, average / busiest | Take-profits / stops | Hold median (s) | Dollars per filled entry |
+| --: | --: | --: | --: | --: | --: | --: | --: |
+| 1 c | 1 s | 11.2 | 88.8 | 234 / 239 | 89 / 78 | 5.6 | -0.0041 |
+| 1 c | 2 s | 31.7 | 68.3 | 213 / 224 | 212 / 262 | 4.8 | -0.0072 |
+| 1 c | 3 s | 39.7 | 60.3 | 205 / 222 | 273 / 321 | 4.6 | -0.0071 |
+| 1 c | 5 s | **52.5** | **47.5** | **193 / 206** | 346 / 440 | 4.4 | -0.0082 |
+| 2 c | 5 s | 53.8 | 45.5 | 189 / 204 | 255 / 551 | 6.1 | -0.0090 |
+| 3 c | 5 s | 51.8 | 44.1 | 185 / 199 | 202 / 574 | 7.1 | -0.0087 |
+| 5 c | 2 s | 33.2 | 64.9 | 208 / 215 | 81 / 416 | 9.9 | -0.0101 |
+| 5 c | 5 s | 45.3 | 35.6 | 161 / 194 | 117 / 561 | 9.1 | -0.0099 |
+
+(All 25 combinations, and the touch and through bands, are in the replay report.) Every combination reaches the 100 orders a minute ceiling in every minute: 30 symbols could each signal about once a second, so the ceiling binds, not refusals.
+
+**Choices:**
+- **Take-profit 1 cent.** At every wait it gives the most filled entries a minute, the shortest holds and the lowest cost per filled entry. Wider take-profits mostly end at the stop (at 5 seconds, take-profits to stops go from 346 / 440 at 1 cent to 117 / 561 at 5 cents).
+- **Wait 5 seconds** before an unfilled entry is cancelled. Paper's own fill delay (median 1.4 seconds) means a 1 or 2 second wait cancels most orders before paper has looked at them. Longer waits buy more fills per order slot and fewer cancel requests.
+- **Backoff after a refusal: 3 seconds, doubling for each further refusal of the same symbol within 60 seconds, capped at 30 seconds** (3, 6, 12, 24, 30). Measured: the free feed changed a symbol's price a median every 1.5 seconds; an order 2 to 5 seconds after a "price above the print" order was no likelier to meet it again (30 percent) than any other (45 percent base rate); the order after a refusal (about 62 seconds later on Thursday) was refused 16 percent of the time, the same as overall. Under 2 seconds is not measured. The cap is a judgement: a symbol that keeps being refused spends at most 5 orders in its first minute and about 2 a minute after. Applied on every day: Michael's decision 5 has no load-day qualifier (the proposal's item 7 had one); normal days had 10 refusals in 3,179 orders on Thursday, and the normal placeholder has its own 15 second cooldown.
+
+**For Michael: requests at `trades 100` (estimate).** Each unfilled entry costs a cancel request (about 48 a minute at 1 cent and 5 seconds). The middle estimate is about 193 requests a minute on average (busiest minute 206); touch 172, through 209. At `trades 80`: 163 (busiest 176), about 42 filled entries a minute. The governor keeps the last 80 of Alpaca's 200 for safety work and holds entries back there, so the stack slows itself rather than hitting Alpaca's limit; that is the zone a load day is meant to probe. The trades limit is Michael's to approve each evening; nothing in code changes for it.
+
+**For Michael: the pass rule.** Orders accepted now reach the 100 ceiling in every minute in the replay, but filled entries do not reach 90 in any minute (best middle estimate about 54 a minute, busiest minute 66). Whether "about 90 entries a minute" means accepted orders or filled entries decides whether a load day can pass.
+
+### What changed, item by item
+
+| Item | Change | Files |
+| :-- | :-- | :-- |
+| 1. Freeing a symbol | Live order updates every day, Armed to the close. A close is written to memory at once and to the database after (`updateOrderSoon`); a failed write is retried every pass. The handler also closes an entry of ours that never filled when Alpaca reports it cancelled or expired, sets the gate's positions from each fill's share count, and reports a stop cancelled at a partial take-profit. | `worker.ts`, `order-stream.ts`, `caching-store.ts`, `store.ts` |
+| 2. Time limit | Removed: the module, the sell gate's price change, the broker call, the settings and the summary line. Nothing in the code can change an order's price now. | `time-limit.ts` (deleted), `sells.ts`, `alpaca-trading.ts`, `broker.ts`, `load-mode.ts`, `summary.ts` |
+| 3. The order sync | Every 10 seconds on every day. With the live updates connected: orders of the last 10 minutes only (at most 3 pages); open entries older than that looked up by id, at most 4 a sync, each at most every 30 seconds (as often as the normal-day sync read it before). With them not connected: everything since the oldest open entry, as in v9. | `risk.ts`, `worker.ts` |
+| 4. The stop gap (decision 3) | Grace 3 seconds from Alpaca's cancel. The live update of the stop's cancel (only when the take-profit has partly filled) starts a timer for cancel + 3 seconds + a quarter second; the sync runs then and sells the rest. The sync's own "come back at the grace time" uses the same timer (before, it waited for the next 5 second pass). The 10 second sync stays the backstop. | `risk.ts`, `order-stream.ts`, `worker.ts` |
+| 4. Its daily measurement | For each such sale: did the take-profit price print within the next 5 seconds (the free feed), and dollars against waiting 5 seconds (take-profit price if it printed, else the last print at +5 seconds), from the sale's fill on the live updates. Saved per day; one line in the summary, labelled an estimate. Watches only. | `stop-gap.ts`, `summary.ts`, `worker.ts` |
+| 5. Loss stop | **Shadow only this release**, as the proposal said ("first a shadow day"). The account is still read every 5 seconds: the proposal's 15 second backstop belongs with the trigger, and going to 15 seconds now would weaken the loss stop. The stack's own estimate (cash plus each position at the last print) is logged beside Alpaca's equity in the per-minute statistics. | `risk.ts`, `worker.ts` |
+| 6. Loss stop first | The loss stop's sale is marked priority. A remainder sale (or a no-exit sale) that is running or waiting stops at its next step and steps aside; the loss stop's whole-account sale sells those shares too. No false "could not sell" alert for a sale that stepped aside. | `sells.ts`, `risk.ts` |
+| 7. Refusal wait (decision 5) | 3 seconds, doubling to 30 (above), from the stored refusals. Refused orders still count against the 100 a minute ceiling. | `gate.ts` |
+| 8. The gate's view | Account and positions every 10 seconds while the live updates are connected, every 5 seconds while not. 10, not the proposal's 15: the gate refreshes a view older than 15 seconds inside the order path, and passes run every 5 seconds, so 15 would cost latency and requests; the gate itself is untouched. A read that started before a live update cannot undo it. The refresh goes by the view's own age, so a read earlier in the pass is not repeated. | `worker.ts`, `broker-view.ts` |
+| 9. Sale waits | The liquidator's wait for cancels and the close-out's wait for its own sells end at a live update for those symbols (at most 20 early wake-ups a wait); the timed looks stay as the backstop. | `sells.ts`, `closeout.ts`, `worker.ts` |
+| 10. Logging | Per-minute statistics all session: requests, stream counters, frees this minute (count, median, slowest), database close times, entry-wait counts, the shadow loss-stop difference, one raw update a minute. | `worker.ts`, `order-stream.ts` |
+| Decision 4 | Load window only: 1-share limit buy at the print rounded down to the cent, take-profit 1 cent above and stop 2 cents below that limit, cancelled 5 seconds after Alpaca accepted it unless its fill has arrived (`entry-expiry.ts`; a cancel that meets a fill is refused by Alpaca and the position keeps both exits). The normal placeholder (normal days, and a load day after 9:00) stays market orders: a multi-share limit entry could partly fill and be cancelled. Both settings are constants in `load-mode.ts` and appear in the Armed message and the summary. | `strategy.ts`, `load-mode.ts`, `gate.ts`, `alpaca-trading.ts`, `entry-expiry.ts` |
+
+**Request math at 100 orders a minute in the window (estimate, updated for what was built):** entries 100; cancels of unfilled entries about 48 (replay); account and positions 12; the loss stop's account read 12 (unchanged, shadow day); settings and clock about 4; the sync about 6 to 18 (1 to 3 pages, plus positions); old-entry lookups about 0 in the window. About 180 to 195 a minute. On a normal day (at most 43 entries a minute on Thursday): about 90.
+
+### Tests
+
+390 pass (377 before; the 7 time-limit tests were removed, 20 added in `test/speed-release.test.ts`, others updated for the new behaviour). Type check clean. Each change was taken out on its own and a test failed every time (23 of 23 caught, after tightening three tests that first let a change through):
+
+| Change taken out | Test that fails |
+| :-- | :-- |
+| live updates on a normal day | a normal day: the live order updates connect |
+| close in memory first | item 1: the caching store |
+| a cancelled unfilled entry frees its symbol | item 1: a cancelled unfilled entry |
+| the 10 minute window | item 3 |
+| 3 second grace; the cancel update's timer; the sync's own timer; only a partial take-profit | release A fix 1 worker level; decision 3 worker; decision 3 handler |
+| the loss stop's sale first | item 6: a remainder sale |
+| 3 second backoff; the 30 second cap | decision 5 (both) |
+| the overlay; the 10 second view | item 8 (both) |
+| waits end at the event | item 9 |
+| limit entries (strategy, client body, gate) | decision 4 (three tests) |
+| the wait skips filled entries; 1-share only | decision 4 worker; entry wait |
+| statistics every minute | request statistics every minute |
+| the shadow hand-off | item 5 |
+| the stop-gap value; the summary line | decision 3 measurement |
+
+**Untested on paper until the next session:** Alpaca accepting a limit bracket with a 1 cent take-profit (documentation says yes); paper's fill delay for limit orders (assumed equal to the market orders'); how long paper takes to cancel an unfilled entry (guess 0.3 seconds, barely matters); whether the cancel updates and the stop-cancel updates arrive in the order the handler expects (if not, the 10 second sync is the backstop); the database close times (now logged).
+
+### Group 1 review, round 1 (2026-11-05, evening): CHANGES REQUIRED. Fixed in `f8b30a7`.
+
+Nothing under paper only, secrets or hard stops. Three blocking findings, each fixed in the cautious direction, with a test from the reviewer's own probe:
+1. **An entry older than the sync's 10 minute read was not looked up by the sync the stop-cancel timer ran**, so its remainder sold about 34.5 seconds after the cancel instead of 3. And with many older entries the 4-a-sync lookup budget could check one only every 50 to 80 seconds (v9: 30 on a normal day, 10 on a load day). **Fix:** an exit leg reported cancelled, expired or rejected on the live updates makes its entry a must-look on the next sync, outside the budget; the budget is now enough to look up every older entry at least every 30 seconds. With the live updates down the sync reads everything, as v9.
+2. **The early wake-up had replaced the liquidator's half-second pause after its cancels** (added in an earlier review because Alpaca's open list may not show a filled entry's exits). In the reviewer's probe a three-position loss stop sale then sold nothing. After 20 early wake-ups the pauses also still counted as full. **Fix:** the half second is a plain pause again; after the cap, plain pauses. Early wake-ups only shorten the later polls.
+3. **The 3 second backoff applied on normal days too**; the proposal's item 7 said normal days unchanged, and decision 5 named no days. **Fix:** load days only; a normal day keeps the minute. Michael can extend it to every day.
+
+Notes taken up: the raw update sample keeps only chosen fields; retried database writes run one at a time. Notes for Michael (not changed): at `trades 100` the governor, not the 100 ceiling, will limit entries in the window (about 60 a minute, estimate), so the 90 a minute pass mark is probably out of reach; the entry wait assumes Alpaca refuses a cancel of a filled bracket entry and leaves its exits alone (untested on paper; the 10 second sync's missing-exit check is the backstop); a restart inside the 5 seconds loses that entry's timer (the limit stays working until it fills or the close-out). The reviewer confirmed the memory-first close is safe in one direction only (an unwritten close can only make the gate refuse).
+
+394 tests pass; 28 of 28 changes caught when taken out.
+
+### Group 1 review, round 2 (2026-11-05, evening, the last round allowed): STOP AND FLAG MICHAEL. Nothing deployed; Fly stays on v9.
+
+Nothing under paper only, secrets or hard stops. Fixes 2 and 3 of round 1 confirmed. **One blocking finding left: round 1's finding 1 was only partly fixed.** When a regular 10 second sync lands inside the 3 second grace (about 1 in 3 such cancels, estimated from the timing), it looked up an entry older than the 10 minute read as a must-look, cleared that mark, and stamped its 30 second lookup time; the grace-time sync then could not see the entry, and the 7 shares sold 36.5 seconds after the cancel (reviewer's probe; control without the regular sync: 3.8 seconds). The reviewer's context for Michael: v9's normal day sells such shares 5 to 35 seconds after the cancel for every entry, so the release is no worse than v9 on this point; it misses decision 3 only for older entries in this timing.
+
+Re-walk found nothing else: the gate (stop flag and commands block before the new checks, read again before sending), the entry wait, the sells (priority and step-aside, no sell beyond shares held), the loss stop (still every 5 seconds; only `priority: true` and the shadow hook), the close-out, the live updates and the cached view. Note: old-entry lookups are not held back by the governor; bounded by the live list (at most about 10 a sync, about 60 a minute, estimate).
+
+**Under Michael's rule ("if group 1 fails after two rounds, deploy nothing; Friday runs normally on v9") nothing is deployed.** The one-line fix (`8ae476e`, risk.ts `syncOrders`: an older entry inside the grace is marked must-look again, so the grace-time sync looks it up) is built and tested (the reviewer's probe as a test, which fails without the line; 395 tests pass) but **not reviewed and not deployed**. It waits for Michael: another review round, or keep v9.
+
+The messaging part (`c43a5e4`, built in a separate worktree) is merged onto the money branch as branch `speed-release-merged` (`be62516`, 407 tests pass) and is in its group 2 review.
+
+### Michael's decision after round 2 (2026-11-05, evening)
+
+Approved a third group 1 round on the one-line fix. If it passes, deploy before 7:30 AM with the messaging (if group 2 passed) and post the "live" line. If round 3 finds anything new and blocking, stop and do not deploy. If round 3's only finding is that the fix is not ready, deploy the release without the fix (that case is no worse than v9), log it, and post the "live" line.
+
+## Speed release, messaging part (group 2; commit `c43a5e4`, merged onto the money branch as `speed-release-merged`, `be62516`)
+
+Built in a separate worktree, so the money review could run at the same time. Messaging only: text, assembly, batching and posting. 407 tests pass on the merged branch (the 395 above plus 12 in `test/messaging.test.ts`, one per behaviour and backlog item).
+
+**Michael's decision 6 supersedes the C2 brief's item 16 ("Keep 'Paper trading only.' on every message") and the project context's "say so in anything it writes" for Discord posts**, by the footer rule below.
+
+### Group 2 review, round 1 (2026-11-05, evening): PASS
+
+Messaging only, confirmed file by file: what stop, flatten, resume, approve, set and load do is unchanged; the gate, the sync's sales, the loss stop's decisions and arming are untouched; alerts that need attention (NOT FLAT, could not sell, loss stop failures, a remainder sale that failed or is not filled yet) still go out one at a time, with the mention where they had one; no em or en dashes. Non-blocking notes, logged for later: only the last part of a split alert carries "Paper trading only." (earlier parts say "continued"); the split-post resume works only for an identical retry; "Alpaca refused N more" also counts the stack's own local refusals; while the live updates are down the digest shows only "N entries sent"; `resume` can hold the command pass up to 3 seconds while it reads the account (bounded; the loss stop has its own timer); a failed post of the batched remainder alert drops that batch (as a failed single alert did before); "nothing was held" could be slightly wrong if the exits closed the positions during the sale.
+
+#### The footer rule
+
+- The evening limits post and the daily summary end with "Paper trading only. Research input for a human decision, never an instruction to act." They are the research input Michael decides on.
+- Every message to `alerts`, the live list, and the full morning review or reminder (only posted when something is undecided) end with "Paper trading only." Added at posting for `alerts`, so no alert can miss it.
+- One-line confirmations (Armed, Close-out done, worker started, stop, resume), the trade digest and command replies carry no footer.
+- Why: before, every one of the 896 messages carried "Paper trading only.", and the research-input line also appeared on the live list, the morning review, the start message and the one-time load note. Every channel is in Michael's private paper-only server, and the footer now marks the messages where it means something.
+
+#### The digest period: 5 minutes
+
+At most 78 lines on a full 6.5 hour session, against 792 messages on Thursday. Three lines cover the 15 minute load window, short enough to watch it, long enough not to buzz the phone. An entry whose outcome at Alpaca is unclear still gets its own message in `commands`, at once.
+
+#### Evening limits post
+
+Before and after: unchanged (full, with the checklist and the research-input line). It is the decision post.
+
+#### Morning review (60 minutes before the open), all four decided
+
+Before (13 lines, repeating the whole evening post):
+```
+**Good morning. Limits for today, Thursday 2026-11-05 (market opens at 8:30 AM CT): all four are decided.**
+1. position: largest single position 500 dollars (decided) [suggested from your approval on 2026-11-04]
+2. loss: ...
+3. trades: ...
+4. cap: ...
+5. mode: **LOAD DAY** (cheap list, at most 75 dollars a position, 1 share churn 8:45 AM CT to 9:00 AM CT, then normal)
+
+**Checklist**
+- Stop flag: off.
+- Account: flat, no open positions.
+- Borrowing cap at Alpaca right now: 1, long only. ...
+- Price feed: iex ...
+
+Reply here: `approve` accepts every limit ... (four lines of instructions)
+Paper trading only. Research input for a human decision, never an instruction to act.
+```
+After (one line; any checklist line that needs attention, such as the stop flag on or positions held, follows it, one line each; with anything undecided the full post goes out as before, with "Paper trading only."):
+```
+**Good morning: Friday 2026-11-06**, all four limits decided (largest position 500 dollars, daily loss stop 500 dollars, at most 100 orders a minute (no daily total), borrowing cap 1); mode: **LOAD DAY** (cheap list, at most 75 dollars a position, 1 share churn 8:45 AM CT to 9:00 AM CT, then normal). Armed at 8:25 AM CT, market opens 8:30 AM CT. Change a limit before Armed, or type `limits` for the list.
+```
+The one-time "Mode for ..." note (for a request posted by a release older than load mode) is no longer posted: the mode is line 5 of every limits list.
+
+#### A several-command reply (`trades 100` / `approve` / `load on`)
+
+Before: each line got its own reply, and the limit and load replies each repeated the five-line list (three lists in one reply).
+After:
+```
+**trades 100**: noted.
+**approve**: all four limits accepted.
+**load on**: Friday 2026-11-06 will be a **load day**.
+
+**Friday 2026-11-06** (approved):
+1. position: largest single position 500 dollars (decided) [suggested from your approval on 2026-11-05]
+2. loss: daily loss stop 500 dollars (decided) [suggested from your approval on 2026-11-05]
+3. trades: at most 100 orders a minute, no daily total; the ceiling is 100 (decided) [suggested from your approval on 2026-11-05]
+4. cap: borrowing cap 1, where 1 means no borrowing (decided) [suggested from your approval on 2026-11-05]
+5. mode: **LOAD DAY** (cheap list, at most 75 dollars a position, 1 share churn 8:45 AM CT to 9:00 AM CT, then normal)
+All four decided: trading is allowed within these. You can change any of them until the Armed message, 5 minutes before the open.
+```
+A single command gets the same: `trades 50: noted.` then the list.
+
+#### Armed
+
+Before:
+```
+Armed for Thursday 2026-11-05: borrowing cap 1 and long only are set at Alpaca; the day starts at 19067.76 dollars of equity. **This is a load day:** at most 75 dollars a position all day; in the load window (no entries before it) 1 share a trade, any new print, exits 1 cent up and 2 down, symbols freed by Alpaca's live order updates, a 60 second time limit; then the normal placeholder.
+Paper trading only.
+```
+After (load day):
+```
+Armed for Friday 2026-11-06: cap 1, long only, the day starts at 18820.46 dollars. **Load day:** at most 75 dollars a position all day; in the load window, 8:45 AM CT to 9:00 AM CT (no entries before it), 1 share a trade on any new print, a limit buy at or below the price seen, cancelled if not filled in 5 seconds, take-profit 1 cent up and stop 2 cents down from that price; then the normal placeholder.
+```
+After a `load off` (wording backlog: before, it still described the window as running):
+```
+Armed for Friday 2026-11-06: cap 1, long only, the day starts at 18820.46 dollars. Load window switched off: the normal placeholder all day, still at most 75 dollars a position.
+```
+
+#### A digest period
+
+Before (one message every 20 seconds, up to 60 lines each, 792 messages on Thursday):
+```
+8:45:00 AM BUY 1 AAL at about 13.36, target 13.37, stop 13.34 (both held at Alpaca), accepted in 196 ms
+8:45:00 AM BUY 1 SMCI at about 27.66, target 27.67, stop 27.64 (both held at Alpaca), accepted in 417 ms
+8:45:00 AM F: Alpaca refused the entry and it was not retried: Alpaca POST /v2/orders answered 422: take_profit.limit_price must be >= base_price + 0.01
+...
+Paper trading only.
+```
+After (one line per 5 minutes; the fills, cancels and exits come from Alpaca's live order updates):
+```
+8:45 AM CT to 8:50 AM CT: 312 entries sent, 290 filled, 22 unfilled and cancelled, 140 take-profits, 147 stops.
+```
+
+#### Remainder sales (shares left without a stop after a partial take-profit)
+
+Before (one alert each, 101 on Thursday):
+```
+**WULF: Alpaca cancelled its stop when the take-profit partly filled, so I sold the remaining 3 shares.**
+Paper trading only.
+```
+After (still in `alerts`, full, with the footer, but at most one a minute; a sale that fails, or is sent but not filled yet, is still posted on its own at once, as before):
+```
+**Sold 3 remainders left without a stop** (Alpaca cancelled the stop when the take-profit partly filled): WULF 3, IREN 2, CIFR 7.
+Paper trading only.
+```
+
+#### Daily loss stop when the account was already flat
+
+Before: `**Daily loss stop reached** (down 535.15 of the 500 dollar limit). Stopped for the day and sold everything.`
+After: `**Daily loss stop reached** (down 535.15 of the 500 dollar limit). Stopped for the day and nothing was held, so nothing needed selling.`
+
+#### `resume` while today's loss is still past the limit
+
+Before: `Stop cleared. New entries still need today's limits approved before the open.` (then the loss stop put the stop back 16 seconds later, on 2026-11-03)
+After (what `resume` does is unchanged: it still clears the flag; a 3 second look at the account decides only the wording, and a failed look gives the plain reply):
+```
+Stop cleared, but today's loss (535.15 dollars) is still past the 500 dollar daily limit, so the daily loss stop will put the stop back on within about 5 seconds, and it stays on until the next trading day.
+```
+Otherwise: `Stop cleared. Entries still need the day's limits approved.`
+
+#### Close-out done
+
+Before: `Close-out done: the account is flat.` + `Paper trading only.`
+After: `Close-out done: the account is flat.` (one line, no footer)
+
+#### Worker started
+
+Before:
+```
+Stack C worker started at 7:08 PM CT (paper trading only). New release 01KABCDE (it was 01KXYZ12), so this is a deploy. Starts in the last hour: 1. Type `help` for commands. Research input for a human decision, never an instruction to act.
+Paper trading only.
+```
+After:
+```
+Worker started at 6:12 PM CT (paper): new release e5f6a7b8 (was a1b2c3d4): a deploy. Starts in the last hour: 1.
+```
+
+#### Daily summary, head
+
+Before:
+```
+**Daily summary for 2026-11-05**
+Limits: ...
+Trades: 4055 entry orders sent (4055 filled), 4156 sells filled. Closed trades: 1916 won, 2061 lost.
+...
+Paper trading only.
+```
+After (the refused orders are named, break-even trades are counted, no time-limit line, and it ends with the research-input line):
+```
+**Daily summary for 2026-11-05**
+Limits: ...
+Trades: 4055 entry orders sent (4055 filled); Alpaca refused 166 more, 4156 sells filled. Closed trades: 1916 won, 2061 lost, 78 broke even.
+...
+Paper trading only. Research input for a human decision, never an instruction to act.
+```
+
+#### A long post that fails part way (wording backlog)
+
+Before: a post split into several messages whose later part failed was retried whole, so its first parts appeared twice. After: the bot remembers how many parts went out (for 10 minutes) and the retry sends only the rest.
+
+### Group 1 review, round 3 (2026-11-05, evening, approved by Michael): PASS
+
+Round 2's finding is fixed: an older entry inside its 3 second grace is marked must-look again, so the grace-time sync looks it up. The reviewer deleted the line in a copy and the test failed; with it, the reviewer's probe sold the 7 shares 3.5 seconds after the cancel (round 2: 36.5). Nothing new and blocking in a re-walk of the whole range. Bounds checked by the reviewer with 170 second probes: no loop (the mark is set only during the 3 seconds), at most one extra lookup per older entry inside its grace, marks dropped once the entry closes, nothing added while a close-out or the loss stop runs. Non-blocking notes: marks of closed entries wait for the next sync with an active entry (harmless); if a must-look lookup itself fails, that entry waits about 30 seconds (no worse than v9); a sale that keeps failing alerts about every 30 seconds (as v9).
+
+### Deploy (2026-11-05, 6:11 PM Central, market closed)
+
+- **What shipped:** `be62516` (branch `speed-release-merged`, now `main`): the money part with all three rounds' fixes (`e558b82`, `f8b30a7`, `8ae476e`, group 1 PASS in round 3) plus the messaging part (`c43a5e4`, group 2 PASS in round 1, reviewed exactly as merged at `be62516`). 407 tests pass.
+- `fly deploy --ha=false` from a separate checkout of `be62516` with no key file in it.
+- **Fly release v10:** one machine (San Jose), good state. One `worker_started` at 6:11:34 PM ("Starts in the last hour: 1"), no warnings or errors after it.
+- Discord, `commands`, 6:11:34 PM (the new one-line form): "Worker started at 6:11 PM CT (paper): new release 1W6WY1C8 (was RXJ6WWNR): a deploy. Starts in the last hour: 1."
+- Healthchecks up (last ping 6:11:35 PM).
+- **Friday's limits post shows the load switch:** the 3:10 PM request's line 5 reads "5. mode: normal (`load on` makes it a load day)". Friday's record: pending, nothing decided yet. Stop flag off, not-flat flag off.
+- **The one Discord line, `commands`:** "Speed release is live (Fly release v10, paper only). Load days now: 1-share limit buys at or below the price seen, take-profit 1 cent up, stop 2 cents down, unfilled entries cancelled after 5 seconds. Approve Friday's limits and type `load on` before 7:45 AM if you want Friday as a load day."
+
+**For Michael before 7:45 AM Friday:** approve the limits (without approval there is no trading Friday) and type `load on` if Friday should be the load day. Note the replay's request estimate before choosing `trades`: about 193 a minute at 100 (the governor will hold entries back near its reserve, about 60 filled entries a minute), about 163 at 80.
+
+**What the next session measures:** whether Alpaca accepts the 1 cent limit brackets (no refusals expected), paper's fill and cancel times for limit entries, the entry wait's cancels, the 3 second remainder sales and their daily stop-gap line, the shadow loss-stop difference, the database close times and the slowest free per minute (all in the per-minute statistics), requests a minute in the window, and the new Discord volume.
+
+Paper only. Everything here is research input for a human decision, never an instruction to act.
