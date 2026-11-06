@@ -806,6 +806,7 @@ Same universe (no ETFs, no test issues).
 - **The close-out:** flat at 2:55, no oversell, no false "no protective stop" alarms.
 
 ### 8. Pass, fail, inconclusive
+**Amended by Michael on 2026-11-05 (evening):** "entries a minute" below means **accepted orders a minute**. See "Michael's ruling on the load-day pass rule" at the end of this log, which states the rule as it now stands.
 - **The 200-a-minute budget does NOT hold if:** Alpaca answers "too many requests" (429) even once; or the remaining stock falls below 80 because of entries and routine work (the governor's reserve was breached, not just reached); or any sell, cancel or close-out request is delayed by a rate limit.
 - **It holds if:** at least about 90 entries a minute for at least 10 of the 15 minutes, 0 rate-limit answers, lowest stock at or above 80, and a flat close-out.
 - **Inconclusive if** entries never get near 90 a minute (limited by the symbols, the free feed or hold times). Then the log reports the highest rate reached and its request count, and says the 100 level was not tested.
@@ -2377,3 +2378,15 @@ Round 2's finding is fixed: an older entry inside its 3 second grace is marked m
 **What the next session measures:** whether Alpaca accepts the 1 cent limit brackets (no refusals expected), paper's fill and cancel times for limit entries, the entry wait's cancels, the 3 second remainder sales and their daily stop-gap line, the shadow loss-stop difference, the database close times and the slowest free per minute (all in the per-minute statistics), requests a minute in the window, and the new Discord volume.
 
 Paper only. Everything here is research input for a human decision, never an instruction to act.
+
+## Michael's ruling on the load-day pass rule (2026-11-05, evening; no code changes)
+
+Asked after the speed release, because limit entries split "entries" into two numbers: orders Alpaca accepts, and entries that then fill (the replay: accepted orders reach the 100 ceiling every minute; filled entries about 54 a minute at best). Michael's answer: **a load day passes on accepted orders a minute, the stack's capacity against Alpaca's limit. Filled entries a minute are reported alongside, with a separate note, but they do not decide the verdict.**
+
+**The rule as it now stands** (it replaces the wording of "Load mode proposal", section 8):
+- **The 200-a-minute budget does NOT hold if:** Alpaca answers "too many requests" (429) even once; or the remaining stock falls below 80 because of entries and routine work (the governor's reserve was breached, not just reached); or any sell, cancel or close-out request is delayed by a rate limit.
+- **It holds if:** at least about 90 **accepted orders** a minute (orders Alpaca accepted, whether or not they then filled) for at least 10 of the 15 minutes of the window, 0 rate-limit answers, lowest stock at or above 80, and a flat close-out.
+- **Inconclusive if** accepted orders never get near 90 a minute. Then the review reports the highest rate reached and its request count, and says the 100 level was not tested.
+- **Reported alongside, not part of the verdict:** filled entries a minute (per minute and the busiest 60 seconds), with a separate note on why they differ from accepted orders (unfilled limit entries cancelled after 5 seconds, paper's fill delay). Orders Alpaca refused do not count as accepted, but they still count against the 100 a minute ceiling.
+
+Paper only. Research input for a human decision, never an instruction to act.
