@@ -2415,14 +2415,14 @@ Times are Central. "Measured" means read from a timestamp or a counter. "Inferre
 - Michael approved the limits at 7:30 AM (position 500, loss 500, trades 100, cap 1) and typed `load on` in the same message. Armed at 8:25:05 AM with the window settings; the order stream went live at 8:25:09.
 - Monday's limits request posted at 3:10 PM and waits for Michael. Monday is a normal day unless he types `load on` before 7:45 AM.
 
-### 1. The load window, 8:45 to 9:00 AM: HOLDS. At least 90 accepted orders in 14 of the 15 minutes (100 in 10 of them), 0 rate-limit answers, lowest remaining stock 159, flat close-out.
+### 1. The load window, 8:45 to 9:00 AM: HOLDS. At least 90 accepted orders in 14 of the 15 minutes (100 in 9 of them), 0 rate-limit answers, lowest remaining stock 159, flat close-out.
 
 Against the rule in "Michael's ruling on the load-day pass rule":
 - **"Does not hold" needs any one of these. None happened:**
   - Alpaca's rate-limit answer (429): **0** all day.
   - Remaining stock below 80: lowest **159** (from 8:46 on, all day).
   - A sell, cancel or close-out delayed by a rate limit: **none**. There were no rate-limit answers, and the governor never holds back sells, cancels or the close-out. (Some cancels in the first half minute were slow, see "Cancels" below; that was not a rate limit.)
-- **"Holds" needs at least about 90 accepted orders a minute for 10 of the 15 minutes, 0 rate-limit answers, lowest stock at or above 80, and a flat close-out.** Accepted orders were 100 in 10 calendar minutes and 94 to 99 in 4 more; only 8:58 fell short (75). The close-out was flat at 2:55:28 (see 4).
+- **"Holds" needs at least about 90 accepted orders a minute for 10 of the 15 minutes, 0 rate-limit answers, lowest stock at or above 80, and a flat close-out.** Accepted orders were 100 in 9 calendar minutes and 94 to 99 in 5 more; only 8:58 fell short (75). The close-out was flat at 2:55:28 (see 4).
 - **So the window holds**, at the 100 a minute ceiling. It ran at the ceiling, so it shows the stack carries 100 orders a minute inside Alpaca's limit; it does not show what lies above 100 (raising the ceiling is a hard stop for Michael and is not proposed).
 
 **Orders and requests, minute by minute.**
@@ -2454,7 +2454,7 @@ Against the rule in "Michael's ruling on the load-day pass rule":
 - **Busiest 60 seconds:** 101 orders by their stored times (8:45:00.86 to 8:46:00.78, 59.925 seconds). The governor's own peak is **100**. Inferred: the stored time is taken when the gate builds the record, a few tens of milliseconds away from the moment the governor grants the slot, so the 101 is timestamp offset, not a 101st order inside the governor's minute.
 - **The ceiling bound in 12 of the 15 minutes** (8:46 to 8:57). The gate refused 1,145 signals as "trades-per-minute limit reached". The orders came in a burst early in each minute, then paused until the oldest slots aged out (from 8:46 to 8:52 every pause over 3 seconds ended at the turn of a minute).
 - **8:58's 75:** no "trades-per-minute" refusals that minute and the most "already holding" refusals of the window (143). Fewer symbols were free (longer holds), so fewer prints became orders. Not the budget.
-- **Requests:** 191 a minute on average over the 14 full stamps (173 to 217), against the replay's 193 average and 206 busiest. The governor counted **217 requests in 60 seconds with 0 rate-limit answers and the remaining stock never below 159.** Measured: Alpaca's 200 a minute refills continuously (a bucket that drains and refills), as Thursday's review inferred, so more than 200 requests can go through in a minute without a refusal.
+- **Requests:** 191 a minute on average over the 14 full stamps (173 to 217), against the replay's 193 average and 206 busiest. The governor counted **217 requests in 60 seconds with 0 rate-limit answers and the remaining stock never below 159.** Inferred from that (the counts are measured): Alpaca's 200 a minute refills continuously (a bucket that drains and refills), as Thursday's review also inferred, so more than 200 requests can go through in 60 seconds without a refusal.
 - **How often the governor held entries back near the reserve: never (0).** It holds back only when its estimate of Alpaca's remaining stock (the last number Alpaca reported plus the refill since) is down to 80; that estimate never went below 159.
 
 **Filled entries, the separate note (not part of the verdict).**
@@ -2490,7 +2490,7 @@ Against the rule in "Michael's ruling on the load-day pass rule":
 
 | | Replay (estimate) | Friday (measured) |
 | :-- | --: | --: |
-| Accepted orders a minute | 100 (the ceiling) | 97 (100 in 10 minutes) |
+| Accepted orders a minute | 100 (the ceiling) | 97 (100 in 9 minutes) |
 | Filled entries a minute | 52.5 | 49.9 |
 | Cancelled unfilled a minute | 47.5 | 47.0 |
 | Requests a minute, average / busiest | 193 / 206 | 191 / 217 |
@@ -2502,7 +2502,7 @@ The replay got the capacity right. It was optimistic on how often the 1 cent tak
 
 **Holds in the window** (entry fill to exit fill, 749): median 6.3 seconds, mean 44.4, 90th percentile 34.2, longest 6 hours 10 minutes (ADT's one share, from 8:45 to the close-out; its take-profit at 9.89 and stop at 9.86 were never reached). Under 1 second 41; 1 to 5 seconds 282; 5 to 10: 155; 10 to 30: 183; 30 to 60: 57; 1 to 2 minutes 20; 2 to 10 minutes 10; over 10 minutes 1.
 
-**Fly in the window** (one shared CPU): 1.0 to 1.5 percent busy before it, rising steadily to a peak of **8.7 percent** at 8:59 (Thursday 9.7), back to 2 to 3 percent by 9:02. CPU credit balance never below 49,590 of 50,000 (no throttling); load average at most 0.45; free memory at least 303 MB of 512.
+**Fly in the window** (one shared CPU): 0.9 to 1.6 percent busy before it, rising steadily to a peak of **8.7 percent** at 8:59 (Thursday 9.7), back to 2 to 3 percent by 9:02. CPU credit balance never below 49,590 of 50,000 (no throttling); load average at most 0.45; free memory at least 303 MB of 512.
 
 ### 2. The new settings in action
 
@@ -2519,9 +2519,9 @@ The replay got the capacity right. It was optimistic on how often the 1 cent tak
 - The share count on the updates: measured this time (a raw update a minute is logged, for example a 1-share fill at 8:52:01 carrying `position_qty` 1).
 
 **The 3 second stop-gap sales:**
-- 1,362 brackets had their stop cancelled by Alpaca at a partial take-profit, all after 9:00 (a 1-share window entry cannot partly fill). In 1,259 the take-profit finished on its own: 1,204 within 3 seconds of the cancel, 1,257 within 5.
+- 762 brackets had their stop cancelled by Alpaca at a partial take-profit (counted from the fills: the take-profit had filled part of the position when the stop was cancelled; the order stream's own counter also says 762). All were after 9:00 (a 1-share window entry cannot partly fill). In 659 the take-profit finished on its own: 604 within 3 seconds of the cancel, 657 within 5.
 - The stack sold the other **103 (199 shares, about 2,627 dollars; the largest 60.90)**.
-- **From Alpaca's stop cancel to the sale being sent: median 5.3 seconds** (10th percentile 5.0, 90th 5.7, slowest 10.2). Thursday: median 10.1.
+- **From Alpaca's stop cancel to the sale being sent: median 5.2 seconds** (10th percentile 5.0, 90th 5.7, slowest 10.2), using the time Alpaca received the sale (its submit time is a median 10 ms later). Thursday: median 10.1.
   - It is the 3 second grace plus the sale's own steps: the sell path first cancels the take-profit still resting at Alpaca and waits for that cancel, then sells (inferred from the code; at the close-out today Alpaca took 6.4 seconds to cancel ADT's take-profit).
 - **From the cancel to the sale's fill: median 6.5 seconds, slowest 12.5.** Thursday: median 12.1, slowest 24.8.
 - The sales came out 15.49 dollars better than the stops those shares had lost, and 3.76 above their entry prices.
@@ -2530,7 +2530,7 @@ The replay got the capacity right. It was optimistic on how often the 1 cent tak
 **Decision 3's measurement: would those shares have filled at their take-profit within the next 5 seconds?**
 - **The stack's own line did not work this time:** "103 sales, 199 shares; 4 would have filled at their take-profit within the next 5 seconds; selling at once came out +0.34 dollars against waiting 5 seconds (99 not measured)". 99 of 103 not measured; the 4 that were may be matched to the wrong sale (see 5.3).
 - **So the measurement was made here instead, by the meter's own definition**, from Alpaca's records and the free feed's prints (an estimate: one exchange's prints, and paper fills within about a cent of them):
-  - for each sale, the prints of that symbol in the 5 seconds after the sale was sent;
+  - for each sale, the prints of that symbol in the 5 seconds after Alpaca received the sale;
   - "would have filled" if a print reached the take-profit price;
   - waiting is valued at the take-profit price if it was reached, and otherwise at the last print at the end of the 5 seconds (or the sale's own price if there was no print);
   - dollars against waiting = (the sale's fill minus that value) times the shares; positive means selling at once did better.
@@ -2618,18 +2618,18 @@ Healthchecks: every ping succeeded (2:54:41, 2:55:11, 2:55:43, 2:56:16), and the
 
 **5.5 Smaller items:**
 - The 30 orders of the opening second took up to 3 seconds to be accepted and up to 11.7 seconds to be cancelled (section 1). No harm; the cause is not measured.
-- The summary's stop-gap line says "sold 3 seconds after Alpaca cancelled the stop"; the measured time to the sale is about 5 seconds (section 2).
+- The summary's stop-gap line says "sold 3 seconds after Alpaca cancelled the stop"; the measured time to the sale is a median 5.2 seconds (section 2).
 - Remainder alerts are batched by the minute but seldom share one (section 4).
 - The order stream's first status, "authenticating", is still logged at warning level.
 
 ### Recommended next steps (under the standing rule: nothing below is built until Michael approves)
 
 1. **Decide a fix for 5.1 before the next load day** (money-touching). Options:
-   - (a) **Recommended:** when the live updates show that a filled entry's take-profit and stop were both cancelled, and the stack did not ask for that, sell the share at once through the checked sell path. The missing-exit check stays as the backstop. This would cut the 4.6 to 13.9 seconds to well under a second (estimate).
+   - (a) **Recommended:** when the live updates show a filled entry whose take-profit and stop are both cancelled while no close-out or sale of that symbol is running, sell the share at once through the checked sell path. The missing-exit check stays as the backstop. Paper filled the six sales 0.3 to 1.7 seconds after receiving them, so this would cut the 4.6 to 13.9 seconds to about 1 to 2 seconds (estimate).
    - (b) Run the next load day with market entries again (Thursday's design), accepting Thursday's refusals.
    - (c) Keep v10 as it is: the missing-exit check limits each case to about 15 seconds on 1 share.
 2. **Fix the summary (5.2):** look up every entry missing from the listing (no 50 cap; 71 lookups fit easily after the close), and the missing sells too, or build the day's figures from Alpaca's fills, which matched the account to the cent today. Reporting only.
-3. **Fix the stop-gap meter (5.3):** hand each sale to the meter when it is sent, not after it fills. It is a one-line move inside `risk.ts`, so it needs Michael's go-ahead under the standing rule.
+3. **Fix the stop-gap meter (5.3):** hand each sale to the meter when it is sent, not after it fills. The sale's send time and shares are known only once the sell path returns today, so the sell path would need to report the moment it sends: a small change inside `risk.ts` and `sells.ts`, so it needs Michael's go-ahead under the standing rule.
 4. **Keep the 5 second account read as the loss stop.** Value the shadow estimate's positions from the same moment as the cash, and run another shadow day before considering a switch.
 5. **The load test has passed at 100 orders a minute.** Testing above 100 would need a higher ceiling, which is a hard stop for Michael; it is not proposed. Normal days on v10 (with fix 1 if approved) would show the live updates and the stop gap under normal load.
 6. **Monday's limits** were posted at 3:10 PM and wait for Michael. Without approval there is no trading Monday; Monday is a normal day unless he types `load on` before 7:45 AM.
