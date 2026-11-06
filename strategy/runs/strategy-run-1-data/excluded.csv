@@ -1,0 +1,357 @@
+period,ticker,name,reason,multiple,start,end
+A,BRACR,BLACK RIDGE ACQUISITION CORP,security type: right,41,2018-12-26,2019-08-09
+A,BVXVW,BIONDVAX PHARMACEUTICALS LTD.,security type: warrant,44.02515723,2018-10-02,2020-01-30
+A,CLDCW,CHINA LENDING CORP WT EXP 03/3,security type: warrant,8.09047619,2016-01-04,2016-12-29
+A,CCNWW,CARDCONNECT CORP WT EXP 02/19/,security type: warrant,9.184601394,2016-01-11,2017-01-05
+A,CNACR,CONSTELLATION ALPHA CAP CORP R,security type: right,14,2019-04-26,2019-08-29
+A,CODX,"Co-Diagnostics, Inc. - Common Stock",first earnings report 2020-05-15 after the period ends,,,
+A,CYRXW,,security type: warrant,23,2016-01-05,2020-01-31
+A,CYTXZ,CYTORI THERAPEUTICS INC,security type: other security (Nasdaq fifth letter Z),14,2018-07-30,2019-07-23
+A,DEACW,DIAMOND EAGLE ACQUISITION CORP,security type: warrant,5,2019-07-19,2020-01-31
+A,ECACR,E-COMPASS ACQUISITION CORP RIG,security type: right,5.163076923,2016-01-04,2017-02-10
+A,FPAYW,FLEXSHOPPER INC WT EXP,security type: warrant,4.6,2018-09-26,2020-01-31
+A,FSRVW,FINSERV ACQUISITION CORP,first earnings report 2021-05-24 after the period ends,,,
+A,GCVRZ,SANOFI CONTINGENT VAL RTS EXP,security type: other security (Nasdaq fifth letter Z),8.669314796,2016-01-04,2020-01-31
+A,GRN,iPath Series B Carbon Exchange-Traded Notes,security type: fund,5.063106796,2016-01-04,2019-10-18
+A,GRSHW,GORES HLDGS III INC WT EXP 09/,security type: warrant,7.407407407,2016-02-09,2020-01-31
+A,HUNTU,HUNTER MARITIME ACQUISITION CO,security type: unit,8.943089431,2016-11-18,2019-03-26
+A,HUNT,HUNTER MARITIME ACQUISITION CO,probable SPAC shell (name and 10 dollar start; no shell merger found in SEC 8-K items),9.743589744,2017-02-17,2019-03-26
+A,ICLDW,INTERCLOUD SYS INC WT EXP,security type: warrant,9.183333333,2016-02-16,2016-08-30
+A,JFKKW,8I ENTERPRISES ACQUISITION COR,security type: warrant,6.27,2019-05-16,2020-01-29
+A,KLREW,KLR ENERGY ACQUISITION CORP,security type: warrant,5.666666667,2016-03-29,2017-04-27
+A,LMPX,LMP AUTOMOTIVE HLDGS INC COM,first earnings report 2020-02-05 after the period ends,,,
+A,MACQW,M I ACQUISITIONS INC WT EXP,security type: warrant,7.6828,2016-11-14,2018-07-24
+A,MDIA,Mediaco Holding Inc. - Class A Common Stock,first earnings report 2020-01-17 falls in the period's final three months (after 2019-10-31),,,
+A,NUROW,NEUROMETRIX INC WT EXP NEW 201,security type: warrant,4.122777778,2019-11-27,2020-01-30
+A,PALL,abrdn Physical Palladium Shares ETF,security type: fund,4.06873823,2016-01-04,2020-01-31
+A,PNTG,"The Pennant Group, Inc. - Common Stock",first earnings report 2020-03-04 after the period ends,,,
+A,RLMD,"Relmada Therapeutics, Inc. - Common Stock",first earnings report 2021-03-23 after the period ends,,,
+A,ROM,ProShares Ultra Technology,security type: fund,4.44813968,2016-01-04,2020-01-31
+A,SOXL,Direxion Daily Semiconductor Bull 3X ETF,security type: fund,9.649435532,2016-01-04,2020-01-31
+A,SRAQW,SILVER RUN ACQUISITION CORPORA,security type: warrant,5.42,2016-04-19,2016-10-11
+A,TBRGW,THUNDER BRDG ACQUISITION LTD W,security type: warrant,4.895833333,2018-07-17,2019-07-11
+A,TECL,Direxion Daily Technology Bull 3X ETF,security type: fund,7.800058123,2016-01-04,2020-01-31
+A,TMCXW,TRINITY MERGER CORP WT EXP,security type: warrant,4.55,2018-05-31,2019-11-14
+A,TQQQ,ProShares UltraPro QQQ,security type: fund,5.27239982,2016-01-04,2020-01-31
+A,USD,ProShares Ultra Semiconductors,security type: fund,4.247262774,2016-01-04,2020-01-31
+A,VKTXW,VIKING THERAPEUTICS INC WT EXP,security type: warrant,94.6,2016-04-08,2020-01-31
+A,XBIOW,XENETIC BIOSCIENCES INC WT PUR,security type: warrant,8700,2019-11-08,2020-01-31
+A,ZIONW,ZIONS BANCORPORATION N.A. WARR,security type: warrant,4.077795527,2016-01-04,2020-01-31
+A,ZIONZ,ZIONS BANCORPORATION N.A,security type: other security (Nasdaq fifth letter Z),5.296984925,2016-01-06,2018-11-14
+A,ZYME,Zymeworks Inc. - Common Stock,first earnings report 2022-11-08 after the period ends,,,
+B,ACAMW,ACAMAR PARTNERS ACQUISITION CO,security type: warrant,6.687402799,2020-04-01,2021-01-21
+B,ACTCW,ARCLIGHT CLEAN TRANSITION CORP,security type: warrant,4.692307692,2020-11-24,2021-06-14
+B,AHACW,ALPHA HEALTHCARE ACQUISITION W,security type: warrant,4.300153846,2020-11-24,2021-08-26
+B,AMRHW,AMERI HLDGS INC WT EXP 11/16/2,security type: warrant,9.257142857,2020-04-03,2020-12-30
+B,ANDAR,ANDINA ACQUISITION CORP III RT,security type: right,8.131176999,2020-04-06,2021-07-20
+B,AONCW,,security type: warrant,24.275,2021-05-13,2022-01-31
+B,APCXW,APPTECH PMTS CORP WT EXP 01/04,security type: warrant,4000,2022-01-05,2022-01-31
+B,BCDAW,BIOCARDIA INC WT EXP 07/30/22,security type: warrant,6.090818363,2021-12-16,2022-01-31
+B,BCTXW,BRIACELL THERAPEUTICS CORP WT,first earnings report 2022-10-27 after the period ends,,,
+B,BLNKW,BLINK CHARGING CO WT EXP 02/12,security type: warrant,27.89166667,2020-04-01,2022-01-31
+B,BNGOW,"BIONANO GENOMICS, INC. WARRANT",security type: warrant,8.742190476,2020-04-01,2022-01-31
+B,BNKU,"MicroSectors U.S. Big Banks 3 Leveraged ETNs due February 17, 2045",security type: fund,6.298633018,2020-04-01,2022-01-31
+B,BRPAR,BIG ROCK PARTNERS ACQUISITION,security type: right,17.61538462,2020-04-07,2021-05-24
+B,NRXPW,NRX PHARMACEUTICALS INC WT EXP,security type: warrant,31.5,2020-04-07,2022-01-31
+B,BVXVW,BIONDVAX PHARMACEUTICALS LTD.,security type: warrant,6.530434783,2020-04-02,2020-05-13
+B,CBL,"CBL & Associates Properties, Inc. Common Stock",first earnings report 2021-11-16 falls in the period's final three months (after 2021-10-31),,,
+B,CEREW,CEREVEL THERAPEUTICS HOLD. INC,security type: warrant,5.75477707,2020-11-17,2021-08-30
+B,RUMBW,RUM Group Inc. - Warrant,first earnings report 2022-09-22 after the period ends,,,
+B,CPST,Calamos S&P 500 Structured Alt Protection ETF  September,security type: fund,6.285714286,2020-04-01,2021-04-21
+B,CIICW,CIIG MERGER CORP WT EXP 12/31/,security type: warrant,12.48571429,2020-04-02,2021-03-24
+B,CRESW,CRESUD SA COMERCIAL INDL FINAN,security type: warrant,4,2021-06-25,2022-01-27
+B,FMCIW,FORUM MERGER II CORP WT EXP,security type: warrant,38.80434783,2020-04-01,2020-10-15
+B,DHBCW,DHB CAP CORP RED WT EXP 03/15/,security type: warrant,12.25,2021-04-23,2022-01-31
+B,DIG,ProShares Ultra Energy,security type: fund,4.622026432,2020-04-01,2022-01-31
+B,DJTWW,Trump Media & Technology Group Corp. - Warrants,first earnings report 2024-05-20 after the period ends,,,
+B,DJT,Trump Media & Technology Group Corp. - Common Stock,first earnings report 2024-05-20 after the period ends,,,
+B,DPHCW,DIAMONDPEAK HLDGS CORP RED WT,no trading day after first earnings report 2021-03-17,,,
+B,DPST,Direxion Daily Regional Banks Bull 3X ETF,security type: fund,5.478118162,2020-04-01,2022-01-31
+B,DUSL,Direxion Daily Industrials Bull 3X ETF,security type: fund,4.641618497,2020-04-01,2022-01-31
+B,DWACU,DIGITAL WORLD ACQ CORP UNT 1 C,first earnings report 2024-05-20 after the period ends,,,
+B,DXLG,"Destination XL Group, Inc. - Common Stock",first earnings report 2021-11-17 falls in the period's final three months (after 2021-10-31),,,
+B,OCSAW,Oculis Holding AG - Warrants,security type: warrant,24.45918367,2021-05-13,2022-01-31
+B,PGYWW,Pagaya Technologies Ltd. - Warrants,first earnings report 2024-05-09 after the period ends,,,
+B,EMO,ClearBridge Energy Midstream Opportunity Fund Inc. Common Stock,security type: fund,4.155,2020-04-01,2022-01-31
+B,ERX,Direxion Energy Bull 2X ETF,security type: fund,4.61,2020-04-01,2022-01-31
+B,FAS,Direxion Financial Bull 3X ETF,security type: fund,6.285995086,2020-04-01,2022-01-31
+B,FATBW,FAT BRANDS INC WARRANT EXP 06/,security type: warrant,9.673333333,2020-07-14,2022-01-31
+B,FCG,First Trust Natural Gas ETF,security type: fund,4.86,2020-04-01,2022-01-31
+B,FTVIW,FINTECH ACQUISITION CORP VI WT,security type: warrant,44.07894737,2021-09-27,2022-01-27
+B,GDYNW,"GRID DYNAMICS HOLDINGS, INC. W",security type: warrant,9.181419355,2020-04-01,2021-08-27
+B,GGPIW,GORES GUGGENHEIM INC WT EXP 03,security type: warrant,4.242424242,2021-05-17,2022-01-31
+B,GMHIW,GORES METROPOULOS INC WT EXP 1,security type: warrant,4.266666667,2020-04-03,2020-12-02
+B,GOEVW,CANOO INC,security type: warrant,4.285714286,2020-04-01,2022-01-31
+B,GPAQW,GORDON POINTE ACQUISITION CORP,security type: warrant,11.5,2020-04-02,2020-07-01
+B,GRIN,VictoryShares International Free Cash Flow Growth ETF,security type: fund,6.003861004,2020-04-01,2022-01-31
+B,GRNVR,GREENVISION ACQUISITION CORP R,security type: right,5.583333333,2020-04-01,2021-08-13
+B,GRN,iPath Series B Carbon Exchange-Traded Notes,security type: fund,4.421674629,2020-04-21,2022-01-31
+B,GUSH,Direxion Daily S&P Oil & Gas Exp. & Prod. Bull 2X ETF,security type: fund,7.280917281,2020-04-01,2022-01-31
+B,HCCHR,HL ACQUISITIONS CORP RTS TO RE,security type: right,28.78598248,2020-04-01,2020-12-09
+B,HCCHW,HL ACQUISITIONS CORP WT TO PUR,security type: warrant,214.7777778,2020-04-01,2020-12-09
+B,HCDIW,HARBOR CUSTOM DEV INC WT EXP,security type: warrant,2980,2021-06-10,2022-01-31
+B,HIBL,Direxion Daily S&P 500 High Beta Bull 3X ETF,security type: fund,9.505366309,2020-04-01,2022-01-31
+B,HOVNP,Hovnanian Enterprises Inc - Depositary Share representing 1/1000th of 7.625% Series A Preferred Stock,security type: preferred,5.555,2020-04-01,2022-01-31
+B,HPKEW,HIGHPEAK ENERGY INC WT EXP 08/,security type: warrant,9.597402597,2020-08-24,2022-01-28
+B,IEAWW,INFRASTRUCTURE & ENERGY ALTERN,security type: warrant,19.50585176,2020-04-01,2022-01-31
+B,INDL,Direxion Daily MSCI India Bull 2X ETF,security type: fund,5.01092437,2020-04-01,2022-01-31
+B,INSUW,INSURANCE ACQUISITION CORP DEL,security type: warrant,4.75,2020-05-04,2020-10-14
+B,LACQW,LEISURE ACQUISITION CORP,security type: warrant,7.56302521,2020-04-01,2021-06-02
+B,LOACR,LONGEVITY ACQUISITION CORP,security type: right,10.23076923,2020-04-17,2021-03-19
+B,LOACW,LONGEVITY ACQUISITION CORP RED,security type: warrant,18,2020-04-21,2021-03-19
+B,LSACW,LIFESCI ACQUISITION CORP WT EX,security type: warrant,69,2020-05-28,2020-12-23
+B,MARPS,Marine Petroleum Trust - Units of Beneficial Interest,security type: unit,4.277777778,2020-04-01,2022-01-31
+B,MDGSW,MEDIGUS LTD WT PUR SPONSORED A,security type: warrant,13.4212963,2020-04-01,2022-01-31
+B,MEXX,Direxion Daily MSCI Mexico Bull 3X ETF,security type: fund,4.162162162,2020-04-01,2022-01-31
+B,MFIN,Medallion Financial Corp. - Common Stock,security type: fund,4.100558659,2020-04-01,2022-01-31
+B,MIDU,Direxion Mid Cap Bull 3X ETF,security type: fund,5.24928092,2020-04-01,2022-01-31
+B,MNCLW,MONOCLE ACQUISITION CORP WT EX,security type: warrant,4.69924812,2020-04-02,2020-12-22
+B,MN,Corgi MANGOS ETF,security type: fund,6.552,2020-04-01,2022-01-31
+B,MVO,MV OIL TRUST UNITS BENE INT,security type: unit,4.125541126,2020-04-01,2022-01-31
+B,NAIL,Direxion Daily Homebuilders & Supplies Bull 3X ETF,security type: fund,8.443052392,2020-04-01,2022-01-31
+B,NBACR,NEWBORN ACQUISITION CORP RT 02,security type: right,12,2020-04-30,2021-03-22
+B,NBACW,NEWBORN ACQUISITION CORP WT EX,security type: warrant,41,2020-04-30,2021-03-22
+B,NESRW,NATIONAL ENERGY SVCS REUNTD CR,security type: warrant,9,2020-04-03,2022-01-31
+B,NPAWW,NEW PROVIDENCE ACQUISITION COR,security type: warrant,7.78,2020-04-02,2021-04-06
+B,NRGU,"MicroSectors U.S. Big Oil 3 Leveraged ETNs due February 17, 2045",security type: fund,6.239908257,2020-04-01,2022-01-31
+B,NTG,TORTOISE MIDSTREAM ENERGY FUND,security type: fund,4.051220965,2020-04-01,2022-01-31
+B,OBE,Obsidian Energy Ltd. Common Shares,fewer than 2 trading days after the start rule,,,
+B,OHPAW,ORION ACQUISITION CORP WT EXP,security type: warrant,14,2021-04-23,2022-01-31
+B,ORSNW,ORISUN ACQUISITION CORP WT EXP,security type: warrant,5.769230769,2020-04-02,2020-11-17
+B,OXBRW,Oxbridge Re Holdings Limited - Warrant,security type: warrant,9.697324415,2020-04-07,2022-01-31
+B,PSACW,PROPERTY SOLUTIONS ACQUISITION,security type: warrant,9.885714286,2020-08-28,2021-07-21
+B,PTACW,PROPTECH ACQUISITION CORP WT E,security type: warrant,16.18277011,2020-04-02,2020-12-23
+B,RETL,Direxion Daily Retail Bull 3X ETF,security type: fund,13.025,2020-04-01,2022-01-31
+B,ROM,ProShares Ultra Technology,security type: fund,4.089368259,2020-04-01,2022-01-31
+B,ROSEU,ROSE HILL ACQ CORP UNT 1 ORD S,first earnings report 2021-11-29 falls in the period's final three months (after 2021-10-31),,,
+B,ROSE,ROSE HILL ACQUISITION CORP ORD,first earnings report 2022-03-31 after the period ends,,,
+B,SKINW,THE BEAUTY HEALTH CO CORP WT E,security type: warrant,4.615830981,2021-05-06,2021-11-03
+B,SMHB,ETRACS Monthly Pay 2x Leveraged Small Cap High Dividend ETN Series B,security type: fund,4.41221374,2020-04-01,2022-01-31
+B,SMMCW,SOUTH MTN MERGER CORP WT EXP,security type: warrant,6.990881459,2020-04-09,2021-01-12
+B,SOXL,Direxion Daily Semiconductor Bull 3X ETF,security type: fund,7.838930895,2020-04-01,2022-01-31
+B,SPXL,Direxion Daily S&P 500 Bull 3X ETF,security type: fund,5.215982721,2020-04-01,2022-01-31
+B,SRACW,STABLE RD ACQUISITION CORP WT,security type: warrant,4.68,2020-04-06,2021-08-12
+B,SRTSW,SENSUS HEALTHCARE INC WT EXP 0,security type: warrant,10.0047619,2020-04-07,2020-06-04
+B,TDACW,TRIDENT ACQUISITIONS CORP WT E,security type: warrant,71.8,2020-04-07,2021-10-29
+B,TECL,Direxion Daily Technology Bull 3X ETF,security type: fund,6.507619048,2020-04-01,2022-01-31
+B,THCBW,TUSCAN HLDGS CORP WT EXP 4/1/2,security type: warrant,9.774193548,2020-04-01,2021-07-23
+B,TMTSW,SPARTACUS ACQUISITION CORP RED,first earnings report 2026-03-27 after the period ends,,,
+B,TNA,Direxion Small Cap Bull 3X ETF,security type: fund,4.288016819,2020-04-01,2022-01-31
+B,TOTAR,TOTTENHAM ACQUISITION I LTD RT,security type: right,9.718437784,2020-04-16,2020-12-30
+B,TOTAW,TOTTENHAM ACQUISITION I LTD WT,security type: warrant,20.4,2020-04-03,2020-12-30
+B,TPOR,Direxion Daily Transportation Bull 3X ETF,security type: fund,6.563492063,2020-04-01,2022-01-31
+B,TQQQ,ProShares UltraPro QQQ,security type: fund,5.673394495,2020-04-01,2022-01-31
+B,TRIL,VegaShares Trillions ETF,security type: fund,4.656565657,2020-04-01,2021-11-16
+B,TWNKW,HOSTESS BRANDS INC WT EXP 08/1,security type: warrant,5.614035088,2020-04-01,2021-11-04
+B,TZACW,TENZING ACQUISITION CORP WT EN,security type: warrant,11.42857143,2020-04-13,2020-12-14
+B,UDOW,ProShares UltraPro Dow30,security type: fund,4.122493225,2020-04-01,2022-01-31
+B,UGA,United States Gasoline Fund LP,security type: fund,5.012752391,2020-04-01,2022-01-31
+B,UMDD,UltraPro MidCap400,security type: fund,5.261051829,2020-04-01,2022-01-31
+B,UPRO,ProShares UltraPro S&P 500,security type: fund,5.229013855,2020-04-01,2022-01-31
+B,URTY,ProShares UltraPro Russell2000,security type: fund,4.328393598,2020-04-01,2022-01-31
+B,USD,ProShares Ultra Semiconductors,security type: fund,4.398931434,2020-04-01,2022-01-31
+B,USWSW,U S WELL SVCS INCWT PUR 1/2 CL,security type: warrant,4.409638554,2020-04-02,2022-01-31
+B,WANT,Direxion Daily Consumer Discretionary Bull 3X ETF,security type: fund,5.709408826,2020-04-01,2022-01-31
+B,XBIOW,XENETIC BIOSCIENCES INC WT PUR,security type: warrant,13000,2021-12-07,2022-01-26
+B,ZGYHW,YUNHONG INTL RED WTS PUR ONE C,security type: warrant,12.4,2020-05-13,2021-11-19
+C,RZLVW,Rezolve AI PLC - Warrants,security type: warrant,8.998,2023-01-03,2025-02-28
+C,ABLLW,"ABACUS GLOBAL MANAGEMENT, INC.",security type: warrant,5.767012687,2023-08-15,2025-02-28
+C,COOTW,Australian Oilseeds Holdings Limited - Warrant,first earnings report 2025-03-31 after the period ends,,,
+C,ADSEW,ADS-TEC ENERGY PLC - Warrant,security type: warrant,17.08129032,2023-01-03,2025-02-28
+C,AGBAW,AGBA GROUP HLDG LTD WT EXP 3/1,security type: warrant,5.474692202,2023-01-03,2024-10-15
+C,ALTIW,ALTI GLOBAL INC WT EXP PUR CL,first earnings report 2025-11-12 after the period ends,,,
+C,AMODW,"Alpha Modus Holdings, Inc. - Warrant",first earnings report 2025-04-15 after the period ends,,,
+C,ANNAW,"AleAnna, Inc. - Warrant",first earnings report 2025-03-31 after the period ends,,,
+C,APACW,STONEBRIDGE ACQUISITION CORP W,first earnings report 2025-11-12 after the period ends,,,
+C,AREBW,AMERICAN REBEL HLDGS INC WT EX,security type: warrant,54.66666667,2023-07-19,2025-02-28
+C,ARIZR,ARISZ ACQ.CORP RT(DE),security type: right,4.798496241,2023-01-25,2024-02-29
+C,FUFUW,BitFuFu Inc. - Warrant,security type: warrant,17.67068273,2023-01-11,2025-02-28
+C,ASTSW,AST SPACEMOBILE INC WT EXP (DE,security type: warrant,6.683168317,2023-01-03,2024-09-27
+C,SOUNW,"SoundHound AI, Inc. - Warrant",security type: warrant,21.27926421,2023-01-03,2025-02-28
+C,AUROW,AURORA INNOVATION INC WT EXP 0,security type: warrant,9.074626866,2023-01-03,2025-02-28
+C,AVPTW,AVEPOINT INC WT EXP 09/18/26,security type: warrant,7.5,2023-01-04,2025-02-28
+C,BBLGW,BONE BIOLOGICS CORP WT EXP NEW,first earnings report 2025-02-26 falls in the period's final three months (after 2024-11-28),,,
+C,BGRYW,BERKSHIRE GREY INC WT EXP (DE),security type: warrant,7.158045433,2023-01-04,2023-07-19
+C,BITQ,Bitwise Crypto Industry Innovators ETF,security type: fund,4.36627907,2023-01-03,2025-02-28
+C,BREZW,BREEZE HLDGS ACQUISITION CORP,security type: warrant,6.228571429,2023-01-03,2024-05-28
+C,BRKHW,BURTECH ACQUISITION CORP WT EX,security type: warrant,13.25,2023-01-03,2024-12-17
+C,DFNSW,T3 Defense Inc. - Warrants,first earnings report 2026-04-15 after the period ends,,,
+C,BSGAR,BLUE SAFARI GROUP ACQUISITION,security type: right,7.769230769,2023-01-12,2023-04-13
+C,BSLKW,BOLT PROJS HLDGS INC WT EXP 08,security type: warrant,4.5,2023-01-03,2025-02-25
+C,BTMDW,BIOTE CORP WT EXP 05/26/27,security type: warrant,6.43742503,2023-01-04,2023-07-06
+C,BULLW,Webull Corporation - Warrants,security type: warrant,4.914,2023-01-03,2025-02-28
+C,BULZ,MicroSectors FANG & Innovation 3x Leveraged ETN,security type: fund,6.519160584,2023-01-03,2025-02-28
+C,KYIVW,Kyivstar Group Ltd. - Warrant,security type: warrant,7.631578947,2024-12-02,2025-02-28
+C,CDROW,"Codere Online Luxembourg, S.A. - Warrants",security type: warrant,4.253164557,2023-01-03,2025-02-28
+C,CIFRW,CIPHER MNG INC WT EXP 10/22/25,security type: warrant,12.66533333,2023-01-03,2025-02-28
+C,CLBTW,CELLEBRITE DI LTD WT EXP (ISR),security type: warrant,8.202219097,2023-01-03,2024-09-16
+C,CLSKW,"CleanSpark, Inc. - Warrant",security type: warrant,5.300333704,2024-11-04,2025-02-28
+C,CMPOW,COMPOSECURE INC WT EXP 08/15/2,security type: warrant,5.753739931,2023-01-03,2025-02-28
+C,CNCKW,Coincheck Group N.V. - Warrants,security type: warrant,7.000769231,2023-01-06,2025-02-28
+C,CONL,GraniteShares 2x Long COIN Daily ETF,security type: fund,4.997916667,2023-01-03,2025-02-28
+C,COOLW,CORNER GROWTH ACQUISITION CORP,security type: warrant,6.976744186,2023-01-03,2024-06-24
+C,CORZZ,"Core Scientific, Inc. - Tranche 2 Warrants",security type: other security (Nasdaq fifth letter Z),4.578512397,2024-03-13,2025-02-28
+C,CRPT,First Trust SkyBridge Crypto Industry and Digital Economy ETF,security type: fund,4.24925816,2023-01-03,2025-02-28
+C,CXAIW,CXApp Inc. - Warrant,first earnings report 2025-04-07 after the period ends,,,
+C,DAPP,VanEck Digital Transformation ETF,security type: fund,4.277978339,2023-01-03,2025-02-28
+C,DAVEW,Dave Inc.  - Warrants,security type: warrant,8.529616725,2023-01-03,2025-02-28
+C,DBGIW,DIGITAL BRANDS GROUP INC WT NE,security type: warrant,7.804878049,2023-01-06,2024-12-17
+C,DEFI,HASHDEX COMMODITIES TRUST HASH,security type: fund,4.431566502,2023-01-03,2025-02-28
+C,DFNS,T3 Defense Inc. - Common Stock,first earnings report 2026-04-15 after the period ends,,,
+C,DXYZ,Destiny Tech100 Inc. Common Stock,security type: fund,4.921212121,2024-03-26,2025-02-28
+C,OCSAW,Oculis Holding AG - Warrants,security type: warrant,27.93103448,2023-01-03,2025-02-27
+C,EDTX,EDTECHX HLDGS ACQUISITION CORP,probable SPAC shell (name and 10 dollar start; no shell merger found in SEC 8-K items),6.139805825,2023-01-04,2023-07-14
+C,EDTXU,,security type: unit,5.665346535,2023-01-30,2023-07-14
+C,FBL,GraniteShares 2x Long META Daily ETF,security type: fund,7.448325018,2023-01-03,2025-02-28
+C,NAMSW,NewAmsterdam Pharma Company N.V. - Warrant,security type: warrant,15.09541441,2023-01-03,2025-02-27
+C,FLDDW,"Fold Holdings, Inc. - Warrant",first earnings report 2025-05-15 after the period ends,,,
+C,FMIVW,FORUM MERGER IV CORP WT EXP 03,security type: warrant,6.5,2023-06-23,2023-07-14
+C,FNGG,Direxion Daily NYSE FANG+ Bull 2X ETF,security type: fund,5.460832258,2023-01-03,2025-02-28
+C,FNGO,"MicroSectors FANG  Index 2X Leveraged ETNs due January 8, 2038",security type: fund,6.297168607,2023-01-03,2025-02-28
+C,GBRGR,GOLDENBRIDGE ACQUISITION LTD U,security type: right,4.285714286,2023-01-03,2023-05-17
+C,GCLWW,GCL Global Holdings Ltd - Warrants,security type: warrant,6.088,2023-01-05,2025-02-28
+C,GCMGW,,security type: warrant,6,2023-01-03,2025-02-28
+C,GDSTW,GOLDENSTONE ACQUISITION LTD WT,security type: warrant,13.94029851,2023-01-04,2025-02-28
+C,GFAIW,GUARDFORCE AI CO. LTD USD WTS,security type: warrant,6.281407035,2023-01-03,2025-02-28
+C,GLT,GLATFELTER CORP COM,first earnings report 2025-02-06 falls in the period's final three months (after 2024-11-28),,,
+C,GPACW,GLOBAL PARTNER ACQUISITION COR,security type: warrant,10,2023-10-04,2024-07-08
+C,GREEL,VULCAN INFRAST & PWR INC,security type: fund,8.118181818,2023-01-03,2025-02-28
+C,GROMW,GROM SOCIAL ENTERPRISES INC WT,security type: warrant,6.857142857,2023-04-18,2024-08-08
+C,MRNOW,Murano Global Investments PLC - Warrants,security type: warrant,17.32876712,2023-01-10,2025-02-28
+C,HMACR,HAINAN MANASLU ACQUISITION COR,security type: right,5.314414414,2023-01-03,2023-08-17
+C,HOVRW,New Horizon Aircraft Ltd. - Warrant,first earnings report 2025-10-10 after the period ends,,,
+C,IMACW,IMAC HLDGS INC WT EXP 02/12/24,security type: warrant,120,2023-09-05,2024-02-09
+C,IPXXW,INFLECTION PT ACQUISITION CORP,security type: warrant,7.588235294,2023-07-17,2025-02-28
+C,JWACR,JUPITER WELLNESS ACQUISITION C,security type: right,4.635,2023-01-05,2023-06-01
+C,KAIIW,KISMET ACQUISITION TWO CORP US,security type: warrant,17,2023-01-03,2023-02-24
+C,KRNLW,KERNEL GROUP HLDGS INC WT EXP,security type: warrant,5.543859649,2023-01-03,2024-08-05
+C,KSICW,KADEM SUSTAINABLE IMPACT CORP,security type: warrant,14,2023-02-16,2023-03-15
+C,KYCHR,KEYARCH ACQUISITION CORP RT(CY,security type: right,4.104210526,2023-01-04,2024-04-04
+C,LCFYW,Locafy Limited - Warrant,security type: warrant,4.28708134,2023-01-10,2025-02-28
+C,LFAF,STONE RIDGE TR 2049 LONGEVITY,security type: fund,9.122526383,2024-09-16,2025-02-27
+C,LFAI,LifeX 2050 Longevity Income ETF,security type: fund,8.892513369,2024-09-16,2025-02-19
+C,LFAJ,STONE RIDGE TR 2051 LONGEVITY,security type: fund,8.961830424,2024-09-16,2025-02-24
+C,LFAL,STONE RIDGE TR 2053 LONGEVITY,security type: fund,9.017222348,2024-09-16,2025-02-27
+C,LFAN,STONE RIDGE TR 2054 LONGEVITY,security type: fund,8.988237831,2024-09-09,2025-02-24
+C,LFAE,STONE RIDGE TR STONE RIDGE 204,security type: fund,9.062862538,2024-09-16,2025-02-24
+C,LFAO,LifeX 2055 Longevity Income ETF,security type: fund,8.970384995,2024-09-16,2025-02-25
+C,LFAQ,STONE RIDGE TR 2056 LONGEVITY,security type: fund,8.952924814,2024-09-16,2025-02-27
+C,LFAU,STONE RIDGE TR 2058 LONGEVITY,security type: fund,8.921046261,2024-09-16,2025-02-25
+C,LFAV,STONE RIDGE TR 2059 LONGEVITY,security type: fund,9.053378896,2024-09-09,2025-02-25
+C,LFAR,STONE RIDGE TR 2057 LONGEVITY,security type: fund,8.936017703,2024-09-16,2025-02-27
+C,LIAJ,STONE RDGE TR STONE RDGE 2053,security type: fund,9.359586206,2024-09-16,2025-02-26
+C,LIAK,STONE RIDGE TR 2054 INFLATION,security type: fund,9.435735708,2024-09-09,2025-02-27
+C,LIAM,LifeX 2055 Inflation-Protected Longevity Income ETF,security type: fund,9.022550832,2024-09-16,2025-02-19
+C,LIAP,STONE RIDGE TR 2057 INFLATION,security type: fund,9.19824969,2024-09-16,2025-02-25
+C,LIAC,STONE RIDGE TR 2049 INFLATION,security type: fund,9.50978833,2024-09-16,2025-02-27
+C,LIAE,LifeX 2050 Inflation-Protected Longevity Income ETF,security type: fund,9.432704403,2024-09-16,2025-02-24
+C,LIAG,STONE RIDGE TR 2052 INFLATION,security type: fund,9.359196147,2024-09-16,2025-02-27
+C,LIAO,STONE RIDGE TR 2056 INFLATION,security type: fund,9.122898593,2024-09-16,2025-02-21
+C,LIAT,STONE RIDGE TR 2059 INFLATION,security type: fund,9.268842565,2024-09-09,2025-02-27
+C,LIAB,STONE RIDGE TR 2048 INFLATION,security type: fund,9.614852321,2024-09-16,2025-02-28
+C,LIAQ,STONE RIDGE TR 2058 INFLATION,security type: fund,9.15910284,2024-09-16,2025-02-25
+C,LIAF,STONE RIDGE TR 2051 INFLATION,security type: fund,9.282769215,2024-09-16,2025-02-19
+C,LUNRW,INTUITIVE MACHS INC WT EXP (CY,security type: warrant,12.32,2023-02-14,2025-02-28
+C,MCAER,MOUNTAIN CREST ACQUISITION COR,security type: right,5.75,2023-01-03,2023-02-17
+C,NVNIW,NVNI GROUP LTD,security type: warrant,4.192546584,2023-01-06,2025-02-28
+C,TLSIW,"TriSalus Life Sciences, Inc. - Warrant",security type: warrant,5.169462513,2023-11-15,2025-02-28
+C,NUAIW,"New Era Energy & Digital, Inc. - Warrants",first earnings report 2025-03-31 after the period ends,,,
+C,NIXXW,"NIXXY, INC. WARRANT",security type: warrant,5.740740741,2024-10-01,2025-02-28
+C,NNAVW,NEXTNAV INC WT EXP,security type: warrant,8.37804878,2023-01-03,2025-02-28
+C,NUBIW,NUBIA BRANDS INTL CORP WT EXP,security type: warrant,5.098039216,2023-01-25,2024-02-02
+C,NUKK,NUKKLEUS INC NEW COM NEW,first earnings report 2026-04-15 after the period ends,,,
+C,NVAWW,NOVA MINERALS LTD WARRANT EXP,security type: warrant,10,2024-07-24,2025-02-28
+C,NVDL,GraniteShares 2x Long NVDA Daily ETF,security type: fund,15.93866171,2023-01-03,2025-02-28
+C,NVDX,T-Rex 2X Long NVIDIA Daily Target ETF,security type: fund,4.170542636,2023-10-19,2025-02-28
+C,OCAXW,OCA ACQUISITION CORP WT EXP 01,security type: warrant,6.006666667,2023-01-03,2024-07-22
+C,ODVWW,OSISKO DEV CORP WT PUR COM EXP,fewer than 2 trading days after the start rule,,,
+C,OXBRW,Oxbridge Re Holdings Limited - Warrant,security type: warrant,14.04174573,2023-01-04,2025-02-28
+C,PDYNW,PALLADYNE AI CORP WT EXP 09/24,security type: warrant,7.2,2024-04-08,2025-02-28
+C,PTIR,GraniteShares 2x Long PLTR Daily ETF,security type: fund,5.781981982,2024-09-04,2025-02-28
+C,RGTIW,"Rigetti Computing, Inc.  - Redeemable warrants, each whole warrant exercisable for one Class A ordinary share at an exercise price of $11.50",security type: warrant,37.25,2023-01-03,2025-02-28
+C,SAIHW,SAIHEAT Limited - Warrant,security type: warrant,4.712837838,2023-01-11,2025-02-28
+C,SATO,Invesco Alerian Galaxy Crypto Economy ETF,security type: fund,4.075985037,2023-01-03,2025-02-28
+C,TENKU,TENX KEANE ACQ UNITS 1 SHS & 1,first earnings report 2024-12-27 falls in the period's final three months (after 2024-11-28),,,
+C,THCHW,TH INTL LTD WT EXP 12/15/2025,security type: warrant,4.662781016,2023-01-03,2023-06-26
+C,TQQQ,ProShares UltraPro QQQ,security type: fund,4.223224352,2023-01-03,2025-02-28
+C,TWNP,TWIN HOSPITALITY GROUP INC CL,first earnings report 2025-02-27 falls in the period's final three months (after 2024-11-28),,,
+C,USD,ProShares Ultra Semiconductors,security type: fund,6.276670574,2023-01-03,2025-02-28
+C,VCAR,SIMPLIFY EXCHANGE TRADED FDS S,security type: fund,4.112068966,2023-01-03,2024-12-31
+C,WEBL,Direxion Daily Dow Jones Internet Bull 3X ETF,security type: fund,4.485809683,2023-01-03,2025-02-28
+C,WGSWW,GENEDX HLDGS CORP WT EXP 07/22,security type: warrant,10.76538462,2023-01-10,2025-02-28
+C,WHLRL,"Wheeler Real Estate Investment Trust, Inc. - 7.00% Senior Subordinated Convertible Notes Due 2031",security type: note,4.888888889,2023-01-11,2025-02-27
+C,XBIOW,XENETIC BIOSCIENCES INC WT PUR,security type: warrant,15.66071429,2023-11-21,2024-07-16
+D,AMDL,GraniteShares 2x Long AMD Daily ETF,security type: fund,15.72396857,2025-04-01,2026-10-01
+D,AMDG,Leverage Shares 2X Long AMD Daily ETF,security type: fund,13.99536485,2025-04-01,2026-10-01
+D,AMUU,Direxion Daily AMD Bull 2X ETF,security type: fund,14.00187777,2025-04-01,2026-10-01
+D,APADR,A PARADISE ACQUISITION CORP RT,security type: right,5.882352941,2025-08-27,2026-05-07
+D,ASMG,Leverage Shares 2X Long ASML Daily ETF,security type: fund,4.198343195,2025-04-01,2026-10-01
+D,NANOW,Forge Nano Holdings Inc. - Warrants,security type: warrant,4.6,2025-04-03,2026-10-01
+D,ATMCW,ALPHATIME ACQUISITION CORP RED,security type: warrant,5.116788321,2025-04-07,2025-12-08
+D,ATMVR,ALPHAVEST ACQUISITION CORP RT,security type: right,4.565030146,2025-04-01,2025-12-09
+D,ATNFW,180 LIFE SCIENCES CORP WT PUR,security type: warrant,60.56338028,2025-04-01,2025-08-15
+D,AVAT,Avalanche Treasury Corporation - Class A Common Stock,first earnings report 2026-08-26 falls in the period's final three months (after 2026-07-01),,,
+D,BULZ,MicroSectors FANG & Innovation 3x Leveraged ETN,security type: fund,4.20756547,2025-04-01,2026-10-01
+D,BWET,Breakwave Tanker Shipping ETF,security type: fund,76.28162512,2025-04-01,2026-10-01
+D,CCCMW,COLUMBUS CIRCLE CAP CORP. I US,security type: warrant,5.733333333,2025-06-09,2025-07-30
+D,CCCXW,CHURCHILL CAP CORP X USD WTS 0,security type: warrant,11.16666667,2025-07-07,2026-02-13
+D,CCXIW,CHURCHILL CAP CORP XI USD WT 0,security type: warrant,6.322111111,2026-02-09,2026-10-01
+D,CHACR,CRANE HBR ACQUISITION CORP RT,security type: right,4.130434783,2025-05-19,2026-03-26
+D,CIFRW,CIPHER MNG INC WT EXP 10/22/25,security type: warrant,10.35443038,2025-04-01,2025-12-26
+D,CRMLW,Critical Metals Corp. - Warrants,security type: warrant,15.23809524,2025-04-01,2026-10-01
+D,CRWL,GraniteShares 2x Long CRWD Daily ETF,security type: fund,4.510029902,2025-04-01,2026-10-01
+D,CSHRW,CoinShares PLC - Warrants,security type: warrant,4.319097889,2025-04-01,2026-10-01
+D,DAVEW,Dave Inc.  - Warrants,security type: warrant,5.772402419,2025-04-01,2026-10-01
+D,DISTW,DISTOKEN ACQUISITION CORP USD,security type: warrant,4.06779661,2025-04-01,2025-06-12
+D,DLLL,GraniteShares 2x Long DELL Daily ETF,security type: fund,16.91478439,2025-04-01,2026-10-01
+D,DRTSW,Alpha Tau Medical Ltd. - Warrant,security type: warrant,20.1,2025-04-01,2026-10-01
+D,DTC,SOLO BRANDS INC,no trading day after first earnings report 2025-08-06,,,
+D,DYNXW,DYNAMIX CORP USD RED WTS 09/12,security type: warrant,7.891967731,2025-04-01,2025-08-26
+D,EOSEW,"Eos Energy Enterprises, Inc. - Warrant",security type: warrant,8.171446192,2025-04-01,2026-10-01
+D,EXYNW,"Exyn Technologies, Inc. - Warrant",first earnings report 2026-07-06 falls in the period's final three months (after 2026-07-01),,,
+D,FGMCR,FG MERGER II CORP RT,security type: right,4.15,2025-04-01,2026-07-17
+D,GRMLW,Greenland Mines Ltd - Warrants,security type: warrant,38.5,2025-04-01,2026-10-01
+D,GSRTR,GSR III ACQUISITION CORP CL A,security type: right,9.935483871,2025-04-01,2025-10-09
+D,HIBL,Direxion Daily S&P 500 High Beta Bull 3X ETF,security type: fund,4.354237932,2025-04-01,2026-10-01
+D,HOVRW,New Horizon Aircraft Ltd. - Warrant,security type: warrant,9.756097561,2025-04-01,2026-10-01
+D,INTW,GraniteShares 2x Long INTC Daily ETF,security type: fund,10.91386555,2025-04-01,2026-10-01
+D,IQMXW,IQM Quantum Computers Oyj - Warrants to purchase American Depositary Shares,security type: warrant,6.333333333,2025-06-02,2026-10-01
+D,KORU,Direxion Daily South Korea Bull 3X ETF,security type: fund,10.75471698,2025-04-01,2026-10-01
+D,LABU,Direxion Daily S&P Biotech Bull 3X ETF,security type: fund,4.114205669,2025-04-01,2026-10-01
+D,LINT,Direxion Daily INTC Bull 2X ETF,security type: fund,6.12660157,2025-11-19,2026-10-01
+D,LITX,Tradr 2X Long LITE Daily ETF,security type: fund,4.145744681,2026-01-27,2026-10-01
+D,LRCU,Tradr 2X Long LRCX Daily ETF,security type: fund,7.118336758,2025-08-19,2026-10-01
+D,MRNX,Defiance Daily Target 2X Long MRNA ETF,security type: fund,6.527413877,2026-02-04,2026-10-01
+D,MRVU,Direxion Daily MRVL Bull 2X ETF,security type: fund,6.125908581,2026-02-11,2026-10-01
+D,MULL,GraniteShares 2x Long MU Daily ETF,security type: fund,51.66157372,2025-04-01,2026-10-01
+D,MUU,Direxion Daily MU Bull 2X ETF,security type: fund,52.22072678,2025-04-01,2026-10-01
+D,MVLL,GraniteShares 2x Long MRVL Daily ETF,security type: fund,6.345423143,2025-04-01,2026-10-01
+D,NUAIW,"New Era Energy & Digital, Inc. - Warrants",security type: warrant,25.2962963,2025-04-01,2026-10-01
+D,NFEGP,New Fortress Energy Inc. - Series A Mandatorily Convertible Preferred Stock,security type: preferred,10.41666667,2026-09-14,2026-09-30
+D,NTWOW,Newbury Street II Acquisition Corp - Warrant,security type: warrant,5.053191489,2025-04-01,2026-10-01
+D,NVAWW,NOVA MINERALS LTD WARRANT EXP,security type: warrant,7.869674185,2025-04-01,2026-06-02
+D,OKTG,Leverage Shares 2X Long OKTA Daily ETF,security type: fund,4.06151743,2025-11-17,2026-10-01
+D,OPTXW,"Syntec Optics Holdings, Inc. - Warrant",security type: warrant,40.7554672,2025-04-03,2026-10-01
+D,OPI,Office Properties Income Trust - Common shares of beneficial interest,first earnings report 2026-08-05 falls in the period's final three months (after 2026-07-01),,,
+D,PELIR,PELICAN ACQUISITION CORP RT,security type: right,4.611111111,2025-06-12,2026-03-25
+D,RFAIU,RF Acquisition Corp II - Unit,security type: unit,4.364851958,2025-04-14,2026-09-30
+D,RMCOW,Royalty Management Holding Corporation - Warrant,security type: warrant,9.534161491,2025-04-16,2026-09-30
+D,RVMDW,"Revolution Medicines, Inc. - Warrant",security type: warrant,229.7029703,2025-04-01,2026-10-01
+D,SABSW,SAB BIOTHERAPEUTICS INC WT EXP,security type: warrant,14,2026-07-27,2026-10-01
+D,SEVNR,SEVEN HILLS RLTY TR,security type: right,280,2025-11-10,2025-12-04
+D,SHOT,RMG ML Sports Holdings - Class A Ordinary Shares,first earnings report 2026-08-12 falls in the period's final three months (after 2026-07-01),,,
+D,SNXX,Tradr 2X Long SNDK Daily ETF,security type: fund,5.385318306,2026-01-27,2026-10-01
+D,SOXL,Direxion Daily Semiconductor Bull 3X ETF,security type: fund,9.773608903,2025-04-01,2026-10-01
+D,SPKLW,SPARK I ACQUISITION CORP USD W,security type: warrant,6.403602402,2025-04-02,2026-10-01
+D,SVIIR,SPRING VY ACQUISITION CORP II,security type: right,8.997649824,2025-04-01,2025-10-20
+D,SVIIW,SPRING VY ACQUISITION CORP II,security type: warrant,12.52830189,2025-04-01,2025-10-20
+D,TDACW,Translational Development Acquisition Corp. - Warrants,security type: warrant,7.25,2025-05-20,2026-09-30
+D,TECL,Direxion Daily Technology Bull 3X ETF,security type: fund,4.147114885,2025-04-01,2026-10-01
+D,TSMU,GraniteShares 2x Long TSM Daily ETF,security type: fund,4.88852378,2025-04-01,2026-10-01
+D,TSMG,Leverage Shares 2X Long TSM Daily ETF,security type: fund,4.66906019,2025-04-01,2026-10-01
+D,TSMX,Direxion Daily TSM Bull 2X ETF,security type: fund,4.812204103,2025-04-01,2026-10-01
+D,USDEW,StablecoinX Inc. - Warrants,first earnings report 2026-08-14 falls in the period's final three months (after 2026-07-01),,,
+D,USDE,StablecoinX Inc. - Class A Common Stock,first earnings report 2026-08-14 falls in the period's final three months (after 2026-07-01),,,
+D,USD,ProShares Ultra Semiconductors,security type: fund,4.883116883,2025-04-01,2026-10-01
+D,VRTL,GraniteShares 2x Long VRT Daily ETF,security type: fund,4.83377524,2025-04-01,2026-10-01
+D,WLACW,WILLOW LANE ACQUISITION CORP U,security type: warrant,34.09648406,2025-04-01,2026-05-08

@@ -109,6 +109,7 @@ Earlier entry, superseded by the paragraph above: **NOT STARTED.** Created Octob
 
 ## Completed
 
+- **2026-11-05. Strategy run 1, how past bull market winners behaved, day by day (descriptive research, separate from the stacks).** Read `strategy/runs/strategy-run-1-deliverable.md` (source of record), its page `strategy/runs/strategy-run-1-deliverable.html` and `strategy/runs/strategy-run-1-trajectory.md`. Research input, not financial advice.
 - **2026-11-05. The speed release built, reviewed (group 1 PASS in round 3, group 2 PASS) and deployed as Fly release v10.** Record: `builds/build-c2-log.md`, "Michael's decisions for the speed release" to "Deploy (2026-11-05, 6:11 PM Central".
 - **2026-11-05. Thursday's session (second load day, v9) reviewed, read only, from a scheduled run.** Load test inconclusive (peak 86 accepted entries a minute); speed release proposed. Record: `builds/build-c2-log.md`, "Thursday 2026-11-05 session review".
 - **2026-11-04. Release B built, reviewed PASS, deployed as Fly release v9.** Record: `builds/build-c2-log.md`, "Release B" and "Release B review".

@@ -1,0 +1,79 @@
+period,ticker,name,exchange,exchange_source,multiple,start,end,flags,class
+A,AXU,Alexco Resource Corp Common Sh,NYSE American,Form 25-NSE 0001143313-22-000049 filed 2022-09-07 (NYSE AMERICAN LLC; Common Shares),5.235294118,2016-01-04,2020-01-31,,listed elsewhere
+A,BIMI,BOQI INTL MED INC COM (DE),unknown,no SEC company found,5.773243682,2016-01-04,2020-01-31,,"possible winner, exchange not confirmed"
+A,BTG,B2Gold Corp Common shares (Canada),NYSE American,"Nasdaq Trader list, 2026-11-05",4.194174757,2016-01-04,2020-01-31,,listed elsewhere
+A,ELA,Envela Corporation Common Stock,NYSE American,"Nasdaq Trader list, 2026-11-05",6.955128205,2016-01-04,2020-01-31,,listed elsewhere
+A,EBR,ELECTROBRAS CENTRAIS ADR (COM),unknown,no Form 25 and no current exchange at SEC,6.954198473,2016-01-04,2020-01-31,ADR; gap in price history; check: overnight price jump x3.39 on 2016-10-13,"possible winner, exchange not confirmed"
+A,ELMD,"Electromed, Inc. Common Stock",NYSE American,"Nasdaq Trader list, 2026-11-05",4.994871795,2016-01-04,2020-01-31,,listed elsewhere
+A,EVI,"EVI Industries, Inc.  Common Stock",NYSE American,"Nasdaq Trader list, 2026-11-05",6.417112299,2016-01-04,2020-01-31,,listed elsewhere
+A,JJE,BARCLAYS BK PLC IPATH SER B BL,Cboe,"Form 25-NSE 0001417835-20-000022 filed 2020-03-18 (Cboe BZX Exchange, Inc.; iPath US Treasury 10-year Bear ETN (DTYS))",7.344827586,2016-01-04,2020-01-22,delisted; gap in price history; check: overnight price jump x8.06 on 2018-11-21,listed elsewhere
+A,JJN,BARCLAYS BK PLC IPATH SER B BL,Cboe,"Form 25-NSE 0001417835-20-000022 filed 2020-03-18 (Cboe BZX Exchange, Inc.; iPath US Treasury 10-year Bear ETN (DTYS))",4.972083456,2016-01-05,2020-01-30,history starts late in Alpaca (company was exchange-registered earlier; ticker change or data gap); delisted; gap in price history,listed elsewhere
+A,LUNA,LUNA INNOVATIONS INC COM STK,unknown,no Form 25 and no current exchange at SEC,7.513761468,2016-01-04,2020-01-31,,"possible winner, exchange not confirmed"
+A,MGT,MGT CAPITAL INVESTMENTS INC CO,NYSE American,Form 25-NSE 0001143313-16-000118 filed 2016-10-28 (NYSE MKT LLC; Common Stock),10.36906854,2016-01-04,2016-10-19,delisted,listed elsewhere
+A,MPET,MAGELLAN PETE CORP COM STK NEW,NYSE American,Form 25-NSE 0001143313-24-000096 filed 2024-10-09 (NYSE AMERICAN LLC; Common Stock),26.41263941,2016-01-04,2017-02-09,acquired,listed elsewhere
+A,TMQ,Trilogy Metals Inc. Common Stock,NYSE American,"Nasdaq Trader list, 2026-11-05",7.556497175,2016-01-04,2020-01-31,,listed elsewhere
+A,NFEC,NF ENERGY SAVING CORPORATION.,unknown,no Form 25 and no current exchange at SEC,8.114060508,2016-01-04,2019-02-07,delisted,"possible winner, exchange not confirmed"
+A,OIL,BARCLAYS BK PLC IPATH SER B S&,Cboe,"Form 25-NSE 0001417835-20-000022 filed 2020-03-18 (Cboe BZX Exchange, Inc.; iPath US Treasury 10-year Bear ETN (DTYS))",8.276131045,2016-01-04,2020-01-31,gap in price history; check: overnight price jump x7.93 on 2018-11-16,listed elsewhere
+A,RADA,RADA ELECTRONIC INDUSTRIES LTD,unknown,no Form 25 and no current exchange at SEC,7.738095238,2016-01-04,2020-01-31,,"possible winner, exchange not confirmed"
+A,STRP,STRAIGHT PATH COMMUNICATIONS I,NYSE American,Form 25-NSE 0001143313-18-000010 filed 2018-03-06 (NYSE AMERICAN LLC; Class B common stock),10.77379553,2016-01-04,2018-02-27,acquired,listed elsewhere
+A,STXS,"Stereotaxis, Inc. Common Stock",NYSE American,"Nasdaq Trader list, 2026-11-05",5.710526316,2016-01-04,2020-01-31,gap in price history; check: overnight price jump x3.49 on 2019-09-06,listed elsewhere
+A,UWTI,CREDIT SUISSE AG NASSAU BRHVEL,NYSE Arca,"Form 25-NSE 0001143362-17-000049 filed 2017-05-26 (NYSE ARCA, INC.; Credit Suisse X-Links Long/Short Equity ETNs due February 19, 2020)",5.820330969,2016-01-04,2016-12-08,delisted; check: overnight price jump x9.19 on 2016-03-14,listed elsewhere
+A,XRA,EXETER RESOURCE CORPORATION,NYSE American,Form 25-NSE 0001143313-17-000037 filed 2017-08-03 (NYSE AMERICAN LLC; Common Stock),4.828660436,2016-01-04,2017-08-02,acquired,listed elsewhere
+B,ACY,AEROCENTURY CORP,unknown,no Form 25 and no current exchange at SEC,27.40909091,2020-04-01,2022-01-31,,"possible winner, exchange not confirmed"
+B,ALTM,,unknown,no SEC company found,4.287755102,2020-04-01,2022-01-31,,"possible winner, exchange not confirmed"
+B,ATTOF,,unknown,no SEC company found,4.192923781,2020-04-01,2022-01-31,,"possible winner, exchange not confirmed"
+B,BGI,BIRKS GROUP INC CL A COM STK (,other (OTC),"SEC submissions, current exchange (no Form 25 found)",10.51677244,2020-04-01,2022-01-31,,listed elsewhere
+B,BRG,BLUEROCK RESIDENTIAL GROWTH RE,NYSE American,Form 25-NSE 0001143313-22-000063 filed 2022-10-06 (NYSE AMERICAN LLC; Class A Common Stock),4.844890511,2020-04-01,2022-01-31,,listed elsewhere
+B,BRN,"Barnwell Industries, Inc. Common Stock",NYSE American,"Nasdaq Trader list, 2026-11-05",4.516666667,2020-04-01,2022-01-31,,listed elsewhere
+B,CADE,CADENCE BK COM,unknown,no Form 25 and no current exchange at SEC,4.995192308,2020-04-01,2022-01-31,,"possible winner, exchange not confirmed"
+B,CMBM,CAMBIUM NETWORKS CORP SHS (CYM,other (OTC),"SEC submissions, current exchange (no Form 25 found)",4.372513562,2020-04-01,2022-01-31,,listed elsewhere
+B,CMT,Core Molding Technologies Inc Common Stock,NYSE American,"Nasdaq Trader list, 2026-11-05",4.944444444,2020-04-01,2022-01-31,,listed elsewhere
+B,COHN,Cohen & Company Inc.,NYSE American,"Nasdaq Trader list, 2026-11-05",4.634146341,2020-04-01,2022-01-31,,listed elsewhere
+B,DCM,"DeFi Capital Markets, Inc. Common Stock",NYSE American,"Nasdaq Trader list, 2026-11-05",6.741854637,2020-04-01,2022-01-31,check: overnight price jump x3.99 on 2020-12-29,listed elsewhere
+B,DDS,"Dillard's, Inc. Common Stock",F,"Nasdaq Trader list, 2026-11-05",7.22026181,2020-04-01,2022-01-31,,listed elsewhere
+B,DNN,Denison Mines Corp Ordinary Shares (Canada),NYSE American,"Nasdaq Trader list, 2026-11-05",5.041666667,2020-04-01,2022-01-31,,listed elsewhere
+B,DTEAF,,unknown,no SEC company found,6.2,2020-04-01,2022-01-31,,"possible winner, exchange not confirmed"
+B,EMAN,EMAGIN CORPORATION NEW,NYSE American,Form 25-NSE 0001143313-23-000106 filed 2023-10-18 (NYSE AMERICAN LLC; Common Stock),5.566037736,2020-04-01,2022-01-31,,listed elsewhere
+B,FTSI,FTS INTL INC COM PAR $0.01,NYSE American,Form 25-NSE 0001143313-22-000018 filed 2022-03-07 (NYSE AMERICAN LLC; Class A Common Stock),5.855555556,2020-04-01,2022-01-31,check: overnight price jump x0.20 on 2020-08-24,listed elsewhere
+B,INTT,inTest Corporation Common Stock,NYSE American,"Nasdaq Trader list, 2026-11-05",4.193904072,2020-04-01,2022-01-31,,listed elsewhere
+B,LAZY,LAZYDAYS HLDGS INC COM,unknown,no Form 25 and no current exchange at SEC,8.547368421,2020-04-01,2022-01-31,,"possible winner, exchange not confirmed"
+B,LNW,"LIGHT & WONDER, INC. COMMON ST",other (OTC),"SEC submissions, current exchange (no Form 25 found)",6.40399556,2020-04-01,2022-01-31,,listed elsewhere
+B,LPI,LAREDO PETROLEUM INC (DE),unknown,no Form 25 and no current exchange at SEC,8.836842105,2020-04-01,2022-01-31,,"possible winner, exchange not confirmed"
+B,MPU,Mega Matrix Inc. Class A Ordinary Shares,NYSE American,"Nasdaq Trader list, 2026-11-05",27.40909091,2020-04-01,2022-01-31,,listed elsewhere
+B,MTBL,,unknown,no SEC company found,26.37667189,2020-04-01,2022-01-31,,"possible winner, exchange not confirmed"
+B,MXC,Mexco Energy Corporation Common Stock,NYSE American,"Nasdaq Trader list, 2026-11-05",4.353191489,2020-04-01,2022-01-31,,listed elsewhere
+B,NTZ,NATUZZI S P A SPONSORED ADR NE,other (null),"SEC submissions, current exchange (no Form 25 found)",22.78846154,2020-04-01,2022-01-31,ADR,listed elsewhere
+B,OBLN,,unknown,no SEC company found,4.236111111,2020-04-01,2021-06-15,delisted,"possible winner, exchange not confirmed"
+B,OIL,BARCLAYS BK PLC IPATH PURE BET,NYSE Arca,"Form 25-NSE 0001143362-22-000312 filed 2022-10-14 (NYSE ARCA, INC.; iPath Shiller CAPE ETN)",6.463942308,2020-04-01,2022-01-31,gap in price history; check: overnight price jump x4.76 on 2020-07-29,listed elsewhere
+B,PLYA,PLAYA HOTELS & RESORTS N V ORD,unknown,no Form 25 and no current exchange at SEC,4.310734463,2020-04-01,2022-01-31,,"possible winner, exchange not confirmed"
+B,PW,Power REIT (MD) Common Stock,NYSE American,"Nasdaq Trader list, 2026-11-05",6.252,2020-04-01,2022-01-31,,listed elsewhere
+B,REPX,"Riley Exploration Permian, Inc. Common Stock",NYSE American,"Nasdaq Trader list, 2026-11-05",4.468333333,2020-04-01,2022-01-31,check: overnight price jump x3.03 on 2020-10-21,listed elsewhere
+B,SBNY,SIGNATURE BANK,unknown,no Form 25 and no current exchange at SEC,4.041793817,2020-04-01,2022-01-31,,"possible winner, exchange not confirmed"
+B,SICP,,unknown,no SEC company found,11.68546638,2020-04-01,2022-01-31,,"possible winner, exchange not confirmed"
+B,SIM,"Grupo Simec, S.A.B. de C.V. American Depositary Shares",NYSE American,"Nasdaq Trader list, 2026-11-05",4.107424961,2020-04-01,2022-01-31,ADR,listed elsewhere
+B,SPI,,unknown,no SEC company found,4.64516129,2020-04-01,2022-01-31,check: overnight price jump x3.38 on 2020-09-23,"possible winner, exchange not confirmed"
+B,SPLP,STEEL PARTNERS HLDGS LP LTD PA,unknown,no Form 25 and no current exchange at SEC,6.169117647,2020-04-01,2022-01-31,partnership units,"possible winner, exchange not confirmed"
+B,SUNWQ,,unknown,no SEC company found,6.361111111,2020-04-01,2022-01-31,check: overnight price jump x3.97 on 2020-09-24,"possible winner, exchange not confirmed"
+B,TGB,Trekor Metals Limited Common Shares,NYSE American,"Nasdaq Trader list, 2026-11-05",7.64,2020-04-01,2022-01-31,,listed elsewhere
+B,TRXC,,unknown,no SEC company found,11.00543478,2020-04-01,2021-03-04,delisted,"possible winner, exchange not confirmed"
+B,TTM,TATA MOTORS LIMITED ADS,unknown,no Form 25 and no current exchange at SEC,7.535714286,2020-04-01,2022-01-31,ADR,"possible winner, exchange not confirmed"
+B,UEC,Uranium Energy Corp. Common Stock,NYSE American,"Nasdaq Trader list, 2026-11-05",4.72826087,2020-04-01,2022-01-31,,listed elsewhere
+B,USCR,"U.S. CONCRETE, INC.",unknown,no Form 25 and no current exchange at SEC,4.291763341,2020-04-01,2021-08-25,delisted,"possible winner, exchange not confirmed"
+B,UUUU,Energy Fuels Inc Ordinary Shares (Canada),NYSE American,"Nasdaq Trader list, 2026-11-05",5.365217391,2020-04-01,2022-01-31,,listed elsewhere
+B,YELLQ,,unknown,no SEC company found,6.525,2020-04-01,2022-01-31,,"possible winner, exchange not confirmed"
+B,ZDGE,"Zedge, Inc. Class B Common Stock ",NYSE American,"Nasdaq Trader list, 2026-11-05",8.788653801,2020-04-01,2022-01-31,,listed elsewhere
+C,AMAM,AMBRX BIOPHARMA INC COM,unknown,no Form 25 and no current exchange at SEC,13.02325581,2023-01-03,2024-03-06,acquired,"possible winner, exchange not confirmed"
+C,GMVWF,G MED INNOVATIONS HLDGS LTD US,unknown,no Form 25 and no current exchange at SEC,8.972691808,2023-01-03,2023-08-22,delisted,"possible winner, exchange not confirmed"
+C,LSF,"Laird Superfood, Inc. Common Stock",NYSE American,"Nasdaq Trader list, 2026-11-05",7.34861846,2023-01-03,2025-02-28,,listed elsewhere
+C,MOR,MORPHOSYS AG SPONSORED ADS (DE,unknown,no Form 25 and no current exchange at SEC,5.34084507,2023-01-03,2024-08-02,acquired; ADR,"possible winner, exchange not confirmed"
+C,MPTI,"M-tron Industries, Inc. Common Stock",NYSE American,"Nasdaq Trader list, 2026-11-05",4.395555556,2023-01-03,2025-02-28,,listed elsewhere
+C,MYO,Myomo Inc. Common Stock,NYSE American,"Nasdaq Trader list, 2026-11-05",9.657142857,2023-01-03,2025-02-28,,listed elsewhere
+C,UMAC,"Unusual Machines, Inc. Common Stock",NYSE American,"Nasdaq Trader list, 2026-11-05",6.410714286,2024-05-16,2025-02-28,new listing,listed elsewhere
+D,ANTE,AIRNET TECHNOLOGY INC,NYSE Arca,"Form 25-NSE 0001143362-20-000193 filed 2020-04-30 (NYSE ARCA, INC.; Market Vectors--Double Long Euro ETNs due April 30, 2020)",7.532467532,2025-04-01,2025-09-18,delisted,listed elsewhere
+D,NEWP,New Pacific Metals Corp. Common Shares,NYSE American,"Nasdaq Trader list, 2026-11-05",5.607142857,2025-04-01,2026-10-01,,listed elsewhere
+D,NWTN,NWTN INC. USD CL B ORD SHS (CY,unknown,no SEC company found,4.34375,2025-04-01,2025-08-25,delisted,"possible winner, exchange not confirmed"
+D,QMMM,QMMM HLDGS LTD SHS NEW US$0.00,unknown,no SEC company found,117.0588235,2025-04-01,2025-09-26,delisted,"possible winner, exchange not confirmed"
+D,SIF,"SIFCO Industries, Inc. Common Stock",NYSE American,"Nasdaq Trader list, 2026-11-05",8.053571429,2025-04-01,2026-10-01,,listed elsewhere
+D,SVT,SERVOTRONICS INCORPORATED,NYSE American,Form 25-NSE 0001143313-25-000040 filed 2025-07-01 (NYSE AMERICAN LLC; Common Stock),4.539651838,2025-04-04,2025-06-30,history starts late in Alpaca (company was exchange-registered earlier; ticker change or data gap); acquired; check: overnight price jump x3.70 on 2025-05-19,listed elsewhere
+D,TCGL,TECHCREATE GROUP LTD. USD CL A,other (OTC),"SEC submissions, current exchange (no Form 25 found)",38.40888889,2025-10-15,2026-01-30,new listing; missing earnings date; delisted,listed elsewhere
+D,THM,"International Tower Hill Mines, Ltd. Ordinary Shares (Canada)",NYSE American,"Nasdaq Trader list, 2026-11-05",4,2025-04-01,2026-10-01,,listed elsewhere
