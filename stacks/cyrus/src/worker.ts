@@ -15,7 +15,7 @@ import { CommandProcessor, type CommandBot } from "./commands.ts";
 import { DIGEST_PERIOD_MS, TradeDigest } from "./digest.ts";
 import { addToRunning, CONTROL_FEES, estimateFees, type FeesRunning } from "./fees.ts";
 import type { Governor } from "./governor.ts";
-import { Liquidator, SellGate } from "./sells.ts";
+import { Liquidator, SellGate, flattenLegs } from "./sells.ts";
 import { formatLiveList } from "./universe.ts";
 import type { Settings } from "./config.ts";
 import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
@@ -27,6 +27,7 @@ import { BusyPlaceholder } from "./strategy.ts";
 import { OrderUpdateHandler, type TradeUpdate } from "./order-stream.ts";
 import { EntryExpiry } from "./entry-expiry.ts";
 import { StopGapMeter, stopGapKey } from "./stop-gap.ts";
+import { ShadowLedger } from "./shadow-ledger.ts";
 import type { Trade } from "./stream.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
 import { computeDay, formatSummary, type StopGapDay } from "./summary.ts";
@@ -70,6 +71,8 @@ export interface WorkerDeps {
 
 // The speed release, item 3: the order sync runs every 10 seconds on every day (it was 30 on a normal day, 10 on a load day). With the
 // live order updates connected it is the backstop and reads only the last 10 minutes of orders (risk.ts).
+// Decision 2 of 2026-11-06: the day phase set when shares carried from an earlier day were sold (the summary's "carried" note).
+export const CARRIED_PHASE = "carried";
 export const SYNC_EVERY_MS = 10_000;
 // The speed release, item 8: the gate's cached account and positions are read every 10 seconds while the live order updates are
 // connected (they keep the positions current in between), and every 5 seconds, as before, while they are not. 10, not the
@@ -195,7 +198,13 @@ export class Worker {
   private sessionForSync: { day: DayRecord; closeAt: Date } | null = null;
   private lastRawSampleAt = 0;
   private rawSample: string | null = null;
-  private shadow: number[] = [];
+  // Decision 4 of 2026-11-06 (shadow only): the estimate's own book of cash and shares, and each loss-stop read's comparison.
+  private readonly shadowLedger = new ShadowLedger();
+  private shadowReconnects = 0;
+  private shadow: Array<{ diff: number; at: number; estimate: number; equity: number; sinceFillMs: number | null; sinceBaseMs: number | null }> = [];
+  private shadowNoEstimate = 0;
+  // Decision 1 of 2026-11-06: entries whose two exits the live updates reported lost, with the symbol, when, and the syncs tried.
+  private readonly lostExitsPending = new Map<string, { symbol: string; at: number; tries: number }>();
 
   constructor(deps: WorkerDeps) {
     this.d = deps;
@@ -302,21 +311,51 @@ export class Worker {
       syncMemory: this.syncMemory,
       governor: this.d.governor,
       log: (e: string, data?: Record<string, unknown>) => this.d.log?.("info", e, data),
-      onBareSale: (sale: { symbol: string; shares: number; takeProfit: number | null; atMs: number }) => this.stopGap.onSale(sale),
+      onBareSale: (sale: { symbol: string; shares: number; takeProfit: number | null; atMs: number; clientOrderId?: string }) => this.stopGap.onSale(sale),
       onRemainderSold: (symbol: string, shares: number) => void this.remainderSales.push({ symbol, shares }),
       onAccountRead: (account: { equity: number; cash: number }) => this.shadowEstimate(account),
     };
   }
 
-  // Item 5, SHADOW ONLY: the stack's own estimate of equity (cash plus each held position at the free feed's last print) beside
-  // Alpaca's equity at each loss stop read. Logged per minute; it triggers nothing.
+  // Item 5, SHADOW ONLY: the stack's own estimate of equity beside Alpaca's equity at each loss stop read. Logged per minute; it
+  // triggers nothing. Since decision 4 of 2026-11-06 the estimate comes from its own book (shadow-ledger.ts): cash and shares moved by
+  // the live fills, set from a quiet read, so cash and shares are from the same moment.
   private shadowEstimate(account: { equity: number; cash: number }): void {
-    const positions = this.view.cachedPositions();
-    if (!positions || !Number.isFinite(account.cash) || !Number.isFinite(account.equity)) return;
-    let value = account.cash;
-    for (const p of positions) value += p.qty * (this.lastPrices.get(p.symbol) ?? (p.qty > 0 ? p.marketValue / p.qty : 0));
-    this.shadow.push(value - account.equity);
+    if (!Number.isFinite(account.equity)) return;
+    this.shadowCheckStream();
+    const t = this.d.now().getTime();
+    const estimate = this.shadowLedger.estimate(this.lastPrices, t);
+    if (estimate === null) {
+      this.shadowNoEstimate++;
+      return;
+    }
+    const lastFill = this.shadowLedger.lastFillTime();
+    const base = this.shadowLedger.baseTime();
+    this.shadow.push({ diff: estimate - account.equity, at: t, estimate, equity: account.equity, sinceFillMs: Number.isFinite(lastFill) ? t - lastFill : null, sinceBaseMs: base !== null ? t - base : null });
     if (this.shadow.length > 1_000) this.shadow.shift();
+  }
+
+  // The book can only follow the fills while the live updates are connected: when they are not, or have reconnected since the last
+  // look (a fill may have been missed), it is dropped until the next quiet read.
+  private shadowCheckStream(): void {
+    const reconnects = this.orderStream?.reconnects?.() ?? 0;
+    if (!this.orderStreamLive() || reconnects !== this.shadowReconnects) {
+      this.shadowReconnects = reconnects;
+      this.shadowLedger.drop();
+    }
+  }
+
+  // A view refresh (account and positions asked together) is offered to the book; it is used only if no fill came near it.
+  private shadowRebase(startedMs: number, endedMs: number): void {
+    try {
+      this.shadowCheckStream();
+      if (!this.orderStreamLive()) return;
+      const account = this.view.cachedAccount();
+      const positions = this.view.cachedPositions();
+      if (account && positions) this.shadowLedger.offerBase(account.cash, positions, startedMs, endedMs);
+    } catch {
+      /* shadow logging must never break the view refresh */
+    }
   }
 
   private closeoutDeps() {
@@ -789,7 +828,7 @@ export class Worker {
     // Closes the live updates wrote to memory but could not write to the database yet are tried again (item 1). Never waited on.
     void this.d.store.retrySoonWrites?.().catch(() => undefined);
     this.sessionForSync = inSession ? { day: current, closeAt: day.closeAt } : null;
-    if (inSession && current.phases.armed) await this.refreshView(now);
+    if (inSession && current.phases.armed) await this.refreshView(now, date);
     // Release A, fix 1: a bare remainder found by the last sync brings the next one forward to its grace time (also by a timer, see
     // syncAt, so it does not wait for the next 5 second pass).
     const recheckDue = this.syncRecheckAt !== null && now.getTime() >= this.syncRecheckAt && !this.inflight.has("risk");
@@ -851,18 +890,41 @@ export class Worker {
         this.syncRecheckAt = synced.recheckAt;
         this.syncAt(synced.recheckAt);
       }
+      await this.lostExitsFollowUp(dayNow.tradeDate, synced.unprotected);
       await sweepEntriesWhileStopped(risk);
     });
+  }
+
+  // Decision 1 of 2026-11-06: after a sync, an entry reported with both exits lost that the sync neither sold nor found closed (Alpaca's
+  // order list may not show the cancel yet) gets another sync shortly: at most 3 more, 0.5, 1 and 2 seconds later. After that the
+  // 10 second sync is the backstop, as before.
+  private async lostExitsFollowUp(date: string, sold: string[]): Promise<void> {
+    if (this.lostExitsPending.size === 0) return;
+    const rows = await this.d.store.listOrders(date).catch(() => null);
+    const now = this.d.now().getTime();
+    let again: number | null = null;
+    for (const [id, p] of [...this.lostExitsPending]) {
+      const row = rows?.find((r) => r.clientOrderId === id);
+      if (sold.includes(p.symbol) || !row || row.closedAt || p.tries >= 3 || now - p.at > 10_000) {
+        this.lostExitsPending.delete(id);
+        continue;
+      }
+      const wait = [500, 1_000, 2_000][p.tries]!;
+      p.tries++;
+      again = again === null ? now + wait : Math.min(again, now + wait);
+    }
+    if (again !== null) this.syncAt(again, 0);
   }
 
   // The speed release (decision 3): runs the order sync at a given moment (plus a quarter second for the clocks), by a timer, so a
   // remainder left without a stop is sold about 3 seconds after Alpaca cancelled the stop rather than at the next 5 second pass. If
   // a sync is running at that moment, it tries again a quarter second later. Only in the session.
-  private syncAt(atMs: number): void {
+  // `slackMs` is added for the clocks (a grace counted from Alpaca's timestamp); 0 for "now" (decision 1 of 2026-11-06).
+  private syncAt(atMs: number, slackMs = 250): void {
     if (this.eventSyncAt !== null && this.eventSyncAt <= atMs) return;
     if (this.eventSyncTimer) (this.d.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>)))(this.eventSyncTimer);
     this.eventSyncAt = atMs;
-    const delay = Math.max(100, atMs + 250 - this.d.now().getTime());
+    const delay = Math.max(slackMs > 0 ? 100 : 0, atMs + slackMs - this.d.now().getTime());
     this.eventSyncTimer = (this.d.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms)))(() => this.syncFromTimer(), delay);
   }
 
@@ -906,6 +968,10 @@ export class Worker {
     const med = (xs: number[]) => (xs.length ? [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)]! : null);
     const shadow = this.shadow;
     this.shadow = [];
+    const noEstimate = this.shadowNoEstimate;
+    this.shadowNoEstimate = 0;
+    const worst = shadow.length ? shadow.reduce((a, b) => (Math.abs(b.diff) > Math.abs(a.diff) ? b : a)) : null;
+    const reserve = this.d.governor.takeMinuteReserve?.();
     const raw = this.rawSample;
     this.rawSample = null;
     return {
@@ -915,7 +981,10 @@ export class Worker {
       freesThisMinute: { n: frees.length, medianMs: med(frees), slowestMs: frees.length ? Math.max(...frees) : null },
       databaseCloses: { n: writes.length, medianMs: med(writes), slowestMs: writes.length ? Math.max(...writes) : null },
       entryExpiry: this.entryExpiry.counts,
-      lossStopShadow: shadow.length ? { n: shadow.length, meanDiff: Math.round((shadow.reduce((a, b) => a + b, 0) / shadow.length) * 100) / 100, maxAbsDiff: Math.round(Math.max(...shadow.map(Math.abs)) * 100) / 100 } : null,
+      // Decision 4 of 2026-11-06: with the read time of the largest gap, the time since the last fill and since the book's quiet read.
+      lossStopShadow: shadow.length || noEstimate ? { n: shadow.length, noEstimate, meanDiff: shadow.length ? Math.round((shadow.reduce((a, b) => a + b.diff, 0) / shadow.length) * 100) / 100 : null, maxAbsDiff: worst ? Math.round(Math.abs(worst.diff) * 100) / 100 : null, ...(worst ? { maxAt: new Date(worst.at).toISOString(), maxEstimate: Math.round(worst.estimate * 100) / 100, maxEquity: Math.round(worst.equity * 100) / 100, maxSinceFillMs: worst.sinceFillMs, maxSinceBaseMs: worst.sinceBaseMs } : {}), book: this.shadowLedger.counts } : null,
+      // Decision 7 of 2026-11-06: the request reserve's range this minute.
+      ...(reserve ? { reserveThisMinute: reserve } : {}),
       viewEveryMs: this.orderStreamLive() ? VIEW_EVERY_MS : VIEW_EVERY_NO_STREAM_MS,
       ...(raw ? { rawUpdate: raw } : {}),
     };
@@ -962,12 +1031,21 @@ export class Worker {
   // Keeps the cached broker view fresh while the session runs: account and positions every 10 seconds while the live order updates
   // are connected (they keep the positions current in between), every 5 seconds while they are not (2 requests); settings and clock
   // every 30 seconds. Skipped while Alpaca's request budget is down to the safety reserve.
-  private async refreshView(now: Date): Promise<void> {
+  private async refreshView(now: Date, date: string): Promise<void> {
     const t = now.getTime();
     try {
       // By the view's own age, so a read made earlier in the pass (the carried-position scan) is not repeated.
       if (this.view.fastAgeMs() >= (this.orderStreamLive() ? VIEW_EVERY_MS : VIEW_EVERY_NO_STREAM_MS) - 500 && this.d.governor.canSpend()) {
+        const readFrom = this.d.now().getTime();
         await this.view.refreshFast();
+        this.shadowRebase(readFrom, this.d.now().getTime());
+      }
+      // Decision 7 (2026-11-06): the request reserve follows the symbols open (held, or with an entry working). The gate counts them
+      // before each entry; this keeps the count current as positions close.
+      const positions = this.view.cachedPositions();
+      if (positions) {
+        const rows = await this.d.store.listOrders(date).catch(() => null);
+        if (rows) this.d.governor.setOpenSymbols(new Set([...positions.map((p) => p.symbol), ...rows.filter((o) => !o.closedAt && (o.status === "intent" || o.status === "submitted" || o.status === "filled")).map((o) => o.symbol)]).size);
       }
       if (t - this.lastViewSlow >= 30_000) {
         this.lastViewSlow = t;
@@ -1013,6 +1091,17 @@ export class Worker {
         this.d.log?.("info", "stop_cancelled_at_partial_take_profit", { symbol: info.symbol });
         this.syncAt(info.atMs + BARE_GRACE_MS);
       },
+      // Decision 1 of 2026-11-06: both exits of a filled entry ended with nothing filled. The order sync runs at once (not at the
+      // next 10 second sync); its missing-exit check sells the shares, with its guards (no sale while a close-out or any other sale
+      // runs, only the newest entry of the symbol, none if a sell is already working on it). Not while a sale or the close-out
+      // runs: the exits were most likely cancelled by that sale itself, and the check is off then anyway.
+      onExitsLost: (info) => {
+        this.syncMemory.mustLook.add(info.clientOrderId);
+        if (this.closingOut || this.liquidator.isLiquidating()) return;
+        this.d.log?.("info", "exits_lost", { symbol: info.symbol });
+        this.lostExitsPending.set(info.clientOrderId, { symbol: info.symbol, at: this.d.now().getTime(), tries: 0 });
+        this.syncAt(this.d.now().getTime(), 0);
+      },
       entryForGroup: (groupId) => [...this.syncMemory.lastSeen.values()].find((o) => o.groupId === groupId) ?? null,
       now: () => this.d.now().getTime(),
       log: (e, data) => this.d.log?.("info", e, data),
@@ -1032,9 +1121,17 @@ export class Worker {
     const o = u.order;
     for (const w of [...this.waiters]) if (w.symbols.has(o.symbol)) w.wake();
     const nowMs = this.d.now().getTime();
+    // Decision 4 of 2026-11-06 (shadow only): every fill moves the estimate's own book.
+    if ((u.event === "fill" || u.event === "partial_fill") && (o.side === "buy" || o.side === "sell")) {
+      try {
+        this.shadowLedger.onFill({ symbol: o.symbol, side: o.side, fillQty: u.fillQty ?? null, price: u.price ?? null, positionQty: u.positionQty, arrivedMs: nowMs });
+      } catch {
+        /* shadow logging must never break the live updates */
+      }
+    }
     if (o.side === "sell" && o.clientOrderId.startsWith("cyrus-x-") && u.event === "fill") {
       const px = o.filledAvgPrice ?? u.price ?? null;
-      if (px !== null && px > 0) this.stopGap.onOwnSellFill(o.symbol, px, u.atMs ?? nowMs);
+      if (px !== null && px > 0) this.stopGap.onOwnSellFill(o.clientOrderId, o.symbol, px, u.atMs ?? nowMs, nowMs);
     }
     // The trade digest's counts (messaging only): entries filled, never-filled entries cancelled, and exits by take-profit or stop.
     const entryOfOurs = o.side === "buy" && o.clientOrderId.startsWith("cyrus-") && !o.clientOrderId.startsWith("cyrus-x-");
@@ -1100,6 +1197,9 @@ export class Worker {
   private async carriedPhase(date: string): Promise<void> {
     this.closingOut = true;
     try {
+      // Decision 2 of 2026-11-06: the day began with shares held, so the summary may call an unmatched sale "carried".
+      // Not waited on: the sale never waits on the database.
+      void setPhase(this.d.store, date, CARRIED_PHASE, this.d.now().toISOString()).catch(() => undefined);
       const result = await closeOut(this.closeoutDeps(), date, { alert: this.notFlatAlertDate !== date, path: "carried" });
       await this.setNotFlat(!result.flat, result.remaining, date);
     } finally {
@@ -1113,16 +1213,37 @@ export class Worker {
     const [account, listed, positions] = await Promise.all([this.d.broker.getAccount(), this.d.broker.listOrdersPaged("all", etInstant(date, "00:00").toISOString(), 60), this.d.broker.listPositions()]);
     // Bring the stored entries up to date from the final fills before summarising (no sells: the day is over).
     await syncOrders(this.riskDeps(), day, { protect: false }).catch(() => undefined);
-    // Release A, fix 4: an entry Alpaca's listing left out (2 on 2026-11-04) is fetched by its client id, so the counts and the
-    // profit match the account.
+    // Release A, fix 4, and Michael's decision 2 of 2026-11-06: every entry Alpaca's listing left out (71 on 2026-11-06) is fetched by
+    // its client id, with no cap (the cap of 50 left 21 filled entries out on 2026-11-06), so the counts and the profit match the account.
     const stored = await this.d.store.listOrders(date);
     const listedIds = new Set(listed.orders.map((o) => o.clientOrderId));
-    const missing = stored.filter((s) => !listedIds.has(s.clientOrderId) && (s.alpacaOrderId || s.status === "filled" || s.status === "submitted")).slice(0, 50);
+    const missing = stored.filter((s) => !listedIds.has(s.clientOrderId) && (s.alpacaOrderId || s.status === "filled" || s.status === "submitted"));
     for (const s of missing) {
       const found = await this.d.broker.findOrderByClientId(s.clientOrderId).catch(() => null);
       if (found) listed.orders.push(found);
     }
     if (missing.length > 0) this.d.log?.("info", "summary_orders_missing_from_listing", { missing: missing.length });
+    // Decision 2 of 2026-11-06: sells are not stored, so a sell the listing left out (4 on 2026-11-06) is found from Alpaca's list of
+    // the day's fills: every fill names its order, and an order not known yet is fetched by that id.
+    let fillsCheck: { complete: boolean; found: number; stillMissing: number } | null = null;
+    try {
+      const fills = await this.d.broker.listFillsForDay(date);
+      const known = new Set(listed.orders.flatMap((o) => [o.id, ...flattenLegs(o).map((l) => l.id)]));
+      const unknown = [...new Set(fills.fills.map((f) => f.orderId).filter((id) => id && !known.has(id)))];
+      let found = 0;
+      for (const id of unknown) {
+        if (known.has(id)) continue; // a leg of an order fetched a moment ago
+        const o = await this.d.broker.getOrderById(id).catch(() => null);
+        if (!o) continue;
+        listed.orders.push(o);
+        for (const x of [o, ...flattenLegs(o)]) known.add(x.id);
+        found++;
+      }
+      fillsCheck = { complete: fills.complete, found, stillMissing: unknown.filter((id) => !known.has(id)).length };
+      if (unknown.length > 0) this.d.log?.("info", "summary_fills_check", fillsCheck);
+    } catch (err) {
+      this.d.log?.("warn", "summary_fills_check_failed", { error: (err as Error).message.slice(0, 120) });
+    }
     const result = computeDay(listed.orders);
     const fees = estimateFees(date, result.fills);
     const prev = await this.d.store.getControl<FeesRunning>(CONTROL_FEES).catch(() => null);
@@ -1143,6 +1264,8 @@ export class Worker {
       loadWindow: isLoadDay(day) ? loadWindow(day) : null,
       ...(isLoadDay(day) ? { loadExtras: { orderStream: this.orderStreamStats(), entryExpiry: { ...this.entryExpiry.counts } } } : {}),
       stopGap: this.stopGapDate === date ? this.stopGap.totals() : await this.d.store.getControl<StopGapDay>(stopGapKey(date)).catch(() => null),
+      carriedAtStart: Boolean(day.phases[CARRIED_PHASE]),
+      fillsCheck,
     });
     await this.say("trading", text);
     await setPhase(this.d.store, date, "summary", this.d.now().toISOString());

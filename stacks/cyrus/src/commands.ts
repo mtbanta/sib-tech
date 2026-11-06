@@ -9,7 +9,7 @@ import { decideLimits, decideLoad, limitLines, parseCommand, type NextSessionFin
 import { LOAD_PHASE, loadLine } from "./load-mode.ts";
 import type { Liquidator, Say } from "./sells.ts";
 import { CONTROL_COMMAND_CURSOR, CONTROL_STOP, setPhase, type DayRecord, type StopFlag, type Store } from "./store.ts";
-import { describeLimits } from "./limits.ts";
+import { MAX_TRADES_PER_MINUTE, MAX_TRADES_PER_MINUTE_LOAD_DAY, describeLimits } from "./limits.ts";
 import { centralClock, dayWord, etDate, sessionPhase } from "./time.ts";
 
 export type CommandBot = Pick<DiscordBot, "post" | "latestCommandMessageId" | "commandMessagesAfter">;
@@ -35,7 +35,7 @@ const HELP = [
   "`resume` clears the stop (approved limits are still needed)",
   "`flatten` stop, then sell everything now",
   "`limits` today's limits",
-  "`approve` or `approve cap` accept the next trading day's limits; `position 1500`, `loss 150`, `trades 20`, `cap 2` change one (`trades` is orders a minute, 1 to 100). Until the `Armed` message 5 minutes before the open you can change any limit; after it only tighten (lower) a limit, until the evening post.",
+  "`approve` or `approve cap` accept the next trading day's limits; `position 1500`, `loss 150`, `trades 20`, `cap 2` change one (`trades` is orders a minute, 1 to 100, or up to 150 on a load day: send `load on` first, or in the same message). Until the `Armed` message 5 minutes before the open you can change any limit; after it only tighten (lower) a limit, until the evening post.",
   "`load on` / `load off` make the next trading day a load day or a normal day (see line 5 of the limits); `load on` until the morning screen, 45 minutes before the open; after `Armed` only `load off`.",
   "You can send several commands in one message, one per line; I answer each line in one short reply and then show the limits once.",
 ].join("\n");
@@ -117,19 +117,29 @@ export class CommandProcessor {
   async handle(m: DiscordMessage): Promise<void> {
     const lines = m.content.split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== "");
     const multi = lines.length > 1;
+    // Michael's ruling of 2026-11-06: `load on` / `load off` lines are handled first, so `trades 150` in the same message is judged
+    // against the day's mode as that message sets it, whatever the order of the lines.
+    // The replies keep the order of the lines as written.
+    const isLoadLine = (l: string) => /^load\s+(on|off)$/i.test(l);
     const shown = multi ? lines.slice(0, 20) : [m.content];
+    const order = multi ? [...shown.keys()].sort((x, y) => Number(!isLoadLine(shown[x]!)) - Number(!isLoadLine(shown[y]!)) || x - y) : [0];
+    const slots: string[][] = shown.map(() => []);
     this.out = [];
     this.listDate = null;
     try {
-      for (const line of shown) {
+      for (const idx of order) {
+        const line = shown[idx]!;
         this.prefix = multi ? `**${line.slice(0, 40)}**: ` : "";
+        const mark = this.out.length;
         try {
           await this.handleLine({ ...m, content: line });
         } catch (err) {
           this.d.log?.("command_failed", { error: (err as Error).message });
           this.out.push(`${this.prefix}${multi ? "that" : "That"} command failed. Nothing may have changed, so check \`status\`.`);
         }
+        slots[idx] = this.out.splice(mark);
       }
+      this.out.push(...slots.flat());
       if (lines.length > shown.length) this.out.push(`I only read the first ${shown.length} lines; ${lines.length - shown.length} more were ignored.`);
       if (this.listDate) {
         const day = await this.d.store.getDay(this.listDate).catch(() => null);
@@ -266,8 +276,16 @@ export class CommandProcessor {
         }
         await setPhase(this.d.store, date, LOAD_PHASE, decision.value);
         this.d.log?.("load_mode", { date, value: decision.value, mode });
+        // Michael's ruling of 2026-11-06: above 100 orders a minute only while the load window is on. Switching it off lowers an
+        // approved value above 100 to 100 (lowering is always allowed); the gate caps at 100 from then on in any case.
+        let lowered = "";
+        if (decision.value !== "on" && latest.limits.maxTradesPerMinute > MAX_TRADES_PER_MINUTE) {
+          await this.d.store.updateDay(date, { limits: { ...latest.limits, maxTradesPerMinute: MAX_TRADES_PER_MINUTE } });
+          lowered = ` trades lowered from ${latest.limits.maxTradesPerMinute} to ${MAX_TRADES_PER_MINUTE} (above ${MAX_TRADES_PER_MINUTE}, up to ${MAX_TRADES_PER_MINUTE_LOAD_DAY}, is for load days only).`;
+          this.d.log?.("trades_lowered_for_load_off", { date, from: latest.limits.maxTradesPerMinute });
+        }
         // One short line (the mode line itself is in the list at the end of the reply).
-        await this.say(decision.reply.split("\n")[0]!);
+        await this.say(`${decision.reply.split("\n")[0]!}${lowered}`);
         return;
       }
       case "approve":

@@ -180,6 +180,9 @@ export interface LiquidateOptions {
   // stop's whole-account sale sells those shares as well. Before, the loss stop could wait about 20 seconds behind such a sale.
   priority?: boolean;
   yieldToPriority?: boolean;
+  // Michael's decision 3 of 2026-11-06 (measurement only): told about each sell the moment Alpaca has accepted it (before any wait
+  // for its fill), with its client id and that moment. It must not throw; an error in it is caught and ignored.
+  onSellSent?: (s: { symbol: string; qty: number; clientOrderId: string; atMs: number }) => void;
 }
 
 // What a sale did and when (release A, fix 5: written to the close-out's run-log event).
@@ -451,8 +454,15 @@ export class Liquidator {
           if (!(free > EPS)) continue; // something is still holding the shares; the next round cancels again
           const id = `cyrus-x-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-${round}`;
           const r = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: id, reason: o.reason });
-          if (r.status === "sent") (result.sold.push({ symbol: p.symbol, qty: free }), steps.sells.push({ symbol: p.symbol, qty: free, at: stamp() }));
-          else result.errors.push(`round ${round}: ${p.symbol}: ${r.reason}`);
+          if (r.status === "sent") {
+            result.sold.push({ symbol: p.symbol, qty: free });
+            steps.sells.push({ symbol: p.symbol, qty: free, at: stamp() });
+            try {
+              o.onSellSent?.({ symbol: p.symbol, qty: free, clientOrderId: id, atMs: this.d.now().getTime() });
+            } catch {
+              /* a measurement must never break a sale */
+            }
+          } else result.errors.push(`round ${round}: ${p.symbol}: ${r.reason}`);
         }
       }
 

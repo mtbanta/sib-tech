@@ -57,6 +57,25 @@ export class FakeBroker implements FullBroker {
     return this.orders.filter((o) => (status === "all" ? true : status === "open" ? open.has(o.status) : !open.has(o.status)));
   }
   async findOrderByClientId(id: string) { this.rec("findOrderByClientId", id); return this.orders.find((o) => o.clientOrderId === id) ?? null; }
+  // Decision 2 of 2026-11-06: an order by Alpaca's id (also an exit leg), and the day's fills. A test sets `fillsForDay` (or `extraOrders`,
+  // orders Alpaca knows but leaves out of every listing).
+  extraOrders: Order[] = [];
+  fillsForDay: Array<{ id: string; orderId: string; symbol: string; side: string; qty: number; price: number; at: string }> | null = null;
+  fillsFail = false;
+  async getOrderById(id: string) {
+    this.rec("getOrderById", id);
+    for (const o of [...this.orders, ...this.extraOrders]) {
+      if (o.id === id) return o;
+      const leg = o.legs.find((l) => l.id === id);
+      if (leg) return leg;
+    }
+    return null;
+  }
+  async listFillsForDay(date: string, _maxPages = 400) {
+    this.rec("listFillsForDay", date);
+    if (this.fillsFail) throw new Error("fills unavailable (test)");
+    return { fills: this.fillsForDay ?? [], complete: true, pages: 1 };
+  }
   async listOrdersPaged(status: "open" | "closed" | "all", afterIso: string, _maxPages = 20) {
     this.rec("listOrdersPaged", status, afterIso);
     const orders = await this.listOrders(status, afterIso);

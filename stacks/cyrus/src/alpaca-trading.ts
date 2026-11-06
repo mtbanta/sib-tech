@@ -345,6 +345,50 @@ export class AlpacaTrading {
     }
   }
 
+  // Michael's decision 2 of 2026-11-06 (the daily summary): one order by Alpaca's own id, with its exit legs. Null when Alpaca does not
+  // know it. Read only.
+  async getOrderById(orderId: string): Promise<Order | null> {
+    if (!/^[0-9a-fA-F-]{8,64}$/.test(orderId)) return null;
+    try {
+      const raw = (await this.read(`/v2/orders/${orderId}`, { nested: "true" })) as Json;
+      return parseOrder(raw);
+    } catch (err) {
+      if (err instanceof AlpacaError && err.status === 404) return null;
+      throw err;
+    }
+  }
+
+  // Decision 2 of 2026-11-06 (the daily summary): every fill of one trading day (Alpaca's account activities, oldest first, 100 a
+  // page), so an order the order listing left out can still be found by the id its fill names. Read only. Stops at `maxPages` and
+  // says so.
+  async listFillsForDay(date: string, maxPages = 400): Promise<{ fills: Array<{ id: string; orderId: string; symbol: string; side: string; qty: number; price: number; at: string }>; complete: boolean; pages: number }> {
+    const fills: Array<{ id: string; orderId: string; symbol: string; side: string; qty: number; price: number; at: string }> = [];
+    const seen = new Set<string>();
+    let token: string | null = null;
+    let pages = 0;
+    let complete = false;
+    while (pages < maxPages) {
+      const query: Record<string, string> = { date, direction: "asc", page_size: "100" };
+      if (token) query.page_token = token;
+      const page = (await this.read("/v2/account/activities/FILL", query)) as Json[];
+      pages++;
+      for (const f of page) {
+        const id = String(f.id ?? "");
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        fills.push({ id, orderId: String(f.order_id ?? ""), symbol: String(f.symbol ?? ""), side: String(f.side ?? ""), qty: num(f.qty), price: num(f.price), at: String(f.transaction_time ?? "") });
+      }
+      if (page.length < 100) {
+        complete = true;
+        break;
+      }
+      const last = String(page[page.length - 1]!.id ?? "");
+      if (!last || last === token) break; // cannot advance: do not claim completeness
+      token = last;
+    }
+    return { fills, complete, pages };
+  }
+
   private cents(x: number): string {
     return (Math.floor(x * 100 + 1e-9) / 100).toFixed(2);
   }

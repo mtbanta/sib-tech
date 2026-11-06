@@ -17,8 +17,8 @@ import { AlpacaError } from "./alpaca-trading.ts";
 import type { BrokerView } from "./broker-view.ts";
 import type { GateBroker } from "./broker.ts";
 import type { Governor } from "./governor.ts";
-import { MAX_TRADES_PER_MINUTE, checkEntry, type EntryContext } from "./limits.ts";
-import { LOAD_MAX_POSITION_USD, LOAD_WINDOW_SHARES, beforeLoadWindow, isLoadDay, loadWindow } from "./load-mode.ts";
+import { checkEntry, tradesCeiling, type EntryContext } from "./limits.ts";
+import { LOAD_MAX_POSITION_USD, LOAD_WINDOW_SHARES, beforeLoadWindow, isLoadDay, loadState, loadWindow } from "./load-mode.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, type NotFlatState, type OrderRecord, type StopFlag, type Store } from "./store.ts";
 import type { Signal } from "./strategy.ts";
 import { centralTime, etDate, minutesBetween } from "./time.ts";
@@ -189,6 +189,8 @@ export class OrderGate {
     // Load day (load-mode.ts): no entries before the load window, and at most 75 dollars an entry all day.
     if (beforeLoadWindow(day, now)) return this.refuse(date, symbol, `load day: entries start at ${centralTime(loadWindow(day)!.start)} Central`);
     const dayLimits = isLoadDay(day) ? { ...limits, maxPositionUsd: Math.min(limits.maxPositionUsd, LOAD_MAX_POSITION_USD) } : limits;
+    // Michael's ruling of 2026-11-06: the ceiling is 150 orders a minute only while a load day's window is switched on, else 100.
+    const ceiling = tradesCeiling(loadState(day) === "on");
 
     // Strategy work never spends Alpaca's last request headroom: if the snapshot would have to ask Alpaca for something
     // and the budget is down to the safety reserve, refuse before any request is made. After a failed refresh, wait a
@@ -245,6 +247,7 @@ export class OrderGate {
       minutesSinceOpen: minutesBetween(day.openAt, now),
       minutesToClose: minutesBetween(now, day.closeAt),
       tradesLastMinute: this.d.governor.tradesInLastMinute(),
+      tradesCeiling: ceiling,
       heldSymbols: held,
       dayStartEquity: day.dayStartEquity ?? account.lastEquity,
       equity: account.equity,
@@ -279,8 +282,10 @@ export class OrderGate {
     if (limitPrice !== undefined && !(limitPrice > 0 && limitPrice <= signal.price)) return this.refuse(date, symbol, "the limit price is not at or below the price seen");
     if (!(signal.stopPrice > 0 && signal.stopPrice < base && signal.takeProfitPrice > base && signal.stopPrice < signal.price && signal.takeProfitPrice > signal.price)) return this.refuse(date, symbol, "the exits are not on the right sides of the price");
 
-    // The governor: a slot under the per-minute cap (never above the fixed ceiling) and headroom under Alpaca's limit.
-    const slot = this.d.governor.admitTrade(Math.min(limits!.maxTradesPerMinute, MAX_TRADES_PER_MINUTE));
+    // Decision 7: the governor's reserve scales with the symbols open (held, or with an entry working), counting this entry.
+    this.d.governor.setOpenSymbols(new Set([...held, ...rows.filter((o) => isActive(o)).map((o) => o.symbol), symbol]).size);
+    // The governor: a slot under the per-minute cap (never above the ceiling in force) and headroom under Alpaca's limit.
+    const slot = this.d.governor.admitTrade(limits!.maxTradesPerMinute, ceiling);
     if (!slot.ok) return this.refuse(date, symbol, slot.reason);
 
     const n = rows.filter((o) => o.symbol === symbol).length + 1;

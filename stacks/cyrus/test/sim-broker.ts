@@ -82,8 +82,11 @@ export class SimBroker implements FullBroker {
   }
   sleep = async (ms: number): Promise<void> => this.advance(ms);
 
+  // Release 11 (decision 7): the refill a test leaves for the work it simulates (200 a minute; less to stand for routine requests that
+  // run beside it, which the simulation does not send itself).
+  refillPerMinute = 200;
   private refill(ms: number) {
-    this.tokens = Math.min(200, this.tokens + (ms * 200) / 60_000);
+    this.tokens = Math.min(200, this.tokens + (ms * this.refillPerMinute) / 60_000);
   }
   // One request against the bucket. `kind` copies what the real client does on a 429: reads retry 3 times with a
   // growing pause, safety writes (sells, cancels) wait and retry up to 8 times, and anything else fails at once.
@@ -131,6 +134,13 @@ export class SimBroker implements FullBroker {
     if (tp.status === "filled") tp.filledAt = new Date(this.simMs).toISOString();
     if (OPEN.has(stop.status)) this.setStatus(stop.id, "canceled");
     this.removeShares(o.symbol, qty, price);
+  }
+  // What Alpaca paper did 6 times on 2026-11-06: a cancel of the entry reached Alpaca as the entry filled; the entry stayed filled
+  // and BOTH exits were cancelled, leaving the shares with no exit at all.
+  cancelExitsAtFill(clientOrderId: string): void {
+    const o = this.orders.find((x) => x.clientOrderId === clientOrderId);
+    if (!o) throw new Error("no such entry");
+    for (const l of o.legs) if (OPEN.has(l.status)) this.setStatus(l.id, "canceled");
   }
   position(symbol: string) {
     return this.positionsMap.get(symbol);
@@ -262,6 +272,21 @@ export class SimBroker implements FullBroker {
     this.spend();
     this.findCalls++;
     return structuredClone(this.orders.find((o) => o.clientOrderId === id) ?? null);
+  }
+  async getOrderById(id: string): Promise<Order | null> {
+    this.spend();
+    for (const o of this.orders) {
+      if (o.id === id) return structuredClone(o);
+      const leg = o.legs.find((l) => l.id === id);
+      if (leg) return structuredClone(leg);
+    }
+    return null;
+  }
+  async listFillsForDay(_date: string, _maxPages = 400) {
+    this.spend();
+    const fills: Array<{ id: string; orderId: string; symbol: string; side: string; qty: number; price: number; at: string }> = [];
+    for (const o of this.all()) if (o.filledQty > 0) fills.push({ id: `fill-${o.id}`, orderId: o.id, symbol: o.symbol, side: o.side, qty: o.filledQty, price: o.filledAvgPrice ?? 0, at: o.filledAt ?? "" });
+    return { fills, complete: true, pages: 1 };
   }
   async submitEntry(e: EntryOrder): Promise<Order> {
     this.spend("plain");

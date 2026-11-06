@@ -2635,3 +2635,77 @@ Healthchecks: every ping succeeded (2:54:41, 2:55:11, 2:55:43, 2:56:16), and the
 6. **Monday's limits** were posted at 3:10 PM and wait for Michael. Without approval there is no trading Monday; Monday is a normal day unless he types `load on` before 7:45 AM.
 
 Paper only. Everything here is research input for a human decision, never an instruction to act.
+
+## Michael's decisions after the Friday review (2026-11-06, after the close)
+
+Approved as one release, proposed briefly here and then built without waiting:
+1. Lost exits: when the live updates show a filled buy with both exits cancelled, sell at once (target 1 to 2 seconds).
+2. The summary looks up every missing order, buys and sells, with no cap, and drops the false "carried" note.
+3. The 3 second sale measurement starts when the sale is sent.
+4. Fix the loss-stop estimate's timing. It stays in shadow; the 5 second check stays the main loss stop.
+5. Load days only: raise the orders-a-minute ceiling to 150 (Michael's ruling). Normal days stay at 100.
+6. Check first hand whether Alpaca's paid plans, including Algo Trader Plus, raise the 200 requests a minute limit. Record the source and date.
+7. The request reserve scales with open positions instead of a fixed 80: enough for a full emergency flatten of what is open (cancels plus sells), with a floor and a cap of 80. Set the formula from the simulated and real close-out data, show the math, and test that a full flatten at the maximum open positions never hits a rate limit.
+
+**Load-day pass rule for this test:** report the highest accepted orders a minute; it holds if there are no rate-limit errors, remaining requests never drop below the reserve in force, no safety sale is delayed, and the close-out is flat.
+
+Two review groups as before (money, messaging), up to two rounds each, pre-approved. Deploy outside market hours, before 7:30 AM Monday, only if group 1 passes. Post the "live" line with the exact load-day ceiling command. Then write `builds/monday-review-brief.md` and set a wait for 3:15 PM Monday.
+
+## Release 11 proposal (2026-11-06, evening; built straight after, per Michael)
+
+1. **Lost exits.** The live-update handler watches each bracket's two exits. When both have ended (cancelled, expired or rejected) with nothing filled, and the entry is filled, it asks the worker for an order sync at once instead of at the next 10 second sync. That sync is the one that already sells a held position with no live exit (the missing-exit check), with its existing guards: nothing while a close-out or any other sale runs, only the newest entry of the symbol, nothing if a sell is already working on it. Estimate: the sale is sent about 0.5 to 1.5 seconds after the cancel (one sync read, then the sale's own reads); paper filled Friday's six sales 0.3 to 1.7 seconds after receiving them.
+2. **Summary.** Every stored entry missing from Alpaca's listing is looked up by its id (no cap). Then Alpaca's list of the day's fills is read, and any order a fill belongs to that is still not known is fetched by its id, so missing sells are found too. The "carried position" note appears only when the day really began with shares held; otherwise unmatched sold shares (if any are still left) are named as not matched. The window line counts entries from Alpaca's records (cancelled unfilled, filled) instead of the cancel requests.
+3. **Stop-gap measurement.** The sell path reports each sale the moment Alpaca accepts it (its client id and time); the meter starts watching then, matches the fill by client id, and keeps fills that arrive first for a minute, so the order does not matter.
+4. **Shadow estimate.** Its own record of cash and shares, moved by every fill on the live updates, and re-based on an account-and-positions read only when no fill arrived within a second of that read. Logged each minute with the time of the largest gap, the time since the last fill and since the re-base. Still shadow only.
+5. **Ceiling 150 on load days.** `trades` accepts up to 150 while the next day is a load day (`load on` first; in one message `load on` is applied before `trades`), up to 100 otherwise. The gate and the governor cap at 150 only while the load window is switched on, 100 otherwise (including after `load off`, which also lowers an approved value above 100 to 100). The evening suggestion never carries more than 100 forward.
+6. **Paid plans (checked first hand, 2026-11-06).** No paid plan raises the trading limit on paper. Algo Trader Plus raises market data calls only (200 to 10,000 a minute). Alpaca Elite Smart Router raises trading calls to 1,000 a minute, but needs a 30,000 dollar live deposit and per-share pricing: a live-money step, a hard stop, not proposed. Sources:
+   - Alpaca forum, staff (Dan_Whitnable_Alpaca, 2024-05-02), https://forum.alpaca.markets/t/429-rate-limit-exceeded-when-creating-orders/14120 : "The Trading APIs (eg submit_order, get_account, etc) all have a rate limit of 200 calls/min." "A paid market data subscription does not increase the rate limit for the Trading APIs, only the market data calls." "About 150 orders can very realistically be placed every minute." Read 2026-11-06.
+   - Alpaca Elite page, https://alpaca.markets/elite : API calls limit "200 calls / minute" and "1000 calls / minute" (Elite Smart Router); "Deposit $30,000 to unlock". Nothing about paper. Read 2026-11-06.
+   - Also found by a research helper and not re-read by me: the forum thread https://forum.alpaca.markets/t/considering-alpaca-elite-have-questions/18680 (staff, 2026-04-10: 200 a minute, "applied per account"), and Alpaca's support page https://alpaca.markets/support/increase-api-rate-limit (December 2022: 1,000 a minute on request for a "non-retail" live account).
+7. **The reserve.** reserve = min(80, max(30, ceil(1.25 x (24 + open symbols)))), where open symbols = symbols held plus symbols with a working entry. Math:
+   - Simulated (the real sale code against the simulated broker with Alpaca's bucket of 200 refilling at 200 a minute; requests take no time, which overstates the drain; cancels of 0.2 and 7 seconds, sells held 16 seconds as paper did): the most any full flatten (close-out, loss stop, flatten command) drew the bucket below its refill was 11 + 1 per open position (12 at 1, 21 at 10, 41 at 30).
+   - Real close-outs: Wednesday about 70 requests (2 positions, a second round), Thursday about 40 (1), Friday about 45 (2), over 20 to 30 seconds, while the bucket refills about 70 to 100 in that time.
+   - Routine work running beside a flatten (loss stop read, view, sync): at most about 75 a minute measured, so about 13 in the 10 seconds a flatten's burst lasts.
+   - 11 + 13 = 24, plus 1 per open symbol, times 1.25 for margin: 30 with nothing open (the floor), 68 at 30 open symbols (the most the 30-symbol live list allows), 80 (the cap) from 40.
+   - The test: a full flatten of 30 positions starting at the reserve, with routine requests running beside it, in every path and both cancel speeds: no rate-limit answer.
+
+Money-touching: 1, 3 (the call sits in the sell path), 5, 7. Messaging: 2 and the summary and help wording of 5. Shadow only: 4. Paper only.
+
+## Release 11 (built 2026-11-06, evening; branch `release-11`; reviews below)
+
+Everything here is paper only, and research input for a human decision, never an instruction to act.
+
+### What changed, item by item
+
+| Item | Change | Files |
+| :-- | :-- | :-- |
+| 1. Lost exits | The live-update handler records each bracket's exits as they end. When both have ended (cancelled, expired or rejected), neither filled anything, and the entry filled, it reports it once. The worker then runs the order sync at once (not at the next 10 second sync), unless a sale or the close-out is running (that sale cancelled them, and the check is off then). The sync's existing missing-exit check sells, with its guards. If the sync still sees live exits (Alpaca's order list behind the update), it tries again 0.5, 1 and 2 seconds later, then leaves it to the 10 second sync. | `order-stream.ts`, `worker.ts` |
+| 2. Summary | Every stored entry missing from the listing is looked up by client id (no cap). Then Alpaca's list of the day's fills is read (100 a page) and any order a fill names that is still unknown is fetched by its id (new read-only calls `listFillsForDay`, `getOrderById`), so missing sells are found. If that check cannot run in full, the summary says so. The "carried position" note only when the day was marked carried (the carried-position sale sets the mark); otherwise unmatched shares are named as unmatched. The window line counts limit buys from Alpaca's records (filled, cancelled unfilled). The stop-gap line says "after a 3 second wait". | `worker.ts`, `summary.ts`, `alpaca-trading.ts`, `broker.ts` |
+| 3. Stop-gap measurement | The sell path (`Liquidator.flatten`, new `onSellSent`) reports each sell the moment Alpaca accepts it, with its client id; the remainder sale hands it to the meter then. The meter matches the fill by client id and keeps a fill that arrives first for a minute. | `sells.ts`, `risk.ts`, `stop-gap.ts`, `worker.ts` |
+| 4. Shadow estimate | A new book (`shadow-ledger.ts`): cash and shares moved by every fill on the live updates (each fill's own quantity is now parsed). It is set from a view refresh (account and positions asked together) only while unset, and only when no fill came within 3 seconds of that read; while set, reads only check it (largest cash gap counted). The live updates dropping or reconnecting drops it. The per-minute line gives the largest gap's time, both values, the time since the last fill and since the book was set. Shadow only: the loss stop still decides on Alpaca's equity every 5 seconds. | `shadow-ledger.ts`, `worker.ts`, `order-stream.ts`, `broker-view.ts` (a read-only getter) |
+| 5. Ceiling 150 on load days | `MAX_TRADES_PER_MINUTE_LOAD_DAY = 150`; `tradesCeiling(windowOn)`. `trades` accepts up to 150 while the day is a load day, else 100 (the reply says how to get 150). In one message `load` lines are handled first, and the replies keep the written order. The gate passes the ceiling in force (150 only while `load on`, else 100) to the entry check and the governor, and the governor never goes above 150. `load off` lowers an approved value above 100 to 100. The evening suggestion never carries more than 100. The limits list shows "the ceiling is 100 (150 on a load day)" or "150 on this load day". | `limits.ts`, `gate.ts`, `governor.ts`, `commands.ts`, `morning.ts` |
+| 6. Paid plans | Recorded in "Release 11 proposal", item 6. No code. | |
+| 7. Reserve | `reserveFor(n) = min(80, max(30, ceil(1.25 x (24 + n))))`. The gate tells the governor the open symbols (held, working, plus the entry it is about to send) before each entry; the worker does at each view refresh. Unknown means 80. Entries, the view refresh and the loss stop's retry keep the reserve in force. The per-minute line gives the reserve's range and the day's lowest "remaining minus the reserve in force" (for Monday's pass rule). | `governor.ts`, `gate.ts`, `worker.ts`, `risk.ts` |
+
+### Found while building
+
+- **The lost-exit report fired twice** when Alpaca repeated a cancel update for the same exit. Now once per bracket (the handler test caught it).
+- **A quiet read could overwrite a correct shadow book with a lagging position list.** The worker test, with Alpaca's position list lagging a fill by about 6 seconds, gave a 510 dollar gap. So reads now only check the book while it is set (see item 4). Whether Alpaca's position list lags, and by how long, is not measured; the book's checks (`maxCheckCashGap`) and the per-minute fields will show it.
+
+### Tests
+
+430 pass (407 before: 23 added in `test/release-11.test.ts`; 4 existing tests changed because the rule they encoded changed: a stored trades value is clamped to 150 when read, the window line's wording, a test that used a budget of 5 as "inside the reserve" now uses 0, and the shadow-estimate statistics test now gives the book its quiet read). Type check clean. Each change was taken out on its own and a test failed every time: 44 of 44 caught (after tightening four tests that first let a change through, and removing one line that could never run).
+
+| Change taken out | Test that fails |
+| :-- | :-- |
+| the handler's report; once per bracket; both exits; nothing filled | decision 1, handler |
+| the worker's sync at once; no delay; skip while a sale runs; the follow-up syncs | decision 1, worker (three tests) |
+| no lookup cap; the fills check; the carried mark; the carried note; the warning; the window counts | decision 2 (five tests) |
+| the sell path's report; the remainder sale's hand-over; matching by client id; early fills kept; the worker passing the id | decision 3 (four tests) |
+| the quiet skip; the quiet wait; fills move cash; check, never overwrite; the worker using the book; the worker feeding fills | decision 4 (two tests) |
+| 150; the override by day; the governor's cap; the entry check's cap; the gate only while on; `trades` judged by the day; load lines first; reply order; `load off` lowers; the suggestion capped | decision 5 (three tests) |
+| the formula; the floor; unknown means 80; `canSpend` uses the reserve; the gate's count and its +1; the worker's count of working entries; the retry | decision 7 (five tests) |
+
+**The flatten test (decision 7):** 30 positions of 2 shares (the most open symbols the live list allows), the bucket starting at the reserve (68), the refill cut to 125 a minute for routine work beside it, cancels of 0.2 and 7 seconds, sells held 16 seconds: the close-out, the loss stop's sale and the flatten command each finished with no rate-limit answer, and flat where their rounds allow.
+
+**Untested on paper until Monday:** the lost-exit sale's real timing (estimate: sent 0.5 to 1.5 seconds after the cancel, filled 0.3 to 1.7 seconds later); the fills listing's paging on a day of 10,000 fills or more (about 100 to 150 reads after the close); how the reserve behaves at 150 orders a minute (estimate: the bucket drains to the reserve and the governor holds entries back, so accepted orders settle near 100 to 110 a minute); whether Alpaca's position list lags fills.

@@ -31,14 +31,23 @@ export interface SummaryInput {
   } | null;
   // The speed release (Michael's decision 3): the shares sold 3 seconds after Alpaca cancelled their stop, against waiting 5 more seconds.
   stopGap?: StopGapDay | null;
+  // Michael's decision 2 of 2026-11-06: true when the day began with shares held from an earlier day (a carried position). Only then
+  // is a sold share with no buy today called carried.
+  carriedAtStart?: boolean;
+  // Decision 2 of 2026-11-06: the check of the order list against Alpaca's list of the day's fills (orders the listing left out are
+  // fetched by the id their fill names). Null when it could not run.
+  fillsCheck?: { complete: boolean; found: number; stillMissing: number } | null;
 }
 
-// A load day: one line with the window's settings and one with what the live order updates did.
-export function loadExtraLines(x: NonNullable<SummaryInput["loadExtras"]>): string[] {
+// A load day: one line with the window's settings and one with what the live order updates did. Since decision 2 of 2026-11-06 the
+// window's entries are counted from Alpaca's records (`window`: filled, and cancelled with nothing filled), not from the cancel
+// requests (on 2026-11-06, 23 of the 728 cancel requests met an entry that had just filled).
+export function loadExtraLines(x: NonNullable<SummaryInput["loadExtras"]>, window?: { sent: number; filled: number; cancelledUnfilled: number }): string[] {
   const s = x.orderStream;
   const e = x.entryExpiry;
+  const counts = window ? `. Of ${window.sent} limit buys: ${window.filled} filled, ${window.cancelledUnfilled} cancelled unfilled${e?.failed ? `, ${e.failed} cancels failed` : ""}` : e ? `. Unfilled and cancelled: ${e.cancelled} of ${e.scheduled} (${e.filledFirst} filled before the cancel${e.failed ? `, ${e.failed} cancels failed` : ""})` : "";
   return [
-    `- window settings: ${loadWindowRules()}${e ? `. Unfilled and cancelled: ${e.cancelled} of ${e.scheduled} (${e.filledFirst} filled before the cancel${e.failed ? `, ${e.failed} cancels failed` : ""})` : ""}`,
+    `- window settings: ${loadWindowRules()}${counts}`,
     s ? `- live order updates: ${s.events} received, ${s.freed} symbols freed${s.medianFreeMs !== null ? `, typically ${s.medianFreeMs} ms after the exit filled` : ""}, ${s.reconnects} reconnects` : "- live order updates: not connected",
   ];
 }
@@ -56,9 +65,9 @@ export interface StopGapDay {
 }
 
 export function stopGapLine(g: StopGapDay): string {
-  if (g.sales === 0) return "Shares left without a stop (sold 3 seconds after Alpaca cancelled the stop): none today.";
+  if (g.sales === 0) return "Shares left without a stop (sold after a 3 second wait from Alpaca's cancel of the stop): none today.";
   const sign = g.dollarsVsWaiting >= 0 ? "+" : "-";
-  return `Shares left without a stop, sold 3 seconds after Alpaca cancelled the stop: ${g.sales} sales, ${g.shares} shares; ${g.wouldHaveFilled} would have filled at their take-profit within the next 5 seconds; selling at once came out ${sign}${Math.abs(g.dollarsVsWaiting).toFixed(2)} dollars against waiting 5 seconds${g.unmeasured ? ` (${g.unmeasured} not measured)` : ""}. Estimate from the free feed's prints.`;
+  return `Shares left without a stop, sold after a 3 second wait from Alpaca's cancel of the stop: ${g.sales} sales, ${g.shares} shares; ${g.wouldHaveFilled} would have filled at their take-profit within the next 5 seconds; selling at once came out ${sign}${Math.abs(g.dollarsVsWaiting).toFixed(2)} dollars against waiting 5 seconds${g.unmeasured ? ` (${g.unmeasured} not measured)` : ""}. Estimate from the free feed's prints.`;
 }
 
 const money = (x: number) => `${x >= 0 ? "+" : "-"}${Math.abs(x).toFixed(2)}`;
@@ -205,6 +214,22 @@ export function partLines(label: string, rows: OrderRecord[], alpacaOrders: Orde
   ];
 }
 
+// Decision 2 of 2026-11-06: the load window's limit buys, counted from Alpaca's records.
+export function windowLimitCounts(rows: OrderRecord[], alpacaOrders: Order[]): { sent: number; filled: number; cancelledUnfilled: number } {
+  const byId = new Map(alpacaOrders.map((o) => [o.clientOrderId, o]));
+  let sent = 0;
+  let filled = 0;
+  let cancelledUnfilled = 0;
+  for (const r of rows) {
+    const o = byId.get(r.clientOrderId);
+    if (!o || o.type !== "limit") continue;
+    sent++;
+    if (o.filledQty > 0) filled++;
+    else if (o.status === "canceled" || o.status === "expired") cancelledUnfilled++;
+  }
+  return { sent, filled, cancelledUnfilled };
+}
+
 export function formatSummary(i: SummaryInput): string {
   const head = `**Daily summary for ${i.day.tradeDate}**`;
   if (!i.day.isTradingDay) return `${head}\nNot a trading day.`;
@@ -233,7 +258,8 @@ export function formatSummary(i: SummaryInput): string {
     ...shown.map((s) => `- ${s.symbol}: bought ${s.bought}, sold ${s.sold}, ${money(s.net)}`),
     bySize.length > shown.length ? `- ...and ${bySize.length - shown.length} more symbols` : "",
     `Profit or loss: ${money(result.realized)} from closed trades${change === null ? "" : `; account equity ${i.day.dayStartEquity!.toFixed(2)} to ${i.account.equity.toFixed(2)} (${money(change)})`}`,
-    result.unmatchedSellShares > 1e-9 ? `Note: ${result.unmatchedSellShares} shares were sold that were bought before today (a carried position), with no profit counted for them.` : "",
+    // Decision 2 of 2026-11-06: "carried" only when the day really began with shares held; otherwise the shares are named as unmatched.
+    result.unmatchedSellShares > 1e-9 ? (i.carriedAtStart ? `Note: ${result.unmatchedSellShares} shares were sold that were bought before today (a carried position), with no profit counted for them.` : `Note: ${result.unmatchedSellShares} sold shares could not be matched to a buy Alpaca showed for today, so no profit is counted for them.`) : "",
     speed ? `Speed (decision to Alpaca accepting the order, ${speed.n} orders): typical ${speed.median} ms, 95th percentile ${speed.p95} ms, slowest ${speed.slowest} ms` : "Speed: no orders were sent",
     ...feeLines(i.day.tradeDate, fees, i.feesRunning),
     i.peak ? `Borrowing used: peak exposure ${i.peak.exposureUsd.toFixed(0)} dollars, ${i.peak.ratio.toFixed(2)} times equity (approved cap ${i.day.limits.borrowingCap})` : "Borrowing used: no entries, none",
@@ -243,12 +269,13 @@ export function formatSummary(i: SummaryInput): string {
       ? [
           "**Load day**",
           ...partLines(`Load window (${centralClock(i.loadWindow.start)} to ${centralClock(i.loadWindow.end)})`, i.stored.filter((r) => r.createdAt && Date.parse(r.createdAt) >= i.loadWindow!.start.getTime() && Date.parse(r.createdAt) < i.loadWindow!.end.getTime()), i.alpacaOrders),
-          ...(i.loadExtras ? loadExtraLines(i.loadExtras) : []),
+          ...(i.loadExtras ? loadExtraLines(i.loadExtras, windowLimitCounts(i.stored.filter((r) => r.createdAt && Date.parse(r.createdAt) >= i.loadWindow!.start.getTime() && Date.parse(r.createdAt) < i.loadWindow!.end.getTime()), i.alpacaOrders)) : []),
           ...partLines("Rest of the day", i.stored.filter((r) => !(r.createdAt && Date.parse(r.createdAt) >= i.loadWindow!.start.getTime() && Date.parse(r.createdAt) < i.loadWindow!.end.getTime())), i.alpacaOrders),
         ]
       : []),
     `Refused entries: ${refusedTotal}${refusedTotal ? ` (${[...reasons].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([r, n]) => `${r.slice(0, 70)}: ${n}`).join("; ")})` : ""}`,
     i.listComplete === false ? "**Warning: the day's order list was longer than I could read, so the totals above may be incomplete.**" : "",
+    i.fillsCheck === null || (i.fillsCheck && (!i.fillsCheck.complete || i.fillsCheck.stillMissing > 0)) ? "**Warning: I could not check every order against Alpaca's list of today's fills, so orders Alpaca's order list left out may be missing from the totals above.**" : "",
     `Stop flag: ${i.stop?.on ? `ON (${i.stop.reason})` : "off"}. End of day: ${i.flat === null ? "flat status not checked" : i.flat ? "flat" : "**NOT FLAT**"}.`,
   ];
   // The footer rule (discord.ts): the daily summary is research input for Michael's next decisions.

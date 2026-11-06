@@ -41,6 +41,8 @@ export interface TradeUpdate {
   atMs: number | null;
   // The price of this fill (fill and partial_fill events), or null.
   price?: number | null;
+  // The shares of this fill alone (fill and partial_fill events), or null. For the shadow estimate's book (shadow-ledger.ts).
+  fillQty?: number | null;
   // The message as Alpaca sent it (one a minute is kept in the statistics, item 10). It holds order data only, no keys.
   raw?: Record<string, unknown>;
 }
@@ -52,7 +54,8 @@ export function parseTradeUpdate(data: Record<string, unknown>): TradeUpdate | n
   const positionQty = pq === undefined || pq === null || pq === "" ? null : Number(pq);
   const at = typeof data.timestamp === "string" ? Date.parse(data.timestamp) : NaN;
   const px = data.price === undefined || data.price === null || data.price === "" ? NaN : Number(data.price);
-  return { event: data.event, order, positionQty: Number.isFinite(positionQty as number) ? (positionQty as number) : null, atMs: Number.isFinite(at) ? at : null, price: Number.isFinite(px) ? px : null, raw: data };
+  const fq = data.qty === undefined || data.qty === null || data.qty === "" ? NaN : Number(data.qty);
+  return { event: data.event, order, positionQty: Number.isFinite(positionQty as number) ? (positionQty as number) : null, atMs: Number.isFinite(at) ? at : null, price: Number.isFinite(px) ? px : null, fillQty: Number.isFinite(fq) ? fq : null, raw: data };
 }
 
 export type OrderStreamStatus = "connecting" | "authenticating" | "live" | "reconnecting" | "auth_failed" | "stopped";
@@ -189,6 +192,10 @@ export interface FreeDeps {
   // Group 1 review, round 1: an exit leg of a filled entry of ours was cancelled, expired or rejected. The worker has the next sync
   // look that entry up even if it is older than the sync's 10 minute read (risk.ts SyncMemory.mustLook).
   onExitEnded?: (clientOrderId: string) => void;
+  // Michael's decision 1 of 2026-11-06: BOTH exits of a filled entry of ours have ended (cancelled, expired or rejected) and neither
+  // filled anything, so its shares have no exit at all. (On 2026-11-06 paper did this 6 times: the load window's 5 second cancel
+  // reached Alpaca as the entry filled.) The worker runs the order sync at once; its missing-exit check sells the shares.
+  onExitsLost?: (info: { clientOrderId: string; symbol: string; atMs: number }) => void;
   // The entry (Alpaca's parent order, with its fill) for a group id, from the order sync's latest view, if the stream has not seen it.
   entryForGroup?: (groupId: string) => Order | null;
   now: () => number;
@@ -220,6 +227,10 @@ export class OrderUpdateHandler {
   private readonly filledIds = new Set<string>();
   private readonly entries = new Map<string, EntryInfo>(); // by group id
   private readonly exitLegs = new Map<string, Map<string, number>>(); // group id -> leg id -> filled qty
+  // Decision 1 of 2026-11-06: group id -> the exit legs that have ended (cancelled, expired or rejected), with what each filled.
+  private readonly endedLegs = new Map<string, Map<string, number>>();
+  private readonly lostReported = new Set<string>(); // group ids already reported
+  readonly lostExits = { reported: 0 };
   private readonly d: FreeDeps;
 
   constructor(deps: FreeDeps) {
@@ -283,6 +294,17 @@ export class OrderUpdateHandler {
     if ((u.event === "canceled" || u.event === "expired" || u.event === "rejected") && g) {
       const info = this.entry(g);
       if (info && info.filledQty > 0) this.d.onExitEnded?.(info.clientOrderId);
+      // Decision 1 of 2026-11-06: a bracket has two exits. Both ended, nothing filled by either (nor by any other exit of the group),
+      // and the entry filled: the shares have no exit. Reported once per group.
+      const ended = this.endedLegs.get(g) ?? new Map<string, number>();
+      ended.set(o.id, o.filledQty);
+      this.endedLegs.set(g, ended);
+      const exitFilled = [...(this.exitLegs.get(g) ?? new Map<string, number>()).values()].reduce((a, b) => a + b, 0) + [...ended.values()].reduce((a, b) => a + b, 0);
+      if (info && info.filledQty > 0 && ended.size === 2 && exitFilled <= 1e-9 && !this.lostReported.has(g)) {
+        this.lostReported.add(g);
+        this.lostExits.reported++;
+        this.d.onExitsLost?.({ clientOrderId: info.clientOrderId, symbol: o.symbol, atMs: u.atMs ?? this.d.now() });
+      }
     }
     // A bracket's stop cancelled while the take-profit has partly filled: shares are left without a stop (release A, fix 1). Only
     // that case is reported: a stop cancelled because the take-profit filled completely, or by one of our own sales, is not.
@@ -328,6 +350,7 @@ export class OrderUpdateHandler {
       }
       this.entries.delete(g);
       this.exitLegs.delete(g);
+      this.endedLegs.delete(g);
     }
     this.d.log?.("order_stream_freed", { symbol: o.symbol, closedRecord: closed, ms: u.atMs !== null ? this.d.now() - u.atMs : null });
   }

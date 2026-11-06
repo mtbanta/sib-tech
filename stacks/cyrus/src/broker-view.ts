@@ -90,6 +90,11 @@ export class BrokerView {
     return this.positions;
   }
 
+  // The account as last read, or null before the first read. For the shadow loss-stop estimate's book (read only).
+  cachedAccount(): Account | null {
+    return this.account;
+  }
+
   fastAgeMs(): number {
     return this.account && this.positions ? this.now() - this.fastAt : Infinity;
   }

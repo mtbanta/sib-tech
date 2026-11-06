@@ -6,7 +6,7 @@
 // account is never left at a raised cap overnight. This file builds the day record, the messages and the
 // decisions (pure where it can be).
 import type { Broker } from "./broker.ts";
-import { LIMIT_NAMES, MAX_TRADES_PER_MINUTE, SUGGESTED_LIMITS, applyOverride, describeLimits, loosened, type LimitName, type Limits } from "./limits.ts";
+import { LIMIT_NAMES, MAX_TRADES_PER_MINUTE, MAX_TRADES_PER_MINUTE_LOAD_DAY, SUGGESTED_LIMITS, applyOverride, describeLimits, loosened, type LimitName, type Limits } from "./limits.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
 import { NOT_ADVICE, PAPER_ONLY } from "./discord.ts";
 import { LOAD_MAX_POSITION_USD, LOAD_NOTE_PHASE, LOAD_PHASE, LOAD_SWITCH_DEADLINE_MIN, isLoadDay, loadLine, loadState, loadWindow, loadWindowRules } from "./load-mode.ts";
@@ -28,6 +28,9 @@ export async function suggestedFromHistory(store: Store, date: string): Promise<
     (limits as unknown as Record<string, unknown>)[LIMIT_KEY[name]] = source.limits[LIMIT_KEY[name]];
     carried[name] = source.tradeDate;
   }
+  // Michael's ruling of 2026-11-06: above 100 orders a minute only on a load day, and a day starts normal, so a load day's 150 is never
+  // carried forward (Michael types `trades 150` after `load on`).
+  limits.maxTradesPerMinute = Math.min(limits.maxTradesPerMinute, MAX_TRADES_PER_MINUTE);
   return { limits, carried };
 }
 
@@ -111,7 +114,7 @@ export function limitLines(day: DayRecord): string {
   return [
     `1. position: largest single position ${l.maxPositionUsd} dollars (${mark("position")})${from("position")}`,
     `2. loss: daily loss stop ${l.dailyLossStopUsd} dollars (${mark("loss")})${from("loss")}`,
-    `3. trades: at most ${l.maxTradesPerMinute} orders a minute, no daily total; the ceiling is ${MAX_TRADES_PER_MINUTE} (${mark("trades")})${from("trades")}`,
+    `3. trades: at most ${l.maxTradesPerMinute} orders a minute, no daily total; the ceiling is ${loadState(day) === "on" ? `${MAX_TRADES_PER_MINUTE_LOAD_DAY} on this load day` : `${MAX_TRADES_PER_MINUTE} (${MAX_TRADES_PER_MINUTE_LOAD_DAY} on a load day)`} (${mark("trades")})${from("trades")}`,
     `4. cap: borrowing cap ${l.borrowingCap}, where 1 means no borrowing (${mark("cap")})${from("cap")}`,
     loadLine(day),
   ].join("\n");
@@ -258,7 +261,8 @@ export function decideLimits(day: DayRecord, cmd: Extract<Command, { kind: "appr
   let limits: Limits = day.limits;
   const decided = { ...day.decided };
   if (cmd.kind === "set") {
-    const r = applyOverride(limits, cmd.name, cmd.value, equity);
+    // Michael's ruling of 2026-11-06: `trades` may go up to 150 while the day is a load day (`load on`), up to 100 otherwise.
+    const r = applyOverride(limits, cmd.name, cmd.value, equity, { loadDay: loadState(day) === "on" });
     if ("error" in r) return { ok: false, reply: `Not changed: ${r.error}.` };
     limits = r.limits;
     decided[cmd.name] = true;

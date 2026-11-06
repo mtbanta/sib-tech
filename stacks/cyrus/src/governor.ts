@@ -5,13 +5,32 @@
 //  2. Keep headroom under Alpaca's request limit. Alpaca counts account, order and position calls in one bucket of
 //     200 requests a minute (measured 2026-11-02; refills at about 3.3 a second; the clock and calendar are counted
 //     separately). The governor listens to the `X-Ratelimit-Remaining` header on every answer. Work that is NOT about
-//     safety (entries, and the reads that serve them) may only use the bucket down to SAFETY_RESERVE; the last tokens
+//     safety (entries, and the reads that serve them) may only use the bucket down to the RESERVE; the last tokens
 //     belong to the stop command, cancels, protective actions and the close-out, which are never held back by it.
-import { MAX_TRADES_PER_MINUTE } from "./limits.ts";
+//
+// THE RESERVE (Michael's decision 7 of 2026-11-06): it scales with what is open, instead of a fixed 80. Enough for a full
+// emergency flatten of every open symbol (a symbol held, or with an entry working), with a floor and a cap of 80:
+//     reserve = min(80, max(30, ceil(1.25 x (24 + open symbols))))
+// Why (the C2 log, "Release 11 proposal", item 7): in the simulator, with the real sale code, the worst full flatten (close-out,
+// loss stop or flatten command) drew the bucket at most 11 + 1 per open symbol below its refill; routine work beside it (loss stop
+// read, view, sync) adds about 13 in the 10 seconds a flatten's burst lasts; 1.25 is the margin. 30 with nothing open, 68 at 30
+// open symbols (the most the 30-symbol live list allows), 80 from 40. Until the gate or the worker has said how many symbols are
+// open, the reserve is the cap.
+import { MAX_TRADES_PER_MINUTE, MAX_TRADES_PER_MINUTE_LOAD_DAY } from "./limits.ts";
 import type { RateInfo } from "./alpaca-trading.ts";
 
 export const ALPACA_REQUESTS_PER_MINUTE = 200;
+// The cap of the reserve (and its old fixed value).
 export const SAFETY_RESERVE = 80;
+export const RESERVE_FLOOR = 30;
+export const RESERVE_BASE = 24;
+export const RESERVE_MARGIN = 1.25;
+
+// The reserve for a number of open symbols (held, or with an entry working).
+export function reserveFor(openSymbols: number): number {
+  const n = Number.isFinite(openSymbols) && openSymbols > 0 ? Math.ceil(openSymbols) : 0;
+  return Math.min(SAFETY_RESERVE, Math.max(RESERVE_FLOOR, Math.ceil(RESERVE_MARGIN * (RESERVE_BASE + n))));
+}
 const REFILL_PER_MS = ALPACA_REQUESTS_PER_MINUTE / 60_000;
 
 export type Admission = { ok: true } | { ok: false; reason: string };
@@ -26,6 +45,13 @@ export class Governor {
   private peakTrades = 0;
   private refused = 0;
   private rateLimited = 0; // answers from Alpaca saying "too many requests" (429), for the record only
+  // Decision 7: how many symbols are open (held, or with an entry working), as the gate or the worker last counted them. Null until
+  // told: the reserve is then the cap.
+  private openSymbols: number | null = null;
+  // The lowest of (remaining - the reserve in force at that moment) Alpaca has reported today, and the reserve's range this
+  // minute, for the statistics (the Monday pass rule: remaining requests never below the reserve in force).
+  private lowestAboveReserve: number | null = null;
+  private minuteReserve: { min: number; max: number } | null = null;
 
   constructor(now: () => number = Date.now) {
     this.now = now;
@@ -51,7 +77,23 @@ export class Governor {
       this.remaining = info.status === 429 ? 0 : info.remaining;
       this.remainingAt = t;
       this.lowest = this.lowest === null ? this.remaining : Math.min(this.lowest, this.remaining);
+      const above = this.remaining - this.reserve();
+      this.lowestAboveReserve = this.lowestAboveReserve === null ? above : Math.min(this.lowestAboveReserve, above);
     }
+  }
+
+  // Decision 7: the gate (before each entry, counting the entry it is about to send) and the worker (at each view refresh) say how
+  // many symbols are open.
+  setOpenSymbols(n: number): void {
+    if (!Number.isFinite(n) || n < 0) return;
+    this.openSymbols = Math.ceil(n);
+    const r = this.reserve();
+    this.minuteReserve = this.minuteReserve ? { min: Math.min(this.minuteReserve.min, r), max: Math.max(this.minuteReserve.max, r) } : { min: r, max: r };
+  }
+
+  // The reserve in force now.
+  reserve(): number {
+    return this.openSymbols === null ? SAFETY_RESERVE : reserveFor(this.openSymbols);
   }
 
   // Our best estimate of the tokens left in Alpaca's bucket right now: the last number it told us, plus the refill since.
@@ -62,7 +104,7 @@ export class Governor {
 
   // Can work that is not about safety spend a request right now?
   canSpend(): boolean {
-    return this.budget() >= SAFETY_RESERVE + 1;
+    return this.budget() >= this.reserve() + 1;
   }
 
   // After a restart the governor knows nothing of the entries sent just before it. The gate tells it, from the day's
@@ -79,13 +121,14 @@ export class Governor {
   }
 
   // An order that opens a position asks for a slot. Refused while the sliding minute is full, and while the
-  // request bucket is down to the safety reserve. The slot is taken when it is granted, so ten entries arriving at
-  // the same instant cannot all see "9 of 10 used".
-  admitTrade(limitPerMinute: number): Admission {
-    const cap = Math.min(Math.floor(limitPerMinute), MAX_TRADES_PER_MINUTE);
+  // request bucket is down to the reserve. The slot is taken when it is granted, so ten entries arriving at
+  // the same instant cannot all see "9 of 10 used". `ceiling` is the ceiling in force (limits.ts tradesCeiling: 150 while a
+  // load day's window is on, else 100); it can never be above 150.
+  admitTrade(limitPerMinute: number, ceiling: number = MAX_TRADES_PER_MINUTE): Admission {
+    const cap = Math.min(Math.floor(limitPerMinute), Math.min(ceiling, MAX_TRADES_PER_MINUTE_LOAD_DAY));
     if (!(cap >= 1)) return this.refuse("trades-per-minute limit is below 1");
     if (this.tradesInLastMinute() >= cap) return this.refuse(`trades-per-minute limit reached (${cap})`);
-    if (!this.canSpend()) return this.refuse(`holding back for safety: Alpaca's request budget is down to ${Math.floor(this.budget())} (the last ${SAFETY_RESERVE} are kept for the stop command, cancels and the close-out)`);
+    if (!this.canSpend()) return this.refuse(`holding back for safety: Alpaca's request budget is down to ${Math.floor(this.budget())} (the last ${this.reserve()} are kept for the stop command, cancels and the close-out)`);
     this.tradeTimes.push(this.now());
     this.peakTrades = Math.max(this.peakTrades, this.tradeTimes.length);
     return { ok: true };
@@ -96,12 +139,20 @@ export class Governor {
     return { ok: false, reason };
   }
 
-  stats(): { requestsLastMinute: number; lowestBudget: number | null; peakTradesPerMinute: number; refusedByGovernor: number; rateLimitAnswers: number } {
+  stats(): { requestsLastMinute: number; lowestBudget: number | null; peakTradesPerMinute: number; refusedByGovernor: number; rateLimitAnswers: number; reserveNow: number; lowestAboveReserve: number | null } {
     const t = this.now();
-    return { requestsLastMinute: this.requestTimes.filter((x) => t - x < 60_000).length, lowestBudget: this.lowest, peakTradesPerMinute: this.peakTrades, refusedByGovernor: this.refused, rateLimitAnswers: this.rateLimited };
+    return { requestsLastMinute: this.requestTimes.filter((x) => t - x < 60_000).length, lowestBudget: this.lowest, peakTradesPerMinute: this.peakTrades, refusedByGovernor: this.refused, rateLimitAnswers: this.rateLimited, reserveNow: this.reserve(), lowestAboveReserve: this.lowestAboveReserve };
+  }
+
+  // The reserve's lowest and highest value since the last call (for the per-minute statistics).
+  takeMinuteReserve(): { min: number; max: number } {
+    const r = this.minuteReserve ?? { min: this.reserve(), max: this.reserve() };
+    this.minuteReserve = null;
+    return r;
   }
   resetDayStats(): void {
     this.lowest = null;
+    this.lowestAboveReserve = null;
     this.peakTrades = 0;
     this.refused = 0;
     this.rateLimited = 0;

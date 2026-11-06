@@ -226,7 +226,7 @@ test("a load day's summary reports the window settings, the entry wait and the l
   const base = { tradeDate: D, isTradingDay: true, openAt: z("14:30:00"), closeAt: z("21:00:00"), status: "approved", dayStartEquity: 20000, suggested: {}, limits: { maxPositionUsd: 500, dailyLossStopUsd: 500, maxTradesPerMinute: 100, borrowingCap: 1 }, decided: {}, liveList: [], phases: { load: "on" } } as unknown as DayRecord;
   const input = { day: base, stored: [] as OrderRecord[], refusals: [], alpacaOrders: [], account: { equity: 20000 } as never, peak: null, stop: null, flat: true, loadWindow: { start: z("14:45:00"), end: z("15:00:00") }, loadExtras: { orderStream: { events: 900, freed: 400, reconnects: 1, medianFreeMs: 420 }, entryExpiry: { scheduled: 1500, cancelled: 700, filledFirst: 20, failed: 0 } } };
   const text = formatSummary(input);
-  assert.ok(text.includes("- window settings: 1 share a trade on any new print, a limit buy at or below the price seen, cancelled if not filled in 5 seconds, take-profit 1 cent up and stop 2 cents down from that price. Unfilled and cancelled: 700 of 1500 (20 filled before the cancel)"), text);
+  assert.ok(text.includes("- window settings: 1 share a trade on any new print, a limit buy at or below the price seen, cancelled if not filled in 5 seconds, take-profit 1 cent up and stop 2 cents down from that price. Of 0 limit buys: 0 filled, 0 cancelled unfilled"), text);
   assert.ok(text.includes("- live order updates: 900 received, 400 symbols freed, typically 420 ms after the exit filled, 1 reconnects"), text);
   const normal = formatSummary({ ...input, loadWindow: null, loadExtras: null });
   assert.ok(!normal.includes("window settings") && !normal.includes("live order updates"));

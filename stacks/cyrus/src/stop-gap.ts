@@ -9,6 +9,11 @@
 // waiting = (the sale's fill price minus that value) times the shares: positive means selling at once did better. It is an estimate
 // (one exchange's prints, and paper fills within about a cent of them), and it is labelled so in the summary. It only watches: it
 // never sends, cancels or changes anything.
+//
+// Michael's decision 3 of 2026-11-06: the watch starts the moment Alpaca accepts the sale (the sell path reports it then, with the
+// sale's client id), and the sale's fill is matched by that client id. A fill that arrives before the sale is reported (the live
+// update can beat the answer to the order) is kept for a minute and matched when it is. On 2026-11-06 the watch started only after
+// the sale had filled, so 99 of 103 sales went unmeasured.
 import type { StopGapDay } from "./summary.ts";
 
 export const STOP_GAP_WATCH_MS = 5_000;
@@ -17,6 +22,7 @@ const GIVE_UP_MS = 60_000;
 
 interface Watch {
   symbol: string;
+  clientOrderId: string | null;
   shares: number;
   takeProfit: number | null;
   atMs: number;
@@ -29,8 +35,12 @@ export const stopGapKey = (date: string) => `stop_gap:${date}`;
 
 export const emptyStopGap = (): StopGapDay => ({ sales: 0, shares: 0, wouldHaveFilled: 0, unmeasured: 0, dollarsVsWaiting: 0 });
 
+// A fill that arrived before its sale was reported is kept this long.
+const EARLY_FILL_KEEP_MS = 60_000;
+
 export class StopGapMeter {
   private watching: Watch[] = [];
+  private readonly earlyFills = new Map<string, { price: number; atMs: number; keptAt: number }>();
   private day: StopGapDay = emptyStopGap();
   private date: string | null = null;
 
@@ -40,11 +50,15 @@ export class StopGapMeter {
     this.date = date;
     this.day = saved ? { ...emptyStopGap(), ...saved } : emptyStopGap();
     this.watching = [];
+    this.earlyFills.clear();
   }
 
-  onSale(sale: { symbol: string; shares: number; takeProfit: number | null; atMs: number }): void {
+  onSale(sale: { symbol: string; shares: number; takeProfit: number | null; atMs: number; clientOrderId?: string }): void {
     if (!(sale.shares > 0)) return;
-    this.watching.push({ ...sale, maxPrint: null, lastPrint: null, fill: null });
+    const clientOrderId = sale.clientOrderId ?? null;
+    const early = clientOrderId ? this.earlyFills.get(clientOrderId) : undefined;
+    if (clientOrderId) this.earlyFills.delete(clientOrderId);
+    this.watching.push({ symbol: sale.symbol, shares: sale.shares, takeProfit: sale.takeProfit, atMs: sale.atMs, clientOrderId, maxPrint: null, lastPrint: null, fill: early ? early.price : null });
   }
 
   // A print from the free feed's live prices.
@@ -56,11 +70,17 @@ export class StopGapMeter {
     }
   }
 
-  // A fill of one of the stack's own sells (client id cyrus-x-) from the live order updates: it belongs to the oldest watched sale
-  // of that symbol that has no fill yet and was sent no later than the fill.
-  onOwnSellFill(symbol: string, price: number, atMs: number): void {
-    const w = this.watching.find((x) => x.symbol === symbol && x.fill === null && x.atMs <= atMs + 1_000);
-    if (w) w.fill = price;
+  // A fill of one of the stack's own sells (client id cyrus-x-) from the live order updates. It belongs to the watched sale with that
+  // client id; if none is watched yet, it is kept for a minute (the sale may be reported a moment later). `nowMs` is the worker's clock.
+  onOwnSellFill(clientOrderId: string, symbol: string, price: number, atMs: number, nowMs: number = atMs): void {
+    const w = this.watching.find((x) => x.clientOrderId === clientOrderId && x.fill === null);
+    if (w) {
+      w.fill = price;
+      return;
+    }
+    for (const [id, f] of [...this.earlyFills]) if (nowMs - f.keptAt > EARLY_FILL_KEEP_MS) this.earlyFills.delete(id);
+    if (this.earlyFills.size < 1_000) this.earlyFills.set(clientOrderId, { price, atMs, keptAt: nowMs });
+    void symbol;
   }
 
   // Moves every sale whose 5 seconds are over and whose fill is known into the day's totals. Returns true when the totals changed.

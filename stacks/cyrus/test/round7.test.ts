@@ -126,10 +126,12 @@ test("a loss stop check that hangs is never started twice: later 10 second slots
 test("the daily loss stop does not wait for the request budget: it runs while the governor holds entries back for the safety reserve", async () => {
   const r = await armedRig();
   await r.at("14:50:00");
-  // Alpaca says 5 requests are left in the minute: entries and the view refresh must wait (they stop at the reserve of 80).
-  r.governor.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: 5, reset: null });
+  // Alpaca says no requests are left in the minute: entries and the view refresh must wait (they stop at the reserve: 80 then, 30 with
+  // nothing open since decision 7 of 2026-11-06, so the budget is set to 0 again just before the last pass).
+  r.governor.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: 0, reset: null });
   r.broker.account = { ...r.broker.account, equity: 19500 };
   await r.at("14:50:05");
+  r.governor.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: 0, reset: null });
   await r.at("14:50:10");
   await settle();
   assert.equal(r.governor.canSpend(), false, "the budget is still inside the safety reserve");

@@ -89,7 +89,9 @@ test("old records are read safely: a daily trade count is not mistaken for a per
   assert.equal(old.limits.maxPositionUsd, 2000);
   const fresh = normalizeLimits({ ...SUGGESTED_LIMITS, maxTradesPerMinute: 7 });
   assert.equal(fresh.tradesPerMinuteMissing, false);
-  assert.equal(normalizeLimits({ ...SUGGESTED_LIMITS, maxTradesPerMinute: 9999 }).limits.maxTradesPerMinute, 100, "clamped to the ceiling when read");
+  // Michael's ruling of 2026-11-06: a stored value is clamped to the load-day ceiling (150) when read; the ceiling in force (100 on a
+  // normal day) is applied where entries are checked (limits.test.ts, "the ceiling in force").
+  assert.equal(normalizeLimits({ ...SUGGESTED_LIMITS, maxTradesPerMinute: 9999 }).limits.maxTradesPerMinute, 150, "clamped to the load-day ceiling when read");
   assert.equal(normalizeLimits(null).limits.borrowingCap, 1);
 });
 

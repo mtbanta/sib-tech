@@ -16,14 +16,16 @@ export interface RiskDeps {
   log?: (event: string, data?: Record<string, unknown>) => void;
   // Optional: the worker passes its own, so the loss stop remembers that it fired even when the stop flag cannot be read.
   lossMemory?: LossStopMemory;
-  // Optional: the order-rate governor. When given, the loss stop's retry never spends Alpaca's last SAFETY_RESERVE requests,
-  // and the first sale's requests (as Alpaca counted them) are charged to the loss stop's budget.
-  governor?: { budget(): number; stats?(): { requestsLastMinute: number } };
+  // Optional: the order-rate governor. When given, the loss stop's retry never spends Alpaca's last requests (the reserve in force,
+  // decision 7 of 2026-11-06; the fixed SAFETY_RESERVE when the governor does not say), and the first sale's requests (as Alpaca
+  // counted them) are charged to the loss stop's budget.
+  governor?: { budget(): number; reserve?(): number; stats?(): { requestsLastMinute: number } };
   // Optional: the worker passes its own, so the order sync remembers between runs (release A, fixes 1 and 4).
   syncMemory?: SyncMemory;
   // The speed release (Michael's decision 3): told about each sale of shares left without a stop, so the worker can measure it
   // against waiting 5 more seconds.
-  onBareSale?: (sale: { symbol: string; shares: number; takeProfit: number | null; atMs: number }) => void;
+  // Since decision 3 of 2026-11-06 it is told when Alpaca accepts the sale (not after the sale has filled), with the sale's client id.
+  onBareSale?: (sale: { symbol: string; shares: number; takeProfit: number | null; atMs: number; clientOrderId?: string }) => void;
   // The speed release, item 5 (shadow only): told about each account read of the loss stop, so the worker can log its own estimate
   // of equity beside Alpaca's. It never changes what the loss stop does.
   onAccountRead?: (account: { equity: number; cash: number }) => void;
@@ -246,18 +248,19 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     unprotected.push(s.symbol);
     d.log?.("bare_remainder", { symbol: s.symbol, shares: bare.shares, stopCancelledAt: cancelTime });
     const cancelIds = flattenLegs(o).filter((l) => l.side === "sell" && OPEN_STATUSES.has(l.status)).map((l) => l.id);
-    const r = await d.liquidator.flatten({ reason: "stop cancelled after a partial take-profit", tradeDate: day.tradeDate, only: [s.symbol], maxRounds: 3, cancelIds, yieldToPriority: true });
-    const soldQty = r.sold.filter((x) => x.symbol === s.symbol).reduce((n, x) => n + x.qty, 0);
-    if (soldQty > 0) {
-      const tp = flattenLegs(o).find((l) => l.side === "sell" && l.type === "limit");
+    const tp = flattenLegs(o).find((l) => l.side === "sell" && l.type === "limit");
+    // Decision 3 of 2026-11-06: the measurement starts the moment Alpaca accepts the sale, so it sees the sale's fill and the prints
+    // after it (before, it was told only after the sale had filled, and 99 of 103 sales went unmeasured).
+    const onSellSent = (x: { symbol: string; qty: number; clientOrderId: string; atMs: number }) => {
+      if (x.symbol !== s.symbol) return;
       try {
-        const sentAt = r.steps?.sells.find((x) => x.symbol === s.symbol)?.at;
-        const atMs = sentAt ? Date.parse(sentAt) : NaN;
-        d.onBareSale?.({ symbol: s.symbol, shares: soldQty, takeProfit: tp?.limitPrice ?? null, atMs: Number.isFinite(atMs) ? atMs : d.now().getTime() });
+        d.onBareSale?.({ symbol: x.symbol, shares: x.qty, takeProfit: tp?.limitPrice ?? null, atMs: x.atMs, clientOrderId: x.clientOrderId });
       } catch {
         /* a measurement must never break the sync */
       }
-    }
+    };
+    const r = await d.liquidator.flatten({ reason: "stop cancelled after a partial take-profit", tradeDate: day.tradeDate, only: [s.symbol], maxRounds: 3, cancelIds, yieldToPriority: true, onSellSent });
+    const soldQty = r.sold.filter((x) => x.symbol === s.symbol).reduce((n, x) => n + x.qty, 0);
     if (r.yielded && soldQty === 0) d.log?.("bare_remainder_yielded", { symbol: s.symbol });
     else if (r.flat && soldQty > 0) {
       // Messaging only (speed release, decision 6): the worker gathers these into one alert a minute; without it, posted at once.
@@ -429,7 +432,7 @@ async function retryLossStopSale(d: RiskDeps, day: DayRecord): Promise<void> {
   if (nowMs < mem.backoffUntil) return;
   if (day.closeAt && nowMs >= day.closeAt.getTime() - RETRY_QUIET_BEFORE_CLOSE_MS) return;
   let spentHere = 0;
-  const canSpend = (n: number) => spentHere + n <= LOSS_STOP_RETRY_PER_CHECK && mem.budget.room(nowMs) >= n && (!d.governor || d.governor.budget() - n >= SAFETY_RESERVE);
+  const canSpend = (n: number) => spentHere + n <= LOSS_STOP_RETRY_PER_CHECK && mem.budget.room(nowMs) >= n && (!d.governor || d.governor.budget() - n >= (d.governor.reserve?.() ?? SAFETY_RESERVE));
   const spend = (n: number) => {
     spentHere += n;
     mem.budget.spend(nowMs, n);

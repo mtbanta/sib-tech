@@ -266,17 +266,17 @@ test("decision 3, measurement: each sale is valued against waiting 5 more second
   const m = new StopGapMeter();
   m.startDay(D, null);
   const t = z("15:00:00").getTime();
-  m.onSale({ symbol: "CIFR", shares: 7, takeProfit: 7.28, atMs: t });
-  m.onSale({ symbol: "WULF", shares: 4, takeProfit: 9.5, atMs: t });
-  m.onSale({ symbol: "IREN", shares: 2, takeProfit: 20, atMs: t });
+  m.onSale({ symbol: "CIFR", shares: 7, takeProfit: 7.28, atMs: t, clientOrderId: "cyrus-x-CIFR" });
+  m.onSale({ symbol: "WULF", shares: 4, takeProfit: 9.5, atMs: t, clientOrderId: "cyrus-x-WULF" });
+  m.onSale({ symbol: "IREN", shares: 2, takeProfit: 20, atMs: t, clientOrderId: "cyrus-x-IREN" });
   m.onPrint("CIFR", 7.27, t + 1000);
   m.onPrint("CIFR", 7.28, t + 3000); // the take-profit price printed inside 5 seconds
   m.onPrint("CIFR", 7.27, t + 4500); // and the price fell back before the 5 seconds were over
   m.onPrint("CIFR", 7.3, t + 6000); // after the 5 seconds: not counted
   m.onPrint("WULF", 9.45, t + 2000);
   m.onPrint("WULF", 9.4, t + 4900); // the last print inside the 5 seconds
-  m.onOwnSellFill("CIFR", 7.26, t + 1500);
-  m.onOwnSellFill("WULF", 9.44, t + 1500);
+  m.onOwnSellFill("cyrus-x-CIFR", "CIFR", 7.26, t + 1500);
+  m.onOwnSellFill("cyrus-x-WULF", "WULF", 9.44, t + 1500);
   assert.equal(m.settle(t + 4000), false, "nothing before its 5 seconds are over");
   assert.equal(m.settle(t + 5001), true);
   const d = m.totals();
@@ -461,12 +461,18 @@ test("item 10: one statistics line a minute, all session, with the live updates,
   await r.trade("BBB", 50.5, "15:00:11");
   const raw = { event: "fill", position_qty: "0", account_id: "should-not-be-kept", order: { symbol: "BBB", side: "sell", client_order_id: "leg" } };
   await r.orderUpdate({ ...upd("fill", { clientOrderId: "leg", symbol: "BBB", side: "sell", type: "limit", status: "filled", qty: 2, filledQty: 2, filledAvgPrice: 50.5, groupId: "g" }, 0, z("15:00:11").getTime()), raw });
+  // Decision 4 of 2026-11-06: the estimate's book needs a quiet read (no fill within 3 seconds of it) before it gives an estimate.
+  r.broker.positions = [];
+  await r.at("15:00:30");
+  await r.at("15:00:40");
   await r.at("15:01:05");
   const stats = r.store.events.filter((e) => e.event === "governor_stats").map((e) => e.data as any);
   const last = stats.at(-1)!;
   for (const k of ["orderStream", "freesThisMinute", "databaseCloses", "entryExpiry", "lossStopShadow", "viewEveryMs", "rawUpdate"]) assert.ok(k in last, `${k} in ${JSON.stringify(last).slice(0, 400)}`);
   assert.equal(last.freesThisMinute.n, 1);
-  assert.ok(last.lossStopShadow.n >= 1, "the estimate was logged beside the loss stop's reads");
+  const shadowed = stats.filter((s) => s.lossStopShadow?.n >= 1);
+  assert.ok(shadowed.length >= 1, "the estimate was logged beside the loss stop's reads");
+  for (const k of ["maxAt", "maxEstimate", "maxEquity", "maxSinceFillMs", "maxSinceBaseMs", "book"]) assert.ok(k in shadowed[0]!.lossStopShadow, `${k} logged with the largest gap`);
   assert.equal(last.rawUpdate, JSON.stringify({ event: "fill", position_qty: "0", order: { symbol: "BBB", side: "sell" } }), "only the chosen fields are kept");
   assert.ok(stats.length >= 2, "one a minute");
 });

@@ -17,6 +17,8 @@ export type Broker = Pick<
   | "listOrders"
   | "listOrdersPaged"
   | "findOrderByClientId"
+  | "getOrderById"
+  | "listFillsForDay"
   | "cancelOrder"
   | "cancelAllOrders"
 >;
