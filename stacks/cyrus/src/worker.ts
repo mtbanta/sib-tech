@@ -1083,6 +1083,8 @@ export class Worker {
   private startOrderStream(date: string): void {
     this.endOrderStream();
     this.orderStreamDate = date;
+    // The shadow book starts each day afresh (group 2 review, round 1): it is set again from the first quiet read.
+    this.shadowLedger.drop();
     const store = this.d.store;
     this.orderHandler = new OrderUpdateHandler({
       getOrder: (id) => store.getOrder(id),

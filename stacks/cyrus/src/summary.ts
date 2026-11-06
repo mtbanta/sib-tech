@@ -264,7 +264,7 @@ export function formatSummary(i: SummaryInput): string {
     ...feeLines(i.day.tradeDate, fees, i.feesRunning),
     i.peak ? `Borrowing used: peak exposure ${i.peak.exposureUsd.toFixed(0)} dollars, ${i.peak.ratio.toFixed(2)} times equity (approved cap ${i.day.limits.borrowingCap})` : "Borrowing used: no entries, none",
     i.stopGap ? stopGapLine(i.stopGap) : "",
-    i.requests ? `Alpaca requests: about ${i.requests.requestsLastMinute} in the last minute at the close; lowest budget seen ${i.requests.lowestBudget === null ? "unknown" : Math.floor(i.requests.lowestBudget)} of 200; busiest minute ${i.requests.peakTradesPerMinute} orders; held back by the governor ${i.requests.refusedByGovernor} times${i.requests.rateLimitAnswers !== undefined ? `; rate-limit answers from Alpaca ${i.requests.rateLimitAnswers}` : ""}` : "",
+    i.requests ? `Alpaca requests: about ${i.requests.requestsLastMinute} in the minute before this summary; lowest budget seen ${i.requests.lowestBudget === null ? "unknown" : Math.floor(i.requests.lowestBudget)} of 200; busiest minute ${i.requests.peakTradesPerMinute} orders; held back by the governor ${i.requests.refusedByGovernor} times${i.requests.rateLimitAnswers !== undefined ? `; rate-limit answers from Alpaca ${i.requests.rateLimitAnswers}` : ""}` : "",
     ...(i.loadWindow
       ? [
           "**Load day**",

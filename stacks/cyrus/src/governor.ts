@@ -10,26 +10,26 @@
 //
 // THE RESERVE (Michael's decision 7 of 2026-11-06): it scales with what is open, instead of a fixed 80. Enough for a full
 // emergency flatten of every open symbol (a symbol held, or with an entry working), with a floor and a cap of 80:
-//     reserve = min(80, max(30, ceil(1.25 x (24 + open symbols))))
-// Why (the C2 log, "Release 11 proposal", item 7): in the simulator, with the real sale code, the worst full flatten (close-out,
-// loss stop or flatten command) drew the bucket at most 11 + 1 per open symbol below its refill; routine work beside it (loss stop
-// read, view, sync) adds about 13 in the 10 seconds a flatten's burst lasts; 1.25 is the margin. 30 with nothing open, 68 at 30
-// open symbols (the most the 30-symbol live list allows), 80 from 40. Until the gate or the worker has said how many symbols are
-// open, the reserve is the cap.
+//     reserve = min(80, 52 + open symbols)
+// Why (the C2 log, "Release 11 group 1 review, round 1" and its fix): in the simulator, with the real sale code, routine work beside
+// it at 75 requests a minute for the whole flatten, cancels of 0.2 or 7 seconds and sells held 16 seconds, the worst full flatten (the
+// flatten command's 4 rounds, 23 seconds) drew the bucket 34 + 1 per open symbol below what it started at. Plus 8: at sustained load
+// the bucket sits up to 6 or 7 below the reserve (cancels, the sync and the loss stop's reads keep spending after entries stop; the
+// 150 a minute rehearsals). Plus 10 left at the bottom (5 percent of the bucket). 52 with nothing open, 80 from 28 open symbols (the
+// live list holds at most 30). Until the gate or the worker has said how many symbols are open, the reserve is the cap.
 import { MAX_TRADES_PER_MINUTE, MAX_TRADES_PER_MINUTE_LOAD_DAY } from "./limits.ts";
 import type { RateInfo } from "./alpaca-trading.ts";
 
 export const ALPACA_REQUESTS_PER_MINUTE = 200;
 // The cap of the reserve (and its old fixed value).
 export const SAFETY_RESERVE = 80;
-export const RESERVE_FLOOR = 30;
-export const RESERVE_BASE = 24;
-export const RESERVE_MARGIN = 1.25;
+// 34 (the flatten command's own draw with routine work beside it) + 8 (the shortfall at sustained load) + 10 (left at the bottom).
+export const RESERVE_FLOOR = 52;
 
-// The reserve for a number of open symbols (held, or with an entry working).
+// The reserve for a number of open symbols (held, or with an entry working): one more request (its sell) per symbol.
 export function reserveFor(openSymbols: number): number {
   const n = Number.isFinite(openSymbols) && openSymbols > 0 ? Math.ceil(openSymbols) : 0;
-  return Math.min(SAFETY_RESERVE, Math.max(RESERVE_FLOOR, Math.ceil(RESERVE_MARGIN * (RESERVE_BASE + n))));
+  return Math.min(SAFETY_RESERVE, RESERVE_FLOOR + n);
 }
 const REFILL_PER_MS = ALPACA_REQUESTS_PER_MINUTE / 60_000;
 
@@ -52,6 +52,9 @@ export class Governor {
   // minute, for the statistics (the Monday pass rule: remaining requests never below the reserve in force).
   private lowestAboveReserve: number | null = null;
   private minuteReserve: { min: number; max: number } | null = null;
+  // The same two lows for the current minute only (reset by takeMinuteReserve), so each minute's depth is visible.
+  private minuteLowest: number | null = null;
+  private minuteLowestAboveReserve: number | null = null;
 
   constructor(now: () => number = Date.now) {
     this.now = now;
@@ -79,6 +82,8 @@ export class Governor {
       this.lowest = this.lowest === null ? this.remaining : Math.min(this.lowest, this.remaining);
       const above = this.remaining - this.reserve();
       this.lowestAboveReserve = this.lowestAboveReserve === null ? above : Math.min(this.lowestAboveReserve, above);
+      this.minuteLowest = this.minuteLowest === null ? this.remaining : Math.min(this.minuteLowest, this.remaining);
+      this.minuteLowestAboveReserve = this.minuteLowestAboveReserve === null ? above : Math.min(this.minuteLowestAboveReserve, above);
     }
   }
 
@@ -144,11 +149,15 @@ export class Governor {
     return { requestsLastMinute: this.requestTimes.filter((x) => t - x < 60_000).length, lowestBudget: this.lowest, peakTradesPerMinute: this.peakTrades, refusedByGovernor: this.refused, rateLimitAnswers: this.rateLimited, reserveNow: this.reserve(), lowestAboveReserve: this.lowestAboveReserve };
   }
 
-  // The reserve's lowest and highest value since the last call (for the per-minute statistics).
-  takeMinuteReserve(): { min: number; max: number } {
+  // The reserve's lowest and highest value since the last call, and Alpaca's lowest remaining and lowest (remaining minus the reserve
+  // in force) since the last call (for the per-minute statistics).
+  takeMinuteReserve(): { min: number; max: number; lowestRemaining: number | null; lowestAboveReserve: number | null } {
     const r = this.minuteReserve ?? { min: this.reserve(), max: this.reserve() };
+    const out = { ...r, lowestRemaining: this.minuteLowest, lowestAboveReserve: this.minuteLowestAboveReserve };
     this.minuteReserve = null;
-    return r;
+    this.minuteLowest = null;
+    this.minuteLowestAboveReserve = null;
+    return out;
   }
   resetDayStats(): void {
     this.lowest = null;

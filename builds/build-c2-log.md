@@ -2685,7 +2685,7 @@ Everything here is paper only, and research input for a human decision, never an
 | 4. Shadow estimate | A new book (`shadow-ledger.ts`): cash and shares moved by every fill on the live updates (each fill's own quantity is now parsed). It is set from a view refresh (account and positions asked together) only while unset, and only when no fill came within 3 seconds of that read; while set, reads only check it (largest cash gap counted). The live updates dropping or reconnecting drops it. The per-minute line gives the largest gap's time, both values, the time since the last fill and since the book was set. Shadow only: the loss stop still decides on Alpaca's equity every 5 seconds. | `shadow-ledger.ts`, `worker.ts`, `order-stream.ts`, `broker-view.ts` (a read-only getter) |
 | 5. Ceiling 150 on load days | `MAX_TRADES_PER_MINUTE_LOAD_DAY = 150`; `tradesCeiling(windowOn)`. `trades` accepts up to 150 while the day is a load day, else 100 (the reply says how to get 150). In one message `load` lines are handled first, and the replies keep the written order. The gate passes the ceiling in force (150 only while `load on`, else 100) to the entry check and the governor, and the governor never goes above 150. `load off` lowers an approved value above 100 to 100. The evening suggestion never carries more than 100. The limits list shows "the ceiling is 100 (150 on a load day)" or "150 on this load day". | `limits.ts`, `gate.ts`, `governor.ts`, `commands.ts`, `morning.ts` |
 | 6. Paid plans | Recorded in "Release 11 proposal", item 6. No code. | |
-| 7. Reserve | `reserveFor(n) = min(80, max(30, ceil(1.25 x (24 + n))))`. The gate tells the governor the open symbols (held, working, plus the entry it is about to send) before each entry; the worker does at each view refresh. Unknown means 80. Entries, the view refresh and the loss stop's retry keep the reserve in force. The per-minute line gives the reserve's range and the day's lowest "remaining minus the reserve in force" (for Monday's pass rule). | `governor.ts`, `gate.ts`, `worker.ts`, `risk.ts` |
+| 7. Reserve | `reserveFor(n) = min(80, 52 + n)` since the group 1 round 1 fix (first built as `min(80, max(30, ceil(1.25 x (24 + n))))`, which was too small; see below). The gate tells the governor the open symbols (held, working, plus the entry it is about to send) before each entry; the worker does at each view refresh. Unknown means 80. Entries, the view refresh and the loss stop's retry keep the reserve in force. The per-minute line gives the reserve's range and the day's lowest "remaining minus the reserve in force" (for Monday's pass rule). | `governor.ts`, `gate.ts`, `worker.ts`, `risk.ts` |
 
 ### Found while building
 
@@ -2725,3 +2725,45 @@ A 15 minute load window with `load on` and `trades 150`: 30 names printing about
 - Nothing oversold, no remainder sales (1 share cannot partly fill).
 
 **Untested on paper until Monday:** the lost-exit sale's real timing (estimate: sent 0.5 to 1.5 seconds after the cancel, filled 0.3 to 1.7 seconds later); the fills listing's paging on a day of 10,000 fills or more (about 100 to 150 reads after the close); how the reserve behaves at 150 orders a minute on paper (the rehearsal above: 150 a minute for 4 minutes, then about 125); whether Alpaca's position list lags fills.
+
+### Group 2 review, round 1 (2026-11-06, evening): PASS
+
+No blocking finding. The reviewer checked the summary's lookups and fills check, the pacing, the request figures taken first, the carried note, the window counts, the stop-gap meter, the wording, the statistics fields and the log against the code and the test output (433 pass). Non-blocking notes, and what was done:
+- Per-minute lows of Alpaca's remaining and of "remaining minus the reserve" are needed to judge Monday's rule minute by minute (the day's running low hides later minutes): **added** (`reserveThisMinute.lowestRemaining`, `.lowestAboveReserve`, reset each minute), in the fix below, reviewed in group 1 round 2.
+- The `load off` reply's "trades lowered" started a sentence in lower case: **now "`trades` lowered"**.
+- The summary's request figure said "at the close" but is read when the summary starts: **now "in the minute before this summary"**.
+- The shadow book could outlive the day: **now dropped when each day's live updates start**.
+- The stop-gap count now counts each sell sent (a remainder can take up to 3 rounds), so it is not strictly comparable with Friday's 103 sales: noted here.
+- With `load` lines handled first, `approve` then `load on` gives the `load on` line "(once all four limits are decided)" although the same message decided them; the list at the end is right. Left as is (messaging only).
+- The carried mark is set whenever the carried-position sale runs, even if it finds nothing; minor (the fills check should leave nothing unmatched). Left as is.
+- The proposal said a read within "a second" of a fill is not used; the code uses 3 seconds (the build table says 3).
+
+### Group 1 review, round 1 (2026-11-06, evening): CHANGES REQUIRED. Fixed.
+
+**The finding (blocking, item 7): the reserve formula was too small.** The reviewer re-ran the build's flatten test at more sizes: starting at the reserve, the flatten command got rate-limit answers at 5 positions (2) and 12 (1) with 7 second cancels; starting 6 below the reserve (where the rehearsal says the bucket sits at sustained load) it got them at every size. The close-out and the loss stop's one round held. Cause: the formula priced routine work beside a flatten at 13 requests ("the 10 seconds a flatten's burst lasts"), but the flatten command's 4 rounds with 7 second cancels and 16 second held sells last about 23 seconds; and the earlier measurement ran with the full refill of 200 a minute instead of what routine work leaves.
+
+**The fix: reserve = min(80, 52 + open symbols).** Re-measured in the simulator with the real sale code, routine work at 75 a minute for the flatten's whole length (the refill cut to 125), cancels of 0.2 and 7 seconds, sells held 16 seconds, the bucket's drop below where it started (requests take no time in the simulator, which overstates the drain):
+
+| Open positions | Close-out (0.2 s / 7 s cancels) | Loss stop's sale | Flatten command | Worst |
+| --: | :-- | :-- | :-- | --: |
+| 0 | 3 / 3 | 2 / 2 | 2 / 2 | 3 |
+| 1 | 10 / 19 | 10 / 13 | 33 / 35 | 35 |
+| 5 | 14 / 23 | 14 / 13 | 37 / 39 | 39 |
+| 12 | 21 / 30 | 21 / 13 | 44 / 46 | 46 |
+| 20 | 29 / 38 | 29 / 13 | 52 / 54 | 54 |
+| 30 | 39 / 48 | 39 / 13 | 62 / 64 | 64 |
+| 40 | 49 / 58 | 49 / 13 | 72 / 74 | 74 |
+
+- The worst is the flatten command with slow cancels: 34 + 1 per open symbol.
+- Plus 8: at sustained load the bucket sits up to 6 or 7 below the reserve (the rehearsals: the governor's low -6, the simulator's sampled low -7).
+- Plus 10 left at the bottom (5 percent of the bucket).
+- 34 + 8 + 10 = 52, plus 1 per open symbol: 52 with nothing open, 80 (Michael's cap) from 28 open symbols. At 30 open symbols (the most the live list allows) the cap holds it at 80 instead of 82, so the worst case leaves 8 requests at the bottom instead of 10, with no rate-limit answer.
+- So the scaling is modest: it frees 28 requests of headroom for entries when nothing is open, and it is v10's 80 whenever the live list is nearly full (as in a load window).
+
+**The test now:** 1, 5, 12, 20 and 30 positions; the close-out, the loss stop's sale and the flatten command; cancels of 0.2 and 7 seconds; the bucket starting 8 below the reserve; routine work at 75 a minute beside it. Every case: no rate-limit answer, at least 10 requests left at the lowest (8 at 30 positions, where the cap binds), flat where the path's rounds allow, nothing oversold.
+
+**The rehearsal at 150 a minute with the new reserve:** accepted 150, 150, 150, 150, 133, then 123 to 130 a minute (2,000 in the window); 0 rate-limit answers; lowest remaining 58; remaining minus the reserve -2 to -7 each minute from the third (governor's low -6). The question for Michael about Monday's rule stands.
+
+Other round 1 notes (non-blocking): the three scope questions (the carried mark, `load` lines first, `load off` lowering trades) judged inside items 2 and 5; the shadow book cannot touch the loss stop, an order or the gate; the 150 ceiling is correct and applies all day while the load mode is on (not only 8:45 to 9:00), which Michael should know; each lost-exit event can cost up to 4 syncs; the sync's 10 minute read reaches its 1,500 order limit only at a sustained 150 a minute (the governor keeps it near 125); `endedLegs` and `lostReported` grow by about 700 entries a load day (the handler is rebuilt each day).
+
+**Tests:** 433 pass; 50 of 50 changes caught when taken out (the reserve's formula, floor, minute lows and the book's daily fresh start added).

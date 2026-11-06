@@ -281,7 +281,7 @@ export class CommandProcessor {
         let lowered = "";
         if (decision.value !== "on" && latest.limits.maxTradesPerMinute > MAX_TRADES_PER_MINUTE) {
           await this.d.store.updateDay(date, { limits: { ...latest.limits, maxTradesPerMinute: MAX_TRADES_PER_MINUTE } });
-          lowered = ` trades lowered from ${latest.limits.maxTradesPerMinute} to ${MAX_TRADES_PER_MINUTE} (above ${MAX_TRADES_PER_MINUTE}, up to ${MAX_TRADES_PER_MINUTE_LOAD_DAY}, is for load days only).`;
+          lowered = ` \`trades\` lowered from ${latest.limits.maxTradesPerMinute} to ${MAX_TRADES_PER_MINUTE} (above ${MAX_TRADES_PER_MINUTE}, up to ${MAX_TRADES_PER_MINUTE_LOAD_DAY}, is for load days only).`;
           this.d.log?.("trades_lowered_for_load_off", { date, from: latest.limits.maxTradesPerMinute });
         }
         // One short line (the mode line itself is in the list at the end of the reply).
