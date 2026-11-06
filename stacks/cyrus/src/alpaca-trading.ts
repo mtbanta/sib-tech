@@ -361,13 +361,14 @@ export class AlpacaTrading {
   // Decision 2 of 2026-11-06 (the daily summary): every fill of one trading day (Alpaca's account activities, oldest first, 100 a
   // page), so an order the order listing left out can still be found by the id its fill names. Read only. Stops at `maxPages` and
   // says so.
-  async listFillsForDay(date: string, maxPages = 400): Promise<{ fills: Array<{ id: string; orderId: string; symbol: string; side: string; qty: number; price: number; at: string }>; complete: boolean; pages: number }> {
+  async listFillsForDay(date: string, maxPages = 400, beforePage?: () => Promise<void>): Promise<{ fills: Array<{ id: string; orderId: string; symbol: string; side: string; qty: number; price: number; at: string }>; complete: boolean; pages: number }> {
     const fills: Array<{ id: string; orderId: string; symbol: string; side: string; qty: number; price: number; at: string }> = [];
     const seen = new Set<string>();
     let token: string | null = null;
     let pages = 0;
     let complete = false;
     while (pages < maxPages) {
+      if (beforePage) await beforePage();
       const query: Record<string, string> = { date, direction: "asc", page_size: "100" };
       if (token) query.page_token = token;
       const page = (await this.read("/v2/account/activities/FILL", query)) as Json[];

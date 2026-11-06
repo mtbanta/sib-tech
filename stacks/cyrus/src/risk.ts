@@ -152,13 +152,17 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   // missing from the listing is fetched by its client id, so it still gets its record update and its missing-exit check. (An entry
   // older than the window read above is not "missing": item 3's lookups above take care of it.)
   let lookups = 0;
-  for (const s of active) {
+  // Decision 1 of 2026-11-06: an entry the live updates just reported (both exits lost, or an exit ended) is looked up first, so it
+  // is never left behind the other missing entries on a busy day.
+  const lookupOrder = [...active].sort((a, b) => Number(mem.mustLook.has(b.clientOrderId)) - Number(mem.mustLook.has(a.clientOrderId)));
+  for (const s of lookupOrder) {
     if (byClientId.has(s.clientOrderId) || lookups >= MISSING_LOOKUPS_PER_SYNC) continue;
     if (createdMs(s) < fromMs) continue;
     const age = s.createdAt ? nowMs - new Date(s.createdAt).getTime() : Infinity;
     if (!(s.status === "submitted" || s.status === "filled" || (s.status === "intent" && age > MISSING_INTENT_AGE_MS))) continue;
     if ((mem.notFoundUntil.get(s.clientOrderId) ?? 0) > nowMs) continue;
     lookups++;
+    mem.mustLook.delete(s.clientOrderId);
     try {
       const found = await d.broker.findOrderByClientId(s.clientOrderId);
       if (found) byClientId.set(s.clientOrderId, found);

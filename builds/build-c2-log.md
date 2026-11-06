@@ -2694,7 +2694,7 @@ Everything here is paper only, and research input for a human decision, never an
 
 ### Tests
 
-430 pass (407 before: 23 added in `test/release-11.test.ts`; 4 existing tests changed because the rule they encoded changed: a stored trades value is clamped to 150 when read, the window line's wording, a test that used a budget of 5 as "inside the reserve" now uses 0, and the shadow-estimate statistics test now gives the book its quiet read). Type check clean. Each change was taken out on its own and a test failed every time: 44 of 44 caught (after tightening four tests that first let a change through, and removing one line that could never run).
+433 pass (407 before: 25 added in `test/release-11.test.ts` and 1 in `test/rehearsal-150.test.ts`; 4 existing tests changed because the rule they encoded changed: a stored trades value is clamped to 150 when read, the window line's wording, a test that used a budget of 5 as "inside the reserve" now uses 0, and the shadow-estimate statistics test now gives the book its quiet read). Type check clean. Each change was taken out on its own and a test failed every time: 48 of 48 caught (after tightening four tests that first let a change through, and removing one line that could never run).
 
 | Change taken out | Test that fails |
 | :-- | :-- |
@@ -2708,4 +2708,20 @@ Everything here is paper only, and research input for a human decision, never an
 
 **The flatten test (decision 7):** 30 positions of 2 shares (the most open symbols the live list allows), the bucket starting at the reserve (68), the refill cut to 125 a minute for routine work beside it, cancels of 0.2 and 7 seconds, sells held 16 seconds: the close-out, the loss stop's sale and the flatten command each finished with no rate-limit answer, and flat where their rounds allow.
 
-**Untested on paper until Monday:** the lost-exit sale's real timing (estimate: sent 0.5 to 1.5 seconds after the cancel, filled 0.3 to 1.7 seconds later); the fills listing's paging on a day of 10,000 fills or more (about 100 to 150 reads after the close); how the reserve behaves at 150 orders a minute (estimate: the bucket drains to the reserve and the governor holds entries back, so accepted orders settle near 100 to 110 a minute); whether Alpaca's position list lags fills.
+### Added before review (a second look at the build)
+
+- **Lost exits, the entry's fill arriving last:** nothing guarantees the entry's fill update comes before its exits' cancels; the check now runs again when the fill arrives (test with the updates in reverse order).
+- **Lost exits, looked up first:** an entry the live updates reported goes first in the sync's lookups of entries Alpaca's listing left out (10 a sync), so on a busy day it is never left behind older missing entries (test: 12 older missing entries).
+- **The summary's reads are paced:** on a big day the fills' pages and the lookups are a few hundred reads after the close. Each waits while Alpaca's budget is under 100, so the summary cannot cause a rate-limit answer (test: 300 missing entries, none). The day's request figures in the summary are taken before those reads. A failed lookup is counted in the run log instead of being silently ignored.
+- **The shadow book's fill quantities, measured:** on 2026-11-06 an update's `qty` and `price` were those of that fill alone (for example T: `qty` 1 while the order's filled total was 3, matching Alpaca's fill record 1 at 21.63, cumulative 3), so the book counts each fill once.
+
+### Rehearsal at 150 orders a minute (simulated broker, `test/rehearsal-150.test.ts`)
+
+A 15 minute load window with `load on` and `trades 150`: 30 names printing about twice a second each, limit entries filled when a later print reaches the limit (at least 0.3 seconds later), the rest cancelled by the 5 second entry wait, live order updates, Alpaca's bucket of 200 refilling at 200 a minute, the governor reading what is left. Requests take no time in the simulator (which overstates the drain). Results (estimate: a model, not paper):
+- **Accepted orders a minute:** 150, 150, 150, 150, 147, then 121 to 132 for the last 10 minutes; 2,023 in all, busiest 60 seconds 150. From the fourth minute the governor held entries back at the reserve (3,348 times).
+- **Rate-limit answers: 0.** Lowest remaining 39. Most requests in any 60 seconds 241 (the bucket refills continuously).
+- **Remaining minus the reserve in force: -1 to -6 in every minute from the third on** (lowest -6). The governor stops only entries at the reserve; cancels of unfilled entries, the order sync and the loss stop's reads keep spending, which is what the reserve is for. Read literally, Monday's rule ("remaining requests never drop below the reserve in force") would then say "does not hold" by design, with no rate-limit risk. Making entries stop earlier would be a money-touching change outside Michael's list, so it was not made: **a question for Michael before Monday** (see the Monday brief).
+- The sync's 10 minute read was never incomplete (at most about 1,300 orders in 10 minutes against its 1,500).
+- Nothing oversold, no remainder sales (1 share cannot partly fill).
+
+**Untested on paper until Monday:** the lost-exit sale's real timing (estimate: sent 0.5 to 1.5 seconds after the cancel, filled 0.3 to 1.7 seconds later); the fills listing's paging on a day of 10,000 fills or more (about 100 to 150 reads after the close); how the reserve behaves at 150 orders a minute on paper (the rehearsal above: 150 a minute for 4 minutes, then about 125); whether Alpaca's position list lags fills.

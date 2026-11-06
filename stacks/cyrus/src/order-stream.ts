@@ -264,6 +264,19 @@ export class OrderUpdateHandler {
     return { clientOrderId: o.clientOrderId, symbol: o.symbol, filledQty: o.filledQty, filledAvgPrice: o.filledAvgPrice, final: o.status === "filled" };
   }
 
+  // Decision 1 of 2026-11-06: a bracket has two exits. Both ended (cancelled, expired or rejected), nothing filled by either (nor by any
+  // other exit of the group), and the entry filled: the shares have no exit. Reported once per group, whichever update comes last.
+  private checkLostExits(g: string, symbol: string, atMs: number | null): void {
+    const info = this.entry(g);
+    const ended = this.endedLegs.get(g);
+    if (!info || !(info.filledQty > 0) || !ended || ended.size !== 2 || this.lostReported.has(g)) return;
+    const exitFilled = [...(this.exitLegs.get(g) ?? new Map<string, number>()).values()].reduce((a, b) => a + b, 0) + [...ended.values()].reduce((a, b) => a + b, 0);
+    if (exitFilled > 1e-9) return;
+    this.lostReported.add(g);
+    this.lostExits.reported++;
+    this.d.onExitsLost?.({ clientOrderId: info.clientOrderId, symbol, atMs: atMs ?? this.d.now() });
+  }
+
   async handle(u: TradeUpdate): Promise<void> {
     this.counts.events++;
     const o = u.order;
@@ -276,6 +289,8 @@ export class OrderUpdateHandler {
       if (isFill) {
         if (ours) this.filledIds.add(o.clientOrderId);
         if (u.positionQty !== null) this.d.setPosition?.(o.symbol, u.positionQty, fillPrice);
+        // Decision 1 of 2026-11-06: the entry's fill can arrive after both exits' cancels; check again now that it is known.
+        if (ours && g && o.filledQty > 0) this.checkLostExits(g, o.symbol, u.atMs);
       }
       // An entry of ours that never filled and is now final (a load-window limit buy cancelled after its wait): its record is closed
       // as cancelled, which frees the symbol at once. One that partly filled is left to the order sync.
@@ -294,17 +309,10 @@ export class OrderUpdateHandler {
     if ((u.event === "canceled" || u.event === "expired" || u.event === "rejected") && g) {
       const info = this.entry(g);
       if (info && info.filledQty > 0) this.d.onExitEnded?.(info.clientOrderId);
-      // Decision 1 of 2026-11-06: a bracket has two exits. Both ended, nothing filled by either (nor by any other exit of the group),
-      // and the entry filled: the shares have no exit. Reported once per group.
       const ended = this.endedLegs.get(g) ?? new Map<string, number>();
       ended.set(o.id, o.filledQty);
       this.endedLegs.set(g, ended);
-      const exitFilled = [...(this.exitLegs.get(g) ?? new Map<string, number>()).values()].reduce((a, b) => a + b, 0) + [...ended.values()].reduce((a, b) => a + b, 0);
-      if (info && info.filledQty > 0 && ended.size === 2 && exitFilled <= 1e-9 && !this.lostReported.has(g)) {
-        this.lostReported.add(g);
-        this.lostExits.reported++;
-        this.d.onExitsLost?.({ clientOrderId: info.clientOrderId, symbol: o.symbol, atMs: u.atMs ?? this.d.now() });
-      }
+      this.checkLostExits(g, o.symbol, u.atMs);
     }
     // A bracket's stop cancelled while the take-profit has partly filled: shares are left without a stop (release A, fix 1). Only
     // that case is reported: a stop cancelled because the take-profit filled completely, or by one of our own sales, is not.

@@ -60,6 +60,11 @@ test("decision 1, handler: both exits of a filled entry ended with nothing fille
   for (const u of [entry("RIOT"), leg("RIOT", "sl", "canceled")]) await h.handle(u); // only one exit ended: the take-profit still holds
   assert.deepEqual(seen, ["IREN"]);
   assert.equal(h.lostExits.reported, 1);
+  // The entry's fill can arrive after both cancels: reported when it arrives.
+  for (const u of [leg("XP", "tp", "canceled"), leg("XP", "sl", "canceled")]) await h.handle(u);
+  assert.deepEqual(seen, ["IREN"], "the entry is not known yet");
+  await h.handle(entry("XP"));
+  assert.deepEqual(seen, ["IREN", "XP"]);
 });
 
 test("decision 1, worker: the 6 cases of 2026-11-06 (both exits cancelled as the entry filled) are sold about a second after the cancel, not at the next 10 second sync", async () => {
@@ -95,6 +100,32 @@ test("decision 1, worker: if Alpaca's order list does not show the cancel yet, t
   for (let i = 0; i < 20 && sim.sellLog.length === 0; i++) await settle();
   assert.deepEqual(sim.sellLog.map((x) => x.symbol), ["XP"]);
   assert.ok(sim.sellLog[0]!.at < z("15:00:03").getTime(), "the follow-up sync sold it, long before the next 10 second sync");
+});
+
+test("decision 1, sync: a reported entry the listing left out is looked up first, ahead of 12 older missing entries (10 lookups a sync)", async () => {
+  const sim = new SimBroker(Date.UTC(2026, 10, 2, 15, 0));
+  const store = new MemoryStore();
+  await ensureDay({ store, broker: sim, now: () => new Date(sim.simMs) }, D);
+  const day = (await store.getDay(D))!;
+  const ids: string[] = [];
+  for (let n = 0; n < 13; n++) {
+    const sym = n === 12 ? "IREN" : `S${n}`;
+    const id = clientOrderIdFor(D, sym, 1);
+    await sim.submitEntry({ symbol: sym, qty: 1, stopPrice: 9.98, takeProfitPrice: 10.01, referencePrice: 10, clientOrderId: id });
+    sim.fillEntry(id, 10);
+    await store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: sym, qty: 1, referencePrice: 10, stopPrice: 9.98, takeProfitPrice: 10.01, status: "filled", alpacaOrderId: null, filledQty: 1, filledAvgPrice: 10, note: null, createdAt: new Date(sim.simMs - 60_000 + n * 1000).toISOString() });
+    sim.hiddenFromListing.add(id);
+    ids.push(id);
+    sim.advance(10);
+  }
+  sim.cancelExitsAtFill(ids[12]!); // the newest entry lost both exits
+  const memory = new SyncMemory();
+  memory.mustLook.add(ids[12]!);
+  const gate = new SellGate({ broker: sim, say: async () => true, nowMs: () => sim.simMs });
+  const liquidator = new Liquidator({ broker: sim, gate, now: () => new Date(sim.simMs), sleep: sim.sleep });
+  const res = await syncOrders({ broker: sim, store, now: () => new Date(sim.simMs), say: async () => true, liquidator, syncMemory: memory }, day, { protect: true, streamLive: true });
+  assert.deepEqual(res.unprotected, ["IREN"], "found and sold in the first sync");
+  assert.equal(memory.mustLook.has(ids[12]!), false);
 });
 
 test("decision 1, worker: exits cancelled while a sale is running (that sale cancelled them) start no extra sync", async () => {
@@ -146,6 +177,30 @@ test("decision 2: the summary looks up every entry the listing left out (no cap 
   assert.ok(!text.includes("Note:"), "nothing unmatched, so no note");
   assert.ok(!text.includes("could not check every order"), "the fills check ran in full");
   assert.deepEqual(logged.find((x) => x.e === "summary_fills_check")?.data, { complete: true, found: 1, stillMissing: 0 }, "every missing entry was found by its client id; only the sale needed the fills check");
+});
+
+test("decision 2: on a big day the summary's few hundred reads are paced and never cause a rate-limit answer; its request figures are the session's", async () => {
+  const { sim, r } = await simDay();
+  sim.onRate = (remaining) => r.governor.observe({ path: "/v2/orders", status: 200, limit: 200, remaining, reset: null });
+  sim.advanceTo(z("15:00:00").getTime());
+  sim.bucketOn = false; // the setup's own orders do not count
+  for (let n = 1; n <= 300; n++) {
+    const id = clientOrderIdFor(D, `S${n}`, 1);
+    await sim.submitEntry({ symbol: `S${n}`, qty: 1, stopPrice: 9.9, takeProfitPrice: 10.1, referencePrice: 10, clientOrderId: id });
+    sim.fillEntry(id, 10);
+    sim.fillExit(id, "take_profit", 10.1);
+    await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: `S${n}`, qty: 1, referencePrice: 10, stopPrice: 9.9, takeProfitPrice: 10.1, status: "filled", alpacaOrderId: "x", filledQty: 1, filledAvgPrice: 10, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+    sim.hiddenFromListing.add(id);
+  }
+  sim.bucketOn = true;
+  sim.tokens = 200;
+  sim.rejected429 = 0;
+  const before = r.governor.stats().requestsLastMinute;
+  await (r.worker as unknown as { summaryPhase(d: string): Promise<void> }).summaryPhase(D);
+  assert.equal(sim.rejected429, 0, `no rate-limit answer (lowest left ${Math.floor(sim.lowestTokens)})`);
+  const text = r.said("trading").join("\n");
+  assert.match(text, /300 entry orders sent \(300 filled\)/);
+  assert.match(text, new RegExp(`about ${before} in the last minute at the close`), "the session's figures, taken before the summary's own reads");
 });
 
 test("decision 2: the 'carried position' note only when the day began with shares held; otherwise unmatched shares are named as unmatched; a failed fills check is said", () => {

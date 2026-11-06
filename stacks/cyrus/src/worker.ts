@@ -73,6 +73,9 @@ export interface WorkerDeps {
 // live order updates connected it is the backstop and reads only the last 10 minutes of orders (risk.ts).
 // Decision 2 of 2026-11-06: the day phase set when shares carried from an earlier day were sold (the summary's "carried" note).
 export const CARRIED_PHASE = "carried";
+// Decision 2 of 2026-11-06: the summary's reads (on a day of 10,000 fills or more, a few hundred: the fills' pages and the lookups) wait
+// while Alpaca's request budget is below this, so the summary never runs the bucket low and never causes a rate-limit answer.
+export const SUMMARY_MIN_BUDGET = 100;
 export const SYNC_EVERY_MS = 10_000;
 // The speed release, item 8: the gate's cached account and positions are read every 10 seconds while the live order updates are
 // connected (they keep the positions current in between), and every 5 seconds, as before, while they are not. 10, not the
@@ -1207,7 +1210,15 @@ export class Worker {
     }
   }
 
+  // Decision 2 of 2026-11-06: waits (at most a minute) while Alpaca's request budget is below SUMMARY_MIN_BUDGET.
+  private async summaryPace(): Promise<void> {
+    const sleep = this.d.sleep ?? ((t: number) => new Promise<void>((r) => setTimeout(r, t)));
+    for (let i = 0; i < 240 && this.d.governor.budget() < SUMMARY_MIN_BUDGET; i++) await sleep(250);
+  }
+
   private async summaryPhase(date: string): Promise<void> {
+    // The day's request figures are taken before the summary's own reads, so they describe the session, not the summary.
+    const requestsAtClose = this.d.governor.stats();
     await this.flushDigest(true);
     const day = (await this.d.store.getDay(date))!;
     const [account, listed, positions] = await Promise.all([this.d.broker.getAccount(), this.d.broker.listOrdersPaged("all", etInstant(date, "00:00").toISOString(), 60), this.d.broker.listPositions()]);
@@ -1218,21 +1229,24 @@ export class Worker {
     const stored = await this.d.store.listOrders(date);
     const listedIds = new Set(listed.orders.map((o) => o.clientOrderId));
     const missing = stored.filter((s) => !listedIds.has(s.clientOrderId) && (s.alpacaOrderId || s.status === "filled" || s.status === "submitted"));
+    let lookupsFailed = 0;
     for (const s of missing) {
-      const found = await this.d.broker.findOrderByClientId(s.clientOrderId).catch(() => null);
+      await this.summaryPace();
+      const found = await this.d.broker.findOrderByClientId(s.clientOrderId).catch(() => (lookupsFailed++, null));
       if (found) listed.orders.push(found);
     }
-    if (missing.length > 0) this.d.log?.("info", "summary_orders_missing_from_listing", { missing: missing.length });
+    if (missing.length > 0) this.d.log?.("info", "summary_orders_missing_from_listing", { missing: missing.length, lookupsFailed });
     // Decision 2 of 2026-11-06: sells are not stored, so a sell the listing left out (4 on 2026-11-06) is found from Alpaca's list of
     // the day's fills: every fill names its order, and an order not known yet is fetched by that id.
     let fillsCheck: { complete: boolean; found: number; stillMissing: number } | null = null;
     try {
-      const fills = await this.d.broker.listFillsForDay(date);
+      const fills = await this.d.broker.listFillsForDay(date, 400, () => this.summaryPace());
       const known = new Set(listed.orders.flatMap((o) => [o.id, ...flattenLegs(o).map((l) => l.id)]));
       const unknown = [...new Set(fills.fills.map((f) => f.orderId).filter((id) => id && !known.has(id)))];
       let found = 0;
       for (const id of unknown) {
         if (known.has(id)) continue; // a leg of an order fetched a moment ago
+        await this.summaryPace();
         const o = await this.d.broker.getOrderById(id).catch(() => null);
         if (!o) continue;
         listed.orders.push(o);
@@ -1258,7 +1272,7 @@ export class Worker {
       peak: await this.d.store.getControl(peakKey(date)),
       stop: await this.d.store.getControl<StopFlag>(CONTROL_STOP),
       flat: positions.length === 0,
-      requests: this.d.governor.stats(),
+      requests: requestsAtClose,
       feesRunning: running.total,
       listComplete: listed.complete,
       loadWindow: isLoadDay(day) ? loadWindow(day) : null,

@@ -282,8 +282,13 @@ export class SimBroker implements FullBroker {
     }
     return null;
   }
-  async listFillsForDay(_date: string, _maxPages = 400) {
-    this.spend();
+  // About one read per 100 fills, as Alpaca pages them (each page waits for `beforePage`, the summary's pacing).
+  async listFillsForDay(_date: string, _maxPages = 400, beforePage?: () => Promise<void>) {
+    const n = this.all().filter((o) => o.filledQty > 0).length;
+    for (let i = 0; i < Math.max(1, Math.ceil(n / 100)); i++) {
+      if (beforePage) await beforePage();
+      this.spend();
+    }
     const fills: Array<{ id: string; orderId: string; symbol: string; side: string; qty: number; price: number; at: string }> = [];
     for (const o of this.all()) if (o.filledQty > 0) fills.push({ id: `fill-${o.id}`, orderId: o.id, symbol: o.symbol, side: o.side, qty: o.filledQty, price: o.filledAvgPrice ?? 0, at: o.filledAt ?? "" });
     return { fills, complete: true, pages: 1 };

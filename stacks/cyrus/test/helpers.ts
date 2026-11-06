@@ -71,7 +71,8 @@ export class FakeBroker implements FullBroker {
     }
     return null;
   }
-  async listFillsForDay(date: string, _maxPages = 400) {
+  async listFillsForDay(date: string, _maxPages = 400, beforePage?: () => Promise<void>) {
+    if (beforePage) await beforePage();
     this.rec("listFillsForDay", date);
     if (this.fillsFail) throw new Error("fills unavailable (test)");
     return { fills: this.fillsForDay ?? [], complete: true, pages: 1 };
