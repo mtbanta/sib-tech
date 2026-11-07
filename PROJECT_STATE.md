@@ -6,7 +6,13 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**BUILD C2: RELEASE 11 DEPLOYED AS FLY RELEASE V11 (THE RESERVE HELD AT 80); THE EARLY WAKE-UP FIX IS NEXT, FOR A THIRD MONEY REVIEW BEFORE 7:30 AM MONDAY.** As of November 6, 2026 (11:45 PM Central).
+**BUILD C2: FLY RELEASE V12 RUNS (RELEASE 11 PLUS THE EARLY WAKE-UP FIX, REVIEWED PASS IN ROUND 3); THE RESERVE STAYS 80; THE SCALED RESERVE IS NEXT UNDER MICHAEL'S WEEKEND APPROVAL.** As of November 6, 2026 (11:59 PM Central).
+- v12 = v11 plus: a live update ends a sale's or the close-out's wait early only while Alpaca's budget is at least 20 above the reserve, at most 5 times a wait. In the simulator, with Alpaca's updates spread out, this removed the rate-limit answers v10 and v11 get in a full flatten (12 positions and up).
+- **Still for Michael:** at 30 open symbols a flatten command with slow cancels can bring Alpaca's remaining to about 0 in the simulator (no rate-limit answer); live it would break his Monday rule; margin there needs lighter polling in the flatten command or a reserve above 80 (his decision).
+- **Next:** the scaled reserve (item 7) under the weekend approval (up to 8 rounds from round 3, stop for Michael on scope, caps, a repeating finding, 8 rounds or Sunday 6:00 PM; otherwise v12 stays for Monday).
+- For Michael before 7:45 AM Monday: approve the limits; for a load day send `load on` / `trades 150` / `approve`. Monday's review runs at 3:15 PM (`builds/monday-review-brief.md`; the wait lives only in this Claude session). Paper only.
+
+Earlier entry, superseded by the paragraph above: **BUILD C2: RELEASE 11 DEPLOYED AS FLY RELEASE V11 (THE RESERVE HELD AT 80); THE EARLY WAKE-UP FIX IS NEXT, FOR A THIRD MONEY REVIEW BEFORE 7:30 AM MONDAY.** As of November 6, 2026 (11:45 PM Central).
 - **Live in v11 (Michael's decisions after the Friday review):** lost exits (both exits of a filled entry cancelled) sold at once by an immediate order sync; the daily summary looks up every missing order, buys and sells (from Alpaca's fills), paced, and drops the false carried note; the stop-gap measurement starts at the sale; the shadow loss-stop estimate keeps its own book (shadow only, the 5 second check stays); up to 150 orders a minute on a load day while `load on` is in force (normal days 100). Alpaca's paid plans do not raise the 200 a minute trading limit on paper (checked first hand, sources in the log).
 - **Item 7 (the reserve scaled by open symbols) is built but switched off:** group 1 round 2 (STOP AND FLAG MICHAEL) found the early wake-ups (v10's item 9) can push a flatten into rate-limit answers when Alpaca's updates arrive spread out (simulated; v10 has it from 12 positions). Michael chose "Both": deploy with the reserve at 80 now, and build the wake-up fix with a third review, deployed before 7:30 AM Monday only if it passes.
 - **Reviews:** group 2 PASS (round 1); group 1 round 1 CHANGES REQUIRED (reserve formula, fixed to 52 + open symbols), round 2 STOP AND FLAG MICHAEL. 433 tests.
@@ -133,6 +139,7 @@ Earlier entry, superseded by the paragraph above: **NOT STARTED.** Created Octob
 
 ## Completed
 
+- **2026-11-06. The early wake-up fix reviewed (group 1 round 3 PASS) and deployed as Fly release v12.** Record: `builds/build-c2-log.md`, "The early wake-up fix" and "Deploy (2026-11-06, 11:57 PM Central".
 - **2026-11-06. Release 11 built, reviewed (group 2 PASS; group 1 stopped on item 7 in round 2) and deployed as Fly release v11 with the reserve held at 80, per Michael.** Record: `builds/build-c2-log.md`, "Michael's decisions after the Friday review" to "Deploy (2026-11-06, 11:41 PM Central".
 - **2026-11-06. Friday's session (third load day, v10) reviewed, read only.** Load test holds at 100 orders a minute; six window shares lost their exits to a cancel meeting a fill (caught); the summary missed orders. Record: `builds/build-c2-log.md`, "Friday 2026-11-06 session review".
 - **2026-11-05. Strategy run 1, how past bull market winners behaved, day by day (descriptive research, separate from the stacks).** Read `strategy/runs/strategy-run-1-deliverable.md` (source of record), its page `strategy/runs/strategy-run-1-deliverable.html` and `strategy/runs/strategy-run-1-trajectory.md`. Research input, not financial advice.
