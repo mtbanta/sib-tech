@@ -28,6 +28,7 @@ import { OrderUpdateHandler, type TradeUpdate } from "./order-stream.ts";
 import { EntryExpiry } from "./entry-expiry.ts";
 import { StopGapMeter, stopGapKey } from "./stop-gap.ts";
 import { ShadowLedger } from "./shadow-ledger.ts";
+import { earlyLookAllowed } from "./early-wake.ts";
 import type { Trade } from "./stream.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
 import { computeDay, formatSummary, type StopGapDay } from "./summary.ts";
@@ -247,7 +248,8 @@ export class Worker {
   }
 
   // Item 9: waits up to `ms`; ends early (true) when a live order update arrives for one of the symbols. A plain pause while the
-  // updates are not connected.
+  // updates are not connected. Since Michael's decision of 2026-11-06 (early-wake.ts) an update is ignored while Alpaca's request
+  // budget is less than EARLY_LOOK_HEADROOM above the reserve: the wait then runs to its timed look.
   private waitEvent(symbols: ReadonlySet<string>, ms: number): Promise<boolean> {
     const sleep = this.d.sleep ?? ((t: number) => new Promise<void>((r) => setTimeout(r, t)));
     if (!this.orderStreamLive()) return sleep(ms).then(() => false);
@@ -257,6 +259,7 @@ export class Worker {
         symbols,
         wake: () => {
           if (done) return;
+          if (!earlyLookAllowed(this.d.governor.budget(), this.d.governor.reserve())) return;
           done = true;
           this.waiters.delete(w);
           resolve(true);

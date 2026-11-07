@@ -14,6 +14,7 @@
 import type { Order, Position } from "./alpaca-trading.ts";
 import { AlpacaError } from "./alpaca-trading.ts";
 import type { SellBroker } from "./broker.ts";
+import { MAX_EARLY_WAKES } from "./early-wake.ts";
 
 export type Say = (channel: "commands" | "trading" | "alerts", text: string, opts?: { mentionOwner?: boolean }) => Promise<boolean>;
 
@@ -221,8 +222,8 @@ export interface LiquidatorDeps {
   waitEvent?: (symbols: ReadonlySet<string>, ms: number) => Promise<boolean>;
 }
 
-// At most this many early wake-ups in one wait for cancels, so a burst of updates cannot turn the wait into a run of extra looks.
-const MAX_EARLY_WAKES = 20;
+// At most MAX_EARLY_WAKES early wake-ups in one liquidation, so a burst of updates cannot turn the waits into a run of extra looks (5
+// since Michael's decision of 2026-11-06, early-wake.ts; the worker's waits also ignore updates while the budget is near the reserve).
 
 export class Liquidator {
   private readonly d: LiquidatorDeps;

@@ -5,6 +5,7 @@
 // shows them gone, and sells each symbol with an explicit quantity, several rounds if need be. It no longer uses
 // Alpaca's bulk "close all positions" call: on 2026-11-02 that call cancelled the protective stops and then failed
 // for every position, and the account was flat only because the order sync happened to sell the positions.
+import { MAX_EARLY_WAKES } from "./early-wake.ts";
 import type { Broker } from "./broker.ts";
 import type { Store } from "./store.ts";
 import { ownOpenSellQty, type Liquidator, type Say } from "./sells.ts";
@@ -101,9 +102,9 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
     const sleep = d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
     const maxLooks = Math.max(0, Math.ceil((deadline - t0) / OWN_SELLS_POLL_MS)) + 1; // bounded even if the clock does not move
     stillWorking = true;
-    let earlyWakes = 0; // at most 20 looks are brought forward by updates; after that every look waits its 2 seconds again
+    let earlyWakes = 0; // at most MAX_EARLY_WAKES looks are brought forward by updates; after that every look waits its 2 seconds again
     for (let look = 1; look <= maxLooks && d.now().getTime() < deadline; look++) {
-      if (d.waitEvent && earlyWakes < 20) {
+      if (d.waitEvent && earlyWakes < MAX_EARLY_WAKES) {
         if (await d.waitEvent(new Set(remaining), OWN_SELLS_POLL_MS)) {
           earlyWakes++;
           look--; // a look brought forward by an update does not use up one of the timed looks

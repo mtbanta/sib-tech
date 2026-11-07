@@ -2796,3 +2796,19 @@ Asked with the round 2 finding and the rehearsal's reserve dip:
 - `builds/monday-review-brief.md` written (Michael's pass rule word for word, with his ruling on dips).
 
 **Next (Michael's "Both"):** the early wake-up fix on a new branch, a third group 1 review, deployed before 7:30 AM Monday only if it passes.
+
+## The early wake-up fix (built 2026-11-07, just after midnight; branch `wake-fix`; group 1 review, round 3, approved by Michael)
+
+Michael's approval ("Both", 2026-11-06): early wake-ups in the sell path and the close-out skip their extra look when Alpaca's budget is near the reserve, fewer wakes per wait, and a flatten test with spread-out update timing at 1 to 30 positions; a third group 1 review; deploy before 7:30 AM Monday only if it passes. The reserve stays at 80 (the scaled reserve stays switched off).
+
+**What changed** (`src/early-wake.ts`, `worker.ts` `waitEvent`, `sells.ts`, `closeout.ts`):
+- A live update ends a wait early only while Alpaca's request budget (the governor's estimate) is at least `EARLY_LOOK_HEADROOM` = 20 above the reserve in force; otherwise it is ignored and the wait runs to its timed look. The check sits in the worker's `waitEvent`, used by both the sell path's waits and the close-out's wait for its own sells.
+- At most `MAX_EARLY_WAKES` = 5 early wake-ups in one liquidation and in the close-out's wait (20 before).
+- It only decides when the next look happens; nothing that sends, cancels or sizes an order changed.
+
+**The flatten test with spread timing** (`test/wake-fix.test.ts`): the release 11 flatten (close-out, the loss stop's sale, the flatten command; cancels of 0.2 and 7 seconds; sells held 16 seconds; routine work at 75 a minute), now with the waits ended by live updates as in production, the cancel completions and sell fills spread at random over their delays (3 random draws each), a governor reading the bucket, and the bucket starting at 72 (the reserve of 80 less 8). Simulator, requests take no time (overstates the drain):
+- **With the limits: no rate-limit answer in any of 90 cases.** At least 10 requests left up to 20 positions. At 30 positions the flatten command with slow cancels drew the whole bucket in one draw (0 to 4 left, no rate-limit answer): early looks are already blocked there, so this is the flatten command's own timed looks against the cap of 80 (and the same in v10 and v11). Adding margin there would need lighter polling in the flatten command or a reserve above 80, both outside the approval: for Michael.
+- **Without the limits (v10 and v11 as deployed), the same spread case gets rate-limit answers** (the test checks this).
+- **The scaled reserve (52 + open symbols) with the limits:** no rate-limit answer, but 6 of 40 cases came below 10 left (the flatten command with slow cancels at 5, 12 and 20 positions: 2 to 4). So it stays switched off.
+
+**Tests:** 439 pass (6 added in `test/wake-fix.test.ts`; the speed release's item 9 test now expects 5 early wake-ups, not 20, per Michael's decision). Each change taken out on its own fails a test: 5 of 5 (the worker's budget check, the headroom, the helper, the sell path's cap, the close-out's cap).

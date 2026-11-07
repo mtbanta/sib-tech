@@ -422,7 +422,7 @@ test("item 8, worker: the account and positions are read every 10 seconds while 
 
 // ------------------------------------------------ item 9: waits end at the event ----------------------------------------------------
 
-test("item 9: a sale's wait for its cancels ends at a live update for that symbol; a run of updates cannot turn the wait into more than 20 extra looks", async () => {
+test("item 9: a sale's wait for its cancels ends at a live update for that symbol; a run of updates cannot turn the wait into more than 5 extra looks (20 before Michael's decision of 2026-11-06)", async () => {
   const fb = new FakeBroker();
   fb.positions = [{ symbol: "AAA", qty: 5, qtyAvailable: 0, marketValue: 100, avgEntryPrice: 20, unrealizedPl: 0 }];
   const sleeps: number[] = [];
@@ -431,10 +431,10 @@ test("item 9: a sale's wait for its cancels ends at a live update for that symbo
   const liq = new Liquidator({ broker: fb, gate, now: () => new Date(0), sleep: async (ms) => void sleeps.push(ms), waitEvent: async (syms, ms) => (assert.ok(syms.has("AAA")), waits.push(ms), true) });
   const res = await liq.flatten({ reason: "test", tradeDate: D, only: ["AAA"], maxRounds: 1 });
   assert.ok(!res.flat, "the shares stay held by an order nothing cancels (a stuck exit)");
-  assert.equal(waits.length, 20, "the first 20 pauses are waits that an update can end");
+  assert.equal(waits.length, 5, "the first 5 pauses are waits that an update can end");
   assert.ok(sleeps.length > 0 && sleeps.every((ms) => ms >= 250), "after that, plain pauses again (group 1 review, round 1)");
   const looks = fb.count("listPositions");
-  assert.ok(looks <= 2 * (20 + 12) + 4, `bounded: ${looks} position reads`);
+  assert.ok(looks <= 2 * (5 + 12) + 4, `bounded: ${looks} position reads`);
 });
 
 // ------------------------------------------------ items 5 and 10: shadow estimate and statistics ------------------------------------
