@@ -10,7 +10,7 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 - v12 = v11 plus: a live update ends a sale's or the close-out's wait early only while Alpaca's budget is at least 20 above the reserve, at most 5 times a wait. In the simulator, with Alpaca's updates spread out, this removed the rate-limit answers v10 and v11 get in a full flatten (12 positions and up).
 - **Still for Michael:** at 30 open symbols a flatten command with slow cancels can bring Alpaca's remaining to about 0 in the simulator (no rate-limit answer); live it would break his Monday rule; margin there needs lighter polling in the flatten command or a reserve above 80 (his decision).
 - **The scaled reserve (item 7): dropped by Michael** (2026-11-07) after round 4 found its margin under-sampled (the same finding after two fixes). The reserve stays fixed at 80 for good; branch `reserve-scale` left unmerged as the record. v12 runs Monday.
-- **Next week (Michael):** a proposal, no code, for lighter polling in the flatten command (its slow-cancel corner at 16 or more open symbols).
+- **Next week (Michael):** a proposal, no code, for (1) lighter polling in the flatten command (its slow-cancel corner at 16 or more open symbols) and (2) a larger loss-stop retry budget after the stop fires (above 60 a minute and above 15 per check, sized to what routine work leaves, never below the 80 reserve), showing how much it shortens the time positions sit without exits and how much of that is Alpaca's own cancel time.
 - For Michael before 7:45 AM Monday: approve the limits; for a load day send `load on` / `trades 150` / `approve`. Monday's review runs at 3:15 PM (`builds/monday-review-brief.md`; the wait lives only in this Claude session). Paper only.
 
 Earlier entry, superseded by the paragraph above: **BUILD C2: RELEASE 11 DEPLOYED AS FLY RELEASE V11 (THE RESERVE HELD AT 80); THE EARLY WAKE-UP FIX IS NEXT, FOR A THIRD MONEY REVIEW BEFORE 7:30 AM MONDAY.** As of November 6, 2026 (11:45 PM Central).
@@ -266,7 +266,7 @@ The full record of each run lives in `runs/`. This table is the index you read f
 
 As of 2026-11-06 (11:45 PM Central): v11 runs.
 
-000000. **Monday 2026-11-09 and after:** Monday's review at 3:15 PM (`builds/monday-review-brief.md`; release v12; Michael's pass rule with his dip ruling). Then a proposal (no code until approved) for lighter polling in the flatten command. The scaled reserve is dropped (reserve fixed at 80).
+000000. **Monday 2026-11-09 and after:** Monday's review at 3:15 PM (`builds/monday-review-brief.md`; release v12; Michael's pass rule with his dip ruling). Then a proposal (no code until approved) for lighter polling in the flatten command and a larger loss-stop retry budget after the stop fires (see the C2 log, "Michael's decisions after the scaled reserve's round 4"). The scaled reserve is dropped (reserve fixed at 80).
 
 00000. Done 2026-11-07 (the wake-up fix deployed as v12; the scaled reserve dropped). **Before 7:30 AM Monday 2026-11-09:** the early wake-up fix (Michael's "Both"): early wake-ups in the sell path and the close-out skip their extra look when Alpaca's budget is near the reserve, fewer wakes per wait, a flatten test with spread update timing at 1 to 30 positions; a third group 1 review; deploy only if it passes (and the scaled reserve only if that test shows it holds). Then Monday's review at 3:15 PM per `builds/monday-review-brief.md`.
 
