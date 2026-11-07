@@ -2780,3 +2780,9 @@ Other round 1 notes (non-blocking): the three scope questions (the carried mark,
 Fixing it needs either a reserve above Michael's cap of 80 or a change to the early wake-ups in the sell path and the close-out, both beyond Michael's list, so under the standing rule it goes to Michael. Non-blocking: a lost-exit or remainder sale already running when a flatten command arrives spends budget first; the "8 below the reserve" comes from a simulator with no request time.
 
 Everything else in the release passed: group 2 in round 1; group 1's checks of items 1 to 5, the shadow book, the 150 ceiling and the fix commit's other changes. Paper only. Research input for a human decision, never an instruction to act.
+
+## Michael's decisions after group 1 round 2 (2026-11-06, evening)
+
+Asked with the round 2 finding and the rehearsal's reserve dip:
+- **Release 11: "Both."** Deploy release 11 now with the reserve fixed at 80 as in v10 (item 7's scaling not shipped; items 1 to 5 go live; flatten exposure the same as v10's). Also build the wake-up fix (early wake-ups in the sell path and the close-out skip their extra look when Alpaca's budget is near the reserve, and fewer wakes per wait; a flatten test with spread-out update timing at 1 to 30 positions) with a third group 1 review, deployed before 7:30 AM Monday only if it passes.
+- **Monday's pass rule, how a dip below the reserve counts: "Allow safety-work dips."** It holds if new entries never spend below the reserve. A dip caused only by cancels, syncs, loss-stop reads or sales is reported with its size but does not fail the day, as long as there are no rate-limit errors and no safety sale is delayed (and the close-out is flat).

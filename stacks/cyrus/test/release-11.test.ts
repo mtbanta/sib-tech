@@ -9,7 +9,7 @@ import { closeOut } from "../src/closeout.ts";
 import { SyncMemory, enforceDailyLoss, syncOrders } from "../src/risk.ts";
 import { OrderGate, clientOrderIdFor } from "../src/gate.ts";
 import { BrokerView } from "../src/broker-view.ts";
-import { Governor, RESERVE_FLOOR, SAFETY_RESERVE, reserveFor } from "../src/governor.ts";
+import { Governor, RESERVE_FLOOR, RESERVE_SCALING, SAFETY_RESERVE, reserveFor } from "../src/governor.ts";
 import { MAX_TRADES_PER_MINUTE, MAX_TRADES_PER_MINUTE_LOAD_DAY, SUGGESTED_LIMITS, applyOverride, checkEntry, tradesCeiling, type EntryContext } from "../src/limits.ts";
 import { StopGapMeter } from "../src/stop-gap.ts";
 import { QUIET_MS, ShadowLedger } from "../src/shadow-ledger.ts";
@@ -495,7 +495,11 @@ test("decision 7: the reserve is 52 + open symbols, at most 80; unknown means th
   assert.equal(RESERVE_FLOOR, 52);
   assert.equal(SAFETY_RESERVE, 80);
   let t = 0;
-  const g = new Governor(() => t);
+  assert.equal(new Governor(() => t).reserve(), 80);
+  const fixed = new Governor(() => t);
+  fixed.setOpenSymbols(0);
+  assert.equal(fixed.reserve(), RESERVE_SCALING ? 52 : 80, "the reserve in force: fixed at 80 until the scaling is switched on (Michael, 2026-11-06)");
+  const g = new Governor(() => t, { scaleReserve: true });
   assert.equal(g.reserve(), 80, "until told how many symbols are open");
   g.setOpenSymbols(0);
   g.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: 53, reset: null });
@@ -524,7 +528,8 @@ test("decision 7, gate: before each entry it tells the governor how many symbols
   for (const s of ["BBB", "CCC"]) await store.insertOrder({ clientOrderId: `cyrus-20261102-${s}-1`, tradeDate: D, symbol: s, qty: 2, referencePrice: 20, stopPrice: 19.9, takeProfitPrice: 20.05, status: "filled", alpacaOrderId: "x", filledQty: 2, filledAvgPrice: 20, note: null, createdAt: z("14:59:00").toISOString() });
   broker.positions = [{ symbol: "BBB", qty: 2, qtyAvailable: 0, marketValue: 40, avgEntryPrice: 20, unrealizedPl: 0 }, { symbol: "CCC", qty: 2, qtyAvailable: 0, marketValue: 40, avgEntryPrice: 20, unrealizedPl: 0 }];
   await gate.enter(signal);
-  assert.equal(governor.reserve(), reserveFor(3), "BBB, CCC and AAA");
+  assert.equal(governor.openSymbolCount(), 3, "BBB, CCC and AAA");
+  assert.equal(governor.reserve(), RESERVE_SCALING ? reserveFor(3) : 80);
 });
 
 test("decision 7, worker: each view refresh counts the open symbols (held, or with an entry working)", async () => {
@@ -538,7 +543,8 @@ test("decision 7, worker: each view refresh counts the open symbols (held, or wi
   r.broker.positions = Array.from({ length: 5 }, (_, i) => ({ symbol: `P${i}`, qty: 1, qtyAvailable: 0, marketValue: 10, avgEntryPrice: 10, unrealizedPl: 0 }));
   await r.store.insertOrder({ clientOrderId: "cyrus-20261102-W-1", tradeDate: D, symbol: "W", qty: 1, referencePrice: 10, stopPrice: 9.9, takeProfitPrice: 10.1, status: "submitted", alpacaOrderId: "x", filledQty: null, filledAvgPrice: null, note: null, createdAt: z("14:59:00").toISOString() });
   await r.at("15:00:00");
-  assert.equal(r.governor.reserve(), reserveFor(6));
+  assert.equal(r.governor.openSymbolCount(), 6);
+  assert.equal(r.governor.reserve(), RESERVE_SCALING ? reserveFor(6) : 80);
 });
 
 test("decision 7, loss stop retry: it keeps the reserve in force (not the fixed 80)", async () => {
@@ -570,7 +576,7 @@ test("decision 7: a full flatten of 1 to 30 positions (30 is the most the live l
       }
       // Entries drained the bucket to the reserve, and cancels, the sync and the loss stop's reads took it up to 6 or 7 further (the
       // 150 a minute rehearsals; 8 here); routine work beside the flatten takes up to 75 a minute for its whole length.
-      sim.tokens = reserveFor(n) - 8;
+      sim.tokens = (RESERVE_SCALING ? reserveFor(n) : SAFETY_RESERVE) - 8;
       sim.lowestTokens = sim.tokens;
       sim.refillPerMinute = 200 - 75;
       sim.rejected429 = 0;

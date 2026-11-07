@@ -25,6 +25,9 @@ export const ALPACA_REQUESTS_PER_MINUTE = 200;
 export const SAFETY_RESERVE = 80;
 // 34 (the flatten command's own draw with routine work beside it) + 8 (the shortfall at sustained load) + 10 (left at the bottom).
 export const RESERVE_FLOOR = 52;
+// Michael's decision of 2026-11-06 (after group 1 review round 2): the scaled reserve is NOT in force yet. The reserve stays at the
+// fixed 80 (as in v10) until the early wake-ups fix passes review; the open-symbol count and the statistics still run.
+export const RESERVE_SCALING = false;
 
 // The reserve for a number of open symbols (held, or with an entry working): one more request (its sell) per symbol.
 export function reserveFor(openSymbols: number): number {
@@ -56,8 +59,16 @@ export class Governor {
   private minuteLowest: number | null = null;
   private minuteLowestAboveReserve: number | null = null;
 
-  constructor(now: () => number = Date.now) {
+  private readonly scaleReserve: boolean;
+
+  constructor(now: () => number = Date.now, opts: { scaleReserve?: boolean } = {}) {
     this.now = now;
+    this.scaleReserve = opts.scaleReserve ?? RESERVE_SCALING;
+  }
+
+  // How many symbols the gate or the worker last said are open (null until told).
+  openSymbolCount(): number | null {
+    return this.openSymbols;
   }
 
   // Called with every answer from Alpaca's trading interface (see AlpacaTrading `onRate`).
@@ -98,7 +109,7 @@ export class Governor {
 
   // The reserve in force now.
   reserve(): number {
-    return this.openSymbols === null ? SAFETY_RESERVE : reserveFor(this.openSymbols);
+    return !this.scaleReserve || this.openSymbols === null ? SAFETY_RESERVE : reserveFor(this.openSymbols);
   }
 
   // Our best estimate of the tokens left in Alpaca's bucket right now: the last number it told us, plus the refill since.
