@@ -2840,3 +2840,10 @@ The change (branch `reserve-scale`, `c46e24c`, not merged): `reserveFor(n) = min
 **Agreed outside this scope (for Michael):** from about 16 open symbols with 11 second cancels and spread updates, the flatten command's timed looks can exceed what a reserve of 80 covers (deployed v12 too); Michael's item 7 test ("a full flatten at the maximum open positions never hits a rate limit") cannot be fully met at 30 open symbols with 11 second cancels under the cap of 80. Covering it needs lighter polling in the flatten command (other money-touching code) or a reserve above the cap.
 
 Other notes: the reserve can be stale low by one symbol for up to about 10 seconds (the view refresh reading rows before the gate's insert), never for an entry (each entry recounts); with the scaling on, the view refresh, the loss stop's retry and the early wake-up threshold spend lower (probed: no rate-limit answer, lowest 34 or more). Paper only.
+
+## Michael's decisions after the scaled reserve's round 4 (2026-11-07, early morning)
+
+- **Item 7: "Drop the scaling."** The reserve stays fixed at 80 for good (v12 as deployed). The open-symbol count and the per-minute reserve statistics stay; the scaled formula stays switched off (`RESERVE_SCALING = false`). The branch `reserve-scale` is left unmerged, as the record. No more rounds this weekend.
+- **The flatten command's slow-cancel corner: "Propose next week."** After Monday, a short proposal for lighter polling in the flatten command (fewer looks while cancels are pending, sized by the request budget), with the simulator numbers. No code until Michael approves.
+
+**Where this leaves Monday:** Fly release v12 (release 11 with the reserve at 80, plus the early wake-up fix). `builds/monday-review-brief.md` needs no change (it measures the reserve in force, now always 80). The 3:15 PM Monday wait is set (only while this Claude session stays open). Paper only.
