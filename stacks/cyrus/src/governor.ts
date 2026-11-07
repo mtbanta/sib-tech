@@ -10,29 +10,32 @@
 //
 // THE RESERVE (Michael's decision 7 of 2026-11-06): it scales with what is open, instead of a fixed 80. Enough for a full
 // emergency flatten of every open symbol (a symbol held, or with an entry working), with a floor and a cap of 80:
-//     reserve = min(80, 52 + open symbols)
-// Why (the C2 log, "Release 11 group 1 review, round 1" and its fix): in the simulator, with the real sale code, routine work beside
-// it at 75 requests a minute for the whole flatten, cancels of 0.2 or 7 seconds and sells held 16 seconds, the worst full flatten (the
-// flatten command's 4 rounds, 23 seconds) drew the bucket 34 + 1 per open symbol below what it started at. Plus 8: at sustained load
-// the bucket sits up to 6 or 7 below the reserve (cancels, the sync and the loss stop's reads keep spending after entries stop; the
-// 150 a minute rehearsals). Plus 10 left at the bottom (5 percent of the bucket). 52 with nothing open, 80 from 28 open symbols (the
-// live list holds at most 30). Until the gate or the worker has said how many symbols are open, the reserve is the cap.
+//     reserve = min(80, 59 + 2 x open symbols)
+// Why (the C2 log, "The scaled reserve, re-derived"): in the simulator, with the real sale code and the early wake-up limits
+// (early-wake.ts), routine work beside it at 75 requests a minute for the whole flatten, Alpaca's cancel completions and sell fills
+// spread at random over their delays (cancels of 0.2 to 11 seconds, sells held 16 seconds, 8 random draws), the worst full flatten
+// (the flatten command's 4 rounds with 11 second cancels; early looks are blocked near the reserve, so its timed looks) drew the bucket
+// at most 41 + 2 per open symbol below where it started. Plus 8: at sustained load the bucket sits up to 6 or 7 below the reserve
+// (cancels, the sync and the loss stop's reads keep spending after entries stop; the 150 a minute rehearsals). Plus 10 left at the
+// bottom (5 percent of the bucket). 59 with nothing open, 80 (the cap) from 11 open symbols. Until the gate or the worker has said how
+// many symbols are open, the reserve is the cap.
 import { MAX_TRADES_PER_MINUTE, MAX_TRADES_PER_MINUTE_LOAD_DAY } from "./limits.ts";
 import type { RateInfo } from "./alpaca-trading.ts";
 
 export const ALPACA_REQUESTS_PER_MINUTE = 200;
 // The cap of the reserve (and its old fixed value).
 export const SAFETY_RESERVE = 80;
-// 34 (the flatten command's own draw with routine work beside it) + 8 (the shortfall at sustained load) + 10 (left at the bottom).
-export const RESERVE_FLOOR = 52;
-// Michael's decision of 2026-11-06 (after group 1 review round 2): the scaled reserve is NOT in force yet. The reserve stays at the
-// fixed 80 (as in v10) until the early wake-ups fix passes review; the open-symbol count and the statistics still run.
-export const RESERVE_SCALING = false;
+// 41 (the flatten command's own draw with routine work beside it) + 8 (the shortfall at sustained load) + 10 (left at the bottom).
+export const RESERVE_FLOOR = 59;
+// Each open symbol: up to 2 more requests in the worst flatten (its sell, and the extra looks while its cancel or fill is awaited).
+export const RESERVE_PER_SYMBOL = 2;
+// In force since the early wake-up fix passed review (Michael's weekend approval of 2026-11-07, this change reviewed in its own round).
+export const RESERVE_SCALING = true;
 
 // The reserve for a number of open symbols (held, or with an entry working): one more request (its sell) per symbol.
 export function reserveFor(openSymbols: number): number {
   const n = Number.isFinite(openSymbols) && openSymbols > 0 ? Math.ceil(openSymbols) : 0;
-  return Math.min(SAFETY_RESERVE, RESERVE_FLOOR + n);
+  return Math.min(SAFETY_RESERVE, RESERVE_FLOOR + RESERVE_PER_SYMBOL * n);
 }
 const REFILL_PER_MS = ALPACA_REQUESTS_PER_MINUTE / 60_000;
 

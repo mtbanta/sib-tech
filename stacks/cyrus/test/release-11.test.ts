@@ -9,7 +9,7 @@ import { closeOut } from "../src/closeout.ts";
 import { SyncMemory, enforceDailyLoss, syncOrders } from "../src/risk.ts";
 import { OrderGate, clientOrderIdFor } from "../src/gate.ts";
 import { BrokerView } from "../src/broker-view.ts";
-import { Governor, RESERVE_FLOOR, RESERVE_SCALING, SAFETY_RESERVE, reserveFor } from "../src/governor.ts";
+import { Governor, RESERVE_FLOOR, SAFETY_RESERVE, reserveFor } from "../src/governor.ts";
 import { MAX_TRADES_PER_MINUTE, MAX_TRADES_PER_MINUTE_LOAD_DAY, SUGGESTED_LIMITS, applyOverride, checkEntry, tradesCeiling, type EntryContext } from "../src/limits.ts";
 import { StopGapMeter } from "../src/stop-gap.ts";
 import { QUIET_MS, ShadowLedger } from "../src/shadow-ledger.ts";
@@ -490,36 +490,36 @@ test("decision 5, commands: `trades 150` needs `load on` (in the same message, e
 
 // ================================ 7. The reserve scales with open symbols ================================
 
-test("decision 7: the reserve is 52 + open symbols, at most 80; unknown means the cap; the lows are kept for the day and for each minute", () => {
-  assert.deepEqual([0, 1, 2, 10, 20, 27, 28, 30, 100].map(reserveFor), [52, 53, 54, 62, 72, 79, 80, 80, 80]);
-  assert.equal(RESERVE_FLOOR, 52);
+test("decision 7: the reserve is 59 + 2 x open symbols, at most 80; unknown means the cap; the lows are kept for the day and for each minute", () => {
+  assert.deepEqual([0, 1, 2, 5, 10, 11, 20, 30, 100].map(reserveFor), [59, 61, 63, 69, 79, 80, 80, 80, 80]);
+  assert.equal(RESERVE_FLOOR, 59);
   assert.equal(SAFETY_RESERVE, 80);
   let t = 0;
   assert.equal(new Governor(() => t).reserve(), 80);
   const fixed = new Governor(() => t);
   fixed.setOpenSymbols(0);
-  assert.equal(fixed.reserve(), RESERVE_SCALING ? 52 : 80, "the reserve in force: fixed at 80 until the scaling is switched on (Michael, 2026-11-06)");
+  assert.equal(fixed.reserve(), 59, "the scaled reserve is in force (switched on after the early wake-up fix passed review)");
   const g = new Governor(() => t, { scaleReserve: true });
   assert.equal(g.reserve(), 80, "until told how many symbols are open");
   g.setOpenSymbols(0);
-  g.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: 53, reset: null });
-  assert.equal(g.canSpend(), true, "53 is above a reserve of 52");
-  g.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: 52, reset: null });
+  g.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: 60, reset: null });
+  assert.equal(g.canSpend(), true, "60 is above a reserve of 59");
+  g.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: 59, reset: null });
   assert.equal(g.canSpend(), false);
-  g.setOpenSymbols(20);
-  g.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: 73, reset: null });
-  assert.equal(g.canSpend(), true, "73 is above a reserve of 72");
+  g.setOpenSymbols(5);
+  g.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: 70, reset: null });
+  assert.equal(g.canSpend(), true, "70 is above a reserve of 69");
   g.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: 40, reset: null });
-  assert.equal(g.canSpend(), false, "20 open symbols: a reserve of 72");
-  assert.match((g.admitTrade(150, 150) as { reason: string }).reason, /the last 72 are kept/);
-  assert.equal(g.stats().reserveNow, 72);
-  assert.equal(g.stats().lowestAboveReserve, -32, "the day's lowest of remaining minus the reserve in force (40 - 72)");
+  assert.equal(g.canSpend(), false, "5 open symbols: a reserve of 69");
+  assert.match((g.admitTrade(150, 150) as { reason: string }).reason, /the last 69 are kept/);
+  assert.equal(g.stats().reserveNow, 69);
+  assert.equal(g.stats().lowestAboveReserve, -29, "the day's lowest of remaining minus the reserve in force (40 - 69)");
   const m1 = g.takeMinuteReserve();
-  assert.deepEqual([m1.min, m1.max, m1.lowestRemaining, m1.lowestAboveReserve], [52, 72, 40, -32]);
+  assert.deepEqual([m1.min, m1.max, m1.lowestRemaining, m1.lowestAboveReserve], [59, 69, 40, -29]);
   g.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: 120, reset: null });
   const m2 = g.takeMinuteReserve();
-  assert.deepEqual([m2.lowestRemaining, m2.lowestAboveReserve], [120, 48], "each minute's lows start again");
-  assert.equal(g.stats().lowestAboveReserve, -32, "the day's low stays");
+  assert.deepEqual([m2.lowestRemaining, m2.lowestAboveReserve], [120, 51], "each minute's lows start again");
+  assert.equal(g.stats().lowestAboveReserve, -29, "the day's low stays");
   t += 1;
 });
 
@@ -529,7 +529,7 @@ test("decision 7, gate: before each entry it tells the governor how many symbols
   broker.positions = [{ symbol: "BBB", qty: 2, qtyAvailable: 0, marketValue: 40, avgEntryPrice: 20, unrealizedPl: 0 }, { symbol: "CCC", qty: 2, qtyAvailable: 0, marketValue: 40, avgEntryPrice: 20, unrealizedPl: 0 }];
   await gate.enter(signal);
   assert.equal(governor.openSymbolCount(), 3, "BBB, CCC and AAA");
-  assert.equal(governor.reserve(), RESERVE_SCALING ? reserveFor(3) : 80);
+  assert.equal(governor.reserve(), reserveFor(3));
 });
 
 test("decision 7, worker: each view refresh counts the open symbols (held, or with an entry working)", async () => {
@@ -544,7 +544,7 @@ test("decision 7, worker: each view refresh counts the open symbols (held, or wi
   await r.store.insertOrder({ clientOrderId: "cyrus-20261102-W-1", tradeDate: D, symbol: "W", qty: 1, referencePrice: 10, stopPrice: 9.9, takeProfitPrice: 10.1, status: "submitted", alpacaOrderId: "x", filledQty: null, filledAvgPrice: null, note: null, createdAt: z("14:59:00").toISOString() });
   await r.at("15:00:00");
   assert.equal(r.governor.openSymbolCount(), 6);
-  assert.equal(r.governor.reserve(), RESERVE_SCALING ? reserveFor(6) : 80);
+  assert.equal(r.governor.reserve(), reserveFor(6));
 });
 
 test("decision 7, loss stop retry: it keeps the reserve in force (not the fixed 80)", async () => {
@@ -576,7 +576,7 @@ test("decision 7: a full flatten of 1 to 30 positions (30 is the most the live l
       }
       // Entries drained the bucket to the reserve, and cancels, the sync and the loss stop's reads took it up to 6 or 7 further (the
       // 150 a minute rehearsals; 8 here); routine work beside the flatten takes up to 75 a minute for its whole length.
-      sim.tokens = (RESERVE_SCALING ? reserveFor(n) : SAFETY_RESERVE) - 8;
+      sim.tokens = reserveFor(n) - 8;
       sim.lowestTokens = sim.tokens;
       sim.refillPerMinute = 200 - 75;
       sim.rejected429 = 0;
@@ -588,7 +588,7 @@ test("decision 7: a full flatten of 1 to 30 positions (30 is the most the live l
       const label = `${n} positions, ${path}, cancels ${cancelMs} ms`;
       assert.equal(sim.rejected429, 0, `${label}: no rate-limit answer (lowest left ${Math.floor(sim.lowestTokens)})`);
       // At least 10 left; where Michael's cap of 80 holds the reserve below 52 + n (28 open symbols or more), 10 less what the cap took.
-      const capped = Math.max(0, RESERVE_FLOOR + n - SAFETY_RESERVE);
+      const capped = Math.max(0, reserveFor(0) + 2 * n - SAFETY_RESERVE);
       assert.ok(sim.lowestTokens >= 10 - capped, `${label}: at least ${10 - capped} requests left at the lowest (${Math.floor(sim.lowestTokens)})`);
       assert.equal(sim.oversellAttempts, 0);
       sim.advance(20_000); // the sells Alpaca paper holds fill

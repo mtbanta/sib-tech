@@ -16,7 +16,7 @@ const MID = Date.UTC(2026, 10, 2, 20, 55);
 // One flatten on the simulated broker. Updates arrive at each cancel completion and sell fill (spread at random over the delay when
 // `spread`), 40 ms later the wait ends, unless the worker's rule (earlyLookAllowed against the governor's budget and reserve) says
 // no, in which case the wait carries on to the next update or its timed end.
-async function flatten(n: number, path: "closeout" | "lossstop" | "flatten", cancelMs: number, opts: { spread: boolean; scaled: boolean; seed: number; limit: boolean }) {
+async function flatten(n: number, path: "closeout" | "lossstop" | "flatten", cancelMs: number, opts: { spread: boolean; scaled: boolean; seed: number; limit: boolean; start?: number }) {
   const sim = new SimBroker(MID);
   const inner = sim as unknown as { cancels: Array<{ id: string; doneAt: number }>; sellFills: Array<{ id: string; at: number }> };
   sim.cancelMs = cancelMs;
@@ -39,6 +39,7 @@ async function flatten(n: number, path: "closeout" | "lossstop" | "flatten", can
   const adv = sim.advance.bind(sim);
   sim.advance = (ms: number) => { jitter(); adv(ms); };
   const symOf = (id: string) => { for (const o of sim.orders) { if (o.id === id) return o.symbol; for (const l of o.legs) if (l.id === id) return l.symbol; } return null; };
+  let early = 0;
   const waitEvent = async (syms: ReadonlySet<string>, ms: number): Promise<boolean> => {
     jitter();
     const end = sim.simMs + ms;
@@ -47,12 +48,12 @@ async function flatten(n: number, path: "closeout" | "lossstop" | "flatten", can
     for (const t of times) {
       if (t + 40 > end) break;
       sim.advance(t + 40 - sim.simMs);
-      if (!opts.limit || earlyLookAllowed(gov.budget(), gov.reserve())) return true;
+      if (!opts.limit || earlyLookAllowed(gov.budget(), gov.reserve())) return (early++, true);
     }
     if (end > sim.simMs) sim.advance(end - sim.simMs);
     return false;
   };
-  const start = gov.reserve() - 8;
+  const start = opts.start ?? gov.reserve() - 8;
   sim.tokens = start;
   sim.lowestTokens = start;
   sim.refillPerMinute = 125;
@@ -63,7 +64,7 @@ async function flatten(n: number, path: "closeout" | "lossstop" | "flatten", can
   if (path === "closeout") await closeOut({ broker: sim, liquidator: liq, store: new MemoryStore(), now: () => new Date(sim.simMs), say, sleep: sim.sleep, waitEvent }, D, { closeAt: new Date(MID + 300_000), path: "close-out" });
   else await liq.flatten({ reason: path, tradeDate: D, maxRounds: path === "lossstop" ? 1 : 4, priority: path === "lossstop" });
   sim.advance(20_000);
-  return { start, lowest: Math.floor(sim.lowestTokens), r429: sim.rejected429, held: [...Array(n).keys()].filter((i) => sim.heldQty(`S${i}`) > 0).length, oversell: sim.oversellAttempts };
+  return { start, reserve: gov.reserve(), early, lowest: Math.floor(sim.lowestTokens), r429: sim.rejected429, held: [...Array(n).keys()].filter((i) => sim.heldQty(`S${i}`) > 0).length, oversell: sim.oversellAttempts };
 }
 
 test("wake-up limits: the helper and the caps", () => {
@@ -90,7 +91,7 @@ test("wake-up limits: a full flatten of 1 to 30 positions with early wake-ups an
   if (process.env.SHOW) console.log(rows.join("\n"));
 });
 
-test("wake-up limits: without them (v10 and v11 as deployed), the same spread case hits rate limits", { timeout: 300_000 }, async () => {
+test("wake-up limits: without the budget check (the cap of 5 alone; v11's cap of 20 is worse), the same spread case hits rate limits", { timeout: 300_000 }, async () => {
   let worst = 0;
   for (const n of [12, 20, 30]) for (const seed of [7, 11]) worst += (await flatten(n, "flatten", 7_000, { spread: true, scaled: false, seed, limit: false })).r429;
   assert.ok(worst > 0, "the case this fix is for");
@@ -115,16 +116,27 @@ test("wake-up limits, worker: a live update ends a sale's wait early only while 
   assert.equal(await p2, false, "it ends at its timed end");
 });
 
-test("wake-up limits: with them, the scaled reserve (52 + open symbols) is checked too (reported, not switched on)", { timeout: 300_000 }, async () => {
-  const out: string[] = [];
-  let failures = 0;
-  for (const n of [1, 5, 12, 20, 30]) for (const path of ["closeout", "flatten"] as const) for (const cancelMs of [200, 7_000]) for (const seed of [7, 11]) {
+test("the scaled reserve (59 + 2 x open symbols): below the cap, a full flatten from 8 below it with spread updates and cancels of 0.2 to 11 seconds never hits a rate limit and leaves at least 10", { timeout: 590_000 }, async () => {
+  for (const n of [0, 1, 3, 5, 8, 10]) for (const path of ["closeout", "lossstop", "flatten"] as const) for (const cancelMs of [200, 3_000, 7_000, 11_000]) for (const seed of [3, 7, 23, 59, 77]) {
     const r = await flatten(n, path, cancelMs, { spread: true, scaled: true, seed, limit: true });
-    if (r.r429 > 0 || r.lowest < 10 - Math.max(0, RESERVE_FLOOR + n - SAFETY_RESERVE)) failures++;
-    out.push(`${n} ${path} ${cancelMs} seed ${seed}: start ${r.start} lowest ${r.lowest} 429s ${r.r429}`);
+    const label = `${n} positions, ${path}, cancels ${cancelMs} ms, seed ${seed} (reserve ${r.reserve})`;
+    assert.ok(r.reserve < SAFETY_RESERVE, `${label}: below the cap`);
+    assert.equal(r.r429, 0, `${label}: no rate-limit answer (lowest ${r.lowest})`);
+    assert.ok(r.lowest >= 10, `${label}: at least 10 left (${r.lowest})`);
+    assert.equal(r.oversell, 0);
   }
-  console.log(`scaled reserve with the wake-up limits: ${failures} of ${out.length} cases short of the margin or rate-limited${process.env.SHOW ? "\n" + out.join("\n") : ""}`);
-  assert.equal(reserveFor(0), 52);
+  // From 11 open symbols the reserve is the cap of 80, the same as v12's fixed reserve (covered by the test above).
+  assert.deepEqual([11, 20, 30].map(reserveFor), [80, 80, 80]);
+});
+
+test("wake-up limits: where early wake-ups are allowed (the budget 20 or more above the reserve), a flatten with spread updates stays within 5 early wake-ups a wait-loop and never hits a rate limit", { timeout: 300_000 }, async () => {
+  for (const start of [150, 200]) for (const n of [5, 12, 30]) for (const path of ["closeout", "lossstop", "flatten"] as const) for (const cancelMs of [200, 7_000]) for (const seed of [7, 11]) {
+    const r = await flatten(n, path, cancelMs, { spread: true, scaled: true, seed, limit: true, start });
+    const label = `start ${start}, ${n} positions, ${path}, cancels ${cancelMs} ms, seed ${seed}`;
+    assert.equal(r.r429, 0, `${label}: no rate-limit answer (lowest ${r.lowest})`);
+    assert.ok(r.early <= (path === "closeout" ? 2 : 1) * MAX_EARLY_WAKES, `${label}: ${r.early} early wake-ups`);
+    if (start === 200 && n === 30 && path === "flatten") assert.ok(r.early > 0, "early wake-ups did happen in this case");
+  }
 });
 
 test("wake-up limits: the close-out's wait for its own sells is brought forward by updates at most 5 times, then waits its timed looks", async () => {

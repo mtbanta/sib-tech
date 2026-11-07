@@ -2828,3 +2828,27 @@ New work allowed by Michael's standing approval for this weekend (2026-11-07): t
 - The Monday brief needs no change for v12 (it measures the same things; it already names v11 or v12). The 3:15 PM Monday wait is kept.
 
 **Next (Michael's standing approval):** the scaled reserve (item 7), re-derived under spread update timing with the early wake-up limits, with round 3's test notes, in further group 1 rounds; deployed only if a round passes.
+
+## The scaled reserve, re-derived (built 2026-11-07, just after midnight; branch `reserve-scale`; group 1 review, round 4 = round 2 of Michael's weekend 8)
+
+Under Michael's standing approval for this weekend (the wake-up fix and the scaled reserve, item 7). Also takes round 3's test notes.
+
+**The measurement** (simulator, real sale code with the early wake-up limits, routine work at 75 a minute for the whole flatten, Alpaca's cancel completions and sell fills spread at random over their delays, cancels of 0.2, 3, 7 and 11 seconds (11 was measured on 2026-11-04), sells held 16 seconds, 8 random draws, the close-out, the loss stop's sale and the flatten command; early looks blocked, as they are near the reserve, so the draw is the timed looks). The worst draw below the starting bucket, by open positions, was always the flatten command with 11 second cancels:
+
+| Open positions | 0 | 1 | 3 | 5 | 8 | 12 | 16 | 20 | 25 | 28 | 30 |
+| :-- | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: |
+| Worst draw | 3 | 39 | 43 | 51 | 56 | 64 | 72 | 79 | 89 | 95 | 98 |
+
+All fit under 41 + 2 per open position.
+
+**The formula: reserve = min(80, 59 + 2 x open symbols)** = 41 + 2n (the draw) + 8 (the bucket's dip below the reserve at sustained load, the rehearsals) + 10 (left at the bottom). 59 with nothing open, 69 at 5, 79 at 10, 80 (the cap) from 11 open symbols. Switched on (`RESERVE_SCALING = true`). Below 11 open symbols it frees up to 21 requests for entries; from 11 it is v12's 80.
+
+**A limit outside this scope, for Michael:** from about 16 open symbols, with 11 second cancels and spread updates, the flatten command's own timed looks draw more than a reserve of 80 can cover (98 at 30 positions against 72 to spend), so rate-limit answers are possible in that corner, in v12 as deployed and in this change alike (the reserve is the same 80 there). With 7 second cancels the reserve of 80 holds (round 3: 0 to 4 left at 30 positions). Covering the 11 second corner needs lighter polling in the flatten command or a reserve above 80, both Michael's decisions.
+
+**Tests** (`test/wake-fix.test.ts`, `test/release-11.test.ts`):
+- The scaled reserve below the cap (0, 1, 3, 5, 8, 10 open symbols) x close-out, loss stop's sale, flatten command x cancels 0.2, 3, 7, 11 seconds x 5 random draws, spread updates, starting 8 below the reserve: no rate-limit answer, at least 10 left, nothing oversold (360 cases).
+- Round 3's notes: a test where early wake-ups are allowed (starting at 150 and 200, 5 to 30 positions): no rate-limit answer, at most 5 early wake-ups a liquidation (10 for the close-out with its own wait), and early wake-ups do happen there; the test of the cap alone is now labelled as such (v11's cap of 20 is worse); the earlier log line "waits ended by live updates as in production" overstated the 90-case test, which starts below where early wakes are allowed (it tests timed looks).
+- The reserve tests now require the scaled reserve in force (59 with nothing open).
+- 440 pass. Each change taken out fails a test (floor, per-symbol 2, the switch, the formula, the cap; the earlier reserve, wake-up and release 11 mutations rerun: all caught).
+
+**Rehearsal at 150 a minute with it on:** accepted 150, 150, 150, 136, then 121 to 130 a minute (1,968 in the window); 0 rate-limit answers; lowest remaining 73; remaining minus the reserve -3 to -6 each minute from the third (the governor's low -7), the reserve at 80 (30 open symbols). Under Michael's ruling these dips come from safety work only (entries stop at the reserve).
