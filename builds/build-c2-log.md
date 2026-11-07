@@ -2828,3 +2828,15 @@ New work allowed by Michael's standing approval for this weekend (2026-11-07): t
 - The Monday brief needs no change for v12 (it measures the same things; it already names v11 or v12). The 3:15 PM Monday wait is kept.
 
 **Next (Michael's standing approval):** the scaled reserve (item 7), re-derived under spread update timing with the early wake-up limits, with round 3's test notes, in further group 1 rounds; deployed only if a round passes.
+
+## The scaled reserve, round 4 (2026-11-07, early morning): CHANGES REQUIRED. Stopped for Michael; nothing new deployed, v12 stays.
+
+The change (branch `reserve-scale`, `c46e24c`, not merged): `reserveFor(n) = min(80, 59 + 2n)`, switched on, re-derived from the timed-look draw under spread update timing with the wake-up limits (cancels to 11 seconds, 8 random draws per case: worst 41 + 2n), plus 8 for the dip at sustained load, plus 10 left; tests at 0 to 10 open symbols (360 cases), round 3's test notes. Details are in that branch's log.
+
+**Round 4's blocking finding: the derivation was under-sampled.** Over 60 random draws (the test's own helper, the flatten command with 11 second cancels, starting 8 below the reserve), the lowest left was 6 at 8 and 10 open symbols and 8 at 3 and 5 (about 10 percent of draws at 3 to 10 open symbols below 10 left), so the worst draw is about 45 + 2n, not 41 + 2n. No rate-limit answer in any run. With a floor of 58 the 360-case test fails, so its 5 seeds sat at the margin. The reviewer's fix: re-derive from 60 or more draws (a floor of about 63 with 2 per symbol, the cap of 80 from about 9 open symbols), more seeds in the test, correct the comment and log; and weigh whether the scaling (at most about 17 requests freed, below about 9 open symbols) is worth more rounds. Also noted: the branch's release 11 flatten test lost its margin bound at the sizes where the reserve is 80.
+
+**Why stopped:** round 1's finding was "the reserve formula is too small"; it was fixed twice (52 + n, then 59 + 2n), and round 4's finding is the same kind again. Michael's weekend approval says to stop and ask "if the same finding comes back after two fixes", and then deploy nothing new. Rounds used under that approval: 2 of 8 (round 3 PASS, round 4 CHANGES REQUIRED).
+
+**Agreed outside this scope (for Michael):** from about 16 open symbols with 11 second cancels and spread updates, the flatten command's timed looks can exceed what a reserve of 80 covers (deployed v12 too); Michael's item 7 test ("a full flatten at the maximum open positions never hits a rate limit") cannot be fully met at 30 open symbols with 11 second cancels under the cap of 80. Covering it needs lighter polling in the flatten command (other money-touching code) or a reserve above the cap.
+
+Other notes: the reserve can be stale low by one symbol for up to about 10 seconds (the view refresh reading rows before the gate's insert), never for an entry (each entry recounts); with the scaling on, the view refresh, the loss stop's retry and the early wake-up threshold spend lower (probed: no rate-limit answer, lowest 34 or more). Paper only.
