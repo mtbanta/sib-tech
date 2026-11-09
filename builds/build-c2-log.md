@@ -3007,4 +3007,8 @@ Logging only: nothing that sends, cancels, sizes or blocks an order changed, and
 
 **Tests:** 445 pass (6 added in `test/sale-logging.test.ts`; the simulated broker gained a fault, `staleHeld`, for shares Alpaca keeps reporting as not available). A test runs the same blocked and clean sales with and without the log and checks the requests, sells, outcome and simulated time are identical. Type check clean. Each piece taken out on its own fails a test: 10 of 10.
 
-Volume: a stuck symbol adds about 6 rows a minute to the run log (3 skips and 1 result per 30 second attempt).
+Volume (estimate, corrected after review): a stuck symbol adds about 8 to 11 rows a minute to the run log (3 skips and 1 result per attempt of about 30 seconds, plus `bare_remainder` at up to one per sync); Monday's four stuck positions would have made about 1,000 rows.
+
+### Group 1 review, round 1 (2026-11-09, evening): PASS
+
+No blocking finding. The reviewer confirmed: every logged value comes from reads the sale already made; `openReadAt` and `blocked` feed only logs; the widened `liquidation_result` condition changes only whether a line is logged; nothing in the code reads these events back (the summary and every count are unaffected); no secret can enter the new fields; 445 tests pass, type check clean; and its own added-request mutation was caught by the with-and-without-log test. Non-blocking notes: the volume figure above was low (corrected); the database pool has 3 connections, and a blocked whole-account sale could queue up to about 120 fire-and-forget inserts beside order recording (expected small); the with-and-without-log test covers the sell path, not the sync (the sync gained only clock reads); a log call that threw would reject the sale, but this callback cannot throw on these plain values, and a guard there would be a sell-path change needing Michael's say.
