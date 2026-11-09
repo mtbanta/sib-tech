@@ -43,6 +43,18 @@ export function openSellQty(orders: Order[], symbol: string): number {
   return total;
 }
 
+// The open sell orders `openSellQty` counts for one symbol (logging only, Michael's decision of 2026-11-09): each with the client id of
+// the order it belongs to (a bracket's leg has none of its own worth showing, so its entry's).
+export function openSellOrdersFor(orders: Order[], symbol: string): Array<{ id: string; clientOrderId: string; type: string; status: string; qty: number; filledQty: number }> {
+  const out: Array<{ id: string; clientOrderId: string; type: string; status: string; qty: number; filledQty: number }> = [];
+  const live = (o: Order) => o.symbol === symbol && o.side === "sell" && OPEN_STATUSES.has(o.status);
+  for (const o of orders) {
+    const group = o.side === "buy" ? flattenLegs(o).filter(live) : o.symbol === symbol ? [o, ...flattenLegs(o)].filter(live) : [];
+    for (const x of group) out.push({ id: x.id, clientOrderId: o.clientOrderId, type: x.type, status: x.status, qty: x.qty, filledQty: x.filledQty });
+  }
+  return out;
+}
+
 export function flattenLegs(o: Order): Order[] {
   return o.legs.flatMap((l) => [l, ...flattenLegs(l)]);
 }
@@ -293,6 +305,7 @@ export class Liquidator {
       return done();
     };
     let earlyWakes = 0;
+    let blocked = 0; // logging only: symbols skipped in step 3 because their shares were not free
     // Item 9: a pause that ends early at a live update for these symbols. Returns the time to count as waited: the full pause when it
     // ran out, the time that really passed when an update ended it (at most MAX_EARLY_WAKES times, then the full pause again).
     const pauseFor = async (symbols: ReadonlySet<string>, ms: number): Promise<number> => {
@@ -312,7 +325,9 @@ export class Liquidator {
     };
     const done = (): LiquidateResult => {
       if (steps.cancelsSentAt.length > 0 || steps.sells.length > 0) result.steps = steps;
-      if (result.sold.length > 0 || result.errors.length > 0) this.d.log?.("liquidation_result", { reason: o.reason, flat: result.flat, remaining: result.remaining, sold: result.sold.length, errors: result.errors.slice(0, 5), ...(result.working ? { working: result.working } : {}) });
+      // Michael's decision of 2026-11-09 (logging only): an attempt that sold nothing and met no error but left shares held is logged
+      // too (on 2026-11-09 such attempts left no trace), with how many times a symbol was skipped because its shares were not free.
+      if (result.sold.length > 0 || result.errors.length > 0 || !result.flat) this.d.log?.("liquidation_result", { reason: o.reason, flat: result.flat, remaining: result.remaining, sold: result.sold.length, errors: result.errors.slice(0, 5), ...(result.working ? { working: result.working } : {}), ...(blocked > 0 ? { blocked } : {}) });
       return result;
     };
 
@@ -406,6 +421,7 @@ export class Liquidator {
       // 2. Wait until Alpaca shows nothing holding those shares (no open order, and no shares reported as held by orders):
       //    a cancel is not instant. If the open orders cannot be read, no sell is sent this round.
       let openOrders: Order[] = [];
+      let openReadAt = 0; // logging only: when `openOrders` was read
       let readOk = true;
       const t0 = this.d.now().getTime();
       let waited = 0;
@@ -416,6 +432,7 @@ export class Liquidator {
         let held: Position[] = [];
         try {
           openOrders = await this.openOrders();
+          openReadAt = this.d.now().getTime();
           held = await heldNow();
         } catch (err) {
           result.errors.push(`round ${round}: could not read open orders or positions: ${(err as Error).message.slice(0, 100)}`);
@@ -452,7 +469,23 @@ export class Liquidator {
         for (const p of freshPositions) {
           if (yieldNow()) return yielded();
           const free = Math.min(p.qty - openSellQty(openOrders, p.symbol), p.qtyAvailable ?? Infinity);
-          if (!(free > EPS)) continue; // something is still holding the shares; the next round cancels again
+          if (!(free > EPS)) {
+            // Something is still holding the shares; the next round cancels again. Michael's decision of 2026-11-09 (logging only, no
+            // request added): say what held them, from the reads already made.
+            blocked++;
+            this.d.log?.("sale_blocked", {
+              symbol: p.symbol,
+              reason: o.reason,
+              round,
+              qty: p.qty,
+              qtyAvailable: p.qtyAvailable ?? null,
+              openSellQty: openSellQty(openOrders, p.symbol),
+              openSells: openSellOrdersFor(openOrders, p.symbol).slice(0, 5),
+              openListAgeMs: this.d.now().getTime() - openReadAt,
+              waitedMs: waited,
+            });
+            continue;
+          }
           const id = `cyrus-x-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-${round}`;
           const r = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: id, reason: o.reason });
           if (r.status === "sent") {

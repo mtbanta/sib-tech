@@ -35,6 +35,9 @@ export class SimBroker implements FullBroker {
   // and may not report qty_available. The sell tests run in every combination.
   hideFilledParents = false;
   reportQtyAvailable = true;
+  // 2026-11-09: shares Alpaca keeps reporting as not available for a symbol although no open order holds them (a guess at what blocked
+  // four sales that day; a test fault).
+  staleHeld = new Map<string, number>();
   rejected429 = 0;
   // Fault injection.
   cancelAllFailsAfterCancelling = false;
@@ -239,7 +242,7 @@ export class SimBroker implements FullBroker {
     this.spend();
     return [...this.positionsMap].map(([symbol, p]) => {
       const price = this.prices.get(symbol) ?? p.avg;
-      return { symbol, qty: p.qty, qtyAvailable: this.reportQtyAvailable ? Math.max(0, p.qty - this.reservedBySells(symbol)) : undefined, marketValue: p.qty * price, avgEntryPrice: p.avg, unrealizedPl: (price - p.avg) * p.qty };
+      return { symbol, qty: p.qty, qtyAvailable: this.reportQtyAvailable ? Math.max(0, p.qty - this.reservedBySells(symbol) - (this.staleHeld.get(symbol) ?? 0)) : undefined, marketValue: p.qty * price, avgEntryPrice: p.avg, unrealizedPl: (price - p.avg) * p.qty };
     });
   }
   async listOrders(status: "open" | "closed" | "all", afterIso?: string): Promise<Order[]> {

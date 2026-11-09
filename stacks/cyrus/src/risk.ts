@@ -129,6 +129,9 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   const fromMs = Math.max(midnight, oldest - 60_000, opts.streamLive ? nowMs - RECENT_WINDOW_MS : midnight);
   const since = new Date(fromMs).toISOString();
   const [listed, positions] = await Promise.all([d.broker.listOrdersPaged("all", since, opts.streamLive ? RECENT_MAX_PAGES : 20), d.broker.listPositions()]);
+  // Logging only (Michael's decision of 2026-11-09): how old this order list and these positions are when the sync acts on them.
+  const listedAtMs = d.now().getTime();
+  const listAgeMs = () => d.now().getTime() - listedAtMs;
   const byClientId = new Map(listed.orders.map((o) => [o.clientOrderId, o]));
   // Item 3: open entries made before the window read above are looked up by id, a few per sync, oldest look first.
   if (opts.streamLive) {
@@ -222,7 +225,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     if (!protectNow || latestPerSymbol.get(s.symbol)?.clientOrderId !== s.clientOrderId || sellingSymbols.has(s.symbol)) continue;
     if (!hasLiveExit(o)) {
       unprotected.push(s.symbol);
-      d.log?.("unprotected_position", { symbol: s.symbol });
+      d.log?.("unprotected_position", { symbol: s.symbol, clientOrderId: s.clientOrderId, listAgeMs: listAgeMs() });
       const r = await d.liquidator.flatten({ reason: "no live protective stop", tradeDate: day.tradeDate, only: [s.symbol], maxRounds: 3, yieldToPriority: true });
       if (r.yielded) d.log?.("unprotected_position_yielded", { symbol: s.symbol });
       else if (r.flat && r.sold.length > 0) await d.say("alerts", `**${s.symbol} had no live protective stop, so I sold it.**`);
@@ -250,7 +253,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       continue;
     }
     unprotected.push(s.symbol);
-    d.log?.("bare_remainder", { symbol: s.symbol, shares: bare.shares, stopCancelledAt: cancelTime });
+    d.log?.("bare_remainder", { symbol: s.symbol, clientOrderId: s.clientOrderId, shares: bare.shares, stopCancelledAt: cancelTime, listAgeMs: listAgeMs() });
     const cancelIds = flattenLegs(o).filter((l) => l.side === "sell" && OPEN_STATUSES.has(l.status)).map((l) => l.id);
     const tp = flattenLegs(o).find((l) => l.side === "sell" && l.type === "limit");
     // Decision 3 of 2026-11-06: the measurement starts the moment Alpaca accepts the sale, so it sees the sale's fill and the prints
