@@ -6,7 +6,14 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**BUILD C2: FLY RELEASE V12 RUNS (RELEASE 11 PLUS THE EARLY WAKE-UP FIX, REVIEWED PASS IN ROUND 3); THE RESERVE STAYS 80; THE SCALED RESERVE IS NEXT UNDER MICHAEL'S WEEKEND APPROVAL.** As of November 6, 2026 (11:59 PM Central).
+**BUILD C2: MONDAY 2026-11-09 (FOURTH LOAD DAY, V12, 150 A MINUTE) REVIEWED. THE LOAD WINDOW HELD ON RATE LIMITS; THE DAY DOES NOT HOLD: FOUR POSITIONS SAT WITHOUT EXITS FOR 16 TO 28 MINUTES (9:10 TO 9:42 AM) BECAUSE THE SELL PATH FOUND NO SHARES FREE TO SELL. NOTHING BUILT.** As of November 9, 2026 (about 4:30 PM Central).
+- **Load window, 8:45 to 9:00:** 1,536 entries, Alpaca refused none, 0 rate-limit answers all day; highest 119 accepted in a calendar minute, 138 in the busiest 60 seconds (the 30-symbol list bound it, then the reserve); remaining dipped to 74 (6 under the reserve) at 8:52; the governor held entries back 98 times; whether any entry spent below the reserve is not provable from the records (inconclusive).
+- **Finding 5.1 (money-touching):** IONQ, CMCSA, APLD, NCLH: no sell sent for 16 to 28 minutes, 64 could-not-sell alerts to Michael; Alpaca kept reporting the shares as held (likely `qty_available`, a guess: nothing logged the free count); the stuck attempts held the order sync, and on its old order list the stack's own remainder sale cancelled two newer brackets' exits (APLD-108, NCLH-42; inferred). Cost +1.08 dollars by chance. v12 still has it.
+- Summary matches the account to the cent (-68.15); close-out flat; shadow book worst gap 1.28 dollars; lost-exit sales 2.9 to 5.1 s (target 1 to 2).
+- The 3:15 PM scheduled review failed on an expired login; run at about 4:10 PM from a new session.
+- **For Michael tonight:** Tuesday's limits (normal day suggested), and whether to approve a logging-only change before 7:30 AM and a proposal for 5.1. Details: `builds/build-c2-log.md`, "Monday 2026-11-09 session review". Paper only.
+
+Earlier entry, superseded by the paragraph above: **BUILD C2: FLY RELEASE V12 RUNS (RELEASE 11 PLUS THE EARLY WAKE-UP FIX, REVIEWED PASS IN ROUND 3); THE RESERVE STAYS 80; THE SCALED RESERVE IS NEXT UNDER MICHAEL'S WEEKEND APPROVAL.** As of November 6, 2026 (11:59 PM Central).
 - v12 = v11 plus: a live update ends a sale's or the close-out's wait early only while Alpaca's budget is at least 20 above the reserve, at most 5 times a wait. In the simulator, with Alpaca's updates spread out, this removed the rate-limit answers v10 and v11 get in a full flatten (12 positions and up).
 - **Still for Michael:** at 30 open symbols a flatten command with slow cancels can bring Alpaca's remaining to about 0 in the simulator (no rate-limit answer); live it would break his Monday rule; margin there needs lighter polling in the flatten command or a reserve above 80 (his decision).
 - **The scaled reserve (item 7): dropped by Michael** (2026-11-07) after round 4 found its margin under-sampled (the same finding after two fixes). The reserve stays fixed at 80 for good; branch `reserve-scale` left unmerged as the record. v12 runs Monday.
