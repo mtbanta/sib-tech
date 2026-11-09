@@ -3012,3 +3012,11 @@ Volume (estimate, corrected after review): a stuck symbol adds about 8 to 11 row
 ### Group 1 review, round 1 (2026-11-09, evening): PASS
 
 No blocking finding. The reviewer confirmed: every logged value comes from reads the sale already made; `openReadAt` and `blocked` feed only logs; the widened `liquidation_result` condition changes only whether a line is logged; nothing in the code reads these events back (the summary and every count are unaffected); no secret can enter the new fields; 445 tests pass, type check clean; and its own added-request mutation was caught by the with-and-without-log test. Non-blocking notes: the volume figure above was low (corrected); the database pool has 3 connections, and a blocked whole-account sale could queue up to about 120 fire-and-forget inserts beside order recording (expected small); the with-and-without-log test covers the sell path, not the sync (the sync gained only clock reads); a log call that threw would reject the sale, but this callback cannot throw on these plain values, and a guard there would be a sell-path change needing Michael's say.
+
+### Deploy (2026-11-09, 5:35 PM Central, market closed): Fly release v13, the sale logging
+
+- **What shipped:** `c2a8216` (`main`): v12 plus the sale logging (group 1 round 1 PASS). 445 tests pass. `fly deploy --ha=false` from a separate checkout with no key file in it.
+- **Fly release v13:** one machine (San Jose), started 5:35:05 PM, good state. Discord `commands`, 5:35:08 PM: "Worker started at 5:35 PM CT (paper): new release CASQMWKX (was YJVHBNW0): a deploy. Starts in the last hour: 1." Healthchecks up (5:35:09 PM). Stop flag off, not-flat flag off. Tuesday 2026-11-10's request pending (posted 3:10 PM).
+- **Live line, `commands`:** "Fly release v13 is live (paper only): logging only, reviewed PASS. When a sale cannot go out, the run log now records why (Alpaca's held and free shares, the open orders counted, how old the order lists were). No trading behaviour changed. Tuesday's limits still need your decision before the open; with nothing decided there is no trading Tuesday."
+
+**Next:** Michael's decision on `builds/c2-proposal-2026-11-09.md` (parts A to C for tonight, the mid-day cycle later).

@@ -6,7 +6,13 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**BUILD C2: MONDAY 2026-11-09 (FOURTH LOAD DAY, V12, 150 A MINUTE) REVIEWED. THE LOAD WINDOW HELD ON RATE LIMITS; THE DAY DOES NOT HOLD: FOUR POSITIONS SAT WITHOUT EXITS FOR 16 TO 28 MINUTES (9:10 TO 9:42 AM) BECAUSE THE SELL PATH FOUND NO SHARES FREE TO SELL. NOTHING BUILT.** As of November 9, 2026 (about 4:30 PM Central).
+**BUILD C2: FLY RELEASE V13 RUNS (V12 PLUS THE SALE LOGGING, GROUP 1 PASS IN ROUND 1, DEPLOYED 5:35 PM 2026-11-09). THE PROPOSAL FOR THE STUCK SALE, THE CLEANUP SALE, ONE ALERT PER STUCK POSITION AND A MID-DAY CYCLE AWAITS MICHAEL.** As of November 9, 2026 (5:40 PM Central).
+- v13 logs why a sale is blocked (`sale_blocked`: Alpaca's `qty` and `qty_available`, the open sells counted, list ages), logs attempts that sold nothing, and adds the order sync's list age to `unprotected_position` and `bare_remainder`. No trading behaviour changed.
+- Proposal: `builds/c2-proposal-2026-11-09.md` (A, B, C recommended for tonight with A step 3 held until Tuesday's logs; D, the mid-day cycle, from Tuesday evening, first use Wednesday at the earliest; three questions for Michael in D). Mid-day review brief: `builds/midday-review-brief.md` (applies once D is built).
+- Tonight's standing approval: up to two review rounds per group.
+- **For Michael before 7:45 AM Tuesday:** Tuesday's limits (normal day suggested); nothing decided means no trading. Paper only.
+
+Earlier entry, superseded by the paragraph above: **BUILD C2: MONDAY 2026-11-09 (FOURTH LOAD DAY, V12, 150 A MINUTE) REVIEWED. THE LOAD WINDOW HELD ON RATE LIMITS; THE DAY DOES NOT HOLD: FOUR POSITIONS SAT WITHOUT EXITS FOR 16 TO 28 MINUTES (9:10 TO 9:42 AM) BECAUSE THE SELL PATH FOUND NO SHARES FREE TO SELL. NOTHING BUILT.** As of November 9, 2026 (about 4:30 PM Central).
 - **Load window, 8:45 to 9:00:** 1,536 entries, Alpaca refused none, 0 rate-limit answers all day; highest 119 accepted in a calendar minute, 138 in the busiest 60 seconds (the 30-symbol list bound it, then the reserve); remaining dipped to 74 (6 under the reserve) at 8:52; the governor held entries back 98 times; whether any entry spent below the reserve is not provable from the records (inconclusive).
 - **Finding 5.1 (money-touching):** IONQ, CMCSA, APLD, NCLH: no sell sent for 16 to 28 minutes, 64 could-not-sell alerts to Michael; Alpaca kept reporting the shares as held (likely `qty_available`, a guess: nothing logged the free count); the stuck attempts held the order sync, and on its old order list the stack's own remainder sale cancelled two newer brackets' exits (APLD-108, NCLH-42; inferred). Cost +1.08 dollars by chance. First seen Monday (none Thursday on v9 or Friday on v10). v12 still has it.
 - Summary matches the account to the cent (-68.15); close-out flat; shadow book worst gap 1.28 dollars; lost-exit sales 2.9 to 5.1 s (target 1 to 2).
