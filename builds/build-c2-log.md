@@ -2983,3 +2983,28 @@ What the records show:
 5. **The shadow book:** a proposal to make it the main loss stop, with the 5 second account read kept as a check, if Michael wants it.
 6. Still pending from 2026-11-07: the proposal on lighter polling in the flatten command and the larger loss-stop retry budget.
 7. **For the next load day:** 150 a minute is not reachable with a 30-symbol list and these window settings (the list bound it at about 110 to 120, then the reserve). Raising it would need more symbols (the free data feed caps the live list at 30) or shorter holds.
+
+## Michael's decisions after the Monday review (2026-11-09, evening)
+
+1. **Approved: a logging-only change** recording why a sale is blocked (Alpaca's held and available quantities, the open orders counted, the order list's age). Review and deploy before 7:30 AM Tuesday.
+2. **Write the proposal now** for the stuck sale fix, the cleanup sale never cancelling a newer position's exits, and one alert per stuck position. If Michael approves tonight: build, review and deploy before 7:30 AM if it passes.
+3. **New, in the same document: a mid-day cycle** (trade from the open to 10:30 AM, a mid-day close-out with the 2:55 close-out code, deploys allowed only while flat and paused, resume under the same day's limits, a resume or keep-paused command, paused from 1:30 PM if nothing was deployed, a start-up with no positions not selling everything, a mid-day review brief).
+
+Standing approval for tonight: up to two review rounds per group.
+
+## The sale logging change (built 2026-11-09, evening; branch `sale-logging`)
+
+Logging only: nothing that sends, cancels, sizes or blocks an order changed, and no request to Alpaca was added (the logs use the reads the sale already made).
+
+| What | Where |
+| :-- | :-- |
+| `sale_blocked`: each time a sale skips a symbol because its shares are not free, the symbol, round, the sale's reason, Alpaca's `qty` and `qty_available`, the open sell quantity counted, the open sell orders counted (up to 5: id, the entry's client id, type, status, quantity, filled), how old the open order list was, how long the round waited | `sells.ts` (`Liquidator.run`, step 3; new `openSellOrdersFor`) |
+| `liquidation_result` also for an attempt that sold nothing, met no error and left shares held (Monday's attempts left no trace), with the number of blocked skips | `sells.ts` (`done`) |
+| The order sync's list age (`listAgeMs`) and the entry's client id on `unprotected_position` and `bare_remainder` | `risk.ts` (`syncOrders`) |
+| `sale_blocked` and `bare_remainder` kept in the database run log | `run-log.ts` |
+
+**Not included** (not in Michael's approval): logging each Alpaca answer under the reserve with its request kind (recommended in the Monday review).
+
+**Tests:** 445 pass (6 added in `test/sale-logging.test.ts`; the simulated broker gained a fault, `staleHeld`, for shares Alpaca keeps reporting as not available). A test runs the same blocked and clean sales with and without the log and checks the requests, sells, outcome and simulated time are identical. Type check clean. Each piece taken out on its own fails a test: 10 of 10.
+
+Volume: a stuck symbol adds about 6 rows a minute to the run log (3 skips and 1 result per 30 second attempt).
