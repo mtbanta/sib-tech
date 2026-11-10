@@ -403,3 +403,23 @@ test("the 5 minute alert goes by the clock: eight stuck, each gets exactly one 5
   }
   assert.equal(mentions(w).length, 16, "one first alert and one 5 minute alert each, nothing else");
 });
+
+test("Michael's decision 'Mid-day owns it': while the mid-day close-out is selling, the stuck-entry 5 minute alert stands aside; it comes once afterwards if still stuck", async () => {
+  const w = world();
+  await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
+  const day = (await w.store.getDay(D))!;
+  const id = await hold(w, "IONQ", 2, 33.88, 125);
+  for (const l of legsOf(w, id)) await w.sim.cancelOrder(l.id);
+  w.sim.advance(2_000);
+  w.sim.staleHeld.set("IONQ", 2);
+  await syncOrders(w.risk, day, { protect: true });
+  assert.equal(mentions(w).length, 1, "the first stuck alert");
+  let owns = true;
+  w.sim.advance(STUCK_ESCALATE_MS + 30_000);
+  await syncOrders(w.risk, day, { protect: false, middayOwnsSelling: () => owns });
+  assert.equal(mentions(w).length, 1, "no 5 minute alert while the mid-day close-out owns selling");
+  owns = false;
+  w.sim.advance(10_000);
+  await syncOrders(w.risk, day, { protect: true, middayOwnsSelling: () => owns });
+  assert.equal(mentions(w).filter((m) => /still has no protective stop after/.test(m.text)).length, 1, "once afterwards");
+});

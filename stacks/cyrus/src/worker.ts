@@ -961,7 +961,7 @@ export class Worker {
       // missing-exit check would otherwise start a liquidation of its own for every such position every 30 seconds (round 8).
       const lossStopped = await this.lossStopInForce(dayNow.tradeDate);
       this.syncRecheckAt = null;
-      const synced = await syncOrders(risk, dayNow, { protect: () => !lossStopped && protect(), streamLive });
+      const synced = await syncOrders(risk, dayNow, { protect: () => !lossStopped && protect(), streamLive, middayOwnsSelling: () => this.middayOwnsSelling });
       if (synced.recheckAt !== undefined) {
         this.syncRecheckAt = synced.recheckAt;
         this.syncAt(synced.recheckAt);
