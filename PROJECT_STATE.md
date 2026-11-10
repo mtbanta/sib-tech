@@ -6,7 +6,12 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**BUILD C2: FLY RELEASE V13 RUNS (V12 PLUS THE SALE LOGGING, GROUP 1 PASS IN ROUND 1, DEPLOYED 5:35 PM 2026-11-09). THE PROPOSAL FOR THE STUCK SALE, THE CLEANUP SALE, ONE ALERT PER STUCK POSITION AND A MID-DAY CYCLE AWAITS MICHAEL.** As of November 9, 2026 (5:40 PM Central).
+**BUILD C2: FLY RELEASE V14 RUNS (RELEASE 1 OF 2026-11-09: CLEANUP SALES ACT ONLY ON THEIR OWN POSITION, STUCK POSITIONS RETRIED ON A SHORT LIST WITHIN 40 REQUESTS A MINUTE, ONE ALERT PER STUCK POSITION). RELEASE 2 (THE MID-DAY CYCLE) IS IN REVIEW; TUESDAY'S MID-DAY CYCLE IS MANUAL UNLESS IT PASSES AND DEPLOYS BEFORE 7:30 AM.** As of November 9, 2026 (7:10 PM Central).
+- Release 1 reviews: group 1 PASS in round 3 (round 2 STOP AND FLAG MICHAEL on retries starving beyond four stuck positions; Michael approved taking turns and a third round); group 2 PASS in round 2. A step 3 (selling past Alpaca's free count) held until Tuesday's logs.
+- Release 2: group 1 round 1 and group 2 round 1 CHANGES REQUIRED; Michael chose (mid-day close-out retries) every 20 seconds within 60 requests a minute and never below the reserve, one alert when a try ends not flat plus the 5 minute alert; (half days) run the cycle at 10:30. Fixes in progress; group 1 has up to three rounds, group 2 two. If it passes group 1 it deploys before 7:30 AM; otherwise Tuesday's cycle runs by hand (Michael's fallback in CLAUDE.md).
+- Tuesday 2026-11-10 approved (normal day, 100 a minute). Paper only.
+
+Earlier entry, superseded by the paragraph above: **BUILD C2: FLY RELEASE V13 RUNS (V12 PLUS THE SALE LOGGING, GROUP 1 PASS IN ROUND 1, DEPLOYED 5:35 PM 2026-11-09). THE PROPOSAL FOR THE STUCK SALE, THE CLEANUP SALE, ONE ALERT PER STUCK POSITION AND A MID-DAY CYCLE AWAITS MICHAEL.** As of November 9, 2026 (5:40 PM Central).
 - v13 logs why a sale is blocked (`sale_blocked`: Alpaca's `qty` and `qty_available`, the open sells counted, list ages), logs attempts that sold nothing, and adds the order sync's list age to `unprotected_position` and `bare_remainder`. No trading behaviour changed.
 - Proposal: `builds/c2-proposal-2026-11-09.md` (A, B, C recommended for tonight with A step 3 held until Tuesday's logs; D, the mid-day cycle, from Tuesday evening, first use Wednesday at the earliest; three questions for Michael in D). Mid-day review brief: `builds/midday-review-brief.md` (applies once D is built).
 - Tonight's standing approval: up to two review rounds per group.
