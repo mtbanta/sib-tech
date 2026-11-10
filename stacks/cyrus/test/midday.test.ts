@@ -152,6 +152,8 @@ test("a half day (close 12:00 PM CT) runs the cycle at 10:30; its texts use the 
   assert.equal((await w.sim.listPositions()).length, 0, "the cycle runs at 10:30 on a half day");
   const morning = w.r.said("commands").find((t) => t.startsWith("Morning (open to"))!;
   assert.ok(morning.includes("before 11:00 AM CT") && morning.includes("(last entry 11:00 AM CT)") && !morning.includes("2:00 PM") && !morning.includes("1:30 PM"), morning);
+  assert.ok(morning.includes("Without a deploy, send `go` to resume (last entry 11:00 AM CT).") && !morning.includes("I stay paused unless"), "no `go` offered after the resume window, which ends at the last entry");
+  assert.ok(morning.includes(": 1 entry sent (1 filled);"), "singular");
   // a plain restart after the last entry: the alert says no entries are left, without mentioning Michael
   const r2 = restart(w, { deploy: false, release: "SAMEREL9" });
   await r2.at("17:05:00");
@@ -288,7 +290,7 @@ test("a deploy while the daily loss stop is in force does not end the pause", as
   await r2.at("16:40:00");
   await r2.at("16:40:05");
   assert.equal((await readPause(r.store, D))!.on, true);
-  assert.ok(r2.said("commands").some((t) => t.includes("the daily loss stop is in force, so I stay paused. The daily loss stop is in force, so trading stays paused for the rest of the day unless you send `resume` and then `go`.")));
+  assert.ok(r2.said("commands").includes("Release NEWREL05 started while flat and paused, so I stay paused. The daily loss stop is in force, so trading stays paused for the rest of the day unless you send `resume` and then `go`."), r2.said("commands").slice(-2).join(" | "));
 });
 
 // ---------------- the commands ----------------
@@ -709,7 +711,7 @@ test("`hold` with the stop flag on says what will really happen", async () => {
   await r.at("16:00:05");
   w.r.ownerSays("hold", "16:00:10");
   await r.at("16:00:15");
-  assert.ok(r.said("commands").includes("Hold noted. The stop flag is on: send `resume`, then `go`."), r.said("commands").slice(-2).join(" | "));
+  assert.ok(r.said("commands").includes("Hold noted. The stop flag is on: send `resume` to trade again before the 10:30 AM CT pause; after the mid-day close-out, `go` resumes trading."), r.said("commands").slice(-2).join(" | "));
 });
 
 test("a retry does not wait for its own sale to fill (the next retry looks again), so it stays a short burst", async () => {
@@ -728,4 +730,24 @@ test("a retry does not wait for its own sale to fill (the next retry looks again
   assert.equal(results.length, 2);
   assert.equal(results[1]!.data!.waitedMs, 0, "the retry did not wait for its own sale");
   assert.equal(sim.sellLog.length, 1, "the sale was sent");
+});
+
+test("after a daily loss stop with the loss still past the limit: the morning line says no more trading today, and the plain-restart alert does not mention Michael", async () => {
+  const w = await armedDay();
+  const { sim, r } = w;
+  sim.advanceTo(z("16:00:00").getTime());
+  await hold(sim, r.store, "AAA", 100, 50);
+  sim.prices.set("AAA", 47); // 300 dollars down, the limit is 200
+  await r.at("16:00:05");
+  await r.at("16:00:10");
+  await until(async () => Boolean((await r.store.getControl<{ on: boolean; reason: string }>(CONTROL_STOP))?.on));
+  await middayFlat(w);
+  const morning = r.said("commands").find((t) => t.startsWith("Morning (open to 10:30 AM CT):"))!;
+  assert.ok(morning.endsWith("No more trading today (the daily loss stop is in force)."), morning);
+  const r2 = restart(w, { deploy: false, release: "SAMEREL2" });
+  await r2.at("16:40:00");
+  await r2.at("16:40:05");
+  const alert = w.bot.posts.find((m) => m.channel === "alerts" && m.text.includes("I restarted during the mid-day pause"))!;
+  assert.ok(alert.text.includes("No more trading today (the daily loss stop is in force)."), alert.text);
+  assert.equal(alert.mention, false, "nothing for Michael to do on a loss-stop day");
 });
