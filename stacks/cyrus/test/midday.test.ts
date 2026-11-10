@@ -71,6 +71,7 @@ test("a full day: at 10:30 CT the pause goes on and the mid-day close-out sells 
   sim.advanceTo(z("16:00:00").getTime());
   await hold(sim, r.store, "AAA", 10, 50);
   await hold(sim, r.store, "BBB", 20, 10);
+  await r.store.insertOrder({ clientOrderId: clientOrderIdFor(D, "CCC", 1), tradeDate: D, symbol: "CCC", qty: 1, referencePrice: 5, stopPrice: 4.9, takeProfitPrice: 5.1, status: "canceled", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: "stop flag set before sending", createdAt: new Date(sim.simMs).toISOString() });
   sim.cancelMs = 7_000;
   await r.at("16:29:55");
   assert.equal(await readPause(r.store, D), null, "nothing before 10:30");
@@ -222,7 +223,18 @@ test("a deploy after 1:30, or with `hold` set, stays paused; `hold` sent while t
   const late = await armedDay();
   await middayFlat(late);
   const r2 = restart(late, { deploy: true, release: "NEWREL02" });
+  // its first loss check is slow, so its start-up decision comes a pass later; the 1:30 note must wait for that decision
+  const history = late.sim.getEquityHistoryToday.bind(late.sim);
+  let slowOnce = true;
+  late.sim.getEquityHistoryToday = async () => {
+    if (slowOnce) {
+      slowOnce = false;
+      await new Promise((res) => setTimeout(res, 30));
+    }
+    return history();
+  };
   await r2.at("19:31:00");
+  await new Promise((res) => setTimeout(res, 40));
   await r2.at("19:31:05");
   assert.equal((await readPause(late.r.store, D))!.on, true);
   assert.ok(r2.said("commands").some((t) => t.includes("it is 1:30 PM CT or later, so I stay paused")));
@@ -276,7 +288,7 @@ test("a deploy while the daily loss stop is in force does not end the pause", as
   await r2.at("16:40:00");
   await r2.at("16:40:05");
   assert.equal((await readPause(r.store, D))!.on, true);
-  assert.ok(r2.said("commands").some((t) => t.includes("the daily loss stop is in force, so I stay paused")));
+  assert.ok(r2.said("commands").some((t) => t.includes("the daily loss stop is in force, so I stay paused. The daily loss stop is in force, so trading stays paused for the rest of the day unless you send `resume` and then `go`.")));
 });
 
 // ---------------- the commands ----------------
@@ -688,4 +700,32 @@ test("a process that started before the pause (an earlier deploy) does not count
   await r.at("16:40:05");
   assert.equal((await readPause(r.store, D))!.on, true, "no automatic resume");
   assert.ok(!r.said("commands").some((t) => t.startsWith("Resumed after release")));
+});
+
+test("`hold` with the stop flag on says what will really happen", async () => {
+  const w = await armedDay();
+  const { r } = w;
+  w.r.ownerSays("stop", "16:00:00");
+  await r.at("16:00:05");
+  w.r.ownerSays("hold", "16:00:10");
+  await r.at("16:00:15");
+  assert.ok(r.said("commands").includes("Hold noted. The stop flag is on: send `resume`, then `go`."), r.said("commands").slice(-2).join(" | "));
+});
+
+test("a retry does not wait for its own sale to fill (the next retry looks again), so it stays a short burst", async () => {
+  const w = await armedDay();
+  const { sim, r } = w;
+  sim.advanceTo(z("16:00:00").getTime());
+  await hold(sim, r.store, "AAA", 10, 50);
+  sim.refuseSellsTimes = 1_000;
+  await r.at("16:30:00");
+  await until(() => !r.worker["inflight"].has("midday") && r.store.events.some((e) => e.event === "closeout_result"));
+  sim.refuseSellsTimes = 0;
+  sim.sellFillDelayMs = 30_000; // Alpaca holds the sale a while before filling it
+  await r.at(new Date(Math.max(z("16:30:21").getTime(), sim.simMs + 21_000)).toISOString());
+  await until(() => !r.worker["inflight"].has("midday"));
+  const results = r.store.events.filter((e) => e.event === "closeout_result" && e.data!.path === "midday");
+  assert.equal(results.length, 2);
+  assert.equal(results[1]!.data!.waitedMs, 0, "the retry did not wait for its own sale");
+  assert.equal(sim.sellLog.length, 1, "the sale was sent");
 });
