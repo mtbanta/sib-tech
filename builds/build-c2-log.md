@@ -3028,3 +3028,28 @@ No blocking finding. The reviewer confirmed: every logged value comes from reads
 2. **Release 2:** part D on top of release 1. Its own group 1 review, up to three rounds, plus group 2 for its messages. Deploy before 7:30 AM Tuesday only if group 1 passes. If it is not ready, deploy nothing more, and Tuesday's cycle runs by hand (stop, flatten, deploy while flat, resume), approved as a fallback.
 3. **D's answers:** a plain restart during the pause stays paused; the commands are `go` and `hold`; automatic resume after a deploy unless `hold` is set; the pass rule is the daily rule with "the mid-day close-out is flat by about 10:35" in place of the close-out; the deploy script pauses the Healthchecks check during a mid-day deploy. The CLAUDE.md deploy-rule exception written as proposed (done); `builds/midday-review-brief.md` updated with the pass rule.
 4. After each deploy: one clean start, Healthchecks up, stop and not-flat flags off, and the "live" line saying whether the mid-day cycle is automatic or manual for Tuesday.
+
+## Release 1 of 2026-11-09: the stuck sale, the cleanup sale, one alert per stuck position (built 2026-11-09, evening; branch `release-r1`)
+
+Michael's approval: parts A steps 1, 2 and 4, B and C of `builds/c2-proposal-2026-11-09.md` (A step 3, selling past Alpaca's free count, held until Tuesday's logs). Money-touching: A and B (group 1). Messaging: C (group 2). Paper only.
+
+### What changed
+
+| Part | Change | Files |
+| :-- | :-- | :-- |
+| B1, A2 | Before every missing-exit or remainder sale, the entry is fetched again by its client id (one request). If its exits have sold every share, or (missing exit) it has a live exit after all, or (remainder) its stop is live, nothing is cancelled or sold (`cleanup_skipped` logged). If the lookup fails, the sync's own copy is used, as before. | `risk.ts` (`cleanupSale`) |
+| B2 | That sale cancels only that entry's own live exits, by id from the fresh copy (which also reaches exits Alpaca's open list does not show); in later rounds only those still shown open. Never another order of the symbol. | `sells.ts` (`ownEntryOnly`), `risk.ts` |
+| B3 | At most that entry's own shares (filled quantity minus what its exits sold) are sold in the attempt. The wait after the cancels ends as soon as that many shares are free (a newer position's exits stay open on purpose); there is no wait in an attempt that cancelled nothing. Once those shares are sold and the holding has fallen by that much, the attempt stops looking. | `sells.ts` |
+| B4 | Enforced through B1 to B3: an older entry acts only on its own shares and its own exits, so a newer entry on the same symbol keeps both. (No separate check of the stack's records: the fresh copy is the authority.) | |
+| A1 | A round that sells nothing because every symbol still to sell is held with no open order visible, in an attempt that cancelled nothing, ends the attempt (`hiddenHold`). The entry is then retried after 5 seconds, then 10, 20 and at most every 30; a sync before it is due skips it and carries on with the others. A hold explained by visible orders (a cancel still landing) keeps the old waits and is retried at the next sync, as before. A cancel sent in the same attempt counts as an explanation even when the open list hides the order (found by the existing slow-cancel test). | `sells.ts` (`endWhenHiddenHold`), `risk.ts` (`SyncMemory.stuck`) |
+| A4, C | One alert when an entry is first stuck (mentions Michael): "X has N shares with no protective stop, and I could not sell them yet (why). I keep trying and will post once it is sold." One after 5 minutes stuck (mentions Michael): "... still has no protective stop after 5 minutes, and I still cannot sell it (why). Please close it in Alpaca's dashboard. I keep trying." One line when it resolves, no mention: "X: sold after N minutes without a protective stop." (or "no longer held", "sold by its exits", "protected again"). Nothing in between. The unchanged messages for a sale that works at once ("had no live protective stop, so I sold it", the remainder batch, "sent a sell ... not filled yet") are kept; the last one now also covers a missing-exit sale whose sell has not filled. | `risk.ts` |
+
+Not changed: the close-out, the flatten command, the loss stop, the carried-position sale, the sell gate's two checks (held minus open sells, and Alpaca's free count), the grace time, the governor.
+
+### Requests
+
+A Monday-style stuck symbol: one attempt of at most about 10 requests and under 2 seconds (was 3 rounds, about 30 seconds and about 60 requests), every 5 to 30 seconds. Each cleanup sale adds one lookup (52 remainder sales on Monday). A cleanup sale beside a newer position: 12 requests and 1 second in the simulator (22 and 3 without stopping once its own share has filled).
+
+### Tests
+
+454 pass (9 added in `test/release-r1.test.ts`: Monday's APLD sequence from a stale list; an older entry's 1 share beside a newer position in three visibility modes; a stale list wrongly showing exits gone; Monday's IONQ case through the 5, 10, 20, 30 retries, the 5 minute escalation and the resolution line, three posts in all; a stuck symbol not delaying another symbol's remainder sale; a visible hold; the stop once its own share filled). One existing structure test changed because the structure changed: it counted two cleanup sale calls with `yieldToPriority`; there is now one shared call, used by both paths (the test checks both). Type check clean. Each piece taken out on its own fails a test: 14 of 14 (after adding a no-free-count case for the cap and a request-count test for the stop once filled, which the first run let through).

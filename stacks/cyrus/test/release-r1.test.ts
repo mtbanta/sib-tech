@@ -14,9 +14,10 @@ import { D } from "./rig.ts";
 
 const MID = Date.UTC(2026, 10, 2, 15, 0); // in the session
 
-function world(mode: { hide?: boolean } = {}) {
+function world(mode: { hide?: boolean; noQty?: boolean } = {}) {
   const sim = new SimBroker(MID);
   sim.hideFilledParents = mode.hide === true;
+  sim.reportQtyAvailable = mode.noQty !== true;
   const events: Array<{ event: string; data: any }> = [];
   const log = (event: string, data?: Record<string, unknown>) => void events.push({ event, data });
   const said: Array<{ ch: string; text: string; mention?: boolean }> = [];
@@ -78,9 +79,9 @@ test("part B, Monday's APLD case: a remainder sale working from an old list, for
   assert.ok(w.events.some((e) => e.event === "cleanup_skipped" && e.data.clientOrderId === id107), "the fresh look skipped it");
 });
 
-for (const hide of [false, true]) {
-  test(`part B: an older entry with 1 share of its own left beside a newer position sells exactly that share and never touches the newer exits (open list ${hide ? "hides" : "shows"} filled entries' exits)`, async () => {
-    const w = world({ hide });
+for (const [hide, noQty] of [[false, false], [true, false], [true, true]] as const) {
+  test(`part B: an older entry with 1 share of its own left beside a newer position sells exactly that share and never touches the newer exits (open list ${hide ? "hides" : "shows"} filled entries' exits${noQty ? ", Alpaca reports no free count" : ""})`, async () => {
+    const w = world({ hide, noQty });
     await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
     const day = (await w.store.getDay(D))!;
     const id107 = await hold(w, "APLD", 3, 16.46, 107);
@@ -206,4 +207,23 @@ test("part A and C: a sale held by a cancel still landing (visible) keeps the ol
   const last = w.said.filter((m) => m.ch === "alerts").at(-1)!;
   assert.ok(/RIOT: (sold|no longer held) after .* without a protective stop\./.test(last.text) && !last.mention, last.text);
   assert.equal(w.sim.oversellAttempts, 0);
+});
+
+test("part B: once that entry's own share has filled, the cleanup sale stops looking (a newer position on the symbol stays held)", async () => {
+  const w = world();
+  w.sim.sellFillDelayMs = 300;
+  const a = clientOrderIdFor(D, "APLD", 1);
+  await w.sim.submitEntry({ symbol: "APLD", qty: 1, stopPrice: 16, takeProfitPrice: 17, referencePrice: 16.4, clientOrderId: a });
+  w.sim.fillEntry(a, 16.4);
+  for (const l of legsOf(w, a)) await w.sim.cancelOrder(l.id);
+  const b = clientOrderIdFor(D, "APLD", 2);
+  await w.sim.submitEntry({ symbol: "APLD", qty: 4, stopPrice: 16, takeProfitPrice: 17, referencePrice: 16.4, clientOrderId: b });
+  w.sim.fillEntry(b, 16.4);
+  w.sim.advance(2_000);
+  const r0 = w.sim.requests, t0 = w.sim.simMs;
+  const r = await w.liquidator.flatten({ reason: "no live protective stop", tradeDate: D, only: ["APLD"], maxRounds: 3, ownEntryOnly: { maxQty: { APLD: 1 } } });
+  assert.deepEqual(r.sold, [{ symbol: "APLD", qty: 1 }]);
+  assert.deepEqual(r.heldAfter, { APLD: 4 });
+  assert.ok(w.sim.requests - r0 <= 15, `${w.sim.requests - r0} requests (22 without the stop)`);
+  assert.ok(w.sim.simMs - t0 <= 1_500, `${w.sim.simMs - t0} ms (3,000 without the stop)`);
 });
