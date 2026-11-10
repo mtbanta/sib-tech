@@ -342,3 +342,64 @@ test("part A: a stuck remainder (its take-profit cancelled by the first attempt,
   assert.equal(w.sim.sellLog.length, 0);
   assert.equal(mentions(w).length, 1, "still one alert");
 });
+
+// Michael's decision of 2026-11-09 (after group 1 round 2): the allowance's room goes to the stuck entry that has waited longest.
+async function stuckMany(n: number) {
+  const w = world();
+  await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
+  const day = (await w.store.getDay(D))!;
+  const syms = Array.from({ length: n }, (_, i) => "S" + String.fromCharCode(65 + i) + "X");
+  for (const [i, sym] of syms.entries()) {
+    const id = await hold(w, sym, 1, 10 + i, 1);
+    for (const l of legsOf(w, id)) await w.sim.cancelOrder(l.id);
+    w.sim.staleHeld.set(sym, 1);
+  }
+  w.sim.advance(2_000);
+  return { w, day, syms, t0: w.sim.simMs };
+}
+async function runFor(w: ReturnType<typeof world>, day: any, untilMs: number, onTick?: (t: number) => void) {
+  let r = await syncOrders(w.risk, day, { protect: true });
+  while (w.sim.simMs < untilMs) {
+    w.sim.advanceTo(Math.min(r.recheckAt ?? w.sim.simMs + 10_000, w.sim.simMs + 10_000));
+    onTick?.(w.sim.simMs);
+    r = await syncOrders(w.risk, day, { protect: true });
+  }
+}
+
+test("turns: five stuck, Alpaca frees the last one in the order after 60 seconds while the other four stay stuck: it is sold within about a minute and a half", async () => {
+  const { w, day, syms, t0 } = await stuckMany(5);
+  let freedAt = 0;
+  await runFor(w, day, t0 + 240_000, (t) => {
+    if (!freedAt && t - t0 >= 60_000) { freedAt = t; w.sim.staleHeld.delete(syms[4]!); }
+  });
+  const sale = w.sim.sellLog.find((x) => x.symbol === syms[4]);
+  assert.ok(sale, "sold");
+  assert.ok(sale!.at - freedAt <= 90_000, `sold ${Math.round((sale!.at - freedAt) / 1000)} s after Alpaca freed it`);
+  assert.equal(w.sim.sellLog.length, 1, "the other four are still stuck");
+});
+
+test("turns: eight stuck, entries 5 to 8 freed after 60 seconds while 1 to 4 stay stuck: all four freed ones are sold within about two and a half minutes; every stuck one is tried in turn", async () => {
+  const { w, day, syms, t0 } = await stuckMany(8);
+  let freedAt = 0;
+  await runFor(w, day, t0 + 360_000, (t) => {
+    if (!freedAt && t - t0 >= 60_000) { freedAt = t; for (const sym of syms.slice(4)) w.sim.staleHeld.delete(sym); }
+  });
+  for (const sym of syms.slice(4)) {
+    const sale = w.sim.sellLog.find((x) => x.symbol === sym);
+    assert.ok(sale && sale.at - freedAt <= 150_000, `${sym} sold ${sale ? Math.round((sale.at - freedAt) / 1000) : "never"} s after it was freed`);
+  }
+  for (const sym of syms.slice(0, 4)) {
+    const tries = w.events.filter((e) => e.event === "sale_blocked" && e.data.symbol === sym).length;
+    assert.ok(tries >= 3, `${sym} tried ${tries} times in 6 minutes`);
+  }
+});
+
+test("the 5 minute alert goes by the clock: eight stuck, each gets exactly one 5 minute alert by about 5 minutes and a half, though most retries wait for room", async () => {
+  const { w, day, syms, t0 } = await stuckMany(8);
+  await runFor(w, day, t0 + STUCK_ESCALATE_MS + 30_000);
+  for (const sym of syms) {
+    const esc = w.said.filter((m) => m.mention && m.text.includes(`${sym} still has no protective stop after`));
+    assert.equal(esc.length, 1, `${sym}: ${esc.length} five minute alerts`);
+  }
+  assert.equal(mentions(w).length, 16, "one first alert and one 5 minute alert each, nothing else");
+});
