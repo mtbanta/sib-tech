@@ -11,7 +11,7 @@ import type { Liquidator, Say } from "./sells.ts";
 import { CONTROL_COMMAND_CURSOR, CONTROL_STOP, setPhase, type DayRecord, type StopFlag, type Store } from "./store.ts";
 import { MAX_TRADES_PER_MINUTE, MAX_TRADES_PER_MINUTE_LOAD_DAY, describeLimits } from "./limits.ts";
 import { centralClock, dayWord, etDate, sessionPhase } from "./time.ts";
-import { blockedNext, goRefusal, middayFlat, middayTimes, readHold, readPause, setHold, updatePause } from "./midday.ts";
+import { blockedNext, goRefusal, lossPast, middayFlat, middayTimes, readHold, readPause, setHold, updatePause } from "./midday.ts";
 
 export type CommandBot = Pick<DiscordBot, "post" | "latestCommandMessageId" | "commandMessagesAfter">;
 
@@ -288,7 +288,10 @@ export class CommandProcessor {
         }
         await setHold(this.d.store, date, now.toISOString());
         const times = middayTimes(day)!;
-        const blocked = blockedNext({ stop: await this.d.store.getControl<StopFlag>(CONTROL_STOP), now, lastEntryAt: times.lastEntryAt });
+        const stop = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
+        // Wording only: after a daily loss stop, is the loss still past the limit? Before the pause, `go` cannot be used yet.
+        const equity = stop?.on && stop.reason.startsWith("daily loss stop") ? ((await this.d.broker.getAccount().catch(() => null))?.equity ?? null) : null;
+        const blocked = blockedNext({ stop, now, lastEntryAt: times.lastEntryAt, lossPast: lossPast(day, equity), pauseAt: pause?.on ? null : times.pauseAt });
         if (blocked) await this.say(`Hold noted. ${blocked}`);
         else if (pause?.on) await this.say(`Hold: after a mid-day deploy today I stay paused. Send \`go\` to trade until ${centralClock(times.lastEntryAt)} (the last entry).`);
         else await this.say("Hold: after today's mid-day deploy I will stay paused until you send `go`.");

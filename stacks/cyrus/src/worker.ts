@@ -34,7 +34,7 @@ import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatS
 import { computeDay, formatSummary, isSentEntry, type StopGapDay } from "./summary.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
 import { PAPER_ONLY } from "./discord.ts";
-import { MIDDAY_NOT_FLAT_ALERT_AFTER_MS, MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MIDDAY_RETRY_MS, MIDDAY_RETRY_REQUESTS_PER_MINUTE, MiddayBudget, blockedNext, middayFlat, middayTimes, readHold, readPause, retryAllowed, retrySymbols, startupAction, updatePause } from "./midday.ts";
+import { MIDDAY_NOT_FLAT_ALERT_AFTER_MS, MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MIDDAY_RETRY_MS, MIDDAY_RETRY_REQUESTS_PER_MINUTE, MiddayBudget, blockedNext, lossPast, middayFlat, middayTimes, readHold, readPause, retryAllowed, retrySymbols, startupAction, updatePause } from "./midday.ts";
 import type { PingKind } from "./heartbeat.ts";
 
 export type Channel = "commands" | "trading" | "alerts";
@@ -1306,9 +1306,12 @@ export class Worker {
 
   // What to tell Michael comes next while paused and flat: what really blocks trading (the stop flag, the daily loss stop, no entries
   // left today), or else what `go` does.
-  private async middayBlocked(date: string, now: Date, lastEntryAt: Date): Promise<{ blocked: string | null; stop: StopFlag | null; goLine: string }> {
+  private async middayBlocked(day: DayRecord, now: Date, lastEntryAt: Date): Promise<{ blocked: string | null; stop: StopFlag | null; lossStop: boolean; goLine: string }> {
     const stop = await this.d.store.getControl<StopFlag>(CONTROL_STOP).catch(() => null);
-    return { blocked: blockedNext({ stop, now, lastEntryAt }), stop, goLine: `Send \`go\` to trade until ${centralClock(lastEntryAt)} (the last entry).` };
+    const lossStop = Boolean(stop?.on && stop.reason.startsWith("daily loss stop"));
+    // Wording only: after a daily loss stop, is the loss still past the limit (then `resume` would be stopped again)?
+    const equity = lossStop ? ((await this.d.broker.getAccount().catch(() => null))?.equity ?? null) : null;
+    return { blocked: blockedNext({ stop, now, lastEntryAt, lossPast: lossPast(day, equity) }), stop, lossStop, goLine: `Send \`go\` to trade until ${centralClock(lastEntryAt)} (the last entry).` };
   }
 
   // The morning in one line for `commands`, and what happens next.
@@ -1322,15 +1325,18 @@ export class Worker {
     const start = day.dayStartEquity;
     const plText = account && start ? `P and L ${account.equity - start >= 0 ? "+" : ""}${(account.equity - start).toFixed(2)} dollars (equity ${start.toFixed(2)} to ${account.equity.toFixed(2)})` : "P and L not known (the account could not be read)";
     const hold = await readHold(this.d.store, date).catch(() => false);
-    const { blocked } = await this.middayBlocked(date, now, mt.lastEntryAt);
+    const { blocked } = await this.middayBlocked(day, now, mt.lastEntryAt);
     const until = centralClock(mt.resumeUntil);
     const last = centralClock(mt.lastEntryAt);
+    // On a half day the automatic resume ends at the last entry, so "from then I stay paused unless you send `go`" would offer a `go`
+    // that cannot trade: dropped then.
+    const sameEnd = mt.resumeUntil.getTime() === mt.lastEntryAt.getTime();
     const next =
       blocked ??
       (hold
         ? `\`hold\` is set: after a deploy I stay paused. Send \`go\` to trade until ${last} (the last entry).`
-        : `Next: after a deploy before ${until} I resume on my own under today's limits, unless you send \`hold\`. Without a deploy, send \`go\` to resume; from ${until} I stay paused unless you send \`go\` (last entry ${last}).`);
-    return `Morning (open to ${centralClock(pauseAt)}): ${sent} entries sent (${filled} filled); ${plText}; rate-limit answers from Alpaca: ${this.d.governor.stats().rateLimitAnswers}. ${next}`;
+        : `Next: after a deploy before ${until} I resume on my own under today's limits, unless you send \`hold\`. Without a deploy, send \`go\` to resume${sameEnd ? ` (last entry ${last})` : `; from ${until} I stay paused unless you send \`go\` (last entry ${last})`}.`);
+    return `Morning (open to ${centralClock(pauseAt)}): ${sent} ${sent === 1 ? "entry" : "entries"} sent (${filled} filled); ${plText}; rate-limit answers from Alpaca: ${this.d.governor.stats().rateLimitAnswers}. ${next}`;
   }
 
   // After the mid-day close-out is flat: the start-up decision (once per start, after this start's first read of commands, so a
@@ -1342,7 +1348,7 @@ export class Worker {
       this.middayStartupDone = true;
       const pause = await readPause(this.d.store, date);
       const hold = await readHold(this.d.store, date);
-      const { blocked, stop, goLine } = await this.middayBlocked(date, now, mt.lastEntryAt);
+      const { blocked, stop, lossStop, goLine } = await this.middayBlocked(day, now, mt.lastEntryAt);
       const deploy = this.startInfo?.deploy === true;
       const release = this.startInfo?.release ?? "unknown";
       // Only a start after the pause began is a mid-day start (a start before it, such as an evening deploy, is not).
@@ -1354,13 +1360,13 @@ export class Worker {
         await updatePause(this.d.store, date, { on: false, resumedAt: now.toISOString(), resumedBy: "deploy", deployedAt: now.toISOString() });
         await this.say("commands", `Resumed after release ${release} (deployed while flat): same limits as this morning; the loss stop counts from the open.`);
       } else if (action === "stay-plain-restart") {
-        await this.say("alerts", `**Michael: I restarted during the mid-day pause without a new release, so I stay paused.** ${blocked ?? goLine}`, { mentionOwner: !late });
+        await this.say("alerts", `**Michael: I restarted during the mid-day pause without a new release, so I stay paused.** ${blocked ?? goLine}`, { mentionOwner: !late && !lossStop });
       } else if (action === "stay-hold") {
         await updatePause(this.d.store, date, { deployedAt: now.toISOString() });
         await this.say("commands", `Release ${release} started while flat and paused. \`hold\` is set, so I stay paused. ${blocked ?? goLine}`);
       } else if (action === "stay-stop") {
         await updatePause(this.d.store, date, { deployedAt: now.toISOString() });
-        await this.say("commands", `Release ${release} started while flat and paused, but the ${stop?.reason.startsWith("daily loss stop") ? "daily loss stop is in force" : "stop flag is on"}, so I stay paused. ${blocked ?? goLine}`);
+        await this.say("commands", `Release ${release} started while flat and paused, so I stay paused. ${blocked ?? goLine}`);
       } else if (action === "stay-late") {
         await updatePause(this.d.store, date, { deployedAt: now.toISOString() });
         await this.say("commands", `Release ${release} started while flat and paused, but it is ${centralClock(mt.resumeUntil)} or later, so I stay paused. ${blocked ?? goLine}`);
@@ -1370,7 +1376,7 @@ export class Worker {
     if (this.middayStartupDone && now >= mt.resumeUntil && middayFlat(day) && !day.phases[MIDDAY_NOTE_PHASE]) {
       const pause = await readPause(this.d.store, date);
       if (pause?.on && !pause.deployedAt && now < mt.lastEntryAt) {
-        const { blocked } = await this.middayBlocked(date, now, mt.lastEntryAt);
+        const { blocked } = await this.middayBlocked(day, now, mt.lastEntryAt);
         await this.say("commands", `${centralClock(mt.resumeUntil)}: nothing was deployed, so I stay paused. ${blocked ?? `Send \`go\` to trade until ${centralClock(mt.lastEntryAt)} (the last entry), or nothing.`}`);
       }
       await setPhase(this.d.store, date, MIDDAY_NOTE_PHASE, now.toISOString());

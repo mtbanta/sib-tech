@@ -116,11 +116,24 @@ export function goRefusal(o: { hasCycle: boolean; pause: MiddayPause | null; fla
   return null;
 }
 
-// What will really happen next when something other than the pause blocks trading (group 2 review, round 1): the stop flag, the daily
-// loss stop, or no entries left today. Null when nothing else blocks it (the caller then says what `go` or a deploy would do).
-export function blockedNext(o: { stop: { on: boolean; reason: string } | null; now: Date; lastEntryAt: Date }): string | null {
-  if (o.stop?.on && o.stop.reason.startsWith("daily loss stop")) return "The daily loss stop is in force, so trading stays paused for the rest of the day unless you send `resume` and then `go`.";
-  if (o.stop?.on) return "The stop flag is on: send `resume`, then `go`.";
+// Is today's loss still past the daily limit (the same look the `resume` reply makes)? Then a `resume` is stopped again within about
+// 5 seconds, and there is no more trading today.
+export function lossPast(day: Pick<DayRecord, "dayStartEquity" | "limits">, equity: number | null): boolean {
+  return equity !== null && day.dayStartEquity !== null && day.dayStartEquity - equity >= day.limits.dailyLossStopUsd;
+}
+
+// What will really happen next when something other than the pause blocks trading (group 2 review, rounds 1 and 2): the stop flag, the
+// daily loss stop, or no entries left today. Null when nothing else blocks it (the caller then says what `go` or a deploy would do).
+// `lossPast`: the loss is still past the limit. `pauseAt`: given only before the pause has started (then `go` cannot be used yet).
+export function blockedNext(o: { stop: { on: boolean; reason: string } | null; now: Date; lastEntryAt: Date; lossPast?: boolean; pauseAt?: Date | null }): string | null {
+  const before = o.pauseAt && o.now < o.pauseAt ? centralClock(o.pauseAt) : null;
+  if (o.stop?.on && o.stop.reason.startsWith("daily loss stop")) {
+    if (o.lossPast) return "No more trading today (the daily loss stop is in force).";
+    return before
+      ? `The daily loss stop is on: send \`resume\` to trade again before the ${before} pause; after the mid-day close-out, \`go\` resumes trading.`
+      : "The daily loss stop is in force, so trading stays paused for the rest of the day unless you send `resume` and then `go`.";
+  }
+  if (o.stop?.on) return before ? `The stop flag is on: send \`resume\` to trade again before the ${before} pause; after the mid-day close-out, \`go\` resumes trading.` : "The stop flag is on: send `resume`, then `go`.";
   if (o.now >= o.lastEntryAt) return `No entries are left today (last entry ${centralClock(o.lastEntryAt)}).`;
   return null;
 }

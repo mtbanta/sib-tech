@@ -3148,3 +3148,15 @@ Each new piece taken out on its own: **40 of 42 caught.** Not caught, and why:
 
 - **Group 1:** the retry budget and its one-round, at-most-10-positions retries (`worker.ts` mid-day block and `middayPhase`, `closeout.ts` `maxRounds` and `onlySymbols`, `midday.ts` `MiddayBudget`, `retryAllowed`, `retrySymbols`); the half-day times; the hold key; `startedAfterPause`; the clean-checkout check; and, separately, commit `38f5114` (the missing-exit check standing aside), which needs Michael's say.
 - **Group 2:** the stop-aware and real-time texts, the alerts, the replies, `HELP`, the summary line.
+
+## Release 2, group 2 round 2 notes (wording)
+
+Group 2 round 2: PASS. Its non-blocking wording notes, done as one commit (messaging only: no decision, order, limit or timing changed; the only new read is one account read for the wording after a daily loss stop, the same look the `resume` reply makes):
+1. **After a daily loss stop**, the texts look at whether today's loss is still past the limit (`lossPast` in `midday.ts`, used in the morning line, the 1:30 note, the start-up lines and the `hold` reply). Still past: "No more trading today (the daily loss stop is in force)." (a `resume` would be stopped again within about 5 seconds). Not past: the resume-then-go line as before.
+2. The stay-stop line no longer repeats itself: "Release X started while flat and paused, so I stay paused. <what happens next>".
+3. On a half day (the automatic resume ends at the last entry) the morning line drops "from 11:00 AM CT I stay paused unless you send `go`": it ends "Without a deploy, send `go` to resume (last entry 11:00 AM CT)."
+4. "1 entry sent", "2 entries sent".
+5. `hold` before 10:30 with the stop flag on says what is true: "send `resume` to trade again before the 10:30 AM CT pause; after the mid-day close-out, `go` resumes trading" (and for the daily loss stop: "No more trading today" when the loss is still past).
+6. The plain-restart alert does not mention Michael on a daily-loss-stop day.
+
+Tests: 474 pass (1 added, 3 changed). Type check clean. Each of the six taken out on its own fails a test: 7 of 7 (two for item 1).
