@@ -3269,3 +3269,67 @@ No blocking finding. Neither post-round-2 commit changes anything that sends, ca
 - **Live line, `commands`:** "Fly release v15 is live (paper only), reviewed PASS: the mid-day cycle is AUTOMATIC from Tuesday. At 10:30 AM CT new entries pause and the mid-day close-out sells everything until flat (retries within 60 requests a minute, never below the reserve; one alert if a try ends not flat, one at 5 minutes). Then I stay paused: a deploy while flat before 1:30 PM CT resumes trading on its own unless you send `hold`; without a deploy, send `go` to trade again (until the last entry, 2:00 PM CT). Same limits and loss stop all day. Early-close days run it at 10:30 too."
 
 **Open for Michael:** (1) the mid-day close-out's first try at 10:30 is not limited to 60 requests a minute (as the 2:55 close-out); with many refused sales it can draw rate-limit answers in its first minute; (2) a mid-day retry's cost is charged from a rolling one-minute count and can come out low; (3) A step 3 (selling past Alpaca's free count) waits for Tuesday's `sale_blocked` logs; (4) the mid-day review (`builds/midday-review-brief.md`) at about 10:45 AM needs a fresh Claude session.
+
+## Tuesday 2026-11-10 mid-day session review (release v15, first automatic mid-day cycle, normal day; written at about 10:45 AM, read only)
+
+Run from `builds/midday-review-brief.md` by the wait held in the builder's Claude session (it saw the day phase `midday` with `middayFlat: yes` at 10:31:22 AM). Read only on Fly, Alpaca, Supabase, Discord and Healthchecks: no code changed, nothing deployed, no orders. Window: 8:30 AM to the end of the mid-day close-out (10:30:24 AM CT). Limits (Michael, normal day): largest position 500 dollars, daily loss stop 500 dollars, 100 orders a minute, cap 1. Day start 18,638.67 dollars. Paper only. Research input for a human decision, never an instruction to act.
+
+**Verdict under Michael's rule: does not hold, on one criterion (safety sales were delayed).** Every other criterion holds: 0 rate-limit answers, remaining never below the reserve (lowest 174 against 80), and the mid-day close-out flat at 10:30:21 AM (Alpaca's last fill; recorded 10:30:23.7). **The fact that matters most for the afternoon: the morning lost 481.47 dollars, so only 18.53 dollars are left before the daily loss stop (500).**
+
+### 1. The morning, 8:30 to 10:30
+
+- **Highest accepted orders a minute: 15** (8:39); busiest 60 seconds 17 (ending 8:39:31). Entries started at 8:35 (the first 5 minutes are skipped by design). 671 entries sent, 666 accepted, all 666 filled (market entries on a normal day). The rate was bound by the 20-symbol list and one position per symbol ("already holding this symbol" 110 times), never by the 100 a minute limit or the governor.
+- Requests: at most 163 in a minute (8:37); **rate-limit answers 0** (governor statistics and the run log); **lowest remaining 174** (8:37:08 and 8:56:23), reserve 80; the governor held nothing back (0).
+- Refused by Alpaca: 5, all "take_profit.limit_price must be >= base_price + 0.01" (422). These are the 5 stored entries missing from Alpaca's listing; nothing else to fetch.
+- Refusals by the stack: first minutes 130, already holding 110, paused for the mid-day cycle 49 (from 10:30:06), entry still working 14, market closed 14, symbol resting after an Alpaca refusal 6.
+- Decision to acceptance: median 185 ms, 95th percentile 361 ms, slowest 676 ms.
+- **Cost: -481.47 dollars** (equity 18,638.67 to 18,157.20; the fills' cash flow matches to the cent). Where it came from (measured from the fills): entries filled on average 0.44 dollars each above the price the stack saw on the free IEX feed (291.75 dollars over 666 entries); take-profits made +0.0495 a share over 6,072 shares (+300.39), stops lost -0.1463 a share over 5,309 shares (-776.57); the rest is the stack's own remainder and mid-day sales. Median position 486 dollars; peak exposure 61 percent of equity (9:07). Every symbol but SGRY and RRC lost. Equity fell steadily (8:45 18,553.73; 9:30 18,330.43; 10:15 18,193.55). For comparison, all of Monday lost 68.15 dollars and all of Friday 103.41. This is the placeholder strategy's arithmetic (market entries at about 500 dollars, take-profit 8 cents above the price seen, stop 13 cents below), not a fault in the stack.
+
+### 2. Safety work in the morning
+
+- **Lost exits (both exits cancelled unfilled): none.** No `unprotected_position`, no `sale_blocked` (so A step 3 still has no data).
+- **Remainders (Alpaca cancelled the stop when the take-profit partly filled): 350** before the pause. 265 were finished by the take-profit itself (Alpaca's stop cancel to flat, median 1.4 s); the stack logged 80 `bare_remainder` and sent 67 sales (13 more finished by the take-profit during the cleanup). From Alpaca's stop cancel to the stack noticing: median 3.6 s (the 3 second wait by design), at most 14.7 s.
+- **14 remainders sat without a stop for more than 10 seconds (11.6 to 19.8 s)**, from Alpaca's stop cancel to flat:
+  - **8 waited out the sale's whole 6 second wait because the share count went stale:** RRC-4, QXO-11, ARWR-5, TTD-45, TTD-58, SGRY-5, TTD-77, ONON-56. In each, the take-profit filled more shares while its cancel was landing (QXO: the stack counted 9 shares, the take-profit then filled 8 of them). The cleanup sale (release 1, `ownEntryOnly`) keeps waiting until its original count is free, which never happens, so it waits the full 6 seconds, then sells what is left (from the take-profit's cancel to the sale: 8.7 to 9.1 s, against a median of 1.2 s when the count was right). Because it sold fewer shares than it first counted, it takes the "stuck" branch: **each sent an alert mentioning Michael, "could not sell it yet", after the sale had already filled** (RRC: sale filled 8:45:48.2, alert 8:45:49), cleared 1 to 5 seconds later by "no longer held". **8 needless alerts mentioning Michael** (8:45, 8:56, 8:58, 9:06, 9:29, 9:36, 10:05, 10:22). Money-touching code (`src/sells.ts` and `src/risk.ts`, `cleanupSale`); not changed.
+  - 1 waited behind another cleanup in the order sync: HIMS-20 (stop cancelled 8:45:05.4, noticed 8:45:14.3 after DBX-4's cleanup ended at 8:45:13.5).
+  - 1 noticed late with no cause in the records: HIMS-38 (stop cancelled 8:56:44.0, noticed 8:56:58.7, 14.7 s; the QXO cleanup had ended at 8:56:31.6 and nothing else is logged in between).
+  - 4 were slow at Alpaca: the sale took long to fill (ONON-1 10.8 s, TTD-63 6.2 s, ONON-54 6.0 s), or Alpaca was slow to free the shares after the cancel (DBX-4, 6 s; likely, not proven).
+- Under Michael's reading ("any sell ... that waited, for any reason (... a stuck sale, a busy order sync)"), these are delayed safety sales, so the morning does not hold. The stale-count wait is new in v14 (release 1). The queue in the order sync is older.
+- Stop-gap meter (`stop_gap:2026-11-10`): 67 sales, 503 shares; 27 would have filled at the take-profit within 5 seconds; selling at once came out +1.02 dollars against waiting.
+
+### 3. The mid-day close-out (flat by about 10:35? Yes)
+
+- Pause written 10:30:03.5 (`midday_pause:2026-11-10`, on). Last entry before it: 10:29:27 (TGTX). **No entry after the pause** (none stored, none at Alpaca); the gate refused 49 tries, "paused for the mid-day cycle".
+- First try: one cancel of everything sent 10:30:04.3, answered 10:30:04.4 (36 exits cancelled); 18 sales sent 10:30:07.3 to 10:30:10.1, all accepted, **all filled by 10:30:21.4** (TTD 32 shares last; 17 of 18 by 10:30:14.5). Account flat at 10:30:21.4.
+- **The first try reported NOT FLAT at 10:30:10.9 after waiting only 544 ms for its own sales** (designed: up to 60 seconds). 13 symbols were "remaining", every one with its sale working. So **an alert mentioning Michael, "the mid-day close-out is NOT FLAT yet", went out at 10:30:11 that was not needed.** Likely cause (read from `src/closeout.ts`, inferred, not proven): in the wait for its own sales, an early wake-up does `look--`, which makes the look number 0. `0 % 5 === 0`, so the open-orders check runs on that same look. With 18 sales filling in a burst, one sale filling between the positions read and the orders read looks like "a sell of ours is gone", and the wait ends. The 2:55 close-out uses the same code (early wake-ups since v12), so it could also end its wait early and send a not-flat alert. Money-touching (the close-out); not changed.
+- Retry 10:30:23.7 found nothing held: day phase `midday`, `middayFlat: yes`; `trading` "Mid-day close-out done: the account is flat. Paused for the mid-day cycle." (10:30:23); `commands` morning line (10:30:24). No 5 minute alert (flat long before). Cap unchanged (Alpaca multiplier 1). Requests in the 10:30 minute 88; lowest remaining 175; **rate-limit answers 0, so the uncapped first try drew none today** (18 positions, every sale accepted; one light day, not proof for a heavy one).
+
+### 4. The pause and what followed (as of 10:45 AM)
+
+- No deploy planned or made. Fly v15, one machine (San Jose), started 2026-11-09 8:15 PM, no restart. Paused, `resumedAt` empty; no `go` or `hold` from Michael yet. The gate keeps refusing entries ("paused for the mid-day cycle", seen in the Fly log at 10:37). Healthchecks up (last ping 10:36:48; the check was not paused, as expected with no deploy; no flip today; the kept pings reach back only to 9:42 AM, so before that the record is "no flip").
+- Expected by design: resumed by `go`, or not at all.
+
+### 5. The loss stop and the shadow book
+
+- Day start 18,638.67; lowest equity 18,157.20 (after the mid-day close-out); **the loss stop came within 18.53 dollars (96 percent of 500)**. It did not fire.
+- Shadow book (shadow only): largest gap 6.25 dollars (8:45:18); 0 at the end.
+- **For the afternoon (estimate, not a measurement):** the morning lost about 0.72 dollars an entry, at about 4 entries a minute late in the morning. After `go`, the daily loss stop would likely fire within minutes (about 26 entries). It would then sell everything, and trading would stop for the day.
+
+### 6. Discord, 8:30 to 10:31
+
+`alerts` 72, `trading` 24, `commands` 1 (97). 9 mentioned Michael: the 8 needless "could not sell yet" alerts and the needless mid-day not-flat alert.
+
+### 7. What did not behave as designed
+
+1. **Stale share count in the cleanup sale** (section 2): 8 remainder sales waited about 7 extra seconds and each sent a needless alert mentioning Michael. Release 1 code.
+2. **The close-out's wait for its own sales ended after 544 ms** (section 3): a needless not-flat alert mentioning Michael. Flat was recorded 2.3 s after the account was in fact flat. The same code serves the 2:55 close-out.
+3. HIMS-38 was noticed 14.7 s after its stop was cancelled; no cause in the records.
+
+Everything else behaved as designed: the pause, no entry after it, the cancels, the sales, the retry, the flat marker, the posts, the cap left alone, no missing-exit sale during the close-out, rate limits.
+
+### Recommended next steps (for Michael to decide)
+
+1. **Now: `go` or not.** With 18.53 dollars left before the daily loss stop, `go` would very likely bring the loss stop within minutes. Recommended: do not send `go` today, unless you want to watch the loss stop fire on purpose. Staying paused needs nothing; the 2:55 close-out and the summary still run.
+2. **A proposal tonight, no code, for two money-touching fixes,** each needing your approval and a group 1 review: (a) the cleanup sale recounts its shares when the take-profit fills more during the cancel, and treats that as sold, not stuck; (b) the close-out's wait for its own sales no longer ends early on an early wake-up.
+3. **Tonight's limits:** at about 0.72 dollars lost per entry, a normal day on this list reaches the 500 loss stop by about mid-day. Lowering the largest position is a tightening you can make; raising the loss stop is a hard stop (yours alone).
+4. **Still open:** A step 3 (no `sale_blocked` again today, so no data); the uncapped first try (0 rate-limit answers today, light load only); the retry cost count; stuck state resetting on restart.
