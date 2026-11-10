@@ -344,7 +344,9 @@ test("item 6: the daily loss stop's sale is marked priority, the order sync's on
   const { readFileSync } = await import("node:fs");
   const risk = readFileSync(new URL("../src/risk.ts", import.meta.url), "utf8");
   assert.ok(/reason: "daily loss stop", tradeDate: day\.tradeDate, maxRounds: 1, priority: true/.test(risk));
-  assert.equal((risk.match(/only: \[s\.symbol\], maxRounds: 3,[^)]*yieldToPriority: true/g) ?? []).length, 2);
+  // Release 1 of 2026-11-09: both one-position sales (missing exit, remainder) go through one helper, whose sale gives way.
+  assert.equal((risk.match(/only: \[s\.symbol\], maxRounds: 3,[^)]*yieldToPriority: true/g) ?? []).length, 1);
+  assert.equal((risk.match(/await cleanupSale\(d, day, mem, s, o, "(missing|bare)"/g) ?? []).length, 2);
 });
 
 // ------------------------------------------------ decision 5: the refusal backoff ---------------------------------------------------
