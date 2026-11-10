@@ -229,6 +229,8 @@ export class Worker {
   private middayNotFlatSince: number | null = null;
   private middayLastRemaining: string[] = [];
   private middayFiveMinAlertDate: string | null = null;
+  // True from 10:30 until the mid-day close-out has finished flat (set on every pass): the mid-day close-out alone sells then.
+  private middayOwnsSelling = false;
 
   constructor(deps: WorkerDeps) {
     this.d = deps;
@@ -329,7 +331,7 @@ export class Worker {
   // May the order sync sell a position whose exits are gone? Not while any liquidation runs or waits (close-out, flatten, loss
   // stop, carried, emergency), and not from the close-out time on: the close-out alone flattens the account.
   protectNow(closeAt: Date): boolean {
-    return !this.closingOut && !this.liquidator.isLiquidating() && !this.inflight.has("closeout") && !this.inflight.has("carried") && !this.inflight.has("midday") && this.d.now() < addMinutes(closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE);
+    return !this.closingOut && !this.liquidator.isLiquidating() && !this.inflight.has("closeout") && !this.inflight.has("carried") && !this.inflight.has("midday") && !this.middayOwnsSelling && this.d.now() < addMinutes(closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE);
   }
 
   private riskDeps() {
@@ -855,6 +857,11 @@ export class Worker {
     if (this.orderStream && (!alive || now >= day.closeAt || this.orderStreamDate !== date)) this.endOrderStream();
 
     const inSession = now >= day.openAt && now < day.closeAt && current.status === "approved";
+    // The mid-day cycle: from 10:30 until the mid-day close-out has finished flat, it alone sells (as the 2:55 close-out does from its
+    // time on), so the order sync's missing-exit check stands aside and its sales cannot spend Alpaca's requests outside the mid-day
+    // close-out's 60 a minute (group 1 review, round 1: 40 positions with refused sales made 80 such sales in 10 minutes).
+    const middayToday = this.d.middayCycle === false ? null : middayTimes(current);
+    this.middayOwnsSelling = Boolean(inSession && middayToday && current.phases.armed && now >= middayToday.pauseAt && !current.phases[MIDDAY_PHASE] && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE));
     // The loss stop is scheduled first, before anything else in the session that waits on the broker.
     if (inSession) this.scheduleLossStop(current, now);
     // Closes the live updates wrote to memory but could not write to the database yet are tried again (item 1). Never waited on.
