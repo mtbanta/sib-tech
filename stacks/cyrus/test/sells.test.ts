@@ -239,7 +239,7 @@ test("worker level: a sync tick that lands inside the close-out's slow cancels s
     }
   };
   const events: string[] = [];
-  r = rig<SimBroker>({ broker: sim, sleep, log: (_l, e) => void events.push(e) });
+  r = rig<SimBroker>({ broker: sim, sleep, log: (_l, e) => void events.push(e), midday: false }); // the mid-day cycle (on in production) would sell at 10:30 CT; it is tested in midday.test.ts
   await r.at("2026-11-01T22:10:00Z");
   r.ownerSays("approve", "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");

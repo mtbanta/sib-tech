@@ -12,7 +12,7 @@ export const D = "2026-11-02";
 export const z = (t: string) => new Date(t.includes("T") ? t : `${D}T${t}Z`);
 export const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setImmediate(r)); };
 
-export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryStore>(opts: { store?: S; bot?: FakeBot; broker?: B; sleep?: (ms: number) => Promise<void>; governor?: Governor; liveList?: string[]; log?: (level: string, event: string, data?: Record<string, unknown>) => void; simClock?: { simMs: number; advanceTo(ms: number): void }; orderStream?: boolean } = {}) {
+export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryStore>(opts: { store?: S; bot?: FakeBot; broker?: B; sleep?: (ms: number) => Promise<void>; governor?: Governor; liveList?: string[]; log?: (level: string, event: string, data?: Record<string, unknown>) => void; simClock?: { simMs: number; advanceTo(ms: number): void }; orderStream?: boolean; midday?: boolean } = {}) {
   const store = (opts.store ?? new MemoryStore()) as S;
   const broker = (opts.broker ?? new FakeBroker()) as B;
   const bot = opts.bot ?? new FakeBot();
@@ -56,6 +56,7 @@ export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryS
     setTimer: (fn: () => void, ms: number) => { const h = { due: getNow().getTime() + ms, fn }; timers.push(h); return h; },
     clearTimer: (h: unknown) => { const i = timers.indexOf(h as { due: number; fn: () => void }); if (i >= 0) timers.splice(i, 1); },
     log: opts.log as any,
+    ...(opts.midday === false ? { middayCycle: false } : {}),
     ...(opts.orderStream ? { makeOrderStream: (cb: (u: TradeUpdate) => void): StreamLike => { onUpdate = cb; return { start: () => void orderStreamStarts++, stop: () => void orderStreamStops++, status: () => "live" }; } } : {}),
   });
   return {

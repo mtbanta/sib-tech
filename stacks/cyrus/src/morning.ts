@@ -210,6 +210,8 @@ export type Command =
   | { kind: "approve"; name: LimitName | "all" }
   | { kind: "set"; name: LimitName; value: string }
   | { kind: "load"; on: boolean }
+  | { kind: "go" }
+  | { kind: "hold" }
   | { kind: "unknown"; text: string };
 
 export function parseCommand(content: string): Command {
@@ -227,6 +229,10 @@ export function parseCommand(content: string): Command {
       return { kind: "resume" };
     case "flatten":
       return { kind: "flatten" };
+    // The mid-day cycle (Michael, 2026-11-09): one word each, nothing after it (so a stray phrase is not taken for a command).
+    case "go":
+    case "hold":
+      return arg1 === undefined ? { kind: word } : { kind: "unknown", text: content.slice(0, 40) };
     case "limits":
       return { kind: "limits" };
     case "approve": {

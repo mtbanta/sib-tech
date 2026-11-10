@@ -3109,3 +3109,58 @@ No blocking finding. The reviewer confirmed: turns go to the longest waiting (an
 - **Live line, `commands`:** "Fly release v14 is live (paper only), reviewed PASS: a cleanup sale now acts only on its own position (it never cancels a newer position's exits or sells its shares); a position stuck without exits is retried on a short list (within 40 requests a minute, taking turns) instead of holding up everything else; one alert when it is stuck, one after 5 minutes, one line when it resolves. The mid-day cycle is manual for Tuesday for now (stop, flatten, deploy while flat, resume); if release 2 passes its review and is deployed before 7:30 AM it becomes automatic, and I will post again."
 
 **Next:** release 2 (the mid-day cycle), review round 1 fixes in progress, then round 2 on top of release 1.
+## Release 2: the mid-day cycle (built 2026-11-09, night; branch `midday-cycle`)
+
+Built from `builds/c2-proposal-2026-11-09.md`, part D, with Michael's answers ("Michael's decisions on the proposal" above). Built in parallel with release 1 (the stuck sale, the cleanup sale, one alert per stuck position) and to be put on top of it before review. Nothing deployed. Paper only. Research input for a human decision, never an instruction to act.
+
+### What changed, item by item
+
+| Item | Change | Files |
+| :-- | :-- | :-- |
+| 1. Times | The pause at the open plus 120 minutes (10:30 AM Central), the automatic resume only before the open plus 300 minutes (1:30 PM Central). A day shorter than 6.5 hours has no cycle. | `midday.ts` (new) |
+| 2. The pause | A day-scoped record `midday_pause:<date>` in `control` (`on`, `since`, `reason`, `hold`, `resumedAt`, `resumedBy`, `deployedAt`), not the stop flag. The caching store serves it like the stop flag (1.5 second cache, a write seen at once). The gate refuses every entry while it is on ("paused for the mid-day cycle"), before any request to Alpaca, and looks again just before sending (the entry is then recorded as cancelled, "mid-day pause set before sending"). | `midday.ts`, `caching-store.ts`, `gate.ts` |
+| 3. The mid-day close-out | At 10:30 the worker writes the pause, then runs `closeOut()` with the new path `midday` (no close time, so its wait for its own sells is the 60 second default), every 20 seconds until flat, never from the regular close-out time on. Unlike the 2:55 wrapper it never writes the `closeout` phase or the close-out's attempt date, never stops the price stream, never sets the not-flat flag or silences the 2:55 alerts, and `closeOut()` skips the cap change and the "Close-out done" post for this path. The missing-exit check is off while it runs. When flat: day phase `midday` with `middayFlat: yes`; `trading`: "Mid-day close-out done: the account is flat. Paused for the mid-day cycle."; `commands`: the morning in one line (entries sent and filled, P and L against the day's start, rate-limit answers) and what happens next. Not flat: one alert mentioning Michael for the day, then it keeps trying with entries paused. | `worker.ts` (`middayPhase`, `middayMorningLine`, `protectNow`, the pass), `closeout.ts` |
+| 4. `go` and `hold` | One word each (anything after the word makes the line not understood). `go` ends the pause only when the mid-day close-out is flat and no stop flag is on (the reply names the daily loss stop when it is that); otherwise "Not resumed: <why>". `hold` sets the day's hold (no automatic resume after a deploy); after a resume it changes nothing and points to `stop`. Owner and command channel only (existing checks); read at start-up if sent while the worker was down. `status` shows the pause, the hold or the resume. `resume` is unchanged. | `morning.ts` (`parseCommand`), `commands.ts` (`handleLine`, `HELP`, `middayStatus`) |
+| 5. Start-up while flat and paused | The start note now says whether the release is new (`deploy`, false when its history could not be read) and main.ts hands that to the worker (`setStartInfo`). The start-up decision is made once per start, after this start's first read of commands and after the loss stop's first check since the start: a new release, flat, paused, no hold, no stop flag, before 1:30 PM: the pause ends and `commands` says "Resumed after release X (deployed while flat): same limits as this morning; the loss stop counts from the open."; a plain restart stays paused with an alert; a deploy with `hold`, after 1:30 PM, or with the stop flag on stays paused with a line saying why. No carried-position sale fires on such a start (no position, no not-flat flag); tested. | `start-note.ts`, `main.ts`, `worker.ts` (`middayFollowUps`), `midday.ts` (`startupAction`) |
+| 6. 1:30 PM | Still paused, flat and nothing deployed: "1:30 PM: nothing was deployed, so I stay paused. Send `go` to trade until 2:00 PM (the last entry), or nothing." once (day phase `midday1330`). | `worker.ts` |
+| 7. Evening summary | One line on the cycle ("Mid-day cycle: paused at ..., flat at ..., resumed at ... (after a deploy / by `go`)" or "stayed paused for the rest of the day"), and, when the worker started after the open, "Restarted at ...; request and live-update figures cover the afternoon only." Shown just before the stop flag line. | `summary.ts` (`middayLines`), `worker.ts` (`middaySummaryLines`) |
+| 8. The deploy check | `stacks/cyrus/tools/midday-deploy.mjs --dir <clean checkout>/stacks/cyrus --reviewed <commit> [--after-130] [--check-only]`. Refuses a checkout that holds a key file. Reads only (the day record and the pause in a read-only transaction, Alpaca paper positions and open orders), then the pure `deployRefusals` (in `midday.ts`): today has a cycle; the mid-day close-out finished flat; after the pause time; before 1:30 PM unless `--after-130`; before the close; the pause is on; no position; no open order; `--reviewed` given, at least 7 characters, and equal to the checkout's commit. Only then: pauses the Healthchecks check, then `fly deploy --ha=false -a sib-tech-cyrus` from the clean checkout. Every key is scrubbed from what it prints. Not run against anything real. | `tools/midday-deploy.mjs` (new), `midday.ts` |
+
+### Builder's choices (where the design was silent; the safer option)
+
+1. **No mid-day cycle on an early-close day** (a session shorter than 6.5 hours): the day runs as before.
+2. **A deploy does not end the pause while the stop flag is on** (Michael's `stop` or the daily loss stop), as `go` would refuse; it says so.
+3. **The start-up decision waits for the loss stop's first check since the start**, so a resume can never come before a loss stop the restart has not seen yet (tested with a slow save of the stop flag).
+4. **A start with unreadable start history never counts as a deploy** (stays paused).
+5. **`hold` never re-pauses trading that has already resumed**; it points to `stop`.
+6. **`go` and `hold` are one word only**, so a stray phrase ("go long") is not taken for a command.
+7. **A restart during the mid-day close-out (not yet flat) makes no start-up decision**: once flat it stays paused until `go` (the deploy check refuses a deploy before flat anyway).
+8. **A test-only switch**: `WorkerDeps.middayCycle` (on unless false; main.ts never sets it). Five earlier tests about other things whose simulated day crosses 10:30 CT turn it off by name, each with a comment pointing to `test/midday.test.ts`: `day.test.ts` (a full day), `round6.test.ts` (the watchdog near the close), `round8.test.ts` (40 positions), `sells.test.ts` (a sync inside the close-out), `volume.test.ts` (the high-volume rehearsal). Every other test runs with the cycle on.
+9. The flatten inside the mid-day close-out logs its reason as "mid-day close-out" (logs only).
+
+### Known, not changed
+
+- An entry already past the gate's last look when the pause is written can still reach Alpaca just after; the close-out's next round (or the 20 second retry) sells it. The 2:55 close-out has the same window (but entries stop at 2:00 there).
+- The request figures, live-update counters and entry-expiry counts still restart with the worker (the summary now says so).
+
+### Tests
+
+465 pass (445 before: 20 added in `test/midday.test.ts`; 5 earlier tests opted out of the cycle by name, see choice 8). Type check clean. The simulated day: a full day with slow cancels (pause, mid-day close-out to flat, cap left at 2, price stream left running, the 1:30 note once, the 2:55 close-out and the summary still run, "Close-out done" once); retries every 20 seconds with one alert and none from the regular close-out time on; no double sale when an order sync falls inside the mid-day close-out's wait; an early-close day; restarts (a deploy resumes before 1:30 with nothing sold and the summary's restart line; a plain restart, no start information, after 1:30, `hold` sent while down, the stop flag, all stay paused); the loss stop counting from the open across a restart (150 lost in the morning plus 60 in the afternoon crosses 200); a morning loss past the limit realised at mid-day stays paused after a deploy; the start-up decision waiting for commands; `go` and `hold` with every refusal; the gate's two looks; the caching store; the start note; `closeOut()` on its market-closed branch; the deploy check, each condition on its own.
+
+Each new piece taken out on its own: **46 of 47 caught**. The one not caught: the missing-exit check's mid-day guard in `protectNow`. While the mid-day close-out runs, the sale's own guard (`isLiquidating`) and the order sync's "a sell already working explains a missing exit" check already hold the sync back; the test with a sync inside the close-out's wait passes either way. Kept as a backstop, as for the 2:55 close-out.
+
+| Taken out | Test that fails |
+| :-- | :-- |
+| the gate's early refusal; its look before sending; the pause as a fast key | the gate (two tests), the caching store |
+| the cap left alone (flat, and on the market-closed branch) | the full day; `closeOut()` market-closed |
+| the pause time; once flat never again; never from the close-out time on; the 20 second spacing; the pause written first; the flat marker; no `endStream`; no `closeout` phase; one not-flat alert | the full day, the retries (several) |
+| the start-up decision waiting for the loss stop's check and for commands; deploy versus plain restart; the start information used | the morning-loss deploy, the `hold` while Discord is down, the plain restart, the deploy |
+| hold, stop, 1:30 and plain restart in the start-up rule; the 1:30 note only without a deploy and once | the restarts, the 1:30 note |
+| the summary's cycle line and restart line | the full day, the deploy |
+| `go`'s refusals (not paused, not flat, a stop); `hold` saved; `hold` after a resume; the status line; one word only | the commands (two tests) |
+| the early-close rule; the start note's new-release rule; every deploy-check condition (10) | the early-close day, the start note, the deploy check |
+
+### For review
+
+- **Group 1 (money):** the gate's pause (both looks), the mid-day close-out wrapper and `closeOut()`'s `midday` path, `protectNow`, the start-up decision and automatic resume, `go` and `hold`, the 1:30 behaviour, the deploy check script, the test-only switch.
+- **Group 2 (messaging):** the mid-day posts (trading, commands, the not-flat alert, the resume and stay-paused lines, the 1:30 note), the `go` and `hold` replies, `HELP`, the status line, the summary's two lines.

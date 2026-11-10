@@ -45,7 +45,10 @@ export interface CloseoutOptions {
   waitForOwnSells?: boolean;
 }
 
-export type CloseoutPath = "close-out" | "retry" | "carried" | "emergency";
+// "midday": the mid-day cycle (Michael, 2026-11-09). It sells the same way, but leaves the borrowing cap alone (the account stays
+// flat and paused until the afternoon resumes under the same day's limits) and posts nothing itself: the worker posts the mid-day
+// messages.
+export type CloseoutPath = "close-out" | "retry" | "carried" | "emergency" | "midday";
 
 // How long before the close the close-out stops waiting for its own sells and reports what is still held.
 export const OWN_SELLS_DEADLINE_BEFORE_CLOSE_MS = 2 * 60_000;
@@ -83,12 +86,12 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
       }
       return { flat: false, remaining: held, deferred: true };
     }
-    return finishFlat(d);
+    return options.path === "midday" ? { flat: true, remaining: [] } : finishFlat(d);
   }
 
   const path: CloseoutPath = options.path ?? "close-out";
   const waitForOwn = options.waitForOwnSells ?? path !== "carried";
-  const res = await d.liquidator.flatten({ reason: "close-out", tradeDate, ...(waitForOwn ? { returnWhenOnlyOwnSells: true } : {}) });
+  const res = await d.liquidator.flatten({ reason: path === "midday" ? "mid-day close-out" : "close-out", tradeDate, ...(waitForOwn ? { returnWhenOnlyOwnSells: true } : {}) });
   let flat = res.flat;
   let remaining = res.remaining;
   let waitedMs = 0;
@@ -137,7 +140,7 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
     // Flat, but something went wrong on the way (a sell was refused and had to be repeated): say so. Waiting for Alpaca to fill
     // our own sells, or Alpaca saying a cancel was already under way, is not a problem.
     if (alert && errors.length > 0) await d.say("alerts", `Michael: the close-out had trouble but recovered and the account is flat. First problem: ${errors[0]!.slice(0, 200)}`);
-    return finishFlat(d);
+    return path === "midday" ? { flat: true, remaining: [] } : finishFlat(d);
   }
   if (alert) {
     if (stillWorking) {

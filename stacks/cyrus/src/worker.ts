@@ -34,6 +34,7 @@ import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatS
 import { computeDay, formatSummary, type StopGapDay } from "./summary.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
 import { PAPER_ONLY } from "./discord.ts";
+import { MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MIDDAY_RETRY_MS, middayFlat, middayTimes, readPause, startupAction, updatePause } from "./midday.ts";
 import type { PingKind } from "./heartbeat.ts";
 
 export type Channel = "commands" | "trading" | "alerts";
@@ -68,6 +69,9 @@ export interface WorkerDeps {
   // The timer for the order sync brought forward by a stop's cancel (default setTimeout; the tests run it by hand).
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
+  // The mid-day cycle (Michael, 2026-11-09) is on unless this is false. main.ts never sets it; only tests about something else, whose
+  // simulated day crosses 10:30 AM Central, turn it off (the cycle itself is tested in test/midday.test.ts).
+  middayCycle?: boolean;
 }
 
 // The speed release, item 3: the order sync runs every 10 seconds on every day (it was 30 on a normal day, 10 on a load day). With the
@@ -210,6 +214,12 @@ export class Worker {
   private shadowNoEstimate = 0;
   // Decision 1 of 2026-11-06: entries whose two exits the live updates reported lost, with the symbol, when, and the syncs tried.
   private readonly lostExitsPending = new Map<string, { symbol: string; at: number; tries: number }>();
+  // The mid-day cycle (Michael, 2026-11-09): what started this process (main.ts, from the start note), whether the start-up decision
+  // about the pause has been made, the mid-day close-out's last attempt, and the day its not-flat alert went out.
+  private startInfo: { deploy: boolean; release: string } | null = null;
+  private middayStartupDone = false;
+  private lastMiddayAttempt = 0;
+  private middayAlertDate: string | null = null;
 
   constructor(deps: WorkerDeps) {
     this.d = deps;
@@ -241,6 +251,12 @@ export class Worker {
       entryBlock: () => this.entryBlockReason(),
       onLimitEntrySent: (e) => this.entryExpiry.schedule(e, LOAD_ENTRY_WAIT_MS),
     });
+  }
+
+  // Told by main.ts before start(): whether this start is a new release (a deploy) or the same release again (a plain restart). The
+  // mid-day cycle resumes on its own only after a deploy. Without it (tests, a failed start note) a start counts as a plain restart.
+  setStartInfo(info: { deploy: boolean; release: string }): void {
+    this.startInfo = info;
   }
 
   // True while Alpaca's live order updates are connected and listening.
@@ -304,7 +320,7 @@ export class Worker {
   // May the order sync sell a position whose exits are gone? Not while any liquidation runs or waits (close-out, flatten, loss
   // stop, carried, emergency), and not from the close-out time on: the close-out alone flattens the account.
   protectNow(closeAt: Date): boolean {
-    return !this.closingOut && !this.liquidator.isLiquidating() && !this.inflight.has("closeout") && !this.inflight.has("carried") && this.d.now() < addMinutes(closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE);
+    return !this.closingOut && !this.liquidator.isLiquidating() && !this.inflight.has("closeout") && !this.inflight.has("carried") && !this.inflight.has("midday") && this.d.now() < addMinutes(closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE);
   }
 
   private riskDeps() {
@@ -858,6 +874,22 @@ export class Worker {
       this.background("carried", () => this.carriedPhase(date));
     }
 
+    // The mid-day cycle (Michael, 2026-11-09): at 10:30 AM Central the pause goes on and the mid-day close-out sells everything, retried
+    // every 20 seconds until flat, never from the regular close-out time on (that close-out takes over). Its own phase, never `closeout`.
+    const mt = this.d.middayCycle === false ? null : middayTimes(current);
+    if (inSession && mt && current.phases.armed && now >= mt.pauseAt && !current.phases[MIDDAY_PHASE] && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !this.closingOut && !this.inflight.has("carried") && now.getTime() - this.lastMiddayAttempt >= MIDDAY_RETRY_MS) {
+      this.lastMiddayAttempt = now.getTime();
+      this.background("midday", () => this.middayPhase(date, current, mt.pauseAt));
+    }
+    if (inSession && mt && current.phases.armed) {
+      try {
+        await this.middayFollowUps(date, current, mt, now);
+      } catch (err) {
+        this.lastTickError = `mid-day cycle: ${(err as Error).message.slice(0, 120)}`;
+        this.d.log?.("error", "midday_followup_failed", { error: (err as Error).message.slice(0, 200) });
+      }
+    }
+
     // Close-out runs until the account is flat: a failed attempt is retried every 5 minutes for 30 minutes
     // past the close (after the close it only reports, it sends nothing), and the heartbeat says "fail" for as
     // long as positions remain.
@@ -1202,6 +1234,96 @@ export class Worker {
     }
   }
 
+  // The mid-day close-out (Michael, 2026-11-09): the pause first (the gate refuses every entry from then on, and looks again just
+  // before sending), then the 2:55 close-out code with path "midday". Unlike the 2:55 wrapper it never writes the `closeout` phase or
+  // the close-out's attempt date (the 2:55 close-out, the carried-position sale and the summary must not take it for the day's close),
+  // never stops the price stream (a `go` without a deploy trades at once), never sets the not-flat flag, and leaves the borrowing cap
+  // alone (closeOut skips that for this path). The missing-exit check is off while it runs (protectNow).
+  private async middayPhase(date: string, day: DayRecord, pauseAt: Date): Promise<void> {
+    const pause = await readPause(this.d.store, date);
+    if (pause?.resumedAt) return; // already resumed today
+    if (!pause?.on) await updatePause(this.d.store, date, { on: true, since: this.d.now().toISOString(), reason: "mid-day cycle" });
+    const result = await closeOut(this.closeoutDeps(), date, { alert: false, path: "midday" });
+    if (result.flat) {
+      await setPhase(this.d.store, date, MIDDAY_PHASE, this.d.now().toISOString(), { middayFlat: "yes" });
+      await this.say("trading", "Mid-day close-out done: the account is flat. Paused for the mid-day cycle.");
+      await this.say("commands", await this.middayMorningLine(date, day, pauseAt));
+      return;
+    }
+    if (this.middayAlertDate !== date) {
+      this.middayAlertDate = date;
+      await this.say("alerts", `**Michael: the mid-day close-out is NOT FLAT yet: ${result.remaining.join(", ")}.** New entries stay paused and I keep trying every 20 seconds. No deploy until the account is flat.`, { mentionOwner: true });
+    }
+  }
+
+  // The morning in one line for `commands`, and what happens next.
+  private async middayMorningLine(date: string, day: DayRecord, pauseAt: Date): Promise<string> {
+    const stored = await this.d.store.listOrders(date).catch(() => []);
+    const sent = stored.filter((o) => o.status !== "failed").length;
+    const filled = stored.filter((o) => o.status === "filled").length;
+    const account = await this.d.broker.getAccount().catch(() => null);
+    const start = day.dayStartEquity;
+    const plText = account && start ? `P and L ${account.equity - start >= 0 ? "+" : ""}${(account.equity - start).toFixed(2)} dollars (equity ${start.toFixed(2)} to ${account.equity.toFixed(2)})` : "P and L not known (the account could not be read)";
+    const pause = await readPause(this.d.store, date).catch(() => null);
+    const next = pause?.hold
+      ? "`hold` is set: after a deploy I stay paused. Send `go` to trade."
+      : "Next: after a deploy before 1:30 PM CT I resume on my own under today's limits, unless you send `hold`. Without a deploy, send `go` to resume; from 1:30 PM CT I stay paused unless you send `go`.";
+    return `Morning (open to ${centralClock(pauseAt)} CT): ${sent} entries sent (${filled} filled); ${plText}; rate-limit answers from Alpaca: ${this.d.governor.stats().rateLimitAnswers}. ${next}`;
+  }
+
+  // After the mid-day close-out is flat: the start-up decision (once per start, after this start's first read of commands, so a
+  // `hold` sent while the worker was down counts), and the 1:30 PM note.
+  private async middayFollowUps(date: string, day: DayRecord, mt: { pauseAt: Date; resumeUntil: Date }, now: Date): Promise<void> {
+    // Also only after the loss stop's first check since this start (with today's equity history) has worked, so a resume can never
+    // come before a loss stop that the restart has not seen yet.
+    if (!this.middayStartupDone && this.lastCommandReadOk !== null && this.lossRederivedDate === date) {
+      this.middayStartupDone = true;
+      const pause = await readPause(this.d.store, date);
+      const stop = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
+      const deploy = this.startInfo?.deploy === true;
+      const release = this.startInfo?.release ?? "unknown";
+      const action = startupAction({ pause, flat: middayFlat(day), deploy, now, resumeUntil: mt.resumeUntil, stop });
+      if (action !== "none") this.d.log?.("info", "midday_startup", { action, deploy, release });
+      if (action === "resume") {
+        await updatePause(this.d.store, date, { on: false, resumedAt: now.toISOString(), resumedBy: "deploy", deployedAt: now.toISOString() });
+        await this.say("commands", `Resumed after release ${release} (deployed while flat): same limits as this morning; the loss stop counts from the open.`);
+      } else if (action === "stay-plain-restart") {
+        await this.say("alerts", "**Michael: I restarted during the mid-day pause without a new release, so I stay paused.** Send `go` to trade.", { mentionOwner: true });
+      } else if (action === "stay-hold") {
+        await updatePause(this.d.store, date, { deployedAt: now.toISOString() });
+        await this.say("commands", `Release ${release} started while flat and paused. \`hold\` is set, so I stay paused. Send \`go\` to trade.`);
+      } else if (action === "stay-stop") {
+        await updatePause(this.d.store, date, { deployedAt: now.toISOString() });
+        await this.say("commands", `Release ${release} started while flat and paused, but the ${stop?.reason.startsWith("daily loss stop") ? "daily loss stop is in force" : "stop flag is on"}, so I stay paused.`);
+      } else if (action === "stay-late") {
+        await updatePause(this.d.store, date, { deployedAt: now.toISOString() });
+        await this.say("commands", `Release ${release} started while flat and paused, but it is 1:30 PM CT or later, so I stay paused. Send \`go\` to trade until 2:00 PM CT (the last entry).`);
+      }
+    }
+    if (now >= mt.resumeUntil && middayFlat(day) && !day.phases[MIDDAY_NOTE_PHASE]) {
+      const pause = await readPause(this.d.store, date);
+      if (pause?.on && !pause.deployedAt) await this.say("commands", "1:30 PM: nothing was deployed, so I stay paused. Send `go` to trade until 2:00 PM (the last entry), or nothing.");
+      await setPhase(this.d.store, date, MIDDAY_NOTE_PHASE, now.toISOString());
+    }
+  }
+
+  // The summary's mid-day lines: the cycle (paused, flat, resumed and how, or stayed paused) and, if this process started after the
+  // open, that the request and live-update figures cover the afternoon only.
+  private async middaySummaryLines(date: string, day: DayRecord): Promise<string[]> {
+    const lines: string[] = [];
+    const mt = middayTimes(day);
+    const pause = mt ? await readPause(this.d.store, date).catch(() => null) : null;
+    if (mt && pause?.since) {
+      const flatIso = middayFlat(day) ? day.phases[MIDDAY_PHASE] : undefined;
+      const resumed = pause.resumedAt ? `resumed at ${centralClock(new Date(pause.resumedAt))} (${pause.resumedBy === "deploy" ? "after a deploy" : "by `go`"})` : "stayed paused for the rest of the day";
+      lines.push(`Mid-day cycle: paused at ${centralClock(new Date(pause.since))}, ${flatIso ? `flat at ${centralClock(new Date(flatIso))}` : "**never flat at mid-day**"}, ${resumed}.`);
+    }
+    if (this.startedAtMs !== null && day.openAt && this.startedAtMs > day.openAt.getTime()) {
+      lines.push(`Restarted at ${centralClock(new Date(this.startedAtMs))}; request and live-update figures cover the afternoon only.`);
+    }
+    return lines;
+  }
+
   // Sells positions carried over from an earlier close-out that ended not flat. The market is open, so this sends.
   private async carriedPhase(date: string): Promise<void> {
     this.closingOut = true;
@@ -1286,6 +1408,7 @@ export class Worker {
       stopGap: this.stopGapDate === date ? this.stopGap.totals() : await this.d.store.getControl<StopGapDay>(stopGapKey(date)).catch(() => null),
       carriedAtStart: Boolean(day.phases[CARRIED_PHASE]),
       fillsCheck,
+      middayLines: await this.middaySummaryLines(date, day).catch(() => []),
     });
     await this.say("trading", text);
     await setPhase(this.d.store, date, "summary", this.d.now().toISOString());

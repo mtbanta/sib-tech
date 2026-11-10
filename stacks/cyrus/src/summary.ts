@@ -37,6 +37,9 @@ export interface SummaryInput {
   // Decision 2 of 2026-11-06: the check of the order list against Alpaca's list of the day's fills (orders the listing left out are
   // fetched by the id their fill names). Null when it could not run.
   fillsCheck?: { complete: boolean; found: number; stillMissing: number } | null;
+  // The mid-day cycle (Michael, 2026-11-09): its one line, and the restart note when the worker started after the open (request and
+  // live-update figures then cover the afternoon only). Shown just before the stop flag line.
+  middayLines?: string[];
 }
 
 // A load day: one line with the window's settings and one with what the live order updates did. Since decision 2 of 2026-11-06 the
@@ -276,6 +279,7 @@ export function formatSummary(i: SummaryInput): string {
     `Refused entries: ${refusedTotal}${refusedTotal ? ` (${[...reasons].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([r, n]) => `${r.slice(0, 70)}: ${n}`).join("; ")})` : ""}`,
     i.listComplete === false ? "**Warning: the day's order list was longer than I could read, so the totals above may be incomplete.**" : "",
     i.fillsCheck === null || (i.fillsCheck && (!i.fillsCheck.complete || i.fillsCheck.stillMissing > 0)) ? "**Warning: I could not check every order against Alpaca's list of today's fills, so orders Alpaca's order list left out may be missing from the totals above.**" : "",
+    ...(i.middayLines ?? []),
     `Stop flag: ${i.stop?.on ? `ON (${i.stop.reason})` : "off"}. End of day: ${i.flat === null ? "flat status not checked" : i.flat ? "flat" : "**NOT FLAT**"}.`,
   ];
   // The footer rule (discord.ts): the daily summary is research input for Michael's next decisions.
