@@ -3020,3 +3020,11 @@ No blocking finding. The reviewer confirmed: every logged value comes from reads
 - **Live line, `commands`:** "Fly release v13 is live (paper only): logging only, reviewed PASS. When a sale cannot go out, the run log now records why (Alpaca's held and free shares, the open orders counted, how old the order lists were). No trading behaviour changed. Tuesday's limits still need your decision before the open; with nothing decided there is no trading Tuesday."
 
 **Next:** Michael's decision on `builds/c2-proposal-2026-11-09.md` (parts A to C for tonight, the mid-day cycle later).
+
+## Michael's decisions on the proposal (2026-11-09, evening)
+
+"Change of plan: build the mid-day cycle (Part D) tonight too, as written in builds/c2-proposal-2026-11-09.md."
+1. **Release 1:** A steps 1, 2 and 4, B and C (A step 3 held until Tuesday's logs). Group 1 and group 2 reviews, up to two rounds each. Deploy as soon as group 1 passes.
+2. **Release 2:** part D on top of release 1. Its own group 1 review, up to three rounds, plus group 2 for its messages. Deploy before 7:30 AM Tuesday only if group 1 passes. If it is not ready, deploy nothing more, and Tuesday's cycle runs by hand (stop, flatten, deploy while flat, resume), approved as a fallback.
+3. **D's answers:** a plain restart during the pause stays paused; the commands are `go` and `hold`; automatic resume after a deploy unless `hold` is set; the pass rule is the daily rule with "the mid-day close-out is flat by about 10:35" in place of the close-out; the deploy script pauses the Healthchecks check during a mid-day deploy. The CLAUDE.md deploy-rule exception written as proposed (done); `builds/midday-review-brief.md` updated with the pass rule.
+4. After each deploy: one clean start, Healthchecks up, stop and not-flat flags off, and the "live" line saying whether the mid-day cycle is automatic or manual for Tuesday.
