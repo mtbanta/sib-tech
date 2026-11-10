@@ -3084,3 +3084,67 @@ Each new piece taken out on its own: **46 of 47 caught**. The one not caught: th
 
 - **Group 1 (money):** the gate's pause (both looks), the mid-day close-out wrapper and `closeOut()`'s `midday` path, `protectNow`, the start-up decision and automatic resume, `go` and `hold`, the 1:30 behaviour, the deploy check script, the test-only switch.
 - **Group 2 (messaging):** the mid-day posts (trading, commands, the not-flat alert, the resume and stay-paused lines, the 1:30 note), the `go` and `hold` replies, `HELP`, the status line, the summary's two lines.
+
+## Release 2, review round 1 fixes (2026-11-09, night; branch `midday-cycle`)
+
+Group 1 round 1: CHANGES REQUIRED (3 blocking). Group 2 round 1: CHANGES REQUIRED (2 blocking). Michael's answers, asked tonight, word for word: (a) on retries when a try ends not flat: "Request budget: Keep trying every 20 seconds, but only within 60 Alpaca requests a minute (like the loss stop's retry), never below the reserve of 80", "plus one alert when a try ends not flat and the 5 minute alert if still not flat"; (b) early-close days: "Run it at 10:30" (no half-day skip). Nothing deployed. Paper only.
+
+Commits on top of `f3761d3`: `aa859f7` (the listed fixes), `ed834de` (a retry sells at most 10 positions, needed to meet the 60 a minute), `38f5114` (**outside the listed fixes, droppable**: the missing-exit check stands aside until the mid-day close-out is flat, with the 40-position test), and this log.
+
+### Group 1, blocking
+
+1. **Retries within 60 requests a minute (Michael's (a)).** The first try at 10:30 is the full close-out, not held back (like the loss stop's first sale). Every try's cost (the governor's `requestsLastMinute` before and after) is charged afterwards to a 60-a-minute budget (`MiddayBudget`, a copy of risk.ts's `LossStopBudget`, in `midday.ts`). A retry, at most every 20 seconds, starts only when the budget has room for its estimate (the last try's charged cost, at most 60) and Alpaca's budget less that estimate stays at or above the reserve (80) (`retryAllowed`). **One-round retries are how the 60 a minute is met:** a retry is ONE round of the same `closeOut()` (new option `maxRounds`, used only here), without the wait for its own sells (the next retry looks again). **And a retry sells at most 10 positions, in turn** (builder's choice, `MIDDAY_RETRY_SYMBOLS`, like the loss stop's retry cap of 15 requests a check): measured in the simulator, one round over 40 positions whose sales are refused costs about 130 requests (each refused sale reads the account again), so one round of everything cannot fit 60; with 10 a retry costs about 37. A retry over some positions judges flat from the whole account (new `closeOut()` option `onlySymbols`, then one positions read). **Alerts:** one alert mentioning Michael when a try first ends not flat (as before), and one more, mentioning him, if still not flat 5 minutes later; nothing in between.
+2. **The deploy check refuses a checkout that is not clean** (`git -C <dir> status --porcelain` must print nothing, or a failed `git status`; fly deploy ships the working files). In the pure `deployRefusals` (field `gitStatus`), tested.
+3. **Half days run the cycle at 10:30 (Michael's (b)).** The skip is removed. `middayTimes` now gives the last entry (close minus 60, from limits.ts: 11:00 AM CT on a 12:00 PM close) and ends the automatic resume at the earlier of 1:30 PM and the last entry. Every text uses the real times (never a fixed "2:00 PM" or "1:30 PM"). The 1:30 note is posted only if there is still time to trade, else nothing. The mid-day close-out still never starts from close minus 5. A day so short that 10:30 is inside its last 5 minutes has no cycle.
+
+### Group 1, non-blocking (done)
+
+- **The log's claim about late entries was wrong; corrected here:** an entry that reaches Alpaca after the mid-day close-out has read an empty account (its single open-orders read) is NOT sold at mid-day. It keeps its bracket (stop and take-profit at Alpaca); the deploy check refuses while a position is held; the 2:55 close-out sells it (or its exits close it first).
+- **`hold` has its own key** (`midday_hold:<date>`), so the pause's own writes (`middayPhase` writing `on: true`) can never overwrite it. Tested: `hold` before 10:30 survives the pause.
+- **The start-up decision requires that this process started after the pause began** (`startedAfterPause`), so an earlier start (an evening deploy, or a start before 10:30 whose decision came late) never counts as a mid-day deploy. Tested.
+
+### Group 2, blocking
+
+1. **"CT CT"** in the morning line removed (`centralClock` already adds " CT"); the test checks the exact start "Morning (open to 10:30 AM CT): ".
+2. **The texts read the stop flag** (`blockedNext` in `midday.ts`): the morning line, the 1:30 note, the plain-restart alert, the stay-hold, stay-stop and stay-late lines and the `hold` reply say what will really happen: the daily loss stop: "The daily loss stop is in force, so trading stays paused for the rest of the day unless you send `resume` and then `go`."; Michael's `stop`: "The stop flag is on: send `resume`, then `go`." Tested with the loss stop on for the morning line and the 1:30 note, and the owner stop for `hold`.
+
+### Group 2, non-blocking (done)
+
+- After the last entry: "No entries are left today (last entry 2:00 PM CT)." (the real time), and the plain-restart alert then does not mention Michael; `go` then answers "The mid-day pause is over, but no entries are left today (last entry ...)".
+- The 1:30 note waits for this start's start-up decision (so it cannot contradict it). Tested with a slow first loss check.
+- The morning line's entry count uses the summary's filter (`isSentEntry`, now exported from summary.ts and used by both).
+- The summary's restart line: "Restarted at <time>; the request figures, the live-update figures and the entry-expiry counts cover only the time since <time>."
+- `hold` before 10:30: "Hold: after today's mid-day deploy I will stay paused until you send `go`."
+- The stay-stop line gives the next step.
+- The not-flat alert with nothing listed says "the positions could not be listed".
+- `HELP` says the pause starts at 10:30 AM CT and the automatic resume ends at 1:30 PM CT, or at the last entry if earlier.
+
+### Outside the listed fixes (commit `38f5114`, droppable)
+
+**The missing-exit check stands aside from 10:30 until the mid-day close-out is flat**, as it does from the 2:55 close-out on ("the close-out alone flattens the account"). Found while building fix 1: with 40 positions and refused sales, between the mid-day tries the order sync's missing-exit check started its own sale for every position whose exits the first try had cancelled: 80 such sales and 400 refused sells in 10 simulated minutes, spending Alpaca's requests outside the 60 a minute and keeping its budget near 0, so no retry could start. With it, the 40-position test meets the reviewer's bar. It is money-touching and was not in the list, so it is a separate commit; without it the 40-position test fails (and is part of that commit). This also means the proposal's line "the missing-exit check keeps running during the pause" now holds only from mid-day flat on (no position should exist then).
+
+### Tests
+
+473 pass (465 before round 1: 8 added, several changed for the new texts and times; the early-close test became two half-day tests). Type check clean. New: 40 positions with every sale refused (after the unlimited first try, mid-day requests in any 60 seconds 52 at most, measured conservatively with routine work beside them; no rate-limit answer after the first try's minute; one alert and one 5 minute alert; no missing-exit sale; flat once Alpaca accepts); the half day (cycle at 10:30, 11:00 AM CT texts, no 1:30 note, `go` after the last entry, a deploy after it); the loss stop's texts; `hold` in its own key and with the stop on; an earlier start not counted; a retry not waiting for its own sale; a subset retry judging the whole account; the deploy check's clean checkout.
+
+Each new piece taken out on its own: **40 of 42 caught.** Not caught, and why:
+- Retries not waiting for their own sells (`waitForOwnSells: false`): redundant with one round (the close-out's own-sells wait needs the liquidator's round 2 to find only its own sells, which a one-round retry never reaches). Kept as an explicit backstop.
+- The not-flat alert's wording when nothing is listed: a fallback the simulator cannot reach (a not-flat result always lists something).
+
+| Taken out | Test that fails |
+| :-- | :-- |
+| the budget check before a retry; its room and reserve conditions; charging each try; the estimate's cap at 60 | the 40 positions, the rule tests |
+| one round per retry; `closeOut()` passing the rounds; at most 10 positions per retry, in turn; the subset passed and the whole-account read | the 40 positions, the subset test |
+| the 5 minute alert; once; the not-flat time remembered | the 40 positions |
+| the half day's resume window and the too-short-day rule | the half day (two tests), the rule tests |
+| each `blockedNext` text; its use in the morning line, the 1:30 note and the stay-stop line; the plain-restart alert's mention; the stay-late times | the loss stop's texts, the half day, the loss-stop deploy, the rule tests |
+| the 1:30 note waiting for the start-up decision; only with time left | the deploy after 1:30, the half day |
+| a start after the pause only (rule and worker) | the earlier start, the rule tests |
+| `hold` in its key (saved, read at start-up, in the morning line, in `status`); its replies before 10:30 and with a stop | the `hold` tests, the commands, the restarts |
+| `go` after the last entry; the morning count like the summary's; the restart line; no "CT CT"; the clean-checkout check | the half day, the full day, the deploy, the deploy check |
+| the missing-exit check standing aside (commit `38f5114`) | the 40 positions |
+
+### For review (round 2)
+
+- **Group 1:** the retry budget and its one-round, at-most-10-positions retries (`worker.ts` mid-day block and `middayPhase`, `closeout.ts` `maxRounds` and `onlySymbols`, `midday.ts` `MiddayBudget`, `retryAllowed`, `retrySymbols`); the half-day times; the hold key; `startedAfterPause`; the clean-checkout check; and, separately, commit `38f5114` (the missing-exit check standing aside), which needs Michael's say.
+- **Group 2:** the stop-aware and real-time texts, the alerts, the replies, `HELP`, the summary line.
