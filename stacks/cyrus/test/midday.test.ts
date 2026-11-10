@@ -589,6 +589,57 @@ test("a retry takes at most 10 positions, in turn; and a retry over some positio
   assert.ok(sim.orders.some((o) => o.symbol === "BBB" && o.legs.some((l) => l.status === "new" || l.status === "held")), "BBB's exits were not touched");
 });
 
+test("Michael's ruling on a mid-day close-out that cannot get flat: 40 positions with every sale refused; after the unlimited first try, mid-day requests stay within 60 a minute, no rate-limit answers after the first try's minute, one alert and one 5 minute alert, and the positions are sold once Alpaca accepts", { timeout: 120_000 }, async () => {
+  const w = await armedDay();
+  const { sim, r } = w;
+  sim.onRate = (remaining) => r.governor.observe({ path: "/v2/orders", status: 200, limit: 200, remaining, reset: null });
+  sim.advanceTo(z("16:00:00").getTime());
+  for (let i = 0; i < 40; i++) await hold(sim, r.store, `S${i}`, 1, 10);
+  sim.refuseSellsTimes = 1_000_000;
+  // count the requests made while a mid-day try is running (routine work running beside it is counted too: a conservative count)
+  const reqDuring: number[] = [];
+  const midday = () => r.worker["inflight"].has("midday");
+  for (const fn of ["listPositions", "listOrders", "listOrdersPaged", "cancelOrder", "cancelAllOrders", "submitSell", "getAccount", "findOrderByClientId"] as const) {
+    const orig = (sim as any)[fn].bind(sim);
+    (sim as any)[fn] = (...a: unknown[]) => { if (midday()) reqDuring.push(sim.simMs); return orig(...a); };
+  }
+  const tries = () => r.store.events.filter((e) => e.event === "closeout_result" && e.data!.path === "midday").length;
+  await r.at("16:30:00");
+  await until(() => tries() === 1 && !midday(), 2000);
+  const firstEnd = sim.simMs;
+  const after = firstEnd + 60_000;
+  let rejectedAtMinute: number | null = null;
+  let t = Math.ceil(firstEnd / 5000) * 5000;
+  const stopAt = z("16:40:00").getTime();
+  while (t <= stopAt) {
+    if (rejectedAtMinute === null && t >= after) rejectedAtMinute = sim.rejected429;
+    await w.r.at(new Date(t).toISOString());
+    await until(() => !midday(), 2000);
+    t = Math.max(t + 5000, Math.ceil(sim.simMs / 5000) * 5000);
+  }
+  const retryReqs = reqDuring.filter((x) => x > firstEnd);
+  let worst = 0;
+  for (let i = 0; i < retryReqs.length; i++) worst = Math.max(worst, retryReqs.filter((x) => x >= retryReqs[i]! && x < retryReqs[i]! + 60_000).length);
+  assert.ok(tries() >= 3, `retries happened (${tries()} tries)`);
+  assert.ok(worst <= 60, `mid-day requests in any 60 seconds after the first try: ${worst}`);
+  assert.equal(sim.rejected429, rejectedAtMinute, "no rate-limit answers after the first try's minute");
+  assert.equal(r.said("alerts").filter((x) => x.includes("mid-day close-out is NOT FLAT yet")).length, 1, "one alert");
+  assert.equal(r.said("alerts").filter((x) => x.includes("still NOT FLAT after 5 minutes")).length, 1, "one 5 minute alert");
+  assert.equal((await readPause(r.store, D))!.on, true);
+  assert.ok(!w.events.some((e) => e.e === "unprotected_position"), "the order sync's missing-exit check stood aside while the mid-day close-out owned the selling");
+  // Alpaca accepts sales again
+  sim.refuseSellsTimes = 0;
+  for (let k = 0; k < 40 && !(await r.store.getDay(D))!.phases[MIDDAY_PHASE]; k++) {
+    t += 5000;
+    await r.at(new Date(t).toISOString());
+    await until(() => !midday(), 2000);
+  }
+  assert.ok((await r.store.getDay(D))!.phases[MIDDAY_PHASE], "flat in the end");
+  assert.equal((await sim.listPositions()).length, 0);
+  assert.equal(sim.oversellAttempts, 0);
+  assert.equal(r.said("alerts").filter((x) => x.includes("still NOT FLAT after 5 minutes")).length, 1, "still one 5 minute alert");
+});
+
 test("the loss stop on: the morning line and the 1:30 note say trading stays paused for the rest of the day unless `resume` and then `go`", async () => {
   const w = await armedDay();
   const { r } = w;
