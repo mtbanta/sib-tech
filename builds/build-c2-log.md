@@ -3053,3 +3053,27 @@ A Monday-style stuck symbol: one attempt of at most about 10 requests and under 
 ### Tests
 
 454 pass (9 added in `test/release-r1.test.ts`: Monday's APLD sequence from a stale list; an older entry's 1 share beside a newer position in three visibility modes; a stale list wrongly showing exits gone; Monday's IONQ case through the 5, 10, 20, 30 retries, the 5 minute escalation and the resolution line, three posts in all; a stuck symbol not delaying another symbol's remainder sale; a visible hold; the stop once its own share filled). One existing structure test changed because the structure changed: it counted two cleanup sale calls with `yieldToPriority`; there is now one shared call, used by both paths (the test checks both). Type check clean. Each piece taken out on its own fails a test: 14 of 14 (after adding a no-free-count case for the cap and a request-count test for the stop once filled, which the first run let through).
+
+### Release 1, group 1 review round 1 (2026-11-09, evening): CHANGES REQUIRED. Group 2 round 1: CHANGES REQUIRED. Fixed.
+
+**Group 1, blocking:** with 8 or more symbols stuck at once, their short retries came due together with no limit on requests, and in the reviewer's simulator harness (80 ms a request, refill 125 a minute for routine work) they drained the reserve: at 10 stuck, 195 rate-limit answers (the old code stayed at 33 or above). Everything else confirmed: the close-out, flatten, loss stop and carried sale are untouched (none passes the new options; every new branch is inert without them), the sell gate is untouched, the APLD case is fixed (all 9 new tests fail on the old code), the hidden-hold rule cannot misread a live exit of the entry's own.
+
+**Michael's choice (asked, 2026-11-09, evening): "Fixed allowance".** Short retries of stuck entries share at most 40 Alpaca requests a minute and 15 in any 5 seconds, like the loss stop's retry; each retry counted at 10 requests (at most 8 measured in the simulator); a retry that does not fit waits for room. A position's first sale is never limited, nor a retry held by visible orders (one full attempt per sync, as before). (`risk.ts`: `STUCK_RETRY_PER_MINUTE`, `STUCK_RETRY_PER_5S`, `STUCK_RETRY_COST`, `takeRetryRoom`, `retryDue`.)
+
+**The reviewer's harness re-run on the fix** (simulator, 3 minutes, 80 ms a request):
+
+| Stuck at once | Refill 200 a minute: lowest left, rate-limit answers | Refill 125 a minute: lowest left, rate-limit answers |
+| --: | :-- | :-- |
+| 4 | 175, 0 | 165, 0 |
+| 8 | 139, 0 | 119, 0 |
+| 10 | 118, 0 | 98, 0 |
+| 12 | | 81, 0 |
+| 15 | 81, 0 | 56, 0 |
+
+The lowest point is set by the first sales, which all run at once (unlimited by Michael's choice): at 15 stuck with routine work modelled it dips 24 below the reserve, with no rate-limit answer (a dip from sales, reported under Michael's ruling of 2026-11-06). The retries themselves stay inside the allowance.
+
+**Group 2, blocking, fixed:** (1) an entry reported stuck whose record was closed elsewhere (the live updates close a record when an exit fill leaves the symbol flat) got no resolution line: now the sync posts it when it prunes the entry, also on its early return with nothing open; (2) the first alert did not say since when: it now says "since 9:10 AM CT" (the latest cancel or expiry among the entry's own exits as Alpaca reports it, else the moment found). Also from both reviews: an entry reported stuck that stops being the newest on its symbol now gets a resolution line; singular and plural fixed ("1 share", "1 second"); the first alert ends "I keep trying and will post again when they are sold or gone"; resolution lines read "IONQ: sold (28 minutes after I reported it without a protective stop)." (or "no longer held", "its own exit orders sold the shares", "it has a live exit again", "a newer IONQ position took over, and I watch that one now"); a stale comment in `worker.ts` corrected.
+
+Known and accepted (non-blocking): the stuck state lives in memory, so a restart starts it again (a still-stuck position gets a fresh first alert); the minutes in the resolution line count from the first report, not from when the protection was lost; a retry after a partial sale aims at the entry's full own count again (the gate's held-minus-open check and the newest-entry check still apply).
+
+**Tests:** 460 pass (6 more in `test/release-r1.test.ts`: the allowance's arithmetic; ten stuck at once (all first sales at once, then at most 4 retries a minute and 1 in 5 seconds, the bucket at or above 80, no rate-limit answer, one alert each); a record closed elsewhere, with and without another position open; an entry no longer the newest; a stuck remainder on the short list on both paths; the part B and RIOT tests now also count every alert line). Type check clean. Each piece taken out on its own fails a test: 21 of 21.

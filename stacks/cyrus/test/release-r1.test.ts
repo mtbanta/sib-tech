@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Liquidator, SellGate, OPEN_STATUSES } from "../src/sells.ts";
-import { STUCK_ESCALATE_MS, STUCK_RETRY_FIRST_MS, STUCK_RETRY_MAX_MS, SyncMemory, syncOrders } from "../src/risk.ts";
+import { STUCK_ESCALATE_MS, STUCK_RETRY_COST, STUCK_RETRY_FIRST_MS, STUCK_RETRY_MAX_MS, STUCK_RETRY_PER_5S, STUCK_RETRY_PER_MINUTE, SyncMemory, syncOrders, takeRetryRoom } from "../src/risk.ts";
 import { MemoryStore } from "../src/store.ts";
 import { ensureDay } from "../src/morning.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
@@ -76,6 +76,7 @@ test("part B, Monday's APLD case: a remainder sale working from an old list, for
   assert.ok(legsOf(w, id108).every((l) => OPEN_STATUSES.has(l.status)), "APLD-108's exits are still live");
   assert.equal(w.sim.heldQty("APLD"), 4, "APLD-108's shares are still held");
   assert.equal(mentions(w).length, 0, "no alarm");
+  assert.equal(w.said.filter((m) => m.ch === "alerts").length, 0, "never reported stuck, so no resolution line either");
   assert.ok(w.events.some((e) => e.event === "cleanup_skipped" && e.data.clientOrderId === id107), "the fresh look skipped it");
 });
 
@@ -99,6 +100,7 @@ for (const [hide, noQty] of [[false, false], [true, false], [true, true]] as con
     w.sim.advance(5_000);
     assert.equal(w.sim.heldQty("APLD"), 4, "APLD-108's 4 shares are still held");
     assert.equal(mentions(w).length, 0);
+    assert.ok(!w.said.some((m) => /reported it without a protective stop/.test(m.text)), "never reported stuck, so no resolution line");
   });
 }
 
@@ -131,7 +133,7 @@ test("part A and C, Monday's IONQ case: shares held with no open order visible; 
   assert.ok(w.sim.requests - req0 <= 10, `${w.sim.requests - req0} requests`);
   assert.equal(w.sim.sellLog.length, 0);
   assert.equal(mentions(w).length, 1, "one alert");
-  assert.match(mentions(w)[0]!.text, /IONQ has 2 shares with no protective stop, and I could not sell them yet/);
+  assert.match(mentions(w)[0]!.text, /IONQ has 2 shares with no protective stop since \d{1,2}:\d{2} [AP]M CT, and I could not sell them yet.*will post again when they are sold or gone\./);
   assert.ok(r.recheckAt !== undefined, "a retry is set");
   const firstDue = r.recheckAt!;
   assert.ok(firstDue - w.sim.simMs <= STUCK_RETRY_FIRST_MS && firstDue - w.sim.simMs > STUCK_RETRY_FIRST_MS - 2_000, "about 5 seconds");
@@ -164,7 +166,7 @@ test("part A and C, Monday's IONQ case: shares held with no open order visible; 
   await syncOrders(w.risk, day, { protect: true });
   const lines = w.said.filter((m) => m.ch === "alerts" && m.text.includes("IONQ"));
   assert.equal(lines.length, 3, "three posts in all");
-  assert.ok(/IONQ: sold after \d+ minutes without a protective stop\./.test(lines[2]!.text) && !lines[2]!.mention, lines[2]!.text);
+  assert.ok(/^IONQ: sold \(\d+ minutes after I reported it without a protective stop\)\.$/.test(lines[2]!.text) && !lines[2]!.mention, lines[2]!.text);
 });
 
 test("part A: a stuck symbol does not hold up a remainder sale on another symbol in the same sync", async () => {
@@ -204,8 +206,10 @@ test("part A and C: a sale held by a cancel still landing (visible) keeps the ol
   assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["RIOT", 3]]);
   w.sim.advance(3_000);
   await syncOrders(w.risk, day, { protect: true });
-  const last = w.said.filter((m) => m.ch === "alerts").at(-1)!;
-  assert.ok(/RIOT: (sold|no longer held) after .* without a protective stop\./.test(last.text) && !last.mention, last.text);
+  const riot = w.said.filter((m) => m.ch === "alerts");
+  assert.equal(riot.length, 2, "one alert and one resolution line, nothing else");
+  const last = riot.at(-1)!;
+  assert.ok(/^RIOT: (sold|no longer held) \(\d+ seconds after I reported it without a protective stop\)\.$/.test(last.text) && !last.mention, last.text);
   assert.equal(w.sim.oversellAttempts, 0);
 });
 
@@ -226,4 +230,115 @@ test("part B: once that entry's own share has filled, the cleanup sale stops loo
   assert.deepEqual(r.heldAfter, { APLD: 4 });
   assert.ok(w.sim.requests - r0 <= 15, `${w.sim.requests - r0} requests (22 without the stop)`);
   assert.ok(w.sim.simMs - t0 <= 1_500, `${w.sim.simMs - t0} ms (3,000 without the stop)`);
+});
+
+test("Michael's retry allowance: 40 requests a minute and 15 in any 5 seconds, each short retry counted at 10; the next room is computed", () => {
+  assert.deepEqual([STUCK_RETRY_PER_MINUTE, STUCK_RETRY_PER_5S, STUCK_RETRY_COST], [40, 15, 10]);
+  const mem = new SyncMemory();
+  assert.deepEqual(takeRetryRoom(mem, 0), { ok: true });
+  assert.deepEqual(takeRetryRoom(mem, 1_000), { ok: false, at: 5_000 }, "a second retry inside 5 seconds waits for the 5 second room");
+  assert.deepEqual(takeRetryRoom(mem, 5_000), { ok: true });
+  assert.deepEqual(takeRetryRoom(mem, 10_000), { ok: true });
+  assert.deepEqual(takeRetryRoom(mem, 15_000), { ok: true });
+  assert.deepEqual(takeRetryRoom(mem, 20_000), { ok: false, at: 60_000 }, "four retries in the minute (40 requests): the fifth waits for the first to age out");
+  assert.deepEqual(takeRetryRoom(mem, 60_000), { ok: true });
+});
+
+test("Michael's retry allowance in the sync: ten symbols stuck at once all get their first sale at once, then their retries never exceed 4 a minute or 1 in 5 seconds, and the bucket stays above the reserve", async () => {
+  const w = world();
+  await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
+  const day = (await w.store.getDay(D))!;
+  const syms = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG", "HHH", "III", "JJJ"];
+  for (const [i, sym] of syms.entries()) {
+    const id = await hold(w, sym, 1, 10 + i, 1);
+    for (const l of legsOf(w, id)) await w.sim.cancelOrder(l.id);
+    w.sim.staleHeld.set(sym, 1);
+  }
+  w.sim.advance(2_000);
+  const t0 = w.sim.simMs;
+  w.sim.lowestTokens = w.sim.tokens;
+  let r = await syncOrders(w.risk, day, { protect: true });
+  const firstAttempts = new Set(w.events.filter((e) => e.event === "sale_blocked").map((e) => e.data.symbol));
+  assert.equal(firstAttempts.size, 10, "every first sale ran at once, unlimited");
+  const tries: number[] = [];
+  const count = () => w.events.filter((e) => e.event === "sale_blocked").length;
+  let seen = count();
+  while (w.sim.simMs - t0 < 180_000) {
+    w.sim.advanceTo(Math.min(r.recheckAt ?? w.sim.simMs + 10_000, w.sim.simMs + 10_000));
+    r = await syncOrders(w.risk, day, { protect: true });
+    const now = count();
+    for (let k = seen; k < now; k++) tries.push(w.sim.simMs);
+    seen = now;
+  }
+  assert.ok(tries.length >= 8, `retries still happen: ${tries.length} in 3 minutes`);
+  for (const t of tries) {
+    assert.ok(tries.filter((x) => x > t - 60_000 && x <= t).length <= 4, "at most 4 retries in any minute");
+    assert.ok(tries.filter((x) => x > t - 5_000 && x <= t).length <= 1, "at most 1 retry in any 5 seconds");
+  }
+  assert.ok(w.sim.lowestTokens >= 80, `lowest bucket ${w.sim.lowestTokens}`);
+  assert.equal(w.sim.rejected429, 0);
+  assert.equal(mentions(w).length, 10, "one alert per position, no repeats");
+});
+
+for (const other of [false, true]) test(`part C: an entry reported stuck whose record is closed elsewhere (its hidden exit filled) gets exactly one resolution line, no mention${other ? ", with another position still open" : ""}`, async () => {
+  const w = world();
+  await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
+  const day = (await w.store.getDay(D))!;
+  if (other) await hold(w, "RIG", 3, 5, 1); // another position, protected, stays open (so the sync does not take its early return)
+  const id = await hold(w, "IONQ", 2, 33.88, 125);
+  for (const l of legsOf(w, id)) await w.sim.cancelOrder(l.id);
+  w.sim.advance(2_000);
+  w.sim.staleHeld.set("IONQ", 2);
+  await syncOrders(w.risk, day, { protect: true });
+  assert.equal(mentions(w).length, 1);
+  await w.store.updateOrder(id, { closedAt: new Date(w.sim.simMs).toISOString() }); // the live updates closed the record
+  w.sim.advance(10_000);
+  await syncOrders(w.risk, day, { protect: true });
+  w.sim.advance(10_000);
+  await syncOrders(w.risk, day, { protect: true });
+  const lines = w.said.filter((m) => m.ch === "alerts");
+  assert.equal(lines.length, 2);
+  assert.ok(/^IONQ: no longer held \(\d+ seconds after I reported it without a protective stop\)\.$/.test(lines[1]!.text) && !lines[1]!.mention, lines[1]!.text);
+});
+
+test("part C: an entry reported stuck that stops being the newest on its symbol gets one resolution line, no mention", async () => {
+  const w = world();
+  await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
+  const day = (await w.store.getDay(D))!;
+  const id = await hold(w, "IONQ", 2, 33.88, 125);
+  for (const l of legsOf(w, id)) await w.sim.cancelOrder(l.id);
+  w.sim.advance(2_000);
+  w.sim.staleHeld.set("IONQ", 2);
+  await syncOrders(w.risk, day, { protect: true });
+  assert.equal(mentions(w).length, 1);
+  w.sim.advance(10_000);
+  await hold(w, "IONQ", 1, 34, 126); // a newer IONQ entry on record
+  await syncOrders(w.risk, day, { protect: true });
+  const lines = w.said.filter((m) => m.ch === "alerts" && /reported it without a protective stop/.test(m.text));
+  assert.equal(lines.length, 1);
+  assert.match(lines[0]!.text, /^IONQ: a newer IONQ position took over, and I watch that one now \(\d+ seconds after I reported it without a protective stop\)\.$/);
+  assert.ok(!lines[0]!.mention);
+});
+
+test("part A: a stuck remainder (its take-profit cancelled by the first attempt, Alpaca still holding the shares) moves to the short retry list and is not tried again before it is due", async () => {
+  const w = world();
+  await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
+  const day = (await w.store.getDay(D))!;
+  const id = await hold(w, "CIFR", 10, 7.27, 55);
+  w.sim.partialTakeProfit(id, 3, 7.29);
+  w.sim.advance(4_000);
+  const old = await staleRisk(w); // a list that still shows the take-profit live (served to the third sync)
+  w.sim.staleHeld.set("CIFR", 7);
+  await syncOrders(w.risk, day, { protect: true }); // cancels the take-profit, waits, cannot sell: a visible hold
+  assert.equal(mentions(w).length, 1);
+  w.sim.advance(10_000);
+  const r = await syncOrders(w.risk, day, { protect: true }); // nothing left to cancel: a hidden hold now
+  assert.ok(r.recheckAt !== undefined && r.recheckAt - w.sim.simMs <= STUCK_RETRY_FIRST_MS, "on the short retry list");
+  const n = w.events.filter((e) => e.event === "sale_blocked").length;
+  w.sim.advance(2_000);
+  await syncOrders(w.risk, day, { protect: true }); // the missing-exit path's skip
+  await syncOrders(old.risk, day, { protect: true }); // the remainder path's skip (an old list shows the take-profit live)
+  assert.equal(w.events.filter((e) => e.event === "sale_blocked").length, n, "not tried before it is due, on either path");
+  assert.equal(w.sim.sellLog.length, 0);
+  assert.equal(mentions(w).length, 1, "still one alert");
 });

@@ -88,7 +88,8 @@ export const VIEW_EVERY_NO_STREAM_MS = 5_000;
 export const STATS_EVERY_MS = 60_000;
 // Successful remainder sales (shares left without a stop, sold by the order sync) are gathered into one alert a minute (the speed
 // release, decision 6): on 2026-11-05 they were 101 separate alerts, and at the 3 second grace about 270 a day are expected.
-// Failures ("could not sell", "not filled yet") are still posted one by one, at once.
+// A sell not filled yet is still posted at once; a position that cannot be sold gets one alert, one after 5 minutes and one line when it
+// resolves (release 1 of 2026-11-09, risk.ts `cleanupSale`).
 export const REMAINDER_ALERT_EVERY_MS = 60_000;
 
 // The batched alert: one line listing each symbol and the shares sold.

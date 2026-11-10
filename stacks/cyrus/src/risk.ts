@@ -2,7 +2,7 @@
 // entry still has a live exit resting at Alpaca, and stop the day if the daily loss limit is reached.
 import { AlpacaError, type Order } from "./alpaca-trading.ts";
 import type { Broker } from "./broker.ts";
-import { etInstant } from "./time.ts";
+import { centralClock, etInstant } from "./time.ts";
 import { CONTROL_STOP, type DayRecord, type OrderRecord, type StopFlag, type Store } from "./store.ts";
 import { OPEN_STATUSES, flattenLegs, openOrderIds, openSellQty, type Liquidator, type Say } from "./sells.ts";
 import { SAFETY_RESERVE } from "./governor.ts";
@@ -67,6 +67,14 @@ export const OLD_LOOKUP_EVERY_MS = 30_000;
 export const STUCK_RETRY_FIRST_MS = 5_000;
 export const STUCK_RETRY_MAX_MS = 30_000;
 export const STUCK_ESCALATE_MS = 5 * 60_000;
+// Michael's choice of 2026-11-09 (after group 1 review round 1 of release 1 found that 8 or more symbols stuck at once could drain the
+// request reserve with their retries): the short retries of stuck entries share at most 40 Alpaca requests a minute and 15 in any 5
+// seconds, like the loss stop's retry. Each retry is counted at STUCK_RETRY_COST requests (one lookup plus one short round of the sale;
+// at most 8 were measured in the simulator, the 2 more are margin). A retry that does not fit waits for room. A position's first sale is
+// never limited, and nor is a retry held by visible orders (it runs at the next sync, one full attempt at a time, as before).
+export const STUCK_RETRY_PER_MINUTE = 40;
+export const STUCK_RETRY_PER_5S = 15;
+export const STUCK_RETRY_COST = 10;
 export interface StuckEntry {
   symbol: string;
   since: number;
@@ -91,6 +99,26 @@ export class SyncMemory {
   readonly mustLook = new Set<string>();
   // Release 1 of 2026-11-09: entries (client ids) whose cleanup sale could not sell their shares, with the retry and alert state.
   readonly stuck = new Map<string, StuckEntry>();
+  // When each short retry of a stuck entry was charged against the allowance above (milliseconds).
+  readonly retrySpend: number[] = [];
+}
+
+// Michael's choice of 2026-11-09: the earliest moment a short retry fits the allowance (now if it fits), and charge it if it does.
+export function takeRetryRoom(mem: SyncMemory, nowMs: number): { ok: true } | { ok: false; at: number } {
+  const recent = mem.retrySpend.filter((t) => nowMs - t < 60_000);
+  mem.retrySpend.splice(0, mem.retrySpend.length, ...recent);
+  const lastMinute = recent.length * STUCK_RETRY_COST;
+  const last5s = recent.filter((t) => nowMs - t < 5_000);
+  if (lastMinute + STUCK_RETRY_COST <= STUCK_RETRY_PER_MINUTE && last5s.length * STUCK_RETRY_COST + STUCK_RETRY_COST <= STUCK_RETRY_PER_5S) {
+    mem.retrySpend.push(nowMs);
+    return { ok: true };
+  }
+  // The next moment one more fits: when enough of the minute's charges, and of the 5 seconds' charges, have aged out.
+  const minuteSlots = Math.floor(STUCK_RETRY_PER_MINUTE / STUCK_RETRY_COST);
+  const fiveSlots = Math.floor(STUCK_RETRY_PER_5S / STUCK_RETRY_COST);
+  const byMinute = recent.length >= minuteSlots ? recent[recent.length - minuteSlots]! + 60_000 : nowMs;
+  const byFive = last5s.length >= fiveSlots ? last5s[last5s.length - fiveSlots]! + 5_000 : nowMs;
+  return { ok: false, at: Math.max(byMinute, byFive, nowMs + 1) };
 }
 const fallbackSync = new SyncMemory();
 
@@ -131,6 +159,9 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   const mem = d.syncMemory ?? fallbackSync;
   const active = (await d.store.listOrders(day.tradeDate)).filter((o) => !o.closedAt && (o.status === "intent" || o.status === "submitted" || o.status === "filled"));
   if (active.length === 0) {
+    // Group 2 review, round 1: an entry reported stuck whose record was closed elsewhere (the live updates close a record when an exit
+    // fill leaves the symbol flat) still gets its one resolution line.
+    for (const id of [...mem.stuck.keys()]) await resolveStuck(d, mem, id, "no longer held");
     mem.bareSeen.clear();
     mem.lastSeen.clear();
     mem.lastSyncAt = d.now().getTime();
@@ -140,7 +171,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   for (const id of [...mem.lastSeen.keys()]) if (!activeIds.has(id)) mem.lastSeen.delete(id);
   for (const id of [...mem.oldLookedAt.keys()]) if (!activeIds.has(id)) mem.oldLookedAt.delete(id);
   for (const id of [...mem.mustLook]) if (!activeIds.has(id)) mem.mustLook.delete(id);
-  for (const id of [...mem.stuck.keys()]) if (!activeIds.has(id)) mem.stuck.delete(id);
+  for (const id of [...mem.stuck.keys()]) if (!activeIds.has(id)) await resolveStuck(d, mem, id, "no longer held");
   const midnight = etInstant(day.tradeDate, "00:00").getTime();
   const nowMs = d.now().getTime();
   const createdMs = (o: OrderRecord) => (o.createdAt ? new Date(o.createdAt).getTime() : midnight);
@@ -242,11 +273,14 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       continue;
     }
     const protectNow = typeof opts.protect === "function" ? opts.protect() : opts.protect;
+    // Group 1 review, round 1 (messaging): an entry reported stuck that is no longer the newest on its symbol gets its resolution line.
+    if (latestPerSymbol.get(s.symbol)?.clientOrderId !== s.clientOrderId) await resolveStuck(d, mem, s.clientOrderId, `a newer ${s.symbol} position took over, and I watch that one now`);
     if (!protectNow || latestPerSymbol.get(s.symbol)?.clientOrderId !== s.clientOrderId || sellingSymbols.has(s.symbol)) continue;
     if (!hasLiveExit(o)) {
-      const due = mem.stuck.get(s.clientOrderId)?.nextAt ?? 0;
-      if (due > d.now().getTime()) {
-        // Part A, step 1: tried moments ago and stuck; it is tried again at `due`, and the sync carries on with the others.
+      const due = retryDue(mem, s.clientOrderId, d.now().getTime());
+      if (due !== null) {
+        // Part A, step 1: tried moments ago and stuck; it is tried again at `due` (or when the retry allowance has room), and the sync
+        // carries on with the others.
         unprotected.push(s.symbol);
         recheckAt = recheckAt === undefined ? due : Math.min(recheckAt, due);
         continue;
@@ -276,9 +310,10 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       mem.mustLook.add(s.clientOrderId);
       continue;
     }
-    const stuckDue = mem.stuck.get(s.clientOrderId)?.nextAt ?? 0;
-    if (stuckDue > d.now().getTime()) {
-      // Part A, step 1: tried moments ago and stuck; it is tried again then, and the sync carries on with the others.
+    const stuckDue = retryDue(mem, s.clientOrderId, d.now().getTime());
+    if (stuckDue !== null) {
+      // Part A, step 1: tried moments ago and stuck; it is tried again then (or when the retry allowance has room), and the sync
+      // carries on with the others.
       unprotected.push(s.symbol);
       recheckAt = recheckAt === undefined ? stuckDue : Math.min(recheckAt, stuckDue);
       continue;
@@ -306,14 +341,27 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
 }
 
 const EPS_QTY = 1e-9;
-const minutesText = (ms: number): string => (ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))} seconds` : `${Math.round(ms / 60_000)} minute${Math.round(ms / 60_000) === 1 ? "" : "s"}`);
+
+// Part A, step 1, with Michael's retry allowance: null when the entry may be tried now (a first sale, a retry held by visible orders,
+// or a short retry that is due and fits the allowance, which is then charged); otherwise the moment to look again.
+function retryDue(mem: SyncMemory, clientOrderId: string, nowMs: number): number | null {
+  const st = mem.stuck.get(clientOrderId);
+  if (!st || st.nextAt === 0) return null;
+  if (st.nextAt > nowMs) return st.nextAt;
+  const room = takeRetryRoom(mem, nowMs);
+  if (room.ok) return null;
+  st.nextAt = room.at;
+  return room.at;
+}
+const plural = (n: number, one: string, many: string = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
+const minutesText = (ms: number): string => (ms < 60_000 ? plural(Math.max(1, Math.round(ms / 1000)), "second") : plural(Math.round(ms / 60_000), "minute"));
 
 // Part C: the one line when a position that was reported stuck resolves (no mention). Nothing is posted for an entry never reported.
 async function resolveStuck(d: RiskDeps, mem: SyncMemory, clientOrderId: string, how: string): Promise<boolean> {
   const st = mem.stuck.get(clientOrderId);
   mem.stuck.delete(clientOrderId);
   if (!st?.alerted) return false;
-  await d.say("alerts", `${st.symbol}: ${how} after ${minutesText(d.now().getTime() - st.since)} without a protective stop.`);
+  await d.say("alerts", `${st.symbol}: ${how} (${minutesText(d.now().getTime() - st.since)} after I reported it without a protective stop).`);
   return true;
 }
 
@@ -340,7 +388,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   const stillNeeded = kind === "missing" ? !hasLiveExit(o) : bareRemainder(o) !== null;
   if (!(ownShares > EPS_QTY) || !stillNeeded) {
     d.log?.("cleanup_skipped", { symbol: s.symbol, clientOrderId: s.clientOrderId, kind, ownShares, liveExit: hasLiveExit(o) });
-    await resolveStuck(d, mem, s.clientOrderId, ownShares > EPS_QTY ? "protected again" : "sold by its exits");
+    await resolveStuck(d, mem, s.clientOrderId, ownShares > EPS_QTY ? "it has a live exit again" : "its own exit orders sold the shares");
     return { attempted: false, stuck: false };
   }
   const cancelIds = flattenLegs(o).filter((l) => l.side === "sell" && OPEN_STATUSES.has(l.status)).map((l) => l.id);
@@ -368,7 +416,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     }
     // The sell went out and Alpaca has not filled it yet (paper has held sells 16 seconds before submitting them): not a failure.
     if (!mem.stuck.get(s.clientOrderId)?.alerted) {
-      const what = kind === "missing" ? `**${s.symbol} had no live protective stop.** I sent a sell for its ${soldQty} shares` : `**${s.symbol}: Alpaca cancelled its stop when the take-profit partly filled.** I sent a sell for the remaining ${soldQty} shares`;
+      const what = kind === "missing" ? `**${s.symbol} had no live protective stop.** I sent a sell for its ${plural(soldQty, "share")}` : `**${s.symbol}: Alpaca cancelled its stop when the take-profit partly filled.** I sent a sell for the remaining ${plural(soldQty, "share")}`;
       await d.say("alerts", `${what}; Alpaca has not filled it yet.`);
     }
     return { attempted: true, stuck: false };
@@ -395,7 +443,10 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   const how = kind === "missing" ? "its exits are gone" : "Alpaca cancelled the stop when the take-profit partly filled";
   if (!st.alerted) {
     st.alerted = true;
-    await d.say("alerts", `**Michael: ${s.symbol} has ${left} share${left === 1 ? "" : "s"} with no protective stop, and I could not sell ${left === 1 ? "it" : "them"} yet** (${how}; ${why}). I keep trying and will post once it is sold.`, { mentionOwner: true });
+    // Group 2 review, round 1: since when. The latest cancel or expiry among the entry's own exits (as Alpaca reports it), else now.
+    const endedAt = flattenLegs(o).filter((l) => l.side === "sell" && !OPEN_STATUSES.has(l.status)).map((l) => Date.parse(l.canceledAt ?? l.updatedAt ?? "")).filter((t) => Number.isFinite(t) && t <= now);
+    const lostAt = new Date(endedAt.length > 0 ? Math.max(...endedAt) : now);
+    await d.say("alerts", `**Michael: ${s.symbol} has ${plural(left, "share")} with no protective stop since ${centralClock(lostAt)}, and I could not sell ${left === 1 ? "it" : "them"} yet** (${how}; ${why}). I keep trying and will post again when ${left === 1 ? "it is" : "they are"} sold or gone.`, { mentionOwner: true });
   } else if (!st.escalated && now - st.since >= STUCK_ESCALATE_MS) {
     st.escalated = true;
     await d.say("alerts", `**Michael: ${s.symbol} still has no protective stop after ${minutesText(now - st.since)}, and I still cannot sell it** (${why}). Please close it in Alpaca's dashboard. I keep trying.`, { mentionOwner: true });
