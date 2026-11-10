@@ -3228,3 +3228,9 @@ Each new piece taken out on its own: **40 of 42 caught.** Not caught, and why:
 
 - **Group 1:** the retry budget and its one-round, at-most-10-positions retries (`worker.ts` mid-day block and `middayPhase`, `closeout.ts` `maxRounds` and `onlySymbols`, `midday.ts` `MiddayBudget`, `retryAllowed`, `retrySymbols`); the half-day times; the hold key; `startedAfterPause`; the clean-checkout check; and, separately, commit `38f5114` (the missing-exit check standing aside), which needs Michael's say.
 - **Group 2:** the stop-aware and real-time texts, the alerts, the replies, `HELP`, the summary line.
+
+### Michael's decisions on the round 1 fixes (2026-11-09, night) and the rebase onto v14
+
+- **The missing-exit check off from 10:30 until the mid-day close-out is flat (commit `38f5114`): "Keep it".** Asked because it was outside the listed fixes and money-touching.
+- **At most 10 positions per mid-day retry, in turn (`MIDDAY_RETRY_SYMBOLS`): "Accept 10".** The first try at 10:30 is not capped.
+- Release 2 is now rebased onto `main` at v14 (release 1 underneath; branch `r2-v14`). Only the log conflicted (both releases appended at its end). On the combined code: 491 tests pass (463 of release 1 plus release 2's 28), type check clean.
