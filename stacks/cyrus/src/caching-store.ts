@@ -9,8 +9,11 @@
 // database that is down fails closed anyway: the gate writes each entry down before sending it.
 import type { DayRecord, OrderRecord, RefusalRecord, Store } from "./store.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP } from "./store.ts";
+import { isMiddayKey } from "./midday.ts";
 
 const FAST_KEYS = new Set([CONTROL_STOP, CONTROL_NOT_FLAT]);
+// The mid-day pause (one key per day) is read by the order gate before every entry, like the two flags.
+const isFastKey = (key: string) => FAST_KEYS.has(key) || isMiddayKey(key);
 
 export class CachingStore implements Store {
   private readonly inner: Store;
@@ -40,14 +43,14 @@ export class CachingStore implements Store {
 
   async getControl<T = unknown>(key: string): Promise<T | null> {
     if (key === CONTROL_STOP && this.unsavedStop) return structuredClone(this.unsavedStop) as T | null;
-    if (FAST_KEYS.has(key)) {
+    if (isFastKey(key)) {
       const hit = this.controls.get(key);
       if (hit && this.now() - hit.at < this.controlTtlMs) return structuredClone(hit.value) as T | null;
     }
     const k = `c:${key}`;
     const g0 = this.g(k);
     const value = await this.inner.getControl<T>(key);
-    if (FAST_KEYS.has(key)) {
+    if (isFastKey(key)) {
       if (this.g(k) === g0) this.controls.set(key, { value: structuredClone(value), at: this.now() });
       else {
         const newer = this.controls.get(key); // a write happened while this read waited: the write wins
@@ -70,7 +73,7 @@ export class CachingStore implements Store {
     const write = async () => {
       await this.inner.setControl(key, value); // a failed write leaves memory as it was (a stop that was set stays set)
       if (key === CONTROL_STOP) this.unsavedStop = null; // saved (on or off): the database is the truth again
-      if (FAST_KEYS.has(key)) this.controls.set(key, { value: structuredClone(value), at: this.now() });
+      if (isFastKey(key)) this.controls.set(key, { value: structuredClone(value), at: this.now() });
       this.bump(k);
     };
     if (key !== CONTROL_STOP) return write();

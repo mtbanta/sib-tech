@@ -20,8 +20,12 @@ import type { Governor } from "./governor.ts";
 import { checkEntry, tradesCeiling, type EntryContext } from "./limits.ts";
 import { LOAD_MAX_POSITION_USD, LOAD_WINDOW_SHARES, beforeLoadWindow, isLoadDay, loadState, loadWindow } from "./load-mode.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, type NotFlatState, type OrderRecord, type StopFlag, type Store } from "./store.ts";
+import { readPause, type MiddayPause } from "./midday.ts";
 import type { Signal } from "./strategy.ts";
 import { centralTime, etDate, minutesBetween } from "./time.ts";
+
+// The refusal while the mid-day cycle has entries paused.
+export const MIDDAY_PAUSED = "paused for the mid-day cycle";
 
 export type GateResult =
   | { status: "sent"; clientOrderId: string; qty: number; acceptMs: number }
@@ -165,10 +169,12 @@ export class OrderGate {
 
     let stop: StopFlag | null;
     let notFlat: NotFlatState | null;
+    let pause: MiddayPause | null;
     let day;
     try {
       stop = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
       notFlat = await this.d.store.getControl<NotFlatState>(CONTROL_NOT_FLAT);
+      pause = await readPause(this.d.store, date);
       day = await this.d.store.getDay(date);
     } catch {
       return this.refuse(date, symbol, "database unavailable, so no entry", undefined, false);
@@ -184,6 +190,8 @@ export class OrderGate {
     if (notFlat?.on && !stop?.on && limits) return this.refuse(date, symbol, "the account was not flat after the last close-out");
     if (stop?.on) return this.refuse(date, symbol, "stop flag is set");
     if (!limits) return this.refuse(date, symbol, "no limits approved for today");
+    // The mid-day cycle (Michael, 2026-11-09): from 10:30 AM Central until a deploy or `go` ends it, no new entry. Before any request.
+    if (pause?.on) return this.refuse(date, symbol, MIDDAY_PAUSED);
     const blocked = this.d.entryBlock?.();
     if (blocked) return this.refuse(date, symbol, blocked);
     // Load day (load-mode.ts): no entries before the load window, and at most 75 dollars an entry all day.
@@ -305,6 +313,11 @@ export class OrderGate {
       if (again?.on) {
         await this.d.store.updateOrder(clientOrderId, { status: "canceled", note: "stop flag set before sending" });
         return this.refuse(date, symbol, "stop flag is set");
+      }
+      // The mid-day pause, looked at again just before the order leaves (the mid-day close-out sets it before it sells anything).
+      if ((await readPause(this.d.store, date))?.on) {
+        await this.d.store.updateOrder(clientOrderId, { status: "canceled", note: "mid-day pause set before sending" });
+        return this.refuse(date, symbol, MIDDAY_PAUSED);
       }
       const blockedNow = this.d.entryBlock?.();
       if (blockedNow) {

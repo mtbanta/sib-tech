@@ -11,6 +11,7 @@ import type { Liquidator, Say } from "./sells.ts";
 import { CONTROL_COMMAND_CURSOR, CONTROL_STOP, setPhase, type DayRecord, type StopFlag, type Store } from "./store.ts";
 import { MAX_TRADES_PER_MINUTE, MAX_TRADES_PER_MINUTE_LOAD_DAY, describeLimits } from "./limits.ts";
 import { centralClock, dayWord, etDate, sessionPhase } from "./time.ts";
+import { goRefusal, middayFlat, middayTimes, readPause, updatePause } from "./midday.ts";
 
 export type CommandBot = Pick<DiscordBot, "post" | "latestCommandMessageId" | "commandMessagesAfter">;
 
@@ -36,6 +37,7 @@ const HELP = [
   "`flatten` stop, then sell everything now",
   "`limits` today's limits",
   "`approve` or `approve cap` accept the next trading day's limits; `position 1500`, `loss 150`, `trades 20`, `cap 2` change one (`trades` is orders a minute, 1 to 100, or up to 150 on a load day: send `load on` first, or in the same message). Until the `Armed` message 5 minutes before the open you can change any limit; after it only tighten (lower) a limit, until the evening post.",
+  "`go` end the mid-day pause now (once the mid-day close-out is flat; with or without a deploy). `hold` no automatic resume after a mid-day deploy today (`go` still resumes).",
   "`load on` / `load off` make the next trading day a load day or a normal day (see line 5 of the limits); `load on` until the morning screen, 45 minutes before the open; after `Armed` only `load off`.",
   "You can send several commands in one message, one per line; I answer each line in one short reply and then show the limits once.",
 ].join("\n");
@@ -255,6 +257,38 @@ export class CommandProcessor {
       case "status":
         await this.say(await this.statusText(now));
         return;
+      case "go": {
+        // The mid-day cycle (Michael, 2026-11-09): end the pause, only when the mid-day close-out is flat and no stop is on.
+        const date = etDate(now);
+        const day = await this.d.store.getDay(date);
+        const pause = await readPause(this.d.store, date);
+        const stop = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
+        const why = goRefusal({ hasCycle: Boolean(day && middayTimes(day)), pause, flat: Boolean(day && middayFlat(day)), stop });
+        if (why) {
+          await this.say(`Not resumed: ${why}.`);
+          return;
+        }
+        await updatePause(this.d.store, date, { on: false, resumedAt: now.toISOString(), resumedBy: "go" });
+        await this.say("Resumed: the mid-day pause is over. Same limits as this morning; the loss stop counts from the open.");
+        return;
+      }
+      case "hold": {
+        // No automatic resume after a mid-day deploy today. It never pauses trading that has already resumed (`stop` does that).
+        const date = etDate(now);
+        const day = await this.d.store.getDay(date);
+        if (!day || !middayTimes(day)) {
+          await this.say("There is no mid-day cycle today, so `hold` changes nothing.");
+          return;
+        }
+        const pause = await readPause(this.d.store, date);
+        if (pause?.resumedAt && !pause.on) {
+          await this.say("Trading has already resumed today, so `hold` changes nothing. Send `stop` to halt new entries.");
+          return;
+        }
+        await updatePause(this.d.store, date, { hold: true });
+        await this.say("Hold: after a mid-day deploy today I stay paused. Send `go` to trade.");
+        return;
+      }
       case "load": {
         const target = await this.targetDay(now);
         if (!target) {
@@ -398,6 +432,16 @@ export class CommandProcessor {
     return n;
   }
 
+  // The mid-day cycle's status line (empty on a day without one).
+  private async middayStatus(day: DayRecord | null): Promise<string> {
+    if (!day || !middayTimes(day)) return "";
+    const pause = await readPause(this.d.store, day.tradeDate).catch(() => null);
+    const hold = pause?.hold ? "; `hold` is set" : "";
+    if (pause?.on) return `Mid-day cycle: entries paused since ${pause.since ? centralClock(new Date(pause.since)) : "?"} (${middayFlat(day) ? "flat" : "mid-day close-out still selling"})${hold}`;
+    if (pause?.resumedAt) return `Mid-day cycle: resumed at ${centralClock(new Date(pause.resumedAt))} (${pause.resumedBy === "deploy" ? "after a deploy" : "by `go`"})`;
+    return `Mid-day cycle: pause at ${centralClock(middayTimes(day)!.pauseAt)}${hold}`;
+  }
+
   private async statusText(now: Date): Promise<string> {
     const flag = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
     const day = await this.d.store.getDay(etDate(now));
@@ -419,6 +463,7 @@ export class CommandProcessor {
       `Live list: ${day?.liveList ? day.liveList.join(" ") || "(empty)" : "not built yet"}`,
       `Entries today: ${orders.filter((o) => o.status !== "failed" && o.status !== "rejected").length}; positions now: ${positions.length}`,
       `Equity: ${account.equity.toFixed(2)} (day start ${day?.dayStartEquity?.toFixed(2) ?? "?"})`,
+      await this.middayStatus(day),
       ...((await this.d.extraStatus?.()) ?? []),
     ];
     return lines.filter(Boolean).join("\n");

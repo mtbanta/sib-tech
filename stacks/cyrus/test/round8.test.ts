@@ -157,7 +157,7 @@ test("40 positions and repeated refusals: total requests stay under Alpaca's lim
   const CLOSEOUT = Date.UTC(2026, 10, 2, 20, 55);
   const sim = new SimBroker(START);
   const events: string[] = [];
-  const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, log: (_l, e) => void events.push(e) }); // one clock, as in production
+  const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, log: (_l, e) => void events.push(e), midday: false }); // one clock, as in production; the mid-day cycle (on in production) would sell at 10:30 CT; it is tested in midday.test.ts
   sim.onRate = (remaining) => r.governor.observe({ path: "/v2/orders", status: 200, limit: 200, remaining, reset: null });
   await r.at("2026-11-01T22:10:00Z");
   r.ownerSays("loss 200\napprove", "2026-11-01T22:20:00Z");

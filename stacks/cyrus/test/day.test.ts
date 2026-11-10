@@ -7,7 +7,7 @@ import { order } from "./helpers.ts";
 import { D, rig, settle } from "./rig.ts";
 
 test("a full day: request, approval, screen, live list, entry with a stop, a refusal after stop, close-out, summary", async () => {
-  const r = rig();
+  const r = rig({ midday: false }); // the mid-day cycle (on in production) would sell at 10:30 CT; it is tested in midday.test.ts
   await r.at("2026-11-01T22:10:00Z"); // Sunday evening: the request for Monday goes out
   assert.equal(r.said("commands").length, 1);
   assert.ok(r.said("commands")[0]!.includes("Suggested limits for Monday 2026-11-02") && r.said("commands")[0]!.includes("Checklist"));

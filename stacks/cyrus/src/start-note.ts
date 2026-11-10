@@ -15,6 +15,10 @@ export interface StartNote {
   recentStarts: number;
   // True when there have been 3 or more starts in an hour.
   repeated: boolean;
+  // The mid-day cycle (Michael, 2026-11-09): true when this start is a new release (a deploy). False for the same release again, or
+  // when the history could not be read (then a start never counts as a deploy, so the mid-day pause stays on).
+  deploy: boolean;
+  release: string;
 }
 
 const HOUR_MS = 60 * 60_000;
@@ -38,6 +42,8 @@ export async function recordStart(store: Store, now: Date, release: string): Pro
     text: `Worker started at ${centralClock(now)} (paper): ${reason}. Starts in the last hour: ${recentStarts}.`,
     recentStarts,
     repeated: recentStarts >= 3,
+    deploy: history !== null && history.release !== release,
+    release,
   };
 }
 

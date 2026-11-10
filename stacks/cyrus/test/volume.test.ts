@@ -54,13 +54,13 @@ interface Run {
   stopRefusedAfter: number;
 }
 
-async function runDay(opts: { tradesPerMinute: number; source: () => Generator<Print>; liveList: string[]; stopAtMs?: number | null }): Promise<Run> {
+async function runDay(opts: { tradesPerMinute: number; source: () => Generator<Print>; liveList: string[]; stopAtMs?: number | null; midday?: boolean }): Promise<Run> {
   const mem = new MemoryStore();
   const store = new CachingStore(mem, () => nowMs, { controlTtlMs: 1_500, dayTtlMs: 2_000 });
   const sim = new SimBroker(OPEN_MS - 3600_000);
   let nowMs = OPEN_MS - 3600_000;
   const bot = new FakeBot();
-  const r = rig<SimBroker, CachingStore>({ broker: sim, store, bot, sleep: sim.sleep, liveList: opts.liveList });
+  const r = rig<SimBroker, CachingStore>({ broker: sim, store, bot, sleep: sim.sleep, liveList: opts.liveList, ...(opts.midday === false ? { midday: false } : {}) });
   const entryTimes: number[] = [];
   const realSubmit = sim.submitEntry.bind(sim);
   const pending = new Map<string, string>(); // symbol -> client order id waiting to fill
@@ -142,7 +142,7 @@ const busiestMinute = (times: number[]) => {
 };
 
 test("high-volume rehearsal: a cap of 30 orders a minute, a stop command in the middle, and the close-out, all at full volume", { timeout: 300_000 }, async () => {
-  const t = await runDay({ tradesPerMinute: 30, source: () => fixtureSource(6, 6), liveList: fx.symbols, stopAtMs: OPEN_MS + 2 * 3600_000 });
+  const t = await runDay({ tradesPerMinute: 30, source: () => fixtureSource(6, 6), liveList: fx.symbols, stopAtMs: OPEN_MS + 2 * 3600_000, midday: false }); // the mid-day cycle (on in production) would sell at 10:30 CT; it is tested in midday.test.ts
   const { sim, entryTimes, r, mem } = t;
   const entries = entryTimes.length;
   console.log(`rehearsal: ${entries} entries, busiest minute ${busiestMinute(entryTimes)}, ${sim.requests} requests, ${sim.rejected429} rate-limit refusals, ${sim.sellLog.length} sells`);

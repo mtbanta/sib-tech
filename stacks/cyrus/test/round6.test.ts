@@ -23,7 +23,7 @@ const never = <T>() => new Promise<T>(() => undefined);
 const AAA = { symbol: "AAA", qty: 20, marketValue: 1000, avgEntryPrice: 50, unrealizedPl: 0 };
 
 // A worker on a day Michael approved (loss stop 200 dollars), armed at 14:25 UTC (9:25 New York), holding 20 AAA that it entered.
-async function armedRig<S extends Store = MemoryStore>(opts: { store?: S; broker?: FakeBroker } = {}) {
+async function armedRig<S extends Store = MemoryStore>(opts: { store?: S; broker?: FakeBroker; midday?: boolean } = {}) {
   const r = rig<FakeBroker, S>(opts);
   await r.at("2026-11-01T22:10:00Z");
   r.ownerSays("loss 200\napprove", "2026-11-01T22:20:00Z");
@@ -56,7 +56,7 @@ async function lossSetup(store: Store) {
 
 // ---------- 1. the watchdog ----------
 test("watchdog: a pass stuck on the database near the close still closes out from the broker alone, and the heartbeat says fail", { timeout: 10_000 }, async () => {
-  const r = await armedRig();
+  const r = await armedRig({ midday: false }); // the mid-day cycle (on in production) would sell at 10:30 CT; it is tested in midday.test.ts
   await r.at("20:40:00");
   r.store.getDay = () => never(); // from 20:50 every read of the day hangs, as in the round 5 reproduction
   r.setNow("20:50:00");
