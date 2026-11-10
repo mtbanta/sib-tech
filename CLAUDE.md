@@ -37,7 +37,7 @@ On 2026-10-29 the owner decided to build two stacks and compare them in paper tr
 
 **Paper only, with no exceptions.** No live trading, no live keys, no live endpoints, anywhere. Anything the stack writes or posts is research input for a human decision, never an instruction to act.
 
-**Credentials.** The owner creates every account. The builder gets only the API keys a stack needs, kept in a git-ignored file (`stacks/cyrus/.env.local`) and as secrets on the hosting platform. Never in the repo, a commit message, a log, a chat message or Discord. The owner keeps passwords in Google Password Manager. A secret scan runs before every commit and refuses the commit if it finds a key.
+**Credentials.** The owner creates every account. The builder gets only the API keys a stack needs, kept in a git-ignored file (`stacks/cyrus/.env.local`) and as secrets on the hosting platform. Never in the repo, a commit message, a log, a chat message or Discord. The owner keeps passwords in Google Password Manager. A secret scan runs before every commit and refuses the commit if it finds a key. **Never skip, bypass or disable the secret scan for any commit, for any reason** (no `--no-verify`, no changed hooks path, no other workaround; Michael, 2026-11-09). If it blocks a commit, stop and tell Michael.
 
 **Review.** Pieces that touch money, and the end of every phase, are reviewed by the `build-reviewer` agent (`.claude/agents/build-reviewer.md`), at most three rounds under the standing rule below. If round 3 still has a blocking finding, or the reviewer returns STOP AND FLAG MICHAEL, stop and flag the owner.
 
