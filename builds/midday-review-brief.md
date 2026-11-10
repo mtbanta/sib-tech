@@ -1,6 +1,6 @@
 # Mid-day session review brief (for the mid-day cycle, once built)
 
-Written by the builder on 2026-11-09, evening, at Michael's request ("a mid-day review brief (same shape as the daily one, for 8:30 to 10:30)"), as part of `builds/c2-proposal-2026-11-09.md`, part D. **It applies once the mid-day cycle (release 2 of 2026-11-09) is deployed; on a day the cycle runs by hand (Michael's fallback), use the same sections with the manual steps.** The pass rule below is Michael's (2026-11-09, evening): the daily rule with "the mid-day close-out is flat by about 10:35" in place of the close-out.
+Written by the builder on 2026-11-09, evening, at Michael's request ("a mid-day review brief (same shape as the daily one, for 8:30 to 10:30)"), as part of `builds/c2-proposal-2026-11-09.md`, part D. **It applies from Tuesday 2026-11-10 (release 2 of 2026-11-09 deployed as Fly v15, 8:15 PM on 2026-11-09); on a day the cycle runs by hand (Michael's fallback), use the same sections with the manual steps.** The pass rule below is Michael's (2026-11-09, evening): the daily rule with "the mid-day close-out is flat by about 10:35" in place of the close-out.
 
 ---
 
@@ -14,6 +14,15 @@ How to read it from the stack's records (8:30 to the mid-day close-out's end):
 - Remaining against the reserve: `reserveThisMinute` (`lowestRemaining`, `lowestAboveReserve`) per minute; the lowest value, when, and what was spending then; the governor's "holding back for safety" refusals.
 - Safety sales: `sale_blocked`, `liquidation_result` (now logged for attempts that sold nothing), `unprotected_position` and `bare_remainder` with `listAgeMs`; from Alpaca's records, every position whose exits were gone, for how long, and when it was sold.
 - The mid-day close-out: the run log's `closeout_result` with path `midday`, the day record's `midday` phase, Alpaca's positions and open orders after it, and the Discord posts.
+
+**Expected by design in v15 (not faults; report them, do not fail the morning for them):**
+- From 10:30 until the mid-day close-out is flat, the missing-exit check stands aside (Michael, "Keep it"): positions whose exits the close-out cancelled are sold by the close-out alone. A position without exits during that time is not a delayed safety sale unless the close-out itself stalls.
+- The close-out's retries (after the first try) run every 20 seconds but only within 60 Alpaca requests a minute and never below the reserve of 80, at most 10 positions a retry, in turn (Michael's rulings). Retries 20 seconds apart or slower are expected.
+- While the close-out is selling, the stuck-entry 5 minute alert stands aside ("Mid-day owns it"); the close-out's own alerts are "the mid-day close-out is NOT FLAT yet" (once) and "still NOT FLAT after 5 minutes" (once).
+- The pause and hold live in the control keys `midday_pause:<date>` and `midday_hold:<date>`; the run log's `closeout_result` with `path: "midday"`; the day phase `midday` with `middayFlat: "yes"`.
+- If no deploy is planned that day, section 4 expects "resumed by `go`, or not at all".
+
+**Rate-limit answers from the first try at 10:30:** the first try is not limited to 60 a minute (an open question with Michael; it matches the 2:55 close-out). Score any rate-limit answer as Michael's rule reads ("no rate-limit errors": it does not hold) and name the cause (the first try, how many, when).
 
 1. **The morning, 8:30 to 10:30** (the load window 8:45 to 9:00 on its own if it was a load day): the highest accepted orders a minute and the per-minute table, filled entries a minute (separate note), requests a minute, remaining against the reserve, governor holds, rate-limit errors, refusals by reason, unfilled entries cancelled, decision-to-acceptance time, cost. Verdict: holds, does not hold, or inconclusive (say which criterion and why).
 2. **Safety work in the morning:** lost exits (from Alpaca's cancel of the exits to the sale sent and filled); remainder sales (from Alpaca's cancel of the stop to the sale sent, sale to fill); any blocked sale, with what the new logs say held the shares (Alpaca's `qty` and `qty_available`, the open orders counted); any position that went without exits for more than 10 seconds.
