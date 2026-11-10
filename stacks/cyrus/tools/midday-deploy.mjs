@@ -39,9 +39,11 @@ const scrub = (s) => secrets.reduce((t, k) => t.split(k).join("<redacted>"), Str
 const now = new Date();
 const date = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
 
-// 1. The checkout's commit.
+// 1. The checkout's commit, and that its files are exactly that commit (fly deploy ships the working files).
 const rev = spawnSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" });
 const checkedOut = (rev.stdout || "").trim();
+const st = spawnSync("git", ["-C", dir, "status", "--porcelain"], { encoding: "utf8" });
+const gitStatus = st.status === 0 ? st.stdout || "" : "git status failed";
 
 // 2. The day record and the pause, read only.
 const pg = createRequire("/Users/mtbanta/Projects/sib-tech/stacks/cyrus/package.json")("pg");
@@ -78,7 +80,7 @@ try {
   process.exit(2);
 }
 
-const refusals = deployRefusals({ now, day, pause, positions, openOrders, afterOneThirtyAllowed: flag("--after-130"), reviewedCommit: reviewed, checkedOutCommit: checkedOut });
+const refusals = deployRefusals({ now, day, pause, positions, openOrders, afterOneThirtyAllowed: flag("--after-130"), reviewedCommit: reviewed, checkedOutCommit: checkedOut, gitStatus });
 console.log(`date ${date}; checkout ${checkedOut.slice(0, 7)}; positions ${positions}; open orders ${openOrders}; pause ${pause?.on ? "on" : "off"}; mid-day flat ${day?.phases?.middayFlat === "yes" ? "yes" : "no"}`);
 if (refusals.length > 0) {
   console.log("refused:");

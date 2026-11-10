@@ -11,7 +11,7 @@ import type { Liquidator, Say } from "./sells.ts";
 import { CONTROL_COMMAND_CURSOR, CONTROL_STOP, setPhase, type DayRecord, type StopFlag, type Store } from "./store.ts";
 import { MAX_TRADES_PER_MINUTE, MAX_TRADES_PER_MINUTE_LOAD_DAY, describeLimits } from "./limits.ts";
 import { centralClock, dayWord, etDate, sessionPhase } from "./time.ts";
-import { goRefusal, middayFlat, middayTimes, readPause, updatePause } from "./midday.ts";
+import { blockedNext, goRefusal, middayFlat, middayTimes, readHold, readPause, setHold, updatePause } from "./midday.ts";
 
 export type CommandBot = Pick<DiscordBot, "post" | "latestCommandMessageId" | "commandMessagesAfter">;
 
@@ -37,7 +37,7 @@ const HELP = [
   "`flatten` stop, then sell everything now",
   "`limits` today's limits",
   "`approve` or `approve cap` accept the next trading day's limits; `position 1500`, `loss 150`, `trades 20`, `cap 2` change one (`trades` is orders a minute, 1 to 100, or up to 150 on a load day: send `load on` first, or in the same message). Until the `Armed` message 5 minutes before the open you can change any limit; after it only tighten (lower) a limit, until the evening post.",
-  "`go` end the mid-day pause now (once the mid-day close-out is flat; with or without a deploy). `hold` no automatic resume after a mid-day deploy today (`go` still resumes).",
+  "`go` end the mid-day pause now (the pause starts at 10:30 AM CT; `go` works once the mid-day close-out is flat, with or without a deploy). `hold` no automatic resume after a mid-day deploy today (the automatic resume ends at 1:30 PM CT, or at the last entry if earlier; `go` still resumes).",
   "`load on` / `load off` make the next trading day a load day or a normal day (see line 5 of the limits); `load on` until the morning screen, 45 minutes before the open; after `Armed` only `load off`.",
   "You can send several commands in one message, one per line; I answer each line in one short reply and then show the limits once.",
 ].join("\n");
@@ -269,7 +269,8 @@ export class CommandProcessor {
           return;
         }
         await updatePause(this.d.store, date, { on: false, resumedAt: now.toISOString(), resumedBy: "go" });
-        await this.say("Resumed: the mid-day pause is over. Same limits as this morning; the loss stop counts from the open.");
+        const lastEntryAt = middayTimes(day!)!.lastEntryAt;
+        await this.say(now >= lastEntryAt ? `The mid-day pause is over, but no entries are left today (last entry ${centralClock(lastEntryAt)}).` : "Resumed: the mid-day pause is over. Same limits as this morning; the loss stop counts from the open.");
         return;
       }
       case "hold": {
@@ -285,8 +286,12 @@ export class CommandProcessor {
           await this.say("Trading has already resumed today, so `hold` changes nothing. Send `stop` to halt new entries.");
           return;
         }
-        await updatePause(this.d.store, date, { hold: true });
-        await this.say("Hold: after a mid-day deploy today I stay paused. Send `go` to trade.");
+        await setHold(this.d.store, date, now.toISOString());
+        const times = middayTimes(day)!;
+        const blocked = blockedNext({ stop: await this.d.store.getControl<StopFlag>(CONTROL_STOP), now, lastEntryAt: times.lastEntryAt });
+        if (blocked) await this.say(`Hold noted. ${blocked}`);
+        else if (pause?.on) await this.say(`Hold: after a mid-day deploy today I stay paused. Send \`go\` to trade until ${centralClock(times.lastEntryAt)} (the last entry).`);
+        else await this.say("Hold: after today's mid-day deploy I will stay paused until you send `go`.");
         return;
       }
       case "load": {
@@ -436,7 +441,7 @@ export class CommandProcessor {
   private async middayStatus(day: DayRecord | null): Promise<string> {
     if (!day || !middayTimes(day)) return "";
     const pause = await readPause(this.d.store, day.tradeDate).catch(() => null);
-    const hold = pause?.hold ? "; `hold` is set" : "";
+    const hold = (await readHold(this.d.store, day.tradeDate).catch(() => false)) ? "; `hold` is set" : "";
     if (pause?.on) return `Mid-day cycle: entries paused since ${pause.since ? centralClock(new Date(pause.since)) : "?"} (${middayFlat(day) ? "flat" : "mid-day close-out still selling"})${hold}`;
     if (pause?.resumedAt) return `Mid-day cycle: resumed at ${centralClock(new Date(pause.resumedAt))} (${pause.resumedBy === "deploy" ? "after a deploy" : "by `go`"})`;
     return `Mid-day cycle: pause at ${centralClock(middayTimes(day)!.pauseAt)}${hold}`;

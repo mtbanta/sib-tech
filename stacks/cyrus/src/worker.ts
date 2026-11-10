@@ -31,10 +31,10 @@ import { ShadowLedger } from "./shadow-ledger.ts";
 import { earlyLookAllowed } from "./early-wake.ts";
 import type { Trade } from "./stream.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
-import { computeDay, formatSummary, type StopGapDay } from "./summary.ts";
+import { computeDay, formatSummary, isSentEntry, type StopGapDay } from "./summary.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
 import { PAPER_ONLY } from "./discord.ts";
-import { MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MIDDAY_RETRY_MS, middayFlat, middayTimes, readPause, startupAction, updatePause } from "./midday.ts";
+import { MIDDAY_NOT_FLAT_ALERT_AFTER_MS, MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MIDDAY_RETRY_MS, MIDDAY_RETRY_REQUESTS_PER_MINUTE, MiddayBudget, blockedNext, middayFlat, middayTimes, readHold, readPause, retryAllowed, startupAction, updatePause } from "./midday.ts";
 import type { PingKind } from "./heartbeat.ts";
 
 export type Channel = "commands" | "trading" | "alerts";
@@ -220,6 +220,16 @@ export class Worker {
   private middayStartupDone = false;
   private lastMiddayAttempt = 0;
   private middayAlertDate: string | null = null;
+  // Michael's ruling of 2026-11-09 on a mid-day close-out that ends not flat: the first try is not held back; each retry (one round,
+  // every 20 seconds at most) runs only within 60 Alpaca requests a minute and never below the reserve. Each try's real cost is
+  // charged afterwards. One alert when a try first ends not flat, and one more if still not flat 5 minutes later.
+  private readonly middayBudget = new MiddayBudget();
+  private middayAttemptDate: string | null = null;
+  private middayAttempts = 0;
+  private middayLastCost: number | null = null;
+  private middayNotFlatSince: number | null = null;
+  private middayLastRemaining: string[] = [];
+  private middayFiveMinAlertDate: string | null = null;
 
   constructor(deps: WorkerDeps) {
     this.d = deps;
@@ -877,9 +887,27 @@ export class Worker {
     // The mid-day cycle (Michael, 2026-11-09): at 10:30 AM Central the pause goes on and the mid-day close-out sells everything, retried
     // every 20 seconds until flat, never from the regular close-out time on (that close-out takes over). Its own phase, never `closeout`.
     const mt = this.d.middayCycle === false ? null : middayTimes(current);
-    if (inSession && mt && current.phases.armed && now >= mt.pauseAt && !current.phases[MIDDAY_PHASE] && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !this.closingOut && !this.inflight.has("carried") && now.getTime() - this.lastMiddayAttempt >= MIDDAY_RETRY_MS) {
-      this.lastMiddayAttempt = now.getTime();
-      this.background("midday", () => this.middayPhase(date, current, mt.pauseAt));
+    if (inSession && mt && current.phases.armed && now >= mt.pauseAt && !current.phases[MIDDAY_PHASE] && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !this.closingOut && !this.inflight.has("carried") && !this.inflight.has("midday") && now.getTime() - this.lastMiddayAttempt >= MIDDAY_RETRY_MS) {
+      if (this.middayAttemptDate !== date) {
+        this.middayAttemptDate = date;
+        this.middayAttempts = 0;
+        this.middayLastCost = null;
+        this.middayNotFlatSince = null;
+        this.middayLastRemaining = [];
+      }
+      const retry = this.middayAttempts > 0;
+      // A retry's cost is estimated from the last try's charged cost, at most the minute's whole budget.
+      const estimate = Math.min(MIDDAY_RETRY_REQUESTS_PER_MINUTE, this.middayLastCost ?? MIDDAY_RETRY_REQUESTS_PER_MINUTE);
+      if (!retry || retryAllowed({ room: this.middayBudget.room(now.getTime()), estimate, governorBudget: this.d.governor.budget(), reserve: this.d.governor.reserve() })) {
+        this.lastMiddayAttempt = now.getTime();
+        this.middayAttempts++;
+        this.background("midday", () => this.middayPhase(date, current, mt.pauseAt, retry));
+      }
+    }
+    // The second alert: still not flat 5 minutes after a try first ended not flat (once a day).
+    if (inSession && mt && this.middayAttemptDate === date && this.middayNotFlatSince !== null && !current.phases[MIDDAY_PHASE] && this.middayFiveMinAlertDate !== date && now.getTime() - this.middayNotFlatSince >= MIDDAY_NOT_FLAT_ALERT_AFTER_MS) {
+      this.middayFiveMinAlertDate = date;
+      void this.say("alerts", `**Michael: the mid-day close-out is still NOT FLAT after 5 minutes: ${this.middayLastRemaining.length > 0 ? this.middayLastRemaining.join(", ") : "the positions could not be listed"}.** Entries stay paused and I keep trying within 60 Alpaca requests a minute. You can also close them by hand in Alpaca. No deploy until the account is flat.`, { mentionOwner: true }).catch(() => undefined);
     }
     if (inSession && mt && current.phases.armed) {
       try {
@@ -1238,77 +1266,111 @@ export class Worker {
   // before sending), then the 2:55 close-out code with path "midday". Unlike the 2:55 wrapper it never writes the `closeout` phase or
   // the close-out's attempt date (the 2:55 close-out, the carried-position sale and the summary must not take it for the day's close),
   // never stops the price stream (a `go` without a deploy trades at once), never sets the not-flat flag, and leaves the borrowing cap
-  // alone (closeOut skips that for this path). The missing-exit check is off while it runs (protectNow).
-  private async middayPhase(date: string, day: DayRecord, pauseAt: Date): Promise<void> {
+  // alone (closeOut skips that for this path). The missing-exit check is off while it runs (protectNow). The first try is the full
+  // close-out; a retry is ONE round of it without the wait for its own sells (the next retry looks again), which is how retries stay
+  // inside 60 requests a minute. What Alpaca counted for each try is charged to the retries' budget afterwards.
+  private async middayPhase(date: string, day: DayRecord, pauseAt: Date, retry = false): Promise<void> {
     const pause = await readPause(this.d.store, date);
     if (pause?.resumedAt) return; // already resumed today
     if (!pause?.on) await updatePause(this.d.store, date, { on: true, since: this.d.now().toISOString(), reason: "mid-day cycle" });
-    const result = await closeOut(this.closeoutDeps(), date, { alert: false, path: "midday" });
+    const before = this.d.governor.stats().requestsLastMinute;
+    let result;
+    try {
+      result = await closeOut(this.closeoutDeps(), date, retry ? { alert: false, path: "midday", maxRounds: 1, waitForOwnSells: false } : { alert: false, path: "midday" });
+    } finally {
+      const cost = Math.max(0, this.d.governor.stats().requestsLastMinute - before);
+      this.middayBudget.spend(this.d.now().getTime(), cost);
+      this.middayLastCost = cost;
+    }
     if (result.flat) {
       await setPhase(this.d.store, date, MIDDAY_PHASE, this.d.now().toISOString(), { middayFlat: "yes" });
       await this.say("trading", "Mid-day close-out done: the account is flat. Paused for the mid-day cycle.");
       await this.say("commands", await this.middayMorningLine(date, day, pauseAt));
       return;
     }
+    this.middayLastRemaining = result.remaining;
+    if (this.middayNotFlatSince === null) this.middayNotFlatSince = this.d.now().getTime();
     if (this.middayAlertDate !== date) {
       this.middayAlertDate = date;
-      await this.say("alerts", `**Michael: the mid-day close-out is NOT FLAT yet: ${result.remaining.join(", ")}.** New entries stay paused and I keep trying every 20 seconds. No deploy until the account is flat.`, { mentionOwner: true });
+      await this.say("alerts", `**Michael: the mid-day close-out is NOT FLAT yet: ${result.remaining.length > 0 ? result.remaining.join(", ") : "the positions could not be listed"}.** New entries stay paused. I keep trying every 20 seconds within 60 Alpaca requests a minute. No deploy until the account is flat.`, { mentionOwner: true });
     }
+  }
+
+  // What to tell Michael comes next while paused and flat: what really blocks trading (the stop flag, the daily loss stop, no entries
+  // left today), or else what `go` does.
+  private async middayBlocked(date: string, now: Date, lastEntryAt: Date): Promise<{ blocked: string | null; stop: StopFlag | null; goLine: string }> {
+    const stop = await this.d.store.getControl<StopFlag>(CONTROL_STOP).catch(() => null);
+    return { blocked: blockedNext({ stop, now, lastEntryAt }), stop, goLine: `Send \`go\` to trade until ${centralClock(lastEntryAt)} (the last entry).` };
   }
 
   // The morning in one line for `commands`, and what happens next.
   private async middayMorningLine(date: string, day: DayRecord, pauseAt: Date): Promise<string> {
+    const mt = middayTimes(day)!;
+    const now = this.d.now();
     const stored = await this.d.store.listOrders(date).catch(() => []);
-    const sent = stored.filter((o) => o.status !== "failed").length;
+    const sent = stored.filter(isSentEntry).length;
     const filled = stored.filter((o) => o.status === "filled").length;
     const account = await this.d.broker.getAccount().catch(() => null);
     const start = day.dayStartEquity;
     const plText = account && start ? `P and L ${account.equity - start >= 0 ? "+" : ""}${(account.equity - start).toFixed(2)} dollars (equity ${start.toFixed(2)} to ${account.equity.toFixed(2)})` : "P and L not known (the account could not be read)";
-    const pause = await readPause(this.d.store, date).catch(() => null);
-    const next = pause?.hold
-      ? "`hold` is set: after a deploy I stay paused. Send `go` to trade."
-      : "Next: after a deploy before 1:30 PM CT I resume on my own under today's limits, unless you send `hold`. Without a deploy, send `go` to resume; from 1:30 PM CT I stay paused unless you send `go`.";
-    return `Morning (open to ${centralClock(pauseAt)} CT): ${sent} entries sent (${filled} filled); ${plText}; rate-limit answers from Alpaca: ${this.d.governor.stats().rateLimitAnswers}. ${next}`;
+    const hold = await readHold(this.d.store, date).catch(() => false);
+    const { blocked } = await this.middayBlocked(date, now, mt.lastEntryAt);
+    const until = centralClock(mt.resumeUntil);
+    const last = centralClock(mt.lastEntryAt);
+    const next =
+      blocked ??
+      (hold
+        ? `\`hold\` is set: after a deploy I stay paused. Send \`go\` to trade until ${last} (the last entry).`
+        : `Next: after a deploy before ${until} I resume on my own under today's limits, unless you send \`hold\`. Without a deploy, send \`go\` to resume; from ${until} I stay paused unless you send \`go\` (last entry ${last}).`);
+    return `Morning (open to ${centralClock(pauseAt)}): ${sent} entries sent (${filled} filled); ${plText}; rate-limit answers from Alpaca: ${this.d.governor.stats().rateLimitAnswers}. ${next}`;
   }
 
   // After the mid-day close-out is flat: the start-up decision (once per start, after this start's first read of commands, so a
   // `hold` sent while the worker was down counts), and the 1:30 PM note.
-  private async middayFollowUps(date: string, day: DayRecord, mt: { pauseAt: Date; resumeUntil: Date }, now: Date): Promise<void> {
+  private async middayFollowUps(date: string, day: DayRecord, mt: { pauseAt: Date; resumeUntil: Date; lastEntryAt: Date }, now: Date): Promise<void> {
     // Also only after the loss stop's first check since this start (with today's equity history) has worked, so a resume can never
     // come before a loss stop that the restart has not seen yet.
     if (!this.middayStartupDone && this.lastCommandReadOk !== null && this.lossRederivedDate === date) {
       this.middayStartupDone = true;
       const pause = await readPause(this.d.store, date);
-      const stop = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
+      const hold = await readHold(this.d.store, date);
+      const { blocked, stop, goLine } = await this.middayBlocked(date, now, mt.lastEntryAt);
       const deploy = this.startInfo?.deploy === true;
       const release = this.startInfo?.release ?? "unknown";
-      const action = startupAction({ pause, flat: middayFlat(day), deploy, now, resumeUntil: mt.resumeUntil, stop });
+      // Only a start after the pause began is a mid-day start (a start before it, such as an evening deploy, is not).
+      const startedAfterPause = Boolean(pause?.since) && this.startedAtMs !== null && this.startedAtMs > Date.parse(pause!.since!);
+      const action = startupAction({ pause, hold, flat: middayFlat(day), deploy, now, resumeUntil: mt.resumeUntil, stop, startedAfterPause });
       if (action !== "none") this.d.log?.("info", "midday_startup", { action, deploy, release });
+      const late = now >= mt.lastEntryAt;
       if (action === "resume") {
         await updatePause(this.d.store, date, { on: false, resumedAt: now.toISOString(), resumedBy: "deploy", deployedAt: now.toISOString() });
         await this.say("commands", `Resumed after release ${release} (deployed while flat): same limits as this morning; the loss stop counts from the open.`);
       } else if (action === "stay-plain-restart") {
-        await this.say("alerts", "**Michael: I restarted during the mid-day pause without a new release, so I stay paused.** Send `go` to trade.", { mentionOwner: true });
+        await this.say("alerts", `**Michael: I restarted during the mid-day pause without a new release, so I stay paused.** ${blocked ?? goLine}`, { mentionOwner: !late });
       } else if (action === "stay-hold") {
         await updatePause(this.d.store, date, { deployedAt: now.toISOString() });
-        await this.say("commands", `Release ${release} started while flat and paused. \`hold\` is set, so I stay paused. Send \`go\` to trade.`);
+        await this.say("commands", `Release ${release} started while flat and paused. \`hold\` is set, so I stay paused. ${blocked ?? goLine}`);
       } else if (action === "stay-stop") {
         await updatePause(this.d.store, date, { deployedAt: now.toISOString() });
-        await this.say("commands", `Release ${release} started while flat and paused, but the ${stop?.reason.startsWith("daily loss stop") ? "daily loss stop is in force" : "stop flag is on"}, so I stay paused.`);
+        await this.say("commands", `Release ${release} started while flat and paused, but the ${stop?.reason.startsWith("daily loss stop") ? "daily loss stop is in force" : "stop flag is on"}, so I stay paused. ${blocked ?? goLine}`);
       } else if (action === "stay-late") {
         await updatePause(this.d.store, date, { deployedAt: now.toISOString() });
-        await this.say("commands", `Release ${release} started while flat and paused, but it is 1:30 PM CT or later, so I stay paused. Send \`go\` to trade until 2:00 PM CT (the last entry).`);
+        await this.say("commands", `Release ${release} started while flat and paused, but it is ${centralClock(mt.resumeUntil)} or later, so I stay paused. ${blocked ?? goLine}`);
       }
     }
-    if (now >= mt.resumeUntil && middayFlat(day) && !day.phases[MIDDAY_NOTE_PHASE]) {
+    // The 1:30 note: only after this start's decision (so it can never contradict it), and only while there is still time to trade.
+    if (this.middayStartupDone && now >= mt.resumeUntil && middayFlat(day) && !day.phases[MIDDAY_NOTE_PHASE]) {
       const pause = await readPause(this.d.store, date);
-      if (pause?.on && !pause.deployedAt) await this.say("commands", "1:30 PM: nothing was deployed, so I stay paused. Send `go` to trade until 2:00 PM (the last entry), or nothing.");
+      if (pause?.on && !pause.deployedAt && now < mt.lastEntryAt) {
+        const { blocked } = await this.middayBlocked(date, now, mt.lastEntryAt);
+        await this.say("commands", `${centralClock(mt.resumeUntil)}: nothing was deployed, so I stay paused. ${blocked ?? `Send \`go\` to trade until ${centralClock(mt.lastEntryAt)} (the last entry), or nothing.`}`);
+      }
       await setPhase(this.d.store, date, MIDDAY_NOTE_PHASE, now.toISOString());
     }
   }
 
   // The summary's mid-day lines: the cycle (paused, flat, resumed and how, or stayed paused) and, if this process started after the
-  // open, that the request and live-update figures cover the afternoon only.
+  // open, which figures cover only the time since then.
   private async middaySummaryLines(date: string, day: DayRecord): Promise<string[]> {
     const lines: string[] = [];
     const mt = middayTimes(day);
@@ -1319,7 +1381,8 @@ export class Worker {
       lines.push(`Mid-day cycle: paused at ${centralClock(new Date(pause.since))}, ${flatIso ? `flat at ${centralClock(new Date(flatIso))}` : "**never flat at mid-day**"}, ${resumed}.`);
     }
     if (this.startedAtMs !== null && day.openAt && this.startedAtMs > day.openAt.getTime()) {
-      lines.push(`Restarted at ${centralClock(new Date(this.startedAtMs))}; request and live-update figures cover the afternoon only.`);
+      const t = centralClock(new Date(this.startedAtMs));
+      lines.push(`Restarted at ${t}; the request figures, the live-update figures and the entry-expiry counts cover only the time since ${t}.`);
     }
     return lines;
   }

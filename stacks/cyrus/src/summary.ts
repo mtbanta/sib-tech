@@ -192,7 +192,7 @@ export function busiestMinute(rows: OrderRecord[]): number {
 // the loss stop) is counted, without profit, as closed later.
 export function partLines(label: string, rows: OrderRecord[], alpacaOrders: Order[]): string[] {
   const byId = new Map(alpacaOrders.map((o) => [o.clientOrderId, o]));
-  const sent = rows.filter((r) => r.status !== "failed" && !(r.status === "canceled" && !r.alpacaOrderId));
+  const sent = rows.filter(isSentEntry);
   let tp = 0;
   let stop = 0;
   let other = 0;
@@ -233,6 +233,10 @@ export function windowLimitCounts(rows: OrderRecord[], alpacaOrders: Order[]): {
   return { sent, filled, cancelledUnfilled };
 }
 
+// An entry that reached Alpaca: not refused by Alpaca, and not one cancelled before it was sent. The summary's "entry orders sent"
+// and the mid-day morning line count the same way.
+export const isSentEntry = (r: OrderRecord): boolean => r.status !== "failed" && !(r.status === "canceled" && !r.alpacaOrderId);
+
 export function formatSummary(i: SummaryInput): string {
   const head = `**Daily summary for ${i.day.tradeDate}**`;
   if (!i.day.isTradingDay) return `${head}\nNot a trading day.`;
@@ -240,7 +244,7 @@ export function formatSummary(i: SummaryInput): string {
     return `${head}\nNo trading today: the limits were not all decided before the open. Equity ${i.account.equity.toFixed(2)}.`;
   }
   const result = computeDay(i.alpacaOrders);
-  const sent = i.stored.filter((r) => r.status !== "failed" && !(r.status === "canceled" && !r.alpacaOrderId));
+  const sent = i.stored.filter(isSentEntry);
   const refusedByAlpaca = i.stored.filter((r) => r.status === "failed").length;
   const change = i.day.dayStartEquity === null ? null : i.account.equity - i.day.dayStartEquity;
   const reasons = new Map<string, number>();

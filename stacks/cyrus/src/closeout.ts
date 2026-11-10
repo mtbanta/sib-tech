@@ -43,6 +43,9 @@ export interface CloseoutOptions {
   // 2 minutes before the close instead of reporting NOT FLAT. On for the close-out, its retry and the emergency close-out; the
   // carried-position sale keeps its old behaviour.
   waitForOwnSells?: boolean;
+  // Rounds of the liquidator (its default is 4). Only the mid-day close-out's retries use it: one round each, the way the loss stop's
+  // first sale is one round, so a retry is a bounded burst that fits inside 60 requests a minute (Michael's ruling of 2026-11-09).
+  maxRounds?: number;
 }
 
 // "midday": the mid-day cycle (Michael, 2026-11-09). It sells the same way, but leaves the borrowing cap alone (the account stays
@@ -91,7 +94,7 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
 
   const path: CloseoutPath = options.path ?? "close-out";
   const waitForOwn = options.waitForOwnSells ?? path !== "carried";
-  const res = await d.liquidator.flatten({ reason: path === "midday" ? "mid-day close-out" : "close-out", tradeDate, ...(waitForOwn ? { returnWhenOnlyOwnSells: true } : {}) });
+  const res = await d.liquidator.flatten({ reason: path === "midday" ? "mid-day close-out" : "close-out", tradeDate, ...(waitForOwn ? { returnWhenOnlyOwnSells: true } : {}), ...(options.maxRounds !== undefined ? { maxRounds: options.maxRounds } : {}) });
   let flat = res.flat;
   let remaining = res.remaining;
   let waitedMs = 0;

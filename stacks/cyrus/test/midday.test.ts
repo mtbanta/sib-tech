@@ -19,7 +19,7 @@ import { parseCommand } from "../src/morning.ts";
 import { recordStart } from "../src/start-note.ts";
 import { FakeBroker, FakeBot } from "./helpers.ts";
 import type { Signal } from "../src/strategy.ts";
-import { MIDDAY_NOTE_PHASE, MIDDAY_PHASE, deployRefusals, emptyPause, type DeployFacts, goRefusal, middayKey, middayTimes, readPause, startupAction, updatePause, type MiddayPause } from "../src/midday.ts";
+import { MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MiddayBudget, blockedNext, deployRefusals, emptyPause, type DeployFacts, goRefusal, middayHoldKey, middayKey, middayTimes, readHold, readPause, retryAllowed, startupAction, updatePause, type MiddayPause } from "../src/midday.ts";
 
 const until = async (cond: () => boolean | Promise<boolean>, n = 400) => {
   for (let i = 0; i < n && !(await cond()); i++) await settle();
@@ -91,16 +91,18 @@ test("a full day: at 10:30 CT the pause goes on and the mid-day close-out sells 
   assert.ok(r.said("trading").includes("Mid-day close-out done: the account is flat. Paused for the mid-day cycle."));
   assert.ok(!r.said("trading").some((t) => t.startsWith("Close-out done")), "not the 2:55 message");
   const morning = r.said("commands").find((t) => t.startsWith("Morning (open to"))!;
+  assert.ok(morning.startsWith("Morning (open to 10:30 AM CT): "), morning);
+  assert.ok(morning.includes("before 1:30 PM CT") && morning.includes("(last entry 2:00 PM CT)"), morning);
   assert.ok(morning && morning.includes("2 entries sent (2 filled)") && morning.includes("rate-limit answers from Alpaca: 0") && morning.includes("unless you send `hold`"), morning);
   const co = r.store.events.find((e) => e.event === "closeout_result")!;
   assert.equal(co.data!.path, "midday", "recorded as the mid-day close-out");
   assert.equal(co.data!.flat, true);
   // the 1:30 PM note, once
   await r.at("19:29:55");
-  assert.ok(!r.said("commands").some((t) => t.startsWith("1:30 PM")));
+  assert.ok(!r.said("commands").some((t) => t.startsWith("1:30 PM CT")));
   await r.at("19:30:00");
   await r.at("19:30:05");
-  assert.equal(r.said("commands").filter((t) => t.startsWith("1:30 PM: nothing was deployed, so I stay paused.")).length, 1);
+  assert.equal(r.said("commands").filter((t) => t === "1:30 PM CT: nothing was deployed, so I stay paused. Send `go` to trade until 2:00 PM CT (the last entry), or nothing.").length, 1);
   assert.ok((await r.store.getDay(D))!.phases[MIDDAY_NOTE_PHASE]);
   // the 2:55 close-out and the summary
   await r.at("20:55:00");
@@ -115,7 +117,7 @@ test("a full day: at 10:30 CT the pause goes on and the mid-day close-out sells 
   assert.ok(!summary.includes("Restarted at"), "no restart today");
 });
 
-test("the mid-day close-out keeps trying every 20 seconds until flat, with one alert to Michael, and entries stay paused", async () => {
+test("the mid-day close-out keeps trying until flat (a retry is one round: it sends the sale, a later retry sees it filled), with one alert to Michael, and entries stay paused", async () => {
   const w = await armedDay();
   const { sim, r } = w;
   sim.advanceTo(z("16:00:00").getTime());
@@ -129,20 +131,48 @@ test("the mid-day close-out keeps trying every 20 seconds until flat, with one a
   assert.equal((await readPause(r.store, D))!.on, true);
   assert.equal((await r.store.getDay(D))!.phases[MIDDAY_PHASE], undefined, "not flat: no phase yet");
   sim.refuseSellsTimes = 0;
-  await r.at("16:31:10");
-  await until(async () => Boolean((await r.store.getDay(D))!.phases[MIDDAY_PHASE]));
+  for (let k = 0; k < 20 && !(await r.store.getDay(D))!.phases[MIDDAY_PHASE]; k++) {
+    await r.at(new Date(Math.max(z("16:31:10").getTime(), sim.simMs) + 20_000 * k).toISOString());
+    await until(() => !r.worker["inflight"].has("midday"));
+  }
+  assert.ok((await r.store.getDay(D))!.phases[MIDDAY_PHASE], "flat");
   assert.equal((await sim.listPositions()).length, 0);
   assert.equal(r.said("alerts").filter((t) => t.includes("mid-day close-out is NOT FLAT yet")).length, 1, "still one alert");
 });
 
-test("an early-close day has no mid-day cycle", async () => {
+test("a half day (close 12:00 PM CT) runs the cycle at 10:30; its texts use the real last entry (11:00 AM CT), the automatic resume ends then, and no 1:30 note", async () => {
+  assert.deepEqual(middayTimes({ isTradingDay: true, openAt: z("14:30:00"), closeAt: z("18:00:00") }), { pauseAt: z("16:30:00"), resumeUntil: z("17:00:00"), lastEntryAt: z("17:00:00") });
+  assert.deepEqual(middayTimes({ isTradingDay: true, openAt: z("14:30:00"), closeAt: z("21:00:00") }), { pauseAt: z("16:30:00"), resumeUntil: z("19:30:00"), lastEntryAt: z("20:00:00") });
+  assert.equal(middayTimes({ isTradingDay: true, openAt: z("14:30:00"), closeAt: z("16:35:00") }), null, "10:30 already inside the close-out's last minutes");
   const w = await armedDay({ early: true });
-  await w.r.at("16:30:00");
-  await w.r.at("16:31:00");
-  assert.equal(await readPause(w.r.store, D), null);
-  assert.equal((await w.r.store.getDay(D))!.phases[MIDDAY_PHASE], undefined);
-  assert.equal(middayTimes({ isTradingDay: true, openAt: z("14:30:00"), closeAt: z("18:00:00") }), null);
-  assert.deepEqual(middayTimes({ isTradingDay: true, openAt: z("14:30:00"), closeAt: z("21:00:00") }), { pauseAt: z("16:30:00"), resumeUntil: z("19:30:00") });
+  w.sim.advanceTo(z("16:00:00").getTime());
+  await hold(w.sim, w.r.store, "AAA", 10, 50);
+  await middayFlat(w);
+  assert.equal((await w.sim.listPositions()).length, 0, "the cycle runs at 10:30 on a half day");
+  const morning = w.r.said("commands").find((t) => t.startsWith("Morning (open to"))!;
+  assert.ok(morning.includes("before 11:00 AM CT") && morning.includes("(last entry 11:00 AM CT)") && !morning.includes("2:00 PM") && !morning.includes("1:30 PM"), morning);
+  // a plain restart after the last entry: the alert says no entries are left, without mentioning Michael
+  const r2 = restart(w, { deploy: false, release: "SAMEREL9" });
+  await r2.at("17:05:00");
+  await r2.at("17:05:05");
+  const alert = w.bot.posts.find((m) => m.channel === "alerts" && m.text.includes("I restarted during the mid-day pause"))!;
+  assert.ok(alert.text.includes("No entries are left today (last entry 11:00 AM CT).") && !alert.text.includes("Send `go`"), alert.text);
+  assert.equal(alert.mention, false, "no mention once no entries are left");
+  await r2.at("17:06:00");
+  assert.ok(!w.r.said("commands").some((t) => t.includes("nothing was deployed")), "no 1:30 note when there is no time left to trade");
+  w.r.ownerSays("go", "17:06:10");
+  await r2.at("17:06:15");
+  assert.ok(w.r.said("commands").some((t) => t === "The mid-day pause is over, but no entries are left today (last entry 11:00 AM CT)."));
+});
+
+test("a half day: a deploy after the last entry stays paused and says no entries are left", async () => {
+  const w = await armedDay({ early: true });
+  await middayFlat(w);
+  const r2 = restart(w, { deploy: true, release: "NEWREL10" });
+  await r2.at("17:05:00");
+  await r2.at("17:05:05");
+  assert.equal((await readPause(w.r.store, D))!.on, true);
+  assert.ok(r2.said("commands").some((t) => t.includes("but it is 11:00 AM CT or later, so I stay paused. No entries are left today (last entry 11:00 AM CT).")));
 });
 
 // ---------------- restarts ----------------
@@ -170,7 +200,7 @@ test("a deploy while flat and paused, before 1:30: nothing is sold at start-up, 
   await until(async () => Boolean((await w.r.store.getDay(D))!.phases.summary));
   const summary = r2.said("trading").find((t) => t.includes("Daily summary"))!;
   assert.ok(summary.includes("resumed at") && summary.includes("(after a deploy)"), summary.slice(-500));
-  assert.ok(summary.includes("Restarted at") && summary.includes("request and live-update figures cover the afternoon only"), summary.slice(-500));
+  assert.ok(summary.includes("Restarted at") && summary.includes("the request figures, the live-update figures and the entry-expiry counts cover only the time since"), summary.slice(-500));
 });
 
 test("a plain restart while flat and paused stays paused and says so", async () => {
@@ -196,7 +226,7 @@ test("a deploy after 1:30, or with `hold` set, stays paused; `hold` sent while t
   await r2.at("19:31:05");
   assert.equal((await readPause(late.r.store, D))!.on, true);
   assert.ok(r2.said("commands").some((t) => t.includes("it is 1:30 PM CT or later, so I stay paused")));
-  assert.ok(!r2.said("commands").some((t) => t.startsWith("1:30 PM: nothing was deployed")), "a deploy happened: no 'nothing was deployed' note");
+  assert.ok(!r2.said("commands").some((t) => t.includes("nothing was deployed")), "a deploy happened: no 'nothing was deployed' note");
 
   const held = await armedDay();
   await middayFlat(held);
@@ -205,7 +235,7 @@ test("a deploy after 1:30, or with `hold` set, stays paused; `hold` sent while t
   await r3.at("16:40:00");
   await r3.at("16:40:05");
   assert.equal((await readPause(held.r.store, D))!.on, true);
-  assert.equal((await readPause(held.r.store, D))!.hold, true);
+  assert.equal(await readHold(held.r.store, D), true);
   assert.ok(r3.said("commands").some((t) => t.includes("`hold` is set, so I stay paused")));
 });
 
@@ -296,10 +326,27 @@ test("`go` refusals as a rule: no cycle today, not flat yet, the daily loss stop
   assert.equal(goRefusal({ hasCycle: true, pause: on, flat: true, stop: { on: false, reason: "" } }), null);
   const now = z("17:00:00");
   const until = z("19:30:00");
-  assert.equal(startupAction({ pause: on, flat: true, deploy: true, now, resumeUntil: until }), "resume");
-  assert.equal(startupAction({ pause: on, flat: false, deploy: true, now, resumeUntil: until }), "not-flat-yet");
-  assert.equal(startupAction({ pause: null, flat: true, deploy: true, now, resumeUntil: until }), "none");
-  assert.equal(startupAction({ pause: on, flat: true, deploy: true, now: until, resumeUntil: until }), "stay-late");
+  const base = { pause: on, hold: false, flat: true, deploy: true, now, resumeUntil: until, stop: null, startedAfterPause: true };
+  assert.equal(startupAction(base), "resume");
+  assert.equal(startupAction({ ...base, flat: false }), "not-flat-yet");
+  assert.equal(startupAction({ ...base, pause: null }), "none");
+  assert.equal(startupAction({ ...base, now: until }), "stay-late");
+  assert.equal(startupAction({ ...base, hold: true }), "stay-hold");
+  assert.equal(startupAction({ ...base, stop: { on: true } }), "stay-stop");
+  assert.equal(startupAction({ ...base, deploy: false }), "stay-plain-restart");
+  assert.equal(startupAction({ ...base, startedAfterPause: false }), "none", "a start before the pause (an evening deploy) is not a mid-day start");
+  const last = z("20:00:00");
+  assert.equal(blockedNext({ stop: { on: true, reason: "daily loss stop reached" }, now, lastEntryAt: last }), "The daily loss stop is in force, so trading stays paused for the rest of the day unless you send `resume` and then `go`.");
+  assert.equal(blockedNext({ stop: { on: true, reason: "owner command (stop)" }, now, lastEntryAt: last }), "The stop flag is on: send `resume`, then `go`.");
+  assert.equal(blockedNext({ stop: null, now: last, lastEntryAt: last }), "No entries are left today (last entry 2:00 PM CT).");
+  assert.equal(blockedNext({ stop: null, now, lastEntryAt: last }), null);
+  assert.equal(retryAllowed({ room: 60, estimate: 50, governorBudget: 140, reserve: 80 }), true);
+  assert.equal(retryAllowed({ room: 40, estimate: 50, governorBudget: 200, reserve: 80 }), false, "the minute's budget");
+  assert.equal(retryAllowed({ room: 60, estimate: 50, governorBudget: 129, reserve: 80 }), false, "never below the reserve");
+  const b = new MiddayBudget();
+  b.spend(0, 45);
+  assert.equal(b.room(59_999), 15);
+  assert.equal(b.room(60_000), 60, "a minute later the spend has expired");
 });
 
 // ---------------- the gate ----------------
@@ -372,22 +419,26 @@ test("the start note tells a deploy (a new release) from a plain restart", async
 
 test("the deploy check refuses unless flat, paused, no positions or open orders, in the window, and on the reviewed commit", () => {
   const day = { isTradingDay: true, openAt: z("14:30:00"), closeAt: z("21:00:00"), phases: { [MIDDAY_PHASE]: z("16:31:00").toISOString(), middayFlat: "yes" } };
-  const ok: DeployFacts = { now: z("16:40:00"), day, pause: { ...emptyPause(), on: true }, positions: 0, openOrders: 0, afterOneThirtyAllowed: false, reviewedCommit: "abc1234", checkedOutCommit: "abc1234def5678" };
+  const ok: DeployFacts = { now: z("16:40:00"), day, pause: { ...emptyPause(), on: true }, positions: 0, openOrders: 0, afterOneThirtyAllowed: false, reviewedCommit: "abc1234", checkedOutCommit: "abc1234def5678", gitStatus: "" };
   assert.deepEqual(deployRefusals(ok), []);
   const has = (o: Partial<DeployFacts>, text: string) => assert.ok(deployRefusals({ ...ok, ...o }).some((r) => r.includes(text)), `${text}: ${deployRefusals({ ...ok, ...o }).join("; ")}`);
   has({ day: { ...day, phases: {} } }, "has not finished flat");
   has({ pause: { ...emptyPause(), on: false } }, "pause is not on");
   has({ positions: 1 }, "1 position");
   has({ openOrders: 2 }, "2 open order");
-  has({ now: z("19:30:00") }, "1:30 PM Central or later");
+  has({ now: z("19:30:00") }, "1:30 PM CT or later");
   assert.deepEqual(deployRefusals({ ...ok, now: z("19:30:00"), afterOneThirtyAllowed: true }), [], "after 1:30 only with the flag");
   has({ now: z("16:20:00") }, "before the mid-day close-out");
   has({ now: z("21:10:00"), afterOneThirtyAllowed: true }, "market is closed");
   has({ reviewedCommit: null }, "--reviewed");
   has({ reviewedCommit: "fff9999" }, "not the reviewed commit");
   has({ reviewedCommit: "abc" }, "not the reviewed commit");
-  has({ day: { ...day, closeAt: z("18:00:00") } }, "no mid-day cycle");
+  has({ day: { ...day, closeAt: z("16:35:00") } }, "no mid-day cycle");
+  has({ day: { ...day, closeAt: z("18:00:00") }, now: z("17:00:00") }, "11:00 AM CT or later");
   has({ day: null }, "no mid-day cycle");
+  has({ gitStatus: " M src/worker.ts\n" }, "git status is not clean");
+  has({ gitStatus: "?? stray.txt\n" }, "git status is not clean");
+  has({ gitStatus: "git status failed" }, "git status is not clean");
 });
 
 test("the mid-day close-out's retries are 20 seconds apart, and none starts once the regular close-out time has come", async () => {
@@ -510,4 +561,56 @@ test("closeOut on the mid-day path never touches the cap or posts 'Close-out don
   assert.deepEqual(res, { flat: true, remaining: [] });
   assert.equal(sim.config.maxMarginMultiplier, 2);
   assert.ok(!said.some((t) => t.includes("Close-out done")));
+});
+
+// ---------------- review round 1 ----------------
+
+test("the loss stop on: the morning line and the 1:30 note say trading stays paused for the rest of the day unless `resume` and then `go`", async () => {
+  const w = await armedDay();
+  const { r } = w;
+  await r.store.setControl(CONTROL_STOP, { on: true, at: z("16:00:00").toISOString(), reason: "daily loss stop reached (test)" });
+  await middayFlat(w);
+  const text = "The daily loss stop is in force, so trading stays paused for the rest of the day unless you send `resume` and then `go`.";
+  const morning = r.said("commands").find((t) => t.startsWith("Morning (open to 10:30 AM CT):"))!;
+  assert.ok(morning.endsWith(text) && !morning.includes("unless you send `hold`"), morning);
+  await r.at("19:30:00");
+  await r.at("19:30:05");
+  assert.ok(r.said("commands").includes(`1:30 PM CT: nothing was deployed, so I stay paused. ${text}`), r.said("commands").slice(-2).join(" | "));
+});
+
+test("`hold` lives in its own key: sent before 10:30 it survives the pause's own writes, and its reply does not offer `go` to trade", async () => {
+  const w = await armedDay();
+  const { r } = w;
+  w.r.ownerSays("hold", "16:00:00");
+  await r.at("16:00:05");
+  assert.ok(r.said("commands").includes("Hold: after today's mid-day deploy I will stay paused until you send `go`."));
+  assert.ok((await r.store.getControl(middayHoldKey(D))) !== null);
+  await middayFlat(w);
+  assert.equal(await readHold(r.store, D), true, "the pause's write did not overwrite it");
+  assert.ok(r.said("commands").find((t) => t.startsWith("Morning (open to"))!.includes("`hold` is set"));
+  w.r.ownerSays("status", "16:36:00");
+  await r.at("16:36:05");
+  assert.ok(r.said("commands").some((t) => t.includes("Mid-day cycle: entries paused since 10:30 AM CT (flat); `hold` is set")));
+});
+
+test("a process that started before the pause (an earlier deploy) does not count as a mid-day deploy, even if its start-up decision comes late", async () => {
+  const w = await armedDay();
+  const { r } = w;
+  // this worker started on the evening before, as a new release; its start-up decision is held back until after the pause because
+  // its commands cannot be read
+  r.worker.setStartInfo({ deploy: true, release: "EVENING1" });
+  r.worker["middayStartupDone"] = false;
+  const bot = w.bot as any;
+  const orig = bot.commandMessagesAfter.bind(bot);
+  const origLatest = bot.latestCommandMessageId.bind(bot);
+  bot.commandMessagesAfter = async () => { throw new Error("Discord down"); };
+  bot.latestCommandMessageId = async () => { throw new Error("Discord down"); };
+  r.worker["lastCommandReadOk"] = null;
+  await middayFlat(w);
+  bot.commandMessagesAfter = orig;
+  bot.latestCommandMessageId = origLatest;
+  await r.at("16:40:00");
+  await r.at("16:40:05");
+  assert.equal((await readPause(r.store, D))!.on, true, "no automatic resume");
+  assert.ok(!r.said("commands").some((t) => t.startsWith("Resumed after release")));
 });
