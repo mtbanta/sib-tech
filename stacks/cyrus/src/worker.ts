@@ -34,7 +34,7 @@ import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatS
 import { computeDay, formatSummary, isSentEntry, type StopGapDay } from "./summary.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
 import { PAPER_ONLY } from "./discord.ts";
-import { MIDDAY_NOT_FLAT_ALERT_AFTER_MS, MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MIDDAY_RETRY_MS, MIDDAY_RETRY_REQUESTS_PER_MINUTE, MiddayBudget, blockedNext, middayFlat, middayTimes, readHold, readPause, retryAllowed, startupAction, updatePause } from "./midday.ts";
+import { MIDDAY_NOT_FLAT_ALERT_AFTER_MS, MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MIDDAY_RETRY_MS, MIDDAY_RETRY_REQUESTS_PER_MINUTE, MiddayBudget, blockedNext, middayFlat, middayTimes, readHold, readPause, retryAllowed, retrySymbols, startupAction, updatePause } from "./midday.ts";
 import type { PingKind } from "./heartbeat.ts";
 
 export type Channel = "commands" | "trading" | "alerts";
@@ -899,8 +899,10 @@ export class Worker {
       const estimate = Math.min(MIDDAY_RETRY_REQUESTS_PER_MINUTE, this.middayLastCost ?? MIDDAY_RETRY_REQUESTS_PER_MINUTE);
       if (!retry || retryAllowed({ room: this.middayBudget.room(now.getTime()), estimate, governorBudget: this.d.governor.budget(), reserve: this.d.governor.reserve() })) {
         this.lastMiddayAttempt = now.getTime();
+        // A retry sells at most MIDDAY_RETRY_SYMBOLS positions, in turn (the first retry takes the first ten left, and so on).
+        const only = retry ? retrySymbols(this.middayLastRemaining, this.middayAttempts - 1) : null;
         this.middayAttempts++;
-        this.background("midday", () => this.middayPhase(date, current, mt.pauseAt, retry));
+        this.background("midday", () => this.middayPhase(date, current, mt.pauseAt, retry, only));
       }
     }
     // The second alert: still not flat 5 minutes after a try first ended not flat (once a day).
@@ -1268,14 +1270,14 @@ export class Worker {
   // alone (closeOut skips that for this path). The missing-exit check is off while it runs (protectNow). The first try is the full
   // close-out; a retry is ONE round of it without the wait for its own sells (the next retry looks again), which is how retries stay
   // inside 60 requests a minute. What Alpaca counted for each try is charged to the retries' budget afterwards.
-  private async middayPhase(date: string, day: DayRecord, pauseAt: Date, retry = false): Promise<void> {
+  private async middayPhase(date: string, day: DayRecord, pauseAt: Date, retry = false, only: string[] | null = null): Promise<void> {
     const pause = await readPause(this.d.store, date);
     if (pause?.resumedAt) return; // already resumed today
     if (!pause?.on) await updatePause(this.d.store, date, { on: true, since: this.d.now().toISOString(), reason: "mid-day cycle" });
     const before = this.d.governor.stats().requestsLastMinute;
     let result;
     try {
-      result = await closeOut(this.closeoutDeps(), date, retry ? { alert: false, path: "midday", maxRounds: 1, waitForOwnSells: false } : { alert: false, path: "midday" });
+      result = await closeOut(this.closeoutDeps(), date, retry ? { alert: false, path: "midday", maxRounds: 1, waitForOwnSells: false, ...(only ? { onlySymbols: only } : {}) } : { alert: false, path: "midday" });
     } finally {
       const cost = Math.max(0, this.d.governor.stats().requestsLastMinute - before);
       this.middayBudget.spend(this.d.now().getTime(), cost);

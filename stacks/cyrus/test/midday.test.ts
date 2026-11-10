@@ -19,7 +19,7 @@ import { parseCommand } from "../src/morning.ts";
 import { recordStart } from "../src/start-note.ts";
 import { FakeBroker, FakeBot } from "./helpers.ts";
 import type { Signal } from "../src/strategy.ts";
-import { MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MiddayBudget, blockedNext, deployRefusals, emptyPause, type DeployFacts, goRefusal, middayHoldKey, middayKey, middayTimes, readHold, readPause, retryAllowed, startupAction, updatePause, type MiddayPause } from "../src/midday.ts";
+import { MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MiddayBudget, blockedNext, deployRefusals, emptyPause, type DeployFacts, goRefusal, middayHoldKey, middayKey, middayTimes, readHold, readPause, retryAllowed, retrySymbols, startupAction, updatePause, type MiddayPause } from "../src/midday.ts";
 
 const until = async (cond: () => boolean | Promise<boolean>, n = 400) => {
   for (let i = 0; i < n && !(await cond()); i++) await settle();
@@ -564,6 +564,30 @@ test("closeOut on the mid-day path never touches the cap or posts 'Close-out don
 });
 
 // ---------------- review round 1 ----------------
+
+test("a retry takes at most 10 positions, in turn; and a retry over some positions counts as flat only when the whole account is flat", async () => {
+  const pool = Array.from({ length: 25 }, (_, i) => `S${i}`);
+  assert.equal(retrySymbols(pool.slice(0, 10), 0), null, "ten or fewer: a whole-account round");
+  assert.deepEqual(retrySymbols(pool, 0), pool.slice(0, 10));
+  assert.deepEqual(retrySymbols(pool, 1), pool.slice(10, 20));
+  assert.deepEqual(retrySymbols(pool, 2), [...pool.slice(20, 25), ...pool.slice(0, 5)], "wraps around");
+  assert.equal(retrySymbols(["(could not read positions)"], 0), null);
+  const sim = new SimBroker(Date.UTC(2026, 10, 2, 16, 0));
+  sim.sellFillDelayMs = 0; // sales fill at once here, so the remaining list shows only what the retry did not sell
+  const store = new MemoryStore();
+  const said: string[] = [];
+  const say = async (_c: string, t: string) => (said.push(t), true);
+  const liquidator = new Liquidator({ broker: sim, gate: new SellGate({ broker: sim, say: say as any, nowMs: () => sim.simMs }), now: () => new Date(sim.simMs), sleep: sim.sleep });
+  await hold(sim, store, "AAA", 10, 50, 1);
+  await hold(sim, store, "BBB", 10, 20, 2);
+  const deps = { broker: sim, liquidator, store, now: () => new Date(sim.simMs), say: say as any, sleep: sim.sleep };
+  const res = await closeOut(deps, D, { alert: false, path: "midday", maxRounds: 1, waitForOwnSells: false, onlySymbols: ["AAA"] });
+  sim.advance(5_000);
+  assert.equal(res.flat, false, "BBB is still held");
+  assert.deepEqual(res.remaining, ["BBB"], "the whole account's remaining, not only the retry's symbols");
+  assert.deepEqual(sim.sellLog.map((x) => x.symbol), ["AAA"], "only AAA was sold");
+  assert.ok(sim.orders.some((o) => o.symbol === "BBB" && o.legs.some((l) => l.status === "new" || l.status === "held")), "BBB's exits were not touched");
+});
 
 test("the loss stop on: the morning line and the 1:30 note say trading stays paused for the rest of the day unless `resume` and then `go`", async () => {
   const w = await armedDay();

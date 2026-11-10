@@ -46,6 +46,10 @@ export interface CloseoutOptions {
   // Rounds of the liquidator (its default is 4). Only the mid-day close-out's retries use it: one round each, the way the loss stop's
   // first sale is one round, so a retry is a bounded burst that fits inside 60 requests a minute (Michael's ruling of 2026-11-09).
   maxRounds?: number;
+  // Only these symbols (the mid-day close-out's retries: at most a few positions a retry, like the loss stop's retry, so a retry stays
+  // inside 60 requests a minute even with many positions). The account counts as flat only when Alpaca shows no position at all, so
+  // the result is read from the whole account afterwards (one request).
+  onlySymbols?: string[];
 }
 
 // "midday": the mid-day cycle (Michael, 2026-11-09). It sells the same way, but leaves the borrowing cap alone (the account stays
@@ -94,9 +98,19 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
 
   const path: CloseoutPath = options.path ?? "close-out";
   const waitForOwn = options.waitForOwnSells ?? path !== "carried";
-  const res = await d.liquidator.flatten({ reason: path === "midday" ? "mid-day close-out" : "close-out", tradeDate, ...(waitForOwn ? { returnWhenOnlyOwnSells: true } : {}), ...(options.maxRounds !== undefined ? { maxRounds: options.maxRounds } : {}) });
+  const res = await d.liquidator.flatten({ reason: path === "midday" ? "mid-day close-out" : "close-out", tradeDate, ...(waitForOwn ? { returnWhenOnlyOwnSells: true } : {}), ...(options.maxRounds !== undefined ? { maxRounds: options.maxRounds } : {}), ...(options.onlySymbols ? { only: options.onlySymbols } : {}) });
   let flat = res.flat;
   let remaining = res.remaining;
+  if (options.onlySymbols) {
+    try {
+      const held = await d.broker.listPositions();
+      flat = held.length === 0;
+      remaining = held.map((p) => p.symbol);
+    } catch {
+      flat = false;
+      remaining = ["(could not read positions)"];
+    }
+  }
   let waitedMs = 0;
   let stillWorking = false; // at the end, every share still held is covered by a sell of ours that Alpaca has not filled
   const sells = res.steps?.sells ?? [];

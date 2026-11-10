@@ -17,6 +17,18 @@ export const MIDDAY_NOT_AFTER_MINUTES_BEFORE_CLOSE = 5;
 // within 60 Alpaca requests a minute (like the loss stop's retry), never below the reserve of 80").
 export const MIDDAY_RETRY_MS = 20_000;
 export const MIDDAY_RETRY_REQUESTS_PER_MINUTE = 60;
+// At most this many positions a retry (builder's choice, like the loss stop's retry cap of 15 requests a check): one round with 40
+// positions whose sales are refused costs about 130 requests (each refused sale reads the account again), so the retries sell a few
+// positions each, in turn, to stay inside 60 a minute.
+export const MIDDAY_RETRY_SYMBOLS = 10;
+
+// The positions for the next retry: all of them when few are left, else the next MIDDAY_RETRY_SYMBOLS in turn.
+export function retrySymbols(remaining: string[], turn: number): string[] | null {
+  const pool = remaining.filter((s) => !s.startsWith("("));
+  if (pool.length <= MIDDAY_RETRY_SYMBOLS) return null; // a whole-account round (it also cancels any stray order)
+  const start = (turn * MIDDAY_RETRY_SYMBOLS) % pool.length;
+  return [...pool, ...pool].slice(start, start + MIDDAY_RETRY_SYMBOLS);
+}
 // The second alert, if the account is still not flat this long after the first try ended not flat.
 export const MIDDAY_NOT_FLAT_ALERT_AFTER_MS = 5 * 60_000;
 // Day phases: the mid-day close-out finished (with `middayFlat: "yes"`), and the 1:30 PM note was handled.
