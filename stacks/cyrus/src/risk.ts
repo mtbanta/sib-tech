@@ -125,6 +125,8 @@ export class SyncMemory {
   readonly retrySpend: number[] = [];
   // Fix C of 2026-11-10: entries whose cleanup sale was sent but not seen filled, waiting for their closing line.
   readonly awaitingFill = new Map<string, AwaitingFill>();
+  // Entries already logged as `late_notice` (once per entry: a stuck entry's retries are not new late notices).
+  readonly lateLogged = new Set<string>();
 }
 
 // Michael's choice of 2026-11-09: the earliest moment a short retry fits the allowance (now if it fits), and charge it if it does.
@@ -206,6 +208,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   for (const id of [...mem.lastSeen.keys()]) if (!activeIds.has(id)) mem.lastSeen.delete(id);
   for (const id of [...mem.oldLookedAt.keys()]) if (!activeIds.has(id)) mem.oldLookedAt.delete(id);
   for (const id of [...mem.mustLook]) if (!activeIds.has(id)) mem.mustLook.delete(id);
+  for (const id of [...mem.lateLogged]) if (!activeIds.has(id)) mem.lateLogged.delete(id);
   for (const id of [...mem.stuck.keys()]) if (!activeIds.has(id)) await resolveStuck(d, mem, id, "no longer held");
   const midnight = etInstant(day.tradeDate, "00:00").getTime();
   const nowMs = d.now().getTime();
@@ -271,9 +274,13 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   let recheckAt: number | undefined;
   // Logging only (Michael's approval of 2026-11-10): an entry whose stop (or both exits) Alpaca cancelled more than LATE_NOTICE_MS ago.
   const lateNotice = (s: OrderRecord, kind: "missing" | "bare", cancelledAt: string | null, extra: Record<string, unknown> = {}) => {
+    // Group 2 review, round 1: once per entry, and never for an entry already reported stuck (its retries go down the missing-exit
+    // path measured from the take-profit cancel our own cleanup made, which is not a late notice).
+    if (mem.stuck.has(s.clientOrderId) || mem.lateLogged.has(s.clientOrderId)) return;
     const t = cancelledAt ? Date.parse(cancelledAt) : NaN;
     const at = d.now().getTime();
     if (!Number.isFinite(t) || at - t <= LATE_NOTICE_MS) return;
+    mem.lateLogged.add(s.clientOrderId);
     let ctx: Record<string, unknown> = {};
     try {
       ctx = d.lateNoticeContext?.(s.symbol) ?? {};

@@ -204,7 +204,8 @@ export class Worker {
   private eventSyncTimer: unknown = null;
   private eventSyncAt: number | null = null;
   // Logging only (Michael's approval of 2026-11-10), for `late_notice`: when the live updates last reported each symbol's stop cancelled,
-  // and what the timed sync did (last set, last fired, how often it was put off because a sync was still running).
+  // and what the timed sync did (last set, last fired, how often it was put off because a sync was still running, since the last sync
+  // the timer started).
   private readonly stopCancelSeen = new Map<string, { alpacaAtMs: number; receivedMs: number; syncSetFor: number }>();
   private syncTimerLog = { setAt: 0, setFor: 0, firedAt: 0, putOff: 0, lastPutOffAt: 0 };
   private syncAgain = false;
@@ -367,7 +368,7 @@ export class Worker {
       streamReportedCancel: seen ? { alpacaAgoMs: ago(seen.alpacaAtMs), receivedAgoMs: ago(seen.receivedMs), syncSetForAgoMs: ago(seen.syncSetFor) } : null,
       streamStatus: this.orderStream ? this.orderStreamLive() : false,
       timedSync: { setAgoMs: ago(t.setAt), setForAgoMs: ago(t.setFor), firedAgoMs: ago(t.firedAt), putOff: t.putOff, lastPutOffAgoMs: ago(t.lastPutOffAt) },
-      syncStartedAgoMs: ago(this.lastSync),
+      workerSyncStartedAgoMs: ago(this.lastSync),
       saleRunning: this.liquidator.isLiquidating(),
     };
   }
@@ -1038,6 +1039,7 @@ export class Worker {
       this.syncAt(this.d.now().getTime());
       return;
     }
+    this.syncTimerLog.putOff = 0;
     this.startSync(s.day, s.closeAt);
   }
 

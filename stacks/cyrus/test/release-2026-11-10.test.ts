@@ -329,6 +329,63 @@ test("logging: a remainder noticed on time (about 3 seconds after the cancel) is
   assert.ok(!w.events.some((e) => e.event === "late_notice"));
 });
 
+test("group 2 review: a stuck remainder retried for a minute and a half gives at most one late_notice", async () => {
+  const w = world();
+  const day = await remainderDay(w);
+  w.sim.refuseSellIf = () => true; // every sale refused: the entry is stuck and retried
+  const id = await hold(w, "HIMS", 26, 18.8, 40);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 10, 18.88);
+  w.sim.advance(8_000); // noticed late the first time
+  for (let i = 0; i < 8; i++) {
+    await syncOrders(w.risk, day, { protect: true });
+    w.sim.advance(10_000);
+  }
+  assert.ok(w.memory.stuck.size > 0 || w.events.some((e) => e.event === "unprotected_position"), "it was retried");
+  assert.ok(w.events.filter((e) => e.event === "late_notice").length <= 1, `${w.events.filter((e) => e.event === "late_notice").length} late notices`);
+});
+
+test("group 2 review: a 'not filled yet' sale that Alpaca ends unfilled gets no closing line and one stored drop", async () => {
+  const w = world();
+  const day = await remainderDay(w);
+  w.sim.sellFillDelayMs = 60_000;
+  const id = await hold(w, "ONON", 14, 34.8, 61);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 11, 34.88);
+  w.sim.advance(3_500);
+  await syncOrders(w.risk, day, { protect: true });
+  assert.equal(w.memory.awaitingFill.size, 1);
+  const sale = w.sim.orders.find((o) => o.side === "sell" && o.symbol === "ONON" && o.status === "accepted")!;
+  sale.status = "canceled";
+  const inner = w.sim as unknown as { sellFills: Array<{ id: string; at: number }> };
+  inner.sellFills = inner.sellFills.filter((f) => f.id !== sale.id);
+  w.sim.advance(2_000);
+  await syncOrders(w.risk, day, { protect: true });
+  assert.equal(w.batch.length, 0, "no closing line");
+  assert.ok(!w.said.some((m) => /has filled/.test(m.text)));
+  assert.equal(w.events.filter((e) => e.event === "awaiting_fill_dropped").length, 1);
+  assert.ok(shouldStoreEvent("info", "awaiting_fill_dropped"), "stored in the run log");
+});
+
+test("group 2 review: a 'not filled yet' sale still unfilled after 2 minutes is dropped once, stored, and never gets a late line", async () => {
+  const w = world();
+  const day = await remainderDay(w);
+  w.sim.sellFillDelayMs = 200_000;
+  const id = await hold(w, "ONON", 14, 34.8, 62);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 11, 34.88);
+  w.sim.advance(3_500);
+  await syncOrders(w.risk, day, { protect: true });
+  for (let i = 0; i < 14; i++) {
+    w.sim.advance(10_000);
+    await syncOrders(w.risk, day, { protect: true });
+  }
+  assert.equal(w.events.filter((e) => e.event === "awaiting_fill_dropped").length, 1, "dropped once");
+  w.sim.advance(100_000); // the sale fills at last
+  await syncOrders(w.risk, day, { protect: true });
+  assert.equal(w.batch.length, 0, "no late closing line after the drop");
+});
+
 // ---------------------------------------------------------- load days ---------------------------------------------------------------
 
 const loadDayRecord = (load: "on" | "ended" = "on") => ({ isTradingDay: true, openAt: z("14:30:00"), closeAt: z("21:00:00"), phases: { load } as Record<string, string> });

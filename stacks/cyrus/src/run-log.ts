@@ -29,6 +29,8 @@ export const STORED_INFO_EVENTS = new Set([
   // more shares while its cancel landed (fix A).
   "late_notice",
   "remainder_recount",
+  // Group 2 review, round 1: a "not filled yet" sale whose closing line was dropped (ended unfilled, or not seen filled in 2 minutes).
+  "awaiting_fill_dropped",
 ]);
 
 export function shouldStoreEvent(level: "info" | "warn" | "error", event: string): boolean {
