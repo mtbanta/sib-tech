@@ -458,7 +458,8 @@ async function settleAwaiting(d: RiskDeps, mem: SyncMemory, orders: Order[] | nu
     if (filled || (!activeIds.has(id) && !ended)) {
       mem.awaitingFill.delete(id);
       if (a.kind === "bare" && d.onRemainderSold) d.onRemainderSold(a.symbol, a.qty);
-      else await d.say("alerts", a.kind === "bare" ? `**${a.symbol}: the sale of the remaining ${plural(a.qty, "share")} has filled.**` : `**${a.symbol}: the sale of its ${plural(a.qty, "share")} has filled.**`);
+      // Group 1 review, round 1 (note 4): not waited for, so a slow Discord can never hold up the sync's safety sales after it.
+      else void Promise.resolve(d.say("alerts", a.kind === "bare" ? `**${a.symbol}: the sale of the remaining ${plural(a.qty, "share")} has filled.**` : `**${a.symbol}: the sale of its ${plural(a.qty, "share")} has filled.**`)).catch(() => undefined);
       continue;
     }
     if (ended || now - a.since > AWAITING_FILL_MAX_MS) {

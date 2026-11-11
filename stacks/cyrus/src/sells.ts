@@ -231,8 +231,8 @@ export interface LiquidateResult {
   heldBefore?: Record<string, number>;
   heldAfter?: Record<string, number>;
   // Fix A (Michael's approval of 2026-11-10), with `ownEntryOnly` only: the entry's own shares as recounted when its last sale was
-  // sent (the original count less the shares its exits took while their cancel landed), and the symbols the entry held alone at the
-  // first look that are no longer held at the last look (every one of its shares is gone, whoever sold them).
+  // sent (the original count less the shares its exits took while their cancel landed), and the symbols held at the first look that
+  // are no longer held at the last look (every one of its shares is gone, whoever sold them).
   ownTarget?: Record<string, number>;
   ownGone?: string[];
 }
@@ -415,6 +415,12 @@ export class Liquidator {
         }
         result.flat = true;
         result.remaining = [];
+        // Fix A, group 1 review round 1 (note 1): one entry's sale ending here (its symbol no longer held) has had every share leave
+        // the holding, so its verdict is "sold", not "not filled yet".
+        if (own && only) {
+          result.heldAfter = {};
+          result.ownGone = [...only].filter((sym) => result.heldBefore?.[sym] !== undefined);
+        }
         return done();
       }
       result.remaining = positions.map((p) => p.symbol);
@@ -591,7 +597,8 @@ export class Liquidator {
       result.flat = left.length === 0;
       result.remaining = left.map((p) => p.symbol);
       result.heldAfter = Object.fromEntries(left.map((p) => [p.symbol, p.qty]));
-      if (own && only) result.ownGone = [...only].filter((sym) => soleHolder(sym) && (result.heldAfter?.[sym] ?? 0) <= EPS);
+      // The symbol no longer held: every share gone, the entry's included (whoever held it alone or not).
+      if (own && only) result.ownGone = [...only].filter((sym) => result.heldBefore?.[sym] !== undefined && (result.heldAfter?.[sym] ?? 0) <= EPS);
     } catch {
       result.remaining = result.remaining.length > 0 ? result.remaining : ["(could not read positions)"];
     }

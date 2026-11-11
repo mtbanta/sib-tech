@@ -132,6 +132,7 @@ test("fix A, the narrow case: the take-profit fills more just before the sale's 
   await syncOrders(w.risk, day, { protect: true });
   assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["RRC", 1]]);
   assert.equal(mentions(w).length, 0, "not reported stuck");
+  assert.ok(!w.said.some((m) => /has not filled it yet/.test(m.text)), "the sale had filled: no 'not filled yet' line (group 1 review, note 1)");
   w.sim.advance(5_000);
   await syncOrders(w.risk, day, { protect: true });
   assert.equal(w.sim.heldQty("RRC"), 0);
@@ -281,6 +282,25 @@ test("fix C: a remainder sale Alpaca has not filled when the cleanup ends is rep
   assert.deepEqual(w.batch, [{ symbol: "ONON", shares: 3 }], "the closing line, in the once-a-minute batch");
   await syncOrders(w.risk, day, { protect: true });
   assert.equal(w.batch.length, 1, "once");
+});
+
+test("group 1 review, note 4: the missing-exit closing line is not waited for, so a slow Discord does not hold up the sync", async () => {
+  const w = world();
+  const day = await remainderDay(w);
+  w.sim.sellFillDelayMs = 9_000;
+  const id = await hold(w, "HIMS", 26, 18.8, 21);
+  w.sim.advance(5_000);
+  w.sim.cancelExitsAtFill(id);
+  w.sim.advance(500);
+  await syncOrders(w.risk, day, { protect: true });
+  w.sim.advance(10_000);
+  let release!: () => void;
+  const slow = new Promise<void>((r) => (release = r));
+  const fast = w.risk.say;
+  w.risk.say = async (ch: string, text: string, o?: any) => (/has filled/.test(text) ? (await slow, fast(ch, text, o)) : fast(ch, text, o));
+  const done = await Promise.race([syncOrders(w.risk, day, { protect: true }).then(() => "sync done"), new Promise((r) => setTimeout(() => r("sync held up"), 200))]);
+  assert.equal(done, "sync done");
+  release();
 });
 
 test("fix C: a missing-exit sale not filled yet gets its own closing line when it fills", async () => {
