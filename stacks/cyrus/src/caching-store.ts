@@ -15,6 +15,9 @@ const FAST_KEYS = new Set([CONTROL_STOP, CONTROL_NOT_FLAT]);
 // The mid-day pause (one key per day) is read by the order gate before every entry, like the two flags.
 const isFastKey = (key: string) => FAST_KEYS.has(key) || isMiddayKey(key);
 
+// A kept order row: frozen, so it is read-only for every caller (see listOrders).
+const frozen = (o: OrderRecord): OrderRecord => Object.freeze(o);
+
 export class CachingStore implements Store {
   private readonly inner: Store;
   private readonly now: () => number;
@@ -155,7 +158,7 @@ export class CachingStore implements Store {
       p = this.inner
         .listOrders(tradeDate)
         .then((rows) => {
-          const m = new Map(rows.map((o) => [o.clientOrderId, o] as const));
+          const m = new Map(rows.map((o) => [o.clientOrderId, frozen(o)] as const));
           this.orders.set(tradeDate, m);
           for (const d of [...this.orders.keys()].sort().slice(0, -2)) this.orders.delete(d);
           return m;
@@ -168,7 +171,7 @@ export class CachingStore implements Store {
   async insertOrder(order: OrderRecord): Promise<boolean> {
     const m = await this.ordersFor(order.tradeDate);
     const inserted = await this.inner.insertOrder(order);
-    if (inserted) m.set(order.clientOrderId, { createdAt: new Date(this.now()).toISOString(), ...structuredClone(order) });
+    if (inserted) m.set(order.clientOrderId, frozen({ createdAt: new Date(this.now()).toISOString(), ...structuredClone(order) }));
     else if (!m.has(order.clientOrderId)) this.orders.delete(order.tradeDate); // it exists in the database: reload next time
     return inserted;
   }
@@ -177,7 +180,7 @@ export class CachingStore implements Store {
     await this.inner.updateOrder(clientOrderId, patch);
     for (const m of this.orders.values()) {
       const o = m.get(clientOrderId);
-      if (o) m.set(clientOrderId, { ...o, ...structuredClone(patch) });
+      if (o) m.set(clientOrderId, frozen({ ...o, ...structuredClone(patch) }));
     }
   }
   // THE SPEED RELEASE, ITEM 1 (Michael's approval of 2026-11-05). Alpaca's live order updates close an entry (its exit filled and
@@ -192,7 +195,7 @@ export class CachingStore implements Store {
   updateOrderSoon(clientOrderId: string, patch: Partial<Omit<OrderRecord, "clientOrderId" | "tradeDate">>): Promise<void> {
     for (const m of this.orders.values()) {
       const o = m.get(clientOrderId);
-      if (o) m.set(clientOrderId, { ...o, ...structuredClone(patch) });
+      if (o) m.set(clientOrderId, frozen({ ...o, ...structuredClone(patch) }));
     }
     this.soonPending.set(clientOrderId, { ...(this.soonPending.get(clientOrderId) ?? {}), ...structuredClone(patch) });
     return this.writeSoon(clientOrderId);
@@ -235,8 +238,13 @@ export class CachingStore implements Store {
     }
     return this.inner.getOrder(clientOrderId);
   }
+  // THE NO-COPY FIX (Michael's approval of 2026-11-11). The rows are handed out as they are kept, not copied one by one: on 2026-11-11
+  // copying all 7,700 of the day's rows on every entry decision grew the worker's CPU from about 5 to about 20 percent, spent Fly's
+  // CPU burst balance by 10:22, and the machine was throttled until 10:30 (builds/build-c2-log.md, "Fly metrics read"). Each kept
+  // row is frozen and never changed in place (a write replaces it with a new frozen row), so a caller cannot change the memory, and a
+  // list read earlier keeps the rows as they were when it was read, as the copies did. The array itself is new on every call.
   async listOrders(tradeDate: string): Promise<OrderRecord[]> {
-    return [...(await this.ordersFor(tradeDate)).values()].map((o) => structuredClone(o)).sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.clientOrderId.localeCompare(b.clientOrderId));
+    return [...(await this.ordersFor(tradeDate)).values()].sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.clientOrderId.localeCompare(b.clientOrderId));
   }
 
   recentDays(beforeDate: string, n: number): Promise<DayRecord[]> {

@@ -6,12 +6,13 @@ import type { DiscordBot, DiscordMessage } from "./discord-bot.ts";
 import { isOwnerCommand } from "./discord-bot.ts";
 import type { Settings } from "./config.ts";
 import { decideLimits, decideLoad, limitLines, parseCommand, type NextSessionFinder } from "./morning.ts";
-import { LOAD_PHASE, loadLine } from "./load-mode.ts";
+import { LOAD_AFTERNOON_PHASE, LOAD_MAX_POSITION_USD, LOAD_PHASE, afternoonLoadStart, afternoonLoadWindow, inAfternoonLoad, isLoadDay, loadLine, loadWindowRules } from "./load-mode.ts";
+import { CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import type { Liquidator, Say } from "./sells.ts";
-import { CONTROL_COMMAND_CURSOR, CONTROL_STOP, setPhase, type DayRecord, type StopFlag, type Store } from "./store.ts";
+import { CONTROL_COMMAND_CURSOR, CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
 import { MAX_TRADES_PER_MINUTE, MAX_TRADES_PER_MINUTE_LOAD_DAY, describeLimits } from "./limits.ts";
-import { centralClock, dayWord, etDate, sessionPhase } from "./time.ts";
-import { blockedNext, goRefusal, lossPast, middayFlat, middayTimes, readHold, readPause, setHold, updatePause } from "./midday.ts";
+import { addMinutes, centralClock, dayWord, etDate, sessionPhase } from "./time.ts";
+import { blockedNext, goRefusal, lossPast, middayFlat, middayTimes, readHold, readPause, resumedByText, setHold, updatePause, type MiddayPause } from "./midday.ts";
 
 export type CommandBot = Pick<DiscordBot, "post" | "latestCommandMessageId" | "commandMessagesAfter">;
 
@@ -27,7 +28,49 @@ export interface CommandDeps {
   // Extra status lines the worker knows (stream state, last price time). Optional.
   extraStatus?: () => Promise<string[]>;
   log?: (event: string, data?: Record<string, unknown>) => void;
+  // `load afternoon` on a normal morning: starts the cheap-symbol screen and the price feed switch in the background (it can take
+  // minutes, and the main loop must keep reading commands). The worker calls finishAfternoonLoad in a later pass, after that pass has
+  // read commands, so a `stop` or `go` sent meanwhile is seen first (group 1 review, round 1). False if one is already running.
+  afternoonScreen?: (date: string) => boolean;
+  // Michael's approval of 2026-11-11 (after round 2): a `stop`, `flatten` or `go` handled while that screen is running or done but not
+  // yet decided cancels the pending window for good. True if one was pending.
+  cancelAfternoonScreen?: (date: string) => boolean;
+  // `load afternoon` is built but switched OFF in the release of 2026-11-11 (Michael's fallback, option B: group 1's round 3 found a
+  // gap in its cancel). Only a deps flag turns it on (the tests); main.ts does not set it.
+  loadAfternoonEnabled?: boolean;
 }
+
+// Why `load afternoon` cannot start now, or null (Michael's standing requirement of 2026-11-11): today has a mid-day cycle, is approved
+// and armed, the window was not started already, it is before 1:30 PM Central (or the last entry if earlier), the mid-day pause is on
+// and its close-out finished flat, no stop is on, the not-flat flag is off, and Alpaca shows no positions and no open orders.
+export function loadAfternoonRefusal(o: { day: DayRecord | null; now: Date; pause: MiddayPause | null; stop: StopFlag | null; notFlat: NotFlatState | null; positions: number | null; openOrders: number | null }): string | null {
+  const times = o.day ? middayTimes(o.day) : null;
+  if (!o.day || !times) return "there is no mid-day cycle today";
+  if (o.day.status !== "approved" || !o.day.phases.armed) return "today is not approved and armed";
+  if (afternoonLoadStart(o.day)) return "the afternoon load window is already on today";
+  if (o.now >= times.resumeUntil) return `it is ${centralClock(times.resumeUntil)} or later (\`load afternoon\` is accepted only before then)`;
+  const go = goRefusal({ hasCycle: true, pause: o.pause, flat: middayFlat(o.day), stop: o.stop });
+  if (go) return go;
+  if (o.notFlat?.on) return "the account was not flat after the last close-out";
+  if (o.positions === null || o.openOrders === null) return "I could not read Alpaca's positions and open orders";
+  if (o.positions !== 0) return `Alpaca shows ${o.positions} position(s)`;
+  if (o.openOrders !== 0) return `Alpaca shows ${o.openOrders} open order(s)`;
+  return null;
+}
+
+// Said when a `stop`, `flatten` or `go` cancels a pending afternoon load window.
+export const SCREEN_CANCELLED = "The afternoon load window is cancelled (its cheap-symbol screen had not finished): it will not start, and the live list stays as it is. Send `load afternoon` again if you want it.";
+
+// The `status` line for the afternoon load window (group 2 review, round 1).
+function afternoonStatusLine(day: DayRecord, now: Date): string {
+  const w = afternoonLoadWindow(day)!;
+  if (inAfternoonLoad(day, now)) return `Afternoon load window: on since ${centralClock(w.start)}, until ${centralClock(w.end)} (the last entry): 1 share churn, at most ${LOAD_MAX_POSITION_USD} dollars a position, up to ${MAX_TRADES_PER_MINUTE_LOAD_DAY} orders a minute`;
+  return now < w.start ? "" : `Afternoon load window: ran from ${centralClock(w.start)} to ${centralClock(w.end)}`;
+}
+
+const LOAD_AFTERNOON_HELP = "`load afternoon` during the mid-day pause, while flat, before 1:30 PM CT (or the last entry, if earlier): the rest of today until the last entry (2:00 PM CT on a full day) is a load window (1 share churn, at most 75 dollars a position, up to 150 orders a minute even above today's approved limit), and trading resumes. If the morning was not a load day, the live list switches to the 30 cheap names first (the screen takes a few minutes; `stop`, `flatten` or `go` meanwhile cancels the window for good).";
+const LOAD_AFTERNOON_OFF_HELP = "`load afternoon` is switched off in this release while a fix to it is finished; it changes nothing.";
+export const LOAD_AFTERNOON_OFF = "`load afternoon` is switched off in this release while a fix to it is finished, so nothing changed. `go` still resumes a normal afternoon.";
 
 const HELP = [
   "**Commands** (only you, only here)",
@@ -182,13 +225,14 @@ export class CommandProcessor {
     this.d.log?.("command", { kind: cmd.kind });
     switch (cmd.kind) {
       case "help":
-        await this.say(HELP);
+        await this.say([HELP, this.d.loadAfternoonEnabled ? LOAD_AFTERNOON_HELP : LOAD_AFTERNOON_OFF_HELP].join("\n"));
         return;
       case "unknown":
         await this.say(`I did not understand the line "${cmd.text}". Nothing was done for it. Type \`help\` for the list.`);
         return;
       case "stop": {
         const saved = await this.trySetStop(true, "owner command (stop)", now);
+        const screenCancelled = this.d.cancelAfternoonScreen?.(etDate(now)) ?? false;
         let n = 0;
         let cancelFailed = false;
         try {
@@ -203,6 +247,7 @@ export class CommandProcessor {
         } else {
           await this.say(`Stopped. No new entries. Cancelled ${n} unfilled entr${n === 1 ? "y" : "ies"}. Open positions keep their protective stops and will be closed at the end of the day (or type \`flatten\`).`);
         }
+        if (screenCancelled) await this.say(SCREEN_CANCELLED);
         return;
       }
       case "resume": {
@@ -215,6 +260,7 @@ export class CommandProcessor {
       }
       case "flatten": {
         const saved = await this.trySetStop(true, "owner command (flatten)", now);
+        const screenCancelled = this.d.cancelAfternoonScreen?.(etDate(now)) ?? false;
         // The sale can take a while (it waits for cancels). It runs in the background so the next command, the heartbeat
         // and the rest of the pass are not held up; the reply follows when it is done.
         const task = (async () => {
@@ -240,6 +286,7 @@ export class CommandProcessor {
         this.pending.add(task);
         void task.finally(() => this.pending.delete(task));
         await this.say(saved ? "Stopped. Selling every position and cancelling every open order now; I will say when the account is flat." : "**The stop flag could not be saved.** Selling every position now anyway; I will say when it is done.");
+        if (screenCancelled) await this.say(SCREEN_CANCELLED);
         return;
       }
       case "limits": {
@@ -258,6 +305,7 @@ export class CommandProcessor {
         await this.say(await this.statusText(now));
         return;
       case "go": {
+        const screenCancelled = this.d.cancelAfternoonScreen?.(etDate(now)) ?? false;
         // The mid-day cycle (Michael, 2026-11-09): end the pause, only when the mid-day close-out is flat and no stop is on.
         const date = etDate(now);
         const day = await this.d.store.getDay(date);
@@ -266,11 +314,42 @@ export class CommandProcessor {
         const why = goRefusal({ hasCycle: Boolean(day && middayTimes(day)), pause, flat: Boolean(day && middayFlat(day)), stop });
         if (why) {
           await this.say(`Not resumed: ${why}.`);
+          if (screenCancelled) await this.say(SCREEN_CANCELLED);
           return;
         }
         await updatePause(this.d.store, date, { on: false, resumedAt: now.toISOString(), resumedBy: "go" });
         const lastEntryAt = middayTimes(day!)!.lastEntryAt;
         await this.say(now >= lastEntryAt ? `The mid-day pause is over, but no entries are left today (last entry ${centralClock(lastEntryAt)}).` : "Resumed: the mid-day pause is over. Same limits as this morning; the loss stop counts from the open.");
+        if (screenCancelled) await this.say(SCREEN_CANCELLED);
+        return;
+      }
+      case "loadAfternoon": {
+        if (!this.d.loadAfternoonEnabled) {
+          await this.say(LOAD_AFTERNOON_OFF);
+          return;
+        }
+        const date = etDate(now);
+        const facts = await this.afternoonFacts(date);
+        const why = loadAfternoonRefusal({ ...facts, now });
+        if (why) {
+          await this.say(`Not started: ${why}.`);
+          return;
+        }
+        // A load day already has the cheap list live: the window starts now (the facts above were just read, Alpaca included).
+        if (isLoadDay(facts.day)) {
+          await this.startAfternoonWindow(date, { switched: false, list: facts.day!.liveList ?? [] }, facts, now);
+          return;
+        }
+        if (!this.d.afternoonScreen) {
+          await this.say("Not started: this part of the stack cannot switch the live list.");
+          return;
+        }
+        const started = this.d.afternoonScreen(date);
+        await this.say(
+          started
+            ? "Running the cheap-symbol screen for the afternoon load window now; it can take a few minutes. When it is done I check again that the account is flat and paused, then start the window and resume trading. `stop`, `flatten` or `go` before then cancels the window."
+            : "Not started yet: the cheap-symbol screen for the afternoon load window is already running.",
+        );
         return;
       }
       case "hold": {
@@ -440,13 +519,61 @@ export class CommandProcessor {
     return n;
   }
 
+  // What `load afternoon` is decided on: the day, the pause, the stop and not-flat flags, and Alpaca's positions and open orders
+  // (null when Alpaca cannot be read: refused, fail closed).
+  private async afternoonFacts(date: string) {
+    const day = await this.d.store.getDay(date);
+    const pause = await readPause(this.d.store, date);
+    const stop = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
+    const notFlat = await this.d.store.getControl<NotFlatState>(CONTROL_NOT_FLAT);
+    let positions: number | null = null;
+    let openOrders: number | null = null;
+    try {
+      positions = (await this.d.broker.listPositions()).length;
+      openOrders = (await this.d.broker.listOrders("open")).length;
+    } catch {
+      positions = null;
+      openOrders = null;
+    }
+    return { day, pause, stop, notFlat, positions, openOrders };
+  }
+
+  // Writes the window's start and ends the pause, then says so.
+  private async startAfternoonWindow(date: string, r: { switched: boolean; list: string[] }, facts: Awaited<ReturnType<CommandProcessor["afternoonFacts"]>>, at: Date): Promise<void> {
+    await setPhase(this.d.store, date, LOAD_AFTERNOON_PHASE, at.toISOString());
+    await updatePause(this.d.store, date, { on: false, resumedAt: at.toISOString(), resumedBy: "load afternoon" });
+    this.d.log?.("load_afternoon", { date, switched: r.switched, symbols: r.list.length });
+    const day = facts.day!;
+    const lastEntryAt = middayTimes(day)!.lastEntryAt;
+    const closeoutAt = day.closeAt ? centralClock(addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE)) : "the usual time";
+    await this.say(
+      `Afternoon load window on until ${centralClock(lastEntryAt)} (the last entry): ${loadWindowRules()}; at most ${LOAD_MAX_POSITION_USD} dollars a position and up to ${MAX_TRADES_PER_MINUTE_LOAD_DAY} orders a minute (your ruling, this window only). ${r.switched ? `The live list is now ${r.list.length} cheap names (posted in trading). ` : ""}Resumed: the mid-day pause is over. The loss stop counts from the open; the close-out runs as normal at ${closeoutAt}.`,
+    );
+  }
+
+  // `load afternoon` on a normal morning, once the screen and the feed switch are done: called by the worker in a pass that has
+  // already read commands since the screen finished. Every condition is read again (Alpaca included, fail closed) just before the
+  // window starts.
+  async finishAfternoonLoad(date: string, r: { switched: boolean; list: string[] }): Promise<void> {
+    const at = this.d.now();
+    if (etDate(at) !== date) return;
+    const facts = await this.afternoonFacts(date);
+    const why = loadAfternoonRefusal({ ...facts, now: at });
+    if (why) {
+      this.d.log?.("load_afternoon_refused", { date, why });
+      await this.say(`Afternoon load window not started: ${why}.${r.switched ? " The live list was switched to the cheap names while paused; if you send `go`, the normal placeholder trades on them." : ""}`);
+      return;
+    }
+    await this.startAfternoonWindow(date, r, facts, at);
+  }
+
   // The mid-day cycle's status line (empty on a day without one).
   private async middayStatus(day: DayRecord | null): Promise<string> {
     if (!day || !middayTimes(day)) return "";
     const pause = await readPause(this.d.store, day.tradeDate).catch(() => null);
     const hold = (await readHold(this.d.store, day.tradeDate).catch(() => false)) ? "; `hold` is set" : "";
     if (pause?.on) return `Mid-day cycle: entries paused since ${pause.since ? centralClock(new Date(pause.since)) : "?"} (${middayFlat(day) ? "flat" : "mid-day close-out still selling"})${hold}`;
-    if (pause?.resumedAt) return `Mid-day cycle: resumed at ${centralClock(new Date(pause.resumedAt))} (${pause.resumedBy === "deploy" ? "after a deploy" : "by `go`"})`;
+    if (pause?.resumedAt) return `Mid-day cycle: resumed at ${centralClock(new Date(pause.resumedAt))} (${resumedByText(pause.resumedBy)})`;
     return `Mid-day cycle: pause at ${centralClock(middayTimes(day)!.pauseAt)}${hold}`;
   }
 
@@ -467,6 +594,7 @@ export class CommandProcessor {
       next ? `Next session: ${dayWord(next.date)}, opens ${centralClock(next.openAt)}${nextDay ? `, limits ${nextDay.status}` : ", limits request not posted yet"}` : "",
       day ? `Today (${day.tradeDate}): ${day.status}${day.isTradingDay ? `, limits: ${describeLimits(day.limits)}` : ""}` : "Today: not set up yet",
       day && day.isTradingDay ? loadLine(day).replace(/^5\. mode: /, "Mode today: ") : "",
+      day && afternoonLoadWindow(day) ? afternoonStatusLine(day, now) : "",
       day && day.status === "pending" ? limitLines(day) : "",
       `Live list: ${day?.liveList ? day.liveList.join(" ") || "(empty)" : "not built yet"}`,
       `Entries today: ${orders.filter((o) => o.status !== "failed" && o.status !== "rejected").length}; positions now: ${positions.length}`,

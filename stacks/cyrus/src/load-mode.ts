@@ -59,6 +59,39 @@ export function loadState(day: Pick<DayRecord, "phases"> | null | undefined): Lo
 // A load day at all, whether or not its window is still switched on (the cheap list, the summary's window part).
 export const isLoadDay = (day: Pick<DayRecord, "phases"> | null | undefined): boolean => loadState(day) !== "off";
 
+// THE AFTERNOON LOAD WINDOW (Michael's standing requirement of 2026-11-11). On any day, while the account is flat and the mid-day pause
+// is on, `load afternoon` (until 1:30 PM Central) makes the rest of the day until the last entry (2:00 PM Central on a full day) a load
+// window: the load day's entries and exits, at most 75 dollars a position, and up to 150 orders a minute even above the day's approved
+// limit (his ruling, only for that window). The day record's phase holds the time it started. The 2:55 close-out runs as normal.
+export const LOAD_AFTERNOON_PHASE = "loadAfternoon";
+
+type AfternoonDay = Pick<DayRecord, "phases"> & WindowDay;
+
+// When `load afternoon` started the window today, or null.
+export function afternoonLoadStart(day: Pick<DayRecord, "phases"> | null | undefined): Date | null {
+  const v = day?.phases?.[LOAD_AFTERNOON_PHASE];
+  if (typeof v !== "string") return null;
+  const t = new Date(v);
+  return Number.isNaN(t.getTime()) ? null : t;
+}
+
+// The afternoon window's span: from `load afternoon` to the day's last entry. Null if it was not started or the times are unknown.
+export function afternoonLoadWindow(day: AfternoonDay | null | undefined): { start: Date; end: Date } | null {
+  const start = afternoonLoadStart(day);
+  if (!day || !start || !day.openAt || !day.closeAt) return null;
+  const times = middayTimes({ isTradingDay: day.isTradingDay ?? true, openAt: day.openAt, closeAt: day.closeAt });
+  return times && start < times.lastEntryAt ? { start, end: times.lastEntryAt } : null;
+}
+
+// The afternoon load window is on at time t.
+export function inAfternoonLoad(day: AfternoonDay | null | undefined, t: Date): boolean {
+  const w = afternoonLoadWindow(day);
+  return !!w && t >= w.start && t < w.end;
+}
+
+// Load-day entries (1 share, a limit buy) may be sent today: a load day, or a day whose afternoon load window was started.
+export const hasLoadEntries = (day: Pick<DayRecord, "phases"> | null | undefined): boolean => isLoadDay(day) || afternoonLoadStart(day) !== null;
+
 type WindowDay = Pick<DayRecord, "openAt"> & Partial<Pick<DayRecord, "closeAt" | "isTradingDay">>;
 
 export function loadWindow(day: WindowDay): { start: Date; end: Date } | null {
@@ -75,6 +108,7 @@ export function loadWindow(day: WindowDay): { start: Date; end: Date } | null {
 // `pauseStarted` (the gate passes it): the worker writes the pause a few seconds after 10:30:00, so the cap is kept until the pause has
 // in fact started (builder's choice, the tighter direction: no full-size entry in those seconds). Without it, the clock alone decides.
 export function loadRulesApply(day: (Pick<DayRecord, "phases"> & WindowDay) | null | undefined, t: Date, pauseStarted?: boolean): boolean {
+  if (inAfternoonLoad(day, t)) return true;
   if (!day || !isLoadDay(day)) return false;
   const w = loadWindow(day);
   if (!w || t < w.end) return true;
@@ -84,11 +118,13 @@ export function loadRulesApply(day: (Pick<DayRecord, "phases"> & WindowDay) | nu
 // The 150 a minute ceiling (Michael's ruling of 2026-11-06) is in force only while the window is switched on (`load on`) and, since
 // his decision of 2026-11-10, only until the mid-day pause; after it, 100.
 export function loadCeilingOn(day: (Pick<DayRecord, "phases"> & WindowDay) | null | undefined, t: Date): boolean {
+  if (inAfternoonLoad(day, t)) return true; // the afternoon load window (Michael, 2026-11-11)
   return !!day && loadState(day) === "on" && loadRulesApply(day, t); // by the clock alone: 100 from 10:30:00 (the tighter direction)
 }
 
 // The churn is on: a load day still switched on, inside its window.
 export function inLoadWindow(day: (Pick<DayRecord, "phases"> & WindowDay) | null | undefined, t: Date): boolean {
+  if (inAfternoonLoad(day, t)) return true; // the afternoon load window (Michael, 2026-11-11)
   if (!day || loadState(day) !== "on") return false;
   const w = loadWindow(day);
   return !!w && t >= w.start && t < w.end;

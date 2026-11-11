@@ -33,7 +33,7 @@ export class TradeStream {
   private attempts = 0;
   private readonly url: string;
   private readonly settings: Settings;
-  private readonly symbols: string[];
+  private symbols: string[];
   private readonly onTrade: (t: Trade) => void;
   private readonly onStatus: (s: StreamStatus, detail?: string) => void;
   private readonly makeSocket: (url: string) => SocketLike;
@@ -61,6 +61,21 @@ export class TradeStream {
   start(): void {
     this.stopped = false;
     this.connect();
+  }
+
+  // The afternoon load window (Michael, 2026-11-11): a new live list on the same connection (Alpaca's free stream allows one
+  // connection, so a second one would be refused). If the stream is not live yet, the next subscribe uses the new list.
+  setSymbols(symbols: readonly string[]): void {
+    if (this.settings.alpaca.dataFeed === "iex" && symbols.length > IEX_STREAM_CAP) {
+      throw new Error(`The free iex stream carries at most ${IEX_STREAM_CAP} symbols, got ${symbols.length}`);
+    }
+    const old = this.symbols;
+    this.symbols = [...symbols];
+    if (this.status === "live" && this.socket) {
+      const gone = old.filter((s) => !this.symbols.includes(s));
+      if (gone.length > 0) this.socket.send(JSON.stringify({ action: "unsubscribe", trades: gone }));
+      this.socket.send(JSON.stringify({ action: "subscribe", trades: this.symbols }));
+    }
   }
 
   stop(): void {

@@ -22,7 +22,8 @@ import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
 import { BARE_GRACE_MS, enforceDailyLoss, LossStopMemory, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
-import { LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
+import type { SelfMonitor } from "./self-monitor.ts";
+import { LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
 import { BusyPlaceholder } from "./strategy.ts";
 import { OrderUpdateHandler, type TradeUpdate } from "./order-stream.ts";
 import { EntryExpiry } from "./entry-expiry.ts";
@@ -34,7 +35,7 @@ import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatS
 import { computeDay, formatSummary, isSentEntry, type StopGapDay } from "./summary.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
 import { PAPER_ONLY } from "./discord.ts";
-import { MIDDAY_NOT_FLAT_ALERT_AFTER_MS, MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MIDDAY_RETRY_MS, MIDDAY_RETRY_REQUESTS_PER_MINUTE, MiddayBudget, blockedNext, lossPast, middayFlat, middayTimes, readHold, readPause, retryAllowed, retrySymbols, startupAction, updatePause } from "./midday.ts";
+import { MIDDAY_NOT_FLAT_ALERT_AFTER_MS, MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MIDDAY_RETRY_MS, MIDDAY_RETRY_REQUESTS_PER_MINUTE, MiddayBudget, blockedNext, lossPast, middayFlat, middayTimes, readHold, readPause, resumedByText, retryAllowed, retrySymbols, startupAction, updatePause } from "./midday.ts";
 import type { PingKind } from "./heartbeat.ts";
 
 export type Channel = "commands" | "trading" | "alerts";
@@ -43,6 +44,8 @@ export interface StreamLike {
   start(): void;
   stop(): void;
   status(): string;
+  // A new live list on the same connection (the afternoon load window). A stream without it is stopped and started again.
+  setSymbols?(symbols: string[]): void;
 }
 
 export interface LiveListResult {
@@ -61,6 +64,10 @@ export interface WorkerDeps {
   // Builds the day's live list (universe, daily bars, screen). Slow (minutes), so it runs in the background.
   buildLiveList: (opts?: { load?: boolean }) => Promise<LiveListResult>;
   makeStream: (symbols: string[], onTrade: (t: Trade) => void) => StreamLike;
+  // Self-monitoring (Michael's approval of 2026-11-11): one `self_monitor` row a minute in the session. Absent: none.
+  selfMonitor?: Pick<SelfMonitor, "sample">;
+  // `load afternoon` on (the tests only, in the release of 2026-11-11: switched off, Michael's fallback option B).
+  loadAfternoon?: boolean;
   // Alpaca's live order updates (order-stream.ts), connected from "Armed" to the close on every day (the speed release; release B
   // had them on load days only). Optional: without it the order sync alone frees symbols, as before.
   makeOrderStream?: (onUpdate: (u: TradeUpdate) => void) => StreamLike & { reconnects?: () => number };
@@ -90,6 +97,8 @@ export const VIEW_EVERY_NO_STREAM_MS = 5_000;
 // The speed release, item 10: the request and stream statistics are written every minute of the session (they were every 5 minutes,
 // and every minute only around a load window).
 export const STATS_EVERY_MS = 60_000;
+// A self-monitoring sample covering more than this is written as a marker row only (`longWindow`).
+export const SELF_MONITOR_MAX_WINDOW_MS = 120_000;
 // Successful remainder sales (shares left without a stop, sold by the order sync) are gathered into one alert a minute (the speed
 // release, decision 6): on 2026-11-05 they were 101 separate alerts, and at the 3 second grace about 270 a day are expected.
 // A sell not filled yet is still posted at once; a position that cannot be sold gets one alert, one after 5 minutes and one line when it
@@ -254,6 +263,9 @@ export class Worker {
       bot: deps.bot,
       now: deps.now,
       extraStatus: async () => this.statusLines(),
+      afternoonScreen: (date) => this.startAfternoonScreen(date),
+      cancelAfternoonScreen: (date) => this.cancelAfternoonScreen(date),
+      loadAfternoonEnabled: deps.loadAfternoon === true,
       log: (e, data) => deps.log?.("info", e, data),
     });
     this.gate = new OrderGate({
@@ -782,13 +794,28 @@ export class Worker {
     // command cursor) must not stop the rest of the pass, least of all the daily loss stop: it is reported, rate limited, and the
     // pass goes on.
     if (this.migrated) {
+      const pollStartedAt = now.getTime();
       try {
         await this.commands.poll();
         this.commandsReadOk();
+        this.lastPollStartedAt = pollStartedAt;
       } catch (err) {
         // Logged (and kept in the run log) every time; Michael is told once, when it has lasted 2 minutes (commandsWatch).
         this.lastTickError = `commands: ${(err as Error).message.slice(0, 120)}`;
         this.d.log?.("error", "command_poll_failed", { error: (err as Error).message.slice(0, 200) });
+      }
+    }
+    // `load afternoon` on a normal morning: once its screen is done, the window is decided in a pass whose command read started after
+    // the screen finished, so a `stop` or `go` sent while the screen ran has been read first (group 1 review, round 1).
+    const screened = this.afternoonScreenState;
+    if (screened?.state === "ready" && screened.readyAt < this.lastPollStartedAt) {
+      this.afternoonScreenState = null;
+      try {
+        await this.commands.finishAfternoonLoad(screened.date, screened.result!);
+      } catch (err) {
+        this.d.log?.("error", "load_afternoon_finish_failed", { error: (err as Error).message.slice(0, 200) });
+        // The window's start is written before the pause is ended, so a failure may leave either state: say so plainly.
+        await this.say("commands", "Afternoon load window: I could not finish starting it (the database did not answer). Send `status` to see whether the window is on and whether trading is still paused.").catch(() => undefined);
       }
     }
 
@@ -900,6 +927,18 @@ export class Worker {
       if (inSession && now.getTime() - this.lastStatsEvent >= STATS_EVERY_MS) {
         this.lastStatsEvent = now.getTime();
         await this.d.store.addEvent("info", "governor_stats", this.minuteStats()).catch(() => undefined);
+        if (this.d.selfMonitor) {
+          let row: Record<string, unknown> | null = null;
+          try {
+            row = this.d.selfMonitor.sample(this.gate.takeDecisionTimes()) as unknown as Record<string, unknown>;
+          } catch {
+            row = null; // measurement must never break the pass
+          }
+          // A window much longer than a minute (the first sample of a day, after a start, or a real stall) is written as a short
+          // marker row only: its length and the event loop's worst delay, flagged `longWindow` (group 2 review, rounds 1 and 2).
+          if (row && typeof row.windowMs === "number" && row.windowMs > SELF_MONITOR_MAX_WINDOW_MS) row = { windowMs: row.windowMs, longWindow: true, eventLoopDelayMs: row.eventLoopDelayMs ?? null };
+          if (row) await this.d.store.addEvent("info", "self_monitor", row).catch(() => undefined);
+        }
       }
     }
 
@@ -1166,10 +1205,89 @@ export class Worker {
   private startStream(day: DayRecord, symbols: string[]): void {
     this.streamDate = day.tradeDate;
     // A load day: the churn rules apply while its window is on (read from the latest copy of the day, so `load off` takes effect).
-    this.strategy = isLoadDay(day) ? new BusyPlaceholder(symbols, { loadActive: (t) => inLoadWindow(this.lastDay?.tradeDate === day.tradeDate ? this.lastDay : day, t) }) : new BusyPlaceholder(symbols);
+    this.strategy = this.makeStrategy(day, symbols);
     this.stream = this.d.makeStream(symbols, (t) => this.onTrade(t));
     this.stream.start();
     this.d.log?.("info", "stream_started", { symbols: symbols.length });
+  }
+
+  // The churn rules apply while a load window is on: a load day's morning window, or the afternoon load window (Michael, 2026-11-11),
+  // read from the latest copy of the day, so `load off` and `load afternoon` take effect. On a normal day without `load afternoon`,
+  // inLoadWindow is always false, so the placeholder behaves exactly as before.
+  private makeStrategy(day: DayRecord, symbols: string[]): BusyPlaceholder {
+    return new BusyPlaceholder(symbols, { loadActive: (t) => inLoadWindow(this.lastDay?.tradeDate === day.tradeDate ? this.lastDay : day, t) });
+  }
+
+  // `load afternoon` on a normal morning (Michael's standing requirement of 2026-11-11): the command has checked every condition and
+  // starts this. The screen runs in the background (it can take minutes); the window itself is decided later (see pass). False if one
+  // is already running for today.
+  private afternoonScreenState: { date: string; state: "running" | "ready" | "cancelled"; readyAt: number; result?: { switched: boolean; list: string[] } } | null = null;
+  private lastPollStartedAt = -Infinity;
+  private startAfternoonScreen(date: string): boolean {
+    if (this.inflight.has("afternoon-screen")) return false;
+    if (this.afternoonScreenState?.date === date && this.afternoonScreenState.state !== "cancelled") return false;
+    const mine = { date, state: "running" as "running" | "ready" | "cancelled", readyAt: 0 } as NonNullable<Worker["afternoonScreenState"]>;
+    this.afternoonScreenState = mine;
+    this.background("afternoon-screen", async () => {
+      try {
+        const result = await this.afternoonLoadList(date, () => mine.state === "cancelled");
+        if (result === null || mine.state === "cancelled") return; // cancelled by a command: it said so
+        mine.state = "ready";
+        mine.readyAt = this.d.now().getTime();
+        mine.result = result;
+      } catch (err) {
+        if (this.afternoonScreenState === mine) this.afternoonScreenState = null;
+        if (mine.state === "cancelled") return;
+        const why = (err as Error).message.slice(0, 120).replace(/\.$/, "");
+        this.d.log?.("info", "load_afternoon_failed", { error: why });
+        await this.say("commands", `Afternoon load window not started: ${why}. Still paused; \`go\` resumes a normal afternoon.`);
+      }
+    });
+    return true;
+  }
+
+  // A `stop`, `flatten` or `go` while the screen is running or done but not decided: the pending window is cancelled for good (the
+  // finished screen then changes nothing). True if one was pending.
+  private cancelAfternoonScreen(date: string): boolean {
+    const st = this.afternoonScreenState;
+    if (!st || st.date !== date || st.state === "cancelled") return false;
+    st.state = "cancelled";
+    this.d.log?.("info", "load_afternoon_cancelled", { date });
+    return true;
+  }
+
+  // The screen and the feed switch for `load afternoon`. On a load day the cheap list is already live. Otherwise the cheap-symbol
+  // screen runs and the price feed switches to its 30 names on the same connection. Throws if the screen fails or finds nothing.
+  // Returns null (and changes nothing) if the window was cancelled while the screen ran, or if the mid-day pause is no longer on or a
+  // stop is set when the screen finishes: the list and the feed switch only at the pause, while nothing trades.
+  private async afternoonLoadList(date: string, cancelled: () => boolean = () => false): Promise<{ switched: boolean; list: string[] } | null> {
+    const day = await this.d.store.getDay(date);
+    if (!day) throw new Error("no day record for today");
+    if (isLoadDay(day)) return { switched: false, list: day.liveList ?? [] };
+    const { symbols: list, names } = await this.d.buildLiveList({ load: true });
+    if (cancelled()) return null;
+    if (list.length === 0) throw new Error("the cheap-symbol screen found no names");
+    const pauseNow = await readPause(this.d.store, date);
+    const stopNow = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
+    if (cancelled()) return null;
+    if (!pauseNow?.on || stopNow?.on) {
+      this.d.log?.("info", "load_afternoon_not_switched", { pause: Boolean(pauseNow?.on), stop: Boolean(stopNow?.on) });
+      throw new Error(stopNow?.on ? "the stop flag is on, so the live list was not changed" : "trading is no longer paused for the mid-day cycle, so the live list was not changed");
+    }
+    const updated = await this.d.store.updateDay(date, { liveList: list });
+    await this.d.store.setControl(`live_names:${date}`, names).catch(() => undefined);
+    this.lastDay = updated;
+    if (this.stream && this.streamDate === date) {
+      this.strategy = this.makeStrategy(updated, list);
+      if (this.stream.setSymbols) this.stream.setSymbols(list);
+      else {
+        this.endStream();
+        this.startStream(updated, list);
+      }
+    }
+    this.d.log?.("info", "afternoon_load_list", { symbols: list.length });
+    await this.say("trading", `Live list switched for the afternoon load window (${list.length} cheap, heavily traded names; the window starts once I have checked again that the account is flat and paused):\n${formatLiveList(list, names)}\n${PAPER_ONLY}`);
+    return { switched: true, list };
   }
 
   private endStream(): void {
@@ -1420,7 +1538,7 @@ export class Worker {
     const pause = mt ? await readPause(this.d.store, date).catch(() => null) : null;
     if (mt && pause?.since) {
       const flatIso = middayFlat(day) ? day.phases[MIDDAY_PHASE] : undefined;
-      const resumed = pause.resumedAt ? `resumed at ${centralClock(new Date(pause.resumedAt))} (${pause.resumedBy === "deploy" ? "after a deploy" : "by `go`"})` : "stayed paused for the rest of the day";
+      const resumed = pause.resumedAt ? `resumed at ${centralClock(new Date(pause.resumedAt))} (${resumedByText(pause.resumedBy)})` : "stayed paused for the rest of the day";
       lines.push(`Mid-day cycle: paused at ${centralClock(new Date(pause.since))}, ${flatIso ? `flat at ${centralClock(new Date(flatIso))}` : "**never flat at mid-day**"}, ${resumed}.`);
     }
     if (this.startedAtMs !== null && day.openAt && this.startedAtMs > day.openAt.getTime()) {
@@ -1509,8 +1627,11 @@ export class Worker {
       requests: requestsAtClose,
       feesRunning: running.total,
       listComplete: listed.complete,
-      loadWindow: isLoadDay(day) ? loadWindow(day) : null,
-      ...(isLoadDay(day) ? { loadExtras: { orderStream: this.orderStreamStats(), entryExpiry: { ...this.entryExpiry.counts } } } : {}),
+      // A load day reports its morning window; a normal day with `load afternoon` reports the afternoon window.
+      loadWindow: isLoadDay(day) ? loadWindow(day) : afternoonLoadWindow(day),
+      loadWindowKind: isLoadDay(day) ? "morning" : "afternoon",
+      afternoonOnLoadDay: isLoadDay(day) ? afternoonLoadWindow(day) : null,
+      ...(isLoadDay(day) || afternoonLoadWindow(day) ? { loadExtras: { orderStream: this.orderStreamStats(), entryExpiry: { ...this.entryExpiry.counts } } } : {}),
       stopGap: this.stopGapDate === date ? this.stopGap.totals() : await this.d.store.getControl<StopGapDay>(stopGapKey(date)).catch(() => null),
       carriedAtStart: Boolean(day.phases[CARRIED_PHASE]),
       fillsCheck,

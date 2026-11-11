@@ -10,6 +10,7 @@ import { describeError, makeLogger } from "./log.ts";
 import { makePool, PgStore } from "./pg-store.ts";
 import { makeRedactor } from "./redact.ts";
 import { DEFAULT_SCREEN, liveListSize, screen } from "./screen.ts";
+import { SelfMonitor } from "./self-monitor.ts";
 import { LOAD_SCREEN } from "./load-mode.ts";
 import { TradeStream } from "./stream.ts";
 import { OrderStream } from "./order-stream.ts";
@@ -69,6 +70,7 @@ const worker = new Worker({
   now: () => new Date(),
   ping: (kind) => ping(settings.healthchecksPingUrl, kind),
   buildLiveList,
+  selfMonitor: new SelfMonitor(),
   makeStream: (symbols, onTrade) => {
     let status = "starting";
     const alerter = new FeedAlerter();
@@ -78,7 +80,7 @@ const worker = new Worker({
       const msg = alerter.onStatus(st, Date.now());
       if (msg) void bot.post("alerts", msg);
     });
-    return { start: () => s.start(), stop: () => s.stop(), status: () => status };
+    return { start: () => s.start(), stop: () => s.stop(), status: () => status, setSymbols: (list: string[]) => s.setSymbols(list) };
   },
   // Release B: Alpaca's live order updates, used on a load day only (the worker decides when). A listener: it never sends orders.
   makeOrderStream: (onUpdate) => {
