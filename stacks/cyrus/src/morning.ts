@@ -210,6 +210,7 @@ export type Command =
   | { kind: "approve"; name: LimitName | "all" }
   | { kind: "set"; name: LimitName; value: string }
   | { kind: "load"; on: boolean }
+  | { kind: "loadAfternoon" }
   | { kind: "go" }
   | { kind: "hold" }
   | { kind: "unknown"; text: string };
@@ -240,6 +241,8 @@ export function parseCommand(content: string): Command {
       return (LIMIT_NAMES as readonly string[]).includes(arg1) ? { kind: "approve", name: arg1 as LimitName } : { kind: "unknown", text: content.slice(0, 40) };
     }
     case "load":
+      // `load afternoon` (Michael, 2026-11-11): today's afternoon load window, during the mid-day pause.
+      if (arg1 === "afternoon" && arg2 === undefined) return { kind: "loadAfternoon" };
       return arg2 === undefined && (arg1 === "on" || arg1 === "off") ? { kind: "load", on: arg1 === "on" } : { kind: "unknown", text: content.slice(0, 40) };
     case "position":
     case "loss":

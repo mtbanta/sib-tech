@@ -22,7 +22,7 @@ import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
 import { BARE_GRACE_MS, enforceDailyLoss, LossStopMemory, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
-import { LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
+import { LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
 import { BusyPlaceholder } from "./strategy.ts";
 import { OrderUpdateHandler, type TradeUpdate } from "./order-stream.ts";
 import { EntryExpiry } from "./entry-expiry.ts";
@@ -43,6 +43,8 @@ export interface StreamLike {
   start(): void;
   stop(): void;
   status(): string;
+  // A new live list on the same connection (the afternoon load window). A stream without it is stopped and started again.
+  setSymbols?(symbols: string[]): void;
 }
 
 export interface LiveListResult {
@@ -254,6 +256,7 @@ export class Worker {
       bot: deps.bot,
       now: deps.now,
       extraStatus: async () => this.statusLines(),
+      afternoonLoad: (date) => this.afternoonLoadList(date),
       log: (e, data) => deps.log?.("info", e, data),
     });
     this.gate = new OrderGate({
@@ -1166,10 +1169,42 @@ export class Worker {
   private startStream(day: DayRecord, symbols: string[]): void {
     this.streamDate = day.tradeDate;
     // A load day: the churn rules apply while its window is on (read from the latest copy of the day, so `load off` takes effect).
-    this.strategy = isLoadDay(day) ? new BusyPlaceholder(symbols, { loadActive: (t) => inLoadWindow(this.lastDay?.tradeDate === day.tradeDate ? this.lastDay : day, t) }) : new BusyPlaceholder(symbols);
+    this.strategy = this.makeStrategy(day, symbols);
     this.stream = this.d.makeStream(symbols, (t) => this.onTrade(t));
     this.stream.start();
     this.d.log?.("info", "stream_started", { symbols: symbols.length });
+  }
+
+  // The churn rules apply while a load window is on: a load day's morning window, or the afternoon load window (Michael, 2026-11-11),
+  // read from the latest copy of the day, so `load off` and `load afternoon` take effect. On a normal day without `load afternoon`,
+  // inLoadWindow is always false, so the placeholder behaves exactly as before.
+  private makeStrategy(day: DayRecord, symbols: string[]): BusyPlaceholder {
+    return new BusyPlaceholder(symbols, { loadActive: (t) => inLoadWindow(this.lastDay?.tradeDate === day.tradeDate ? this.lastDay : day, t) });
+  }
+
+  // `load afternoon` (Michael's standing requirement of 2026-11-11), called by the command once every condition is met (flat, paused,
+  // before 1:30 PM). On a load day the cheap list is already live. Otherwise the cheap-symbol screen runs now and the price feed
+  // switches to its 30 names on the same connection. Throws if the screen fails or finds nothing (the command then does not resume).
+  private async afternoonLoadList(date: string): Promise<{ switched: boolean; list: string[] }> {
+    const day = await this.d.store.getDay(date);
+    if (!day) throw new Error("no day record for today");
+    if (isLoadDay(day)) return { switched: false, list: day.liveList ?? [] };
+    const { symbols: list, names } = await this.d.buildLiveList({ load: true });
+    if (list.length === 0) throw new Error("the cheap-symbol screen found no names");
+    const updated = await this.d.store.updateDay(date, { liveList: list });
+    await this.d.store.setControl(`live_names:${date}`, names).catch(() => undefined);
+    this.lastDay = updated;
+    if (this.stream && this.streamDate === date) {
+      this.strategy = this.makeStrategy(updated, list);
+      if (this.stream.setSymbols) this.stream.setSymbols(list);
+      else {
+        this.endStream();
+        this.startStream(updated, list);
+      }
+    }
+    this.d.log?.("info", "afternoon_load_list", { symbols: list.length });
+    await this.say("trading", `Afternoon load window: the live list is now ${list.length} cheap, heavily traded names:\n${formatLiveList(list, names)}\n${PAPER_ONLY}`);
+    return { switched: true, list };
   }
 
   private endStream(): void {
@@ -1509,8 +1544,9 @@ export class Worker {
       requests: requestsAtClose,
       feesRunning: running.total,
       listComplete: listed.complete,
-      loadWindow: isLoadDay(day) ? loadWindow(day) : null,
-      ...(isLoadDay(day) ? { loadExtras: { orderStream: this.orderStreamStats(), entryExpiry: { ...this.entryExpiry.counts } } } : {}),
+      // A load day reports its morning window; a normal day with `load afternoon` reports the afternoon window.
+      loadWindow: isLoadDay(day) ? loadWindow(day) : afternoonLoadWindow(day),
+      ...(isLoadDay(day) || afternoonLoadWindow(day) ? { loadExtras: { orderStream: this.orderStreamStats(), entryExpiry: { ...this.entryExpiry.counts } } } : {}),
       stopGap: this.stopGapDate === date ? this.stopGap.totals() : await this.d.store.getControl<StopGapDay>(stopGapKey(date)).catch(() => null),
       carriedAtStart: Boolean(day.phases[CARRIED_PHASE]),
       fillsCheck,

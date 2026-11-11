@@ -78,7 +78,7 @@ const worker = new Worker({
       const msg = alerter.onStatus(st, Date.now());
       if (msg) void bot.post("alerts", msg);
     });
-    return { start: () => s.start(), stop: () => s.stop(), status: () => status };
+    return { start: () => s.start(), stop: () => s.stop(), status: () => status, setSymbols: (list: string[]) => s.setSymbols(list) };
   },
   // Release B: Alpaca's live order updates, used on a load day only (the worker decides when). A listener: it never sends orders.
   makeOrderStream: (onUpdate) => {
