@@ -3333,3 +3333,93 @@ Everything else behaved as designed: the pause, no entry after it, the cancels, 
 2. **A proposal tonight, no code, for two money-touching fixes,** each needing your approval and a group 1 review: (a) the cleanup sale recounts its shares when the take-profit fills more during the cancel, and treats that as sold, not stuck; (b) the close-out's wait for its own sales no longer ends early on an early wake-up.
 3. **Tonight's limits:** at about 0.72 dollars lost per entry, a normal day on this list reaches the 500 loss stop by about mid-day. Lowering the largest position is a tightening you can make; raising the loss stop is a hard stop (yours alone).
 4. **Still open:** A step 3 (no `sale_blocked` again today, so no data); the uncapped first try (0 rate-limit answers today, light load only); the retry cost count; stuck state resetting on restart.
+
+## Tuesday 2026-11-10 end-of-day review (release v15, normal day; written at about 6:15 PM, read only)
+
+Run at Michael's request in a fresh session, in the shape of `builds/monday-review-brief.md`, covering the afternoon and the whole day; the morning's detail is in "Tuesday 2026-11-10 mid-day session review" above and is not repeated. Read only on Fly, Alpaca, Supabase, Discord and Healthchecks: no code changed, nothing deployed, no orders. Limits (Michael, normal day): largest position 500 dollars, daily loss stop 500 dollars, 100 orders a minute, cap 1. Day start 18,638.67 dollars. Fly v15, one machine (San Jose), running since 2026-11-09 8:15 PM with no restart today. Fly keeps only its last 100 log lines (from 2:53 PM), so the afternoon is read from the database, Alpaca and Discord. Paper only. Research input for a human decision, never an instruction to act.
+
+**First, for Wednesday: the stop flag is still ON** (set by the daily loss stop at 1:56:59 PM; by design it stays on until Michael clears it). The 3:10 PM evening post's checklist says "Stop flag is ON (daily loss stop reached (501.81 dollars)). Type `resume` or there will be no entries." Wednesday's limits are pending with nothing decided. Without `resume` and the limit decisions before "Armed" (8:25 AM), there is no trading Wednesday.
+
+**Verdict for the whole day under Michael's rule: does not hold, on one criterion: safety sales were delayed in the morning** (14 remainders without a stop for 11.6 to 19.8 s; see the mid-day review). Every other criterion holds all day: 0 rate-limit answers, remaining never below the reserve (lowest 170 against 80, at the loss stop), the mid-day close-out flat at 10:30:21 AM and the 2:55 close-out flat. **The afternoon on its own holds:** no sale waited beyond its designed steps (longest remainder 9.6 s), and the daily loss stop sold everything in 8 seconds. **The day lost 504.18 dollars** (morning -481.47, afternoon -22.71); the loss stop fired 18.5 minutes after `go`.
+
+### 1. The afternoon after `go`
+
+- **The 1:30 PM note** (`commands`, 1:30:03): "nothing was deployed, so I stay paused. Send `go` to trade until 2:00 PM CT (the last entry), or nothing." Michael sent `Go` at 1:38:26; resumed at 1:38:28 (`midday_pause:2026-11-10`: off, `resumedBy: go`, `deployedAt` empty), "Resumed: the mid-day pause is over. Same limits as this morning; the loss stop counts from the open." First entry 1:38:37.3 (NVDA), 9 s later.
+- **Entries:** 42, from 1:38:37 to 1:56:51, all accepted and all filled (market entries); Alpaca refused none. Highest 9 in a calendar minute (1:38), busiest 60 seconds 13. Per minute: 1:38 9, 1:39 6, 1:41 3, 1:42 2, 1:43 3, 1:44 2, 1:45 1, 1:46 1, 1:48 3, 1:49 1, 1:50 1, 1:51 2, 1:52 3, 1:54 2, 1:55 2, 1:56 1. The 20-symbol list and one position per symbol bound the rate (stack refusals "already holding this symbol" 18; the `(many)` row at 1:57:33 is a batched count of 6 written late, not a live refusal).
+- **Requests:** at most 79 in a minute (1:57, the loss stop; 78 at 1:52); **lowest remaining 170** (1:57) against the reserve of 80; **rate-limit answers 0**; the governor held nothing back.
+- **How the 42 ended:** 12 take-profits filled whole, 2 take-profits partly filled and the rest sold by the stack (ONON-60, ONON-61), 11 stops, 17 still open when the loss stop fired.
+- **Cost: -22.71 dollars** in the afternoon (the fills' cash flow), so -504.18 for the day.
+- **The daily loss stop:** fired at **1:56:59.075 PM** (stop flag written) at a loss of **501.81 dollars** by Alpaca's account read (equity 18,136.86). **Overshoot: 1.81 dollars at the read, 4.18 at flat** (final equity 18,134.49, a loss of 504.18, 0.8 percent of the limit); the other 2.37 dollars came from the 17 market sales against the marks at the read. The loss check reads Alpaca's account every 5 seconds, so the loss passed 500 at most about 5 seconds before it fired (inferred from the design; the earlier reads are not kept). The last entry, ASO-13, was sent at 1:56:51.2 and filled at 1:56:54.6, 8 seconds before the stop; whether the loss had already passed 500 by then cannot be measured from the records (the gate uses its 10 second account view and the Fly log is gone).
+- **How fast it sold everything:** all 34 exits of the 17 positions cancelled at 1:56:59.345 to 1:56:59.417 (0.3 s after the flag); 17 sales sent 1:57:00.655 to 1:57:02.121 (1.6 to 3.0 s); all filled by 1:57:07.075 (QXO 37 shares last, HIMS 1:57:07.0): **8.0 seconds from the flag to flat.** The first pass reported "sold 17" at 1:57:02.2 with 15 still working; its retry at 1:57:04.1 found 6 still held, all with sales working, and sent nothing (as designed). `commands`: "Daily loss stop reached (down 501.81 of the 500 dollar limit). Stopped for the day and sent a sell for every position" (1:57:02) and "Daily loss stop: everything is sold, the account is flat." (1:57:09). Each position spent 2.3 to 7.7 s without exits, from the loss stop's cancels to its sale's fill (by design). **No entry after the flag:** the gate refused 1,557 tries "stop flag is set" from 1:57:05 to 2:55.
+- **Positions without exits:** no lost exits all day (no `unprotected_position`). Three remainders in the afternoon, none over 10 s:
+  - ONON-60: stop cancelled 1:52:08.404, take-profit filled 11 of 14 at 1:52:09.6, noticed 1:52:12.0 (3 shares, the 3 second wait by design), take-profit cancelled 1:52:14.1, sale sent 1:52:15.2, filled 1:52:18.0: **9.6 s**, of which 2.8 s was Alpaca filling the sale. The share count was right (no stale count).
+  - ONON-61: stop cancelled 1:53:45.984, take-profit 12 of 14 at 1:53:48.5, noticed 1:53:49.8 (2 shares), sale sent 1:53:51.2, filled 1:53:53.1: **7.1 s**.
+  - TTD-97: stop cancelled 1:54:50.404, noticed 1:54:54.0 (12 shares), but its take-profit had filled the rest at 1:54:53.9: 3.5 s, no sale needed.
+- **Shadow book (shadow only):** at the loss stop's read its estimate was 18,139.00 against the account's 18,136.86 (gap 2.14, the afternoon's largest; the morning's was 6.25). It would have shown a loss of 499.67, so it would not have fired sooner. Not ready to replace the 5 second check on this evidence.
+
+### 2. The 2:55 close-out
+
+- `closeout_result` at 2:55:04.656: flat, nothing sold, `waitedMs: 0`; `trading` "Close-out done: the account is flat." (2:55:04). Not-flat flag off (2:55:05). Cap at Alpaca 1 (multiplier 1). **The account had been flat since 1:57:07** (the loss stop).
+- **The too-short wait was not tested at 2:55 today:** nothing was held, so the close-out's wait for its own sales never ran. **No false NOT FLAT today at 2:55.**
+- **The cause of the 10:30 short wait is now confirmed by reading the code (not proven live at 2:55):** in `src/closeout.ts`, the wait for the close-out's own sales starts its looks at 1; a look brought forward by a live update does `look--`, which makes it 0, and `0 % 5 === 0` runs the open-orders check on that same look. This can happen on each of up to 5 early wake-ups. If one sale fills between the positions read and the open-orders read, the check sees "a sell of ours is gone" and ends the wait with `stillWorking` false. At 2:55 that path sends "NOT FLAT after the close-out ... Please check Alpaca now and close by hand" to `alerts` (mentioning Michael) and to `commands`: a needless and misleading instruction. The 2:55 close-out shares this code with the mid-day one, so it remains exposed on any day that reaches 2:55 holding positions.
+
+### 3. Alerts that mentioned Michael today
+
+**9, all in the morning, all needless; none in the afternoon.**
+- 8 "could not sell it yet" alerts (8:45:49 RRC, 8:56:31 QXO, 8:58:26 ARWR, 9:06:25 TTD, 9:29:06 TTD, 9:36:43 SGRY, 10:05:27 TTD, 10:22:42 ONON). False: each sale had sold everything left. The take-profit filled more shares while its cancel landed, the cleanup sale waited its full 6 seconds for its original (stale) count, sold what was left, and then took the "stuck" branch because it sold fewer shares than it first counted (mid-day review, section 2).
+- 1 "the mid-day close-out is NOT FLAT yet" alert (10:30:11). False: all 13 named symbols had sales working and were filled by 10:30:21. The wait ended after 544 ms (section 2 above).
+- Afternoon alerts without a mention: 2. ONON-60 at 1:52:17, "I sent a sell for the remaining 3 shares; Alpaca has not filled it yet": true when sent (filled 0.7 s later), as designed, but no line ever says it filled. ONON-61 at 1:53:53, "Sold 1 remainder left without a stop ... ONON 2" (the once-a-minute batch). The loss stop's two posts went to `commands` without a mention (as designed).
+
+### 4. Blocked sales
+
+**None all day.** No `sale_blocked` event, no attempt that sold nothing, no hidden hold. So the new logging recorded nothing (no held or free quantities, open orders or list ages to report), and A step 3 (selling past Alpaca's free count) still has no data. Monday's stuck sales (v12) have not recurred on v13 to v15.
+
+### 5. The daily summary against the account
+
+Posted at 3:05:16 PM (`trading`, with the research-input line at 3:05:18). Checked line by line against Alpaca:
+
+| Summary line | Summary | Alpaca | Match |
+| :---- | :---- | :---- | :---- |
+| Entry orders | 708 sent, 708 filled, Alpaca refused 5 more | 708 buy orders, all filled; the 5 refused (422, take-profit price) never reached Alpaca's list; the stack stores 708 filled and 5 failed | yes |
+| Sells filled | 777 | 777 distinct sell orders in the day's fills (Alpaca's order listing shows 787 because 10 ids appear twice across its pages) | yes |
+| Closed trades | 398 won, 372 lost, 7 even (777) | 777 | yes |
+| Profit or loss | -504.18 from closed trades | fills' cash flow -504.18 | yes, to the cent |
+| Equity | 18,638.67 to 18,134.49 (-504.18) | `last_equity` 18,638.67, `equity` 18,134.49, cash 18,134.49, no positions, no open orders | yes, to the cent |
+| Per symbol (top 8) | ZETA -61.16, TGTX -55.02, IONS -50.39, AKAM -44.23, HIMS -42.90, ONON -42.34, TTD -39.15, MNDY -34.27 | the same, from the fills | yes |
+| Speed | typical 185 ms, 95th percentile 360 ms, slowest 676 ms | (stack's own measure) | consistent with the mid-day review |
+| Peak exposure | 11,158 dollars, 0.61 times equity | `peak_exposure:2026-11-10` (9:07 AM) | yes |
+| Stop-gap sales | 69 sales, 508 shares, 28 would have filled, +1.07 | `stop_gap:2026-11-10` the same (67 in the morning, 2 in the afternoon) | yes |
+| Requests | lowest budget 170 of 200 | governor statistics, 1:57 PM | yes |
+| Fees (estimate) | 6.93 (SEC 6.85, TAF 0.00, CAT 0.08), running 23.05 | not yet posted by Alpaca at 6:13 PM (Monday's posted at about 7:10 PM). SEC check: 332,181.85 dollars of sales times 20.60 per million is 6.843, which rounds up to 6.85, the same rounding as Monday's posted 2.20 | estimate consistent; Monday's posted fees (REG 2.20, CAT 0.06) matched Monday's estimate of 2.26 to the cent |
+
+**Restart note:** none, correctly: there was no restart or deploy today, mid-day or otherwise. Today's fees are not in the 18,134.49 yet; Wednesday's day start is read at "Armed" (`armDay` in `src/morning.ts`), after Alpaca posts them, so the day record's placeholder of 18,638.67 for Wednesday will be replaced.
+
+### 6. Anything else that did not behave as designed
+
+1. (Morning, carried) Stale share count in the cleanup sale: 8 delayed remainder sales and 8 needless alerts mentioning Michael. Release 1 code.
+2. (Morning, carried) The close-out's wait ended after 544 ms: a needless NOT FLAT alert. Code cause confirmed (section 2); not exercised at 2:55 today.
+3. (Morning, carried) HIMS-38 was noticed 14.7 s after its stop was cancelled, with no cause in the records.
+4. (New, messaging) The "Alpaca has not filled it yet" alert (ONON-60) has no closing line when the sale fills, so it reads as an open problem.
+
+Everything else in the afternoon behaved as designed: the 1:30 note, `go` and the resume, entries within limits, remainders, the loss stop (cancels, sales, retry, no entry after it, both posts), the stop flag refusing entries, the 2:55 close-out, the summary, the evening post with its checklist, Healthchecks (up, no flips today, last ping 6:11 PM).
+
+**Discord, whole day (7 AM to 6:10 PM):** `alerts` 74, `trading` 34, `commands` 9 (117). After 10:31 AM: `alerts` 2, `trading` 9, `commands` 6.
+
+### 7. Recommended fixes (a proposal only, no code; each money-touching item needs Michael's approval and a group 1 review)
+
+**A. The stale share count (cleanup sale; `src/sells.ts` `ownEntryOnly` wait and `src/risk.ts` `cleanupSale`).**
+- Recount the entry's own shares once the take-profit's cancel lands, from the take-profit's filled quantity (the cancel answer or the live update carries it, so no extra request), and sell that count instead of waiting for the original one.
+- When the symbol's holding has fallen by at least the entry's own shares (take-profit fills plus our sale), treat the entry as sold, not stuck: no alert.
+- Effect, estimated from today: the 8 cases would have sold about 1.2 s after the take-profit's cancel instead of 8.7 to 9.1 s (about 7 s less each without a stop), and none of the 8 alerts would have gone. Risk: a count that comes out too low leaves shares unsold; the remainder check would find them at the next order sync (10 seconds or sooner), as it does today.
+
+**B. The close-out's wait for its own sales (`src/closeout.ts`; serves both the mid-day and the 2:55 close-out).**
+- Run the open-orders check only on timed looks (count timed looks apart from looks brought forward by updates), so an early wake-up never triggers it.
+- When the check finds one of our sales gone, read positions once more before ending: a sale that filled between the two reads is not gone.
+- Effect: today's 10:30:11 alert would not have gone; flat would still be recorded within about 2 s of the account being flat. It also removes the misleading "close by hand" alert at 2:55 described in section 2. Cost: at most one more positions read per ended wait.
+
+**C. New, smaller.**
+- (Messaging only, group 2.) Give the "Alpaca has not filled it yet" alert a closing line when the sale fills, or fold that case into the once-a-minute "Sold remainder" batch.
+- (Question for Michael, no change proposed.) The loss stop's overshoot was 4.18 dollars today: 1.81 from the 5 second account read and 2.37 from selling 17 positions at market. The shadow book lagged the account at that moment, so moving the loss stop to it would not have fired sooner today. Accept as is?
+- (Question for Michael.) HIMS-38's 14.7 s notice has no cause in the records; more logging in the order sync's queue would show it if it recurs.
+
+**For Wednesday's limits (Michael's decision):** the placeholder lost about 0.71 dollars an entry today (504.18 over 708), at about 4 to 15 entries a minute, so a normal day on a list like today's reaches the 500 dollar loss stop by mid-morning (estimate). The losses scale with shares (entry slippage on the free IEX feed, and take-profit 8 cents against stop 13 cents a share), so a largest position of 250 dollars would roughly halve the loss an entry (estimate, not a measurement) and keep the mid-day cycle and an afternoon testable. Lowering the largest position is a tightening Michael can make; raising the loss stop is a hard stop (his alone). In any case, `resume` is needed.
