@@ -14,6 +14,7 @@ import { Governor } from "../src/governor.ts";
 import { Liquidator, SellGate } from "../src/sells.ts";
 import { ensureDay, parseCommand } from "../src/morning.ts";
 import { MemoryStore, CONTROL_STOP, setPhase, type DayRecord } from "../src/store.ts";
+import { CachingStore } from "../src/caching-store.ts";
 import { FakeBroker, order } from "./helpers.ts";
 import type { Signal } from "../src/strategy.ts";
 import { BusyPlaceholder } from "../src/strategy.ts";
@@ -379,4 +380,97 @@ test("the worker writes one self_monitor row a minute in the session, beside the
   (r.worker as any).d.selfMonitor = { sample: () => { throw new Error("boom"); } };
   await r.at("16:53:03");
   assert.equal((r.store as any).events.filter((e: any) => e.event === "self_monitor").length, rows.length);
+});
+
+// ---------------- part 3: the no-copy fix (Michael's approval of 2026-11-11) ----------------
+
+async function cachedDay(n: number) {
+  const inner = new MemoryStore();
+  let nowMs = z("15:00:00").getTime();
+  const store = new CachingStore(inner, () => nowMs);
+  for (let i = 0; i < n; i++) {
+    inner.orders.set(`cyrus-20261102-S${i % 30}-${i}`, { clientOrderId: `cyrus-20261102-S${i % 30}-${i}`, tradeDate: D, symbol: `S${i % 30}`, qty: 1, referencePrice: 10, stopPrice: 9.98, takeProfitPrice: 10.01, status: i % 3 === 0 ? "canceled" : "filled", alpacaOrderId: `a${i}`, filledQty: i % 3 === 0 ? 0 : 1, filledAvgPrice: 10, note: null, createdAt: new Date(nowMs - (n - i) * 700).toISOString(), closedAt: new Date(nowMs - 1).toISOString() });
+  }
+  return { store, inner, tick: (ms: number) => (nowMs += ms) };
+}
+
+test("the caching store hands out its kept rows without copying each one: no structuredClone per row, the same frozen objects, in the same order as before", async () => {
+  const { store } = await cachedDay(2000);
+  const first = await store.listOrders(D);
+  const real = globalThis.structuredClone;
+  let clones = 0;
+  globalThis.structuredClone = ((v: unknown, o?: StructuredSerializeOptions) => (clones++, real(v, o))) as typeof structuredClone;
+  let second: Awaited<ReturnType<typeof store.listOrders>>;
+  try {
+    second = await store.listOrders(D);
+  } finally {
+    globalThis.structuredClone = real;
+  }
+  assert.equal(clones, 0, "no copy per row");
+  assert.equal(second.length, 2000);
+  assert.notEqual(second, first, "a new array each call");
+  assert.ok(second.every((o, i) => o === first[i]), "the same row objects, in the same order");
+  assert.ok(second.every((o) => Object.isFrozen(o)));
+  const sorted = [...second].sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.clientOrderId.localeCompare(b.clientOrderId));
+  assert.ok(second.every((o, i) => o === sorted[i]), "sorted by time written, then id, as before");
+});
+
+test("a kept row cannot be changed by a caller, and a list read before a write keeps the rows as they were (as the copies did)", async () => {
+  const { store } = await cachedDay(10);
+  const before = await store.listOrders(D);
+  const row = before[0]!;
+  assert.throws(() => {
+    (row as any).status = "failed";
+  }, TypeError);
+  await store.updateOrder(row.clientOrderId, { status: "failed", note: "x" });
+  assert.equal(row.status, "canceled", "the earlier read is unchanged");
+  const after = await store.listOrders(D);
+  const now = after.find((o) => o.clientOrderId === row.clientOrderId)!;
+  assert.equal(now.status, "failed");
+  assert.ok(Object.isFrozen(now));
+  store.updateOrderSoon!(after[1]!.clientOrderId, { closedAt: "2026-11-02T15:30:00.000Z" });
+  assert.ok(Object.isFrozen((await store.listOrders(D)).find((o) => o.clientOrderId === after[1]!.clientOrderId)!));
+  await store.insertOrder({ clientOrderId: "cyrus-20261102-NEW-1", tradeDate: D, symbol: "NEW", qty: 1, referencePrice: 5, stopPrice: 4.98, takeProfitPrice: 5.01, status: "intent", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: null });
+  assert.ok(Object.isFrozen((await store.listOrders(D)).find((o) => o.symbol === "NEW")!));
+  // getOrder still hands out a copy (one row).
+  const one = (await store.getOrder("cyrus-20261102-NEW-1"))!;
+  one.note = "mine";
+  assert.equal((await store.getOrder("cyrus-20261102-NEW-1"))!.note, null);
+});
+
+test("the gate decides exactly as it did with copied rows: the same answers for the same 300 signals over 3,000 stored orders", async () => {
+  async function run(copying: boolean) {
+    const { store } = await cachedDay(3000);
+    if (copying) {
+      const orig = store.listOrders.bind(store);
+      (store as any).listOrders = async (d: string) => (await orig(d)).map((o) => structuredClone(o));
+    }
+    const broker = new FakeBroker();
+    let now = z("17:00:00");
+    const governor = new Governor(() => now.getTime());
+    const view = new BrokerView(broker, () => now.getTime());
+    const say = async () => true;
+    const liquidator = new Liquidator({ broker, gate: new SellGate({ broker, say: say as any }), now: () => now, sleep: async () => undefined });
+    await ensureDay({ broker, store, now: () => now, say: say as any, liquidator } as any, D);
+    await store.updateDay(D, { status: "approved", limits: { maxPositionUsd: 250, dailyLossStopUsd: 500, maxTradesPerMinute: 100, borrowingCap: 1 }, decided: { position: true, loss: true, trades: true, cap: true }, phases: { request: "2026-11-01T22:10:00.000Z", armed: "2026-11-02T14:25:00.000Z" } } as any);
+    const gate = new OrderGate({ broker, store, view, governor, now: () => now, say: say as any, note: () => undefined });
+    let seed = 11;
+    const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+    const out: string[] = [];
+    for (let i = 0; i < 300; i++) {
+      now = new Date(now.getTime() + Math.floor(rnd() * 1500));
+      const r: any = await gate.enter(normalSignal(`S${Math.floor(rnd() * 30)}`, 10 + Math.floor(rnd() * 20), now));
+      await gate.settled();
+      out.push(`${r.status}|${r.reason ?? ""}|${r.clientOrderId ?? ""}|${r.qty ?? ""}`);
+      if (r.status === "sent") {
+        const x = rnd();
+        await store.updateOrder(r.clientOrderId, x < 0.4 ? { status: "filled", closedAt: now.toISOString() } : x < 0.55 ? { status: "failed" } : { status: "submitted" });
+      }
+    }
+    return out;
+  }
+  const a = await run(true);
+  const b = await run(false);
+  assert.deepEqual(b, a);
+  assert.ok(a.some((x) => x.startsWith("sent")) && a.some((x) => x.includes("still working")), "the run covers sends and refusals");
 });
