@@ -35,6 +35,9 @@ export interface CommandDeps {
   // Michael's approval of 2026-11-11 (after round 2): a `stop`, `flatten` or `go` handled while that screen is running or done but not
   // yet decided cancels the pending window for good. True if one was pending.
   cancelAfternoonScreen?: (date: string) => boolean;
+  // `load afternoon` is built but switched OFF in the release of 2026-11-11 (Michael's fallback, option B: group 1's round 3 found a
+  // gap in its cancel). Only a deps flag turns it on (the tests); main.ts does not set it.
+  loadAfternoonEnabled?: boolean;
 }
 
 // Why `load afternoon` cannot start now, or null (Michael's standing requirement of 2026-11-11): today has a mid-day cycle, is approved
@@ -65,6 +68,10 @@ function afternoonStatusLine(day: DayRecord, now: Date): string {
   return now < w.start ? "" : `Afternoon load window: ran from ${centralClock(w.start)} to ${centralClock(w.end)}`;
 }
 
+const LOAD_AFTERNOON_HELP = "`load afternoon` during the mid-day pause, while flat, before 1:30 PM CT (or the last entry, if earlier): the rest of today until the last entry (2:00 PM CT on a full day) is a load window (1 share churn, at most 75 dollars a position, up to 150 orders a minute even above today's approved limit), and trading resumes. If the morning was not a load day, the live list switches to the 30 cheap names first (the screen takes a few minutes; `stop`, `flatten` or `go` meanwhile cancels the window for good).";
+const LOAD_AFTERNOON_OFF_HELP = "`load afternoon` is switched off in this release while a fix to it is finished; it changes nothing.";
+export const LOAD_AFTERNOON_OFF = "`load afternoon` is switched off in this release while a fix to it is finished, so nothing changed. `go` still resumes a normal afternoon.";
+
 const HELP = [
   "**Commands** (only you, only here)",
   "`status` what the stack is doing",
@@ -74,7 +81,6 @@ const HELP = [
   "`limits` today's limits",
   "`approve` or `approve cap` accept the next trading day's limits; `position 1500`, `loss 150`, `trades 20`, `cap 2` change one (`trades` is orders a minute, 1 to 100, or up to 150 on a load day: send `load on` first, or in the same message). Until the `Armed` message 5 minutes before the open you can change any limit; after it only tighten (lower) a limit, until the evening post.",
   "`go` end the mid-day pause now (the pause starts at 10:30 AM CT; `go` works once the mid-day close-out is flat, with or without a deploy). `hold` no automatic resume after a mid-day deploy today (the automatic resume ends at 1:30 PM CT, or at the last entry if earlier; `go` still resumes).",
-  "`load afternoon` during the mid-day pause, while flat, before 1:30 PM CT (or the last entry, if earlier): the rest of today until the last entry (2:00 PM CT on a full day) is a load window (1 share churn, at most 75 dollars a position, up to 150 orders a minute even above today's approved limit), and trading resumes. If the morning was not a load day, the live list switches to the 30 cheap names first (the screen takes a few minutes; `stop`, `flatten` or `go` meanwhile cancels the window for good).",
   "`load on` / `load off` make the next trading day a load day or a normal day (see line 5 of the limits); `load on` until the morning screen, 45 minutes before the open; after `Armed` only `load off`.",
   "You can send several commands in one message, one per line; I answer each line in one short reply and then show the limits once.",
 ].join("\n");
@@ -219,7 +225,7 @@ export class CommandProcessor {
     this.d.log?.("command", { kind: cmd.kind });
     switch (cmd.kind) {
       case "help":
-        await this.say(HELP);
+        await this.say([HELP, this.d.loadAfternoonEnabled ? LOAD_AFTERNOON_HELP : LOAD_AFTERNOON_OFF_HELP].join("\n"));
         return;
       case "unknown":
         await this.say(`I did not understand the line "${cmd.text}". Nothing was done for it. Type \`help\` for the list.`);
@@ -318,6 +324,10 @@ export class CommandProcessor {
         return;
       }
       case "loadAfternoon": {
+        if (!this.d.loadAfternoonEnabled) {
+          await this.say(LOAD_AFTERNOON_OFF);
+          return;
+        }
         const date = etDate(now);
         const facts = await this.afternoonFacts(date);
         const why = loadAfternoonRefusal({ ...facts, now });

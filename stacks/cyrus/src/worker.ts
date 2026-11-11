@@ -66,6 +66,8 @@ export interface WorkerDeps {
   makeStream: (symbols: string[], onTrade: (t: Trade) => void) => StreamLike;
   // Self-monitoring (Michael's approval of 2026-11-11): one `self_monitor` row a minute in the session. Absent: none.
   selfMonitor?: Pick<SelfMonitor, "sample">;
+  // `load afternoon` on (the tests only, in the release of 2026-11-11: switched off, Michael's fallback option B).
+  loadAfternoon?: boolean;
   // Alpaca's live order updates (order-stream.ts), connected from "Armed" to the close on every day (the speed release; release B
   // had them on load days only). Optional: without it the order sync alone frees symbols, as before.
   makeOrderStream?: (onUpdate: (u: TradeUpdate) => void) => StreamLike & { reconnects?: () => number };
@@ -263,6 +265,7 @@ export class Worker {
       extraStatus: async () => this.statusLines(),
       afternoonScreen: (date) => this.startAfternoonScreen(date),
       cancelAfternoonScreen: (date) => this.cancelAfternoonScreen(date),
+      loadAfternoonEnabled: deps.loadAfternoon === true,
       log: (e, data) => deps.log?.("info", e, data),
     });
     this.gate = new OrderGate({

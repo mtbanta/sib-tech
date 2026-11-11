@@ -20,7 +20,7 @@ import type { Signal } from "../src/strategy.ts";
 import { BusyPlaceholder } from "../src/strategy.ts";
 import { LOAD_AFTERNOON_PHASE, LOAD_PHASE, afternoonLoadWindow, hasLoadEntries, inAfternoonLoad, inLoadWindow, loadCeilingOn, loadRulesApply } from "../src/load-mode.ts";
 import { MIDDAY_PHASE, readPause, updatePause, emptyPause } from "../src/midday.ts";
-import { SCREEN_CANCELLED, loadAfternoonRefusal } from "../src/commands.ts";
+import { LOAD_AFTERNOON_OFF, SCREEN_CANCELLED, loadAfternoonRefusal } from "../src/commands.ts";
 import { TradeStream } from "../src/stream.ts";
 import { settings } from "./helpers.ts";
 import { SelfMonitor, parseMemAvailable, parseProcStat } from "../src/self-monitor.ts";
@@ -30,11 +30,11 @@ const until = async (cond: () => boolean | Promise<boolean>, n = 400) => {
 };
 
 // An approved, armed normal day in the simulator, flat after the mid-day close-out (as midday.test.ts does it).
-async function flatAtMidday(opts: { load?: boolean; early?: boolean } = {}) {
+async function flatAtMidday(opts: { load?: boolean; early?: boolean; off?: boolean } = {}) {
   const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
   if (opts.early) sim.calendar = [{ date: "2026-11-02", open: "09:30", close: "13:00" }];
   const events: Array<{ e: string; d: any }> = [];
-  const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, log: (_l, e, d) => void events.push({ e, d }) });
+  const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, log: (_l, e, d) => void events.push({ e, d }), loadAfternoon: !opts.off });
   await r.at("2026-11-01T22:10:00Z");
   r.ownerSays(`${opts.load ? "load on\n" : ""}trades 20\nposition 300\napprove`, "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
@@ -695,4 +695,37 @@ test("round 3: on a load day with `load afternoon`, the summary keeps its mornin
   const summary = r.said("trading").find((t) => t.includes("**Load day**"));
   assert.ok(summary);
   assert.ok(summary!.includes("- afternoon load window 10:40 AM CT to 2:00 PM CT (by `load afternoon`): its entries are counted in the rest of the day"), summary);
+});
+
+// ---------------- option B (Michael's fallback after group 1's round 3) ----------------
+
+test("option B: in this release `load afternoon` is switched off unless the worker is built with it on (main.ts does not): it changes nothing, and `help` says so", async () => {
+  const { r, sim } = await flatAtMidday({ off: true });
+  const screens = r.screenOpts.length;
+  const before = r.counts();
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  await r.at("16:40:10");
+  assert.ok(r.said("commands").some((t) => t === LOAD_AFTERNOON_OFF), r.said("commands").join(" | "));
+  assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], undefined);
+  assert.equal((await readPause(r.store, D))!.on, true, "still paused");
+  assert.equal(r.screenOpts.length, screens, "no screen");
+  assert.deepEqual(r.counts(), before, "no feed switch");
+  assert.deepEqual((await r.store.getDay(D))!.liveList, ["AAA", "BBB"]);
+  r.ownerSays("help", "16:41:00");
+  await r.at("16:41:05");
+  const help = r.said("commands").find((t) => t.startsWith("**Commands**"))!;
+  assert.match(help, /`load afternoon` is switched off in this release/);
+  assert.ok(!help.includes("up to 150 orders a minute even above"));
+  // `go` still resumes a normal afternoon, with the approved limits.
+  r.ownerSays("go", "16:42:00");
+  await r.at("16:42:05");
+  assert.equal((await readPause(r.store, D))!.resumedBy, "go");
+  void sim;
+});
+
+test("option B: main.ts builds the worker without `load afternoon`", async () => {
+  const { readFileSync } = await import("node:fs");
+  const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  assert.ok(!/loadAfternoon\s*:/.test(main), "main.ts must not switch `load afternoon` on in this release");
 });
