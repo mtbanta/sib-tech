@@ -20,7 +20,7 @@ import type { Signal } from "../src/strategy.ts";
 import { BusyPlaceholder } from "../src/strategy.ts";
 import { LOAD_AFTERNOON_PHASE, LOAD_PHASE, afternoonLoadWindow, hasLoadEntries, inAfternoonLoad, inLoadWindow, loadCeilingOn, loadRulesApply } from "../src/load-mode.ts";
 import { MIDDAY_PHASE, readPause, updatePause, emptyPause } from "../src/midday.ts";
-import { loadAfternoonRefusal } from "../src/commands.ts";
+import { SCREEN_CANCELLED, loadAfternoonRefusal } from "../src/commands.ts";
 import { TradeStream } from "../src/stream.ts";
 import { settings } from "./helpers.ts";
 import { SelfMonitor, parseMemAvailable, parseProcStat } from "../src/self-monitor.ts";
@@ -496,12 +496,13 @@ test("group 1, round 1: a `stop` sent while the cheap-symbol screen runs wins; t
   r.ownerSays("stop", "16:41:00");
   await r.at("16:41:05");
   assert.ok(r.said("commands").some((t) => t.startsWith("Stopped.")), "the stop was read while the screen ran");
+  assert.ok(r.said("commands").some((t) => t.includes(SCREEN_CANCELLED)), "the stop says the window is cancelled");
   release({ symbols: ["CHP1", "CHP2"], names: {} });
   await settle();
   await r.at("16:41:10");
-  assert.ok(r.said("commands").some((t) => t.startsWith("Afternoon load window not started: the stop flag is on")), r.said("commands").join(" | "));
   assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], undefined);
   assert.equal((await readPause(r.store, D))!.on, true);
+  assert.deepEqual((await r.store.getDay(D))!.liveList, ["AAA", "BBB"], "the finished screen changed nothing");
   // `go` sent while the screen runs also cancels the window.
   const w = await flatAtMidday();
   let rel2: (v: { symbols: string[]; names: Record<string, string> }) => void = () => undefined;
@@ -510,11 +511,16 @@ test("group 1, round 1: a `stop` sent while the cheap-symbol screen runs wins; t
   await w.r.at("16:40:05");
   w.r.ownerSays("go", "16:41:00");
   await w.r.at("16:41:05");
+  assert.ok(w.r.said("commands").some((t) => t.includes(SCREEN_CANCELLED)));
+  const streamsBefore = w.r.counts();
   rel2({ symbols: ["CHP1"], names: {} });
   await settle();
   await w.r.at("16:41:10");
-  assert.ok(w.r.said("commands").some((t) => t.startsWith("Afternoon load window not started: trading has already resumed today")));
   assert.equal((await w.r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], undefined);
+  assert.deepEqual((await w.r.store.getDay(D))!.liveList, ["AAA", "BBB"], "group 2 round 2: the list is not switched under trading resumed by `go`");
+  assert.deepEqual(w.r.counts(), streamsBefore, "the price feed was not switched");
+  assert.ok(!w.r.said("trading").some((t) => t.startsWith("Live list switched")), "no post about a switch");
+  assert.ok(!w.r.said("commands").some((t) => t.startsWith("Afternoon load window not started")), "no second line after the cancel");
 });
 
 test("group 1, round 1: the window is decided only in a pass that read commands after the screen finished, with Alpaca read again (a position opened meanwhile refuses it; unreadable refuses it)", async () => {
@@ -576,15 +582,17 @@ test("group 2, round 1: the daily summary on a normal day with `load afternoon` 
   assert.ok(summary!.includes("(by `load afternoon`)"));
 });
 
-test("group 2, round 1: a self-monitoring sample covering more than 2 minutes (the first of a day) is not written; the next one is", async () => {
+test("group 2, rounds 1 and 2: a self-monitoring sample covering more than 2 minutes (the first of a day, or a stall) is written as a marker row only; the next one in full", async () => {
   const { r } = await flatAtMidday();
   const windows = [600_000, 60_000];
   (r.worker as any).d.selfMonitor = { sample: () => ({ windowMs: windows.shift() ?? 60_000, decisions: { n: 0 } }) };
   await r.at("16:50:00");
   await r.at("16:51:01");
   const rows = (r.store as any).events.filter((e: any) => e.event === "self_monitor");
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].data.windowMs, 60_000);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows[0].data, { windowMs: 600_000, longWindow: true, eventLoopDelayMs: null }, "a long window is a marker row only");
+  assert.equal(rows[1].data.windowMs, 60_000);
+  assert.equal(rows[1].data.longWindow, undefined);
 });
 
 test("group 2, round 1: the gate's decision-time list stops at 20,000 and counts the rest, without shifting", async () => {
@@ -594,4 +602,97 @@ test("group 2, round 1: the gate's decision-time list stops at 20,000 and counts
   assert.equal(t.times.length, 20_000);
   assert.equal(t.dropped, 3);
   assert.equal(s.gate.takeDecisionTimes().dropped, 0);
+});
+
+// ---------------- round 3 (Michael's approval after both groups' round 2) ----------------
+
+type Rel = (v: { symbols: string[]; names: Record<string, string> }) => void;
+function slowScreen(r: any): { release: Rel } {
+  const h = { release: (() => undefined) as Rel };
+  r.worker.d.buildLiveList = () => new Promise((res) => (h.release = res));
+  return h;
+}
+
+test("round 3: `stop` then `resume`, and `flatten` then `resume`, while the screen runs: the window never starts and trading stays paused", async () => {
+  for (const first of ["stop", "flatten"]) {
+    const { r } = await flatAtMidday();
+    const h = slowScreen(r);
+    r.ownerSays("load afternoon", "16:40:00");
+    await r.at("16:40:05");
+    r.ownerSays(first, "16:40:30");
+    await r.at("16:40:35");
+    assert.ok(r.said("commands").some((t) => t.includes(SCREEN_CANCELLED)), `${first} says the window is cancelled`);
+    r.ownerSays("resume", "16:41:00");
+    await r.at("16:41:05");
+    h.release({ symbols: ["CHP1", "CHP2"], names: {} });
+    await settle();
+    for (const t of ["16:41:10", "16:41:20", "16:41:30"]) await r.at(t);
+    assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], undefined, first);
+    assert.equal((await readPause(r.store, D))!.on, true, `${first}: still paused after resume`);
+    assert.deepEqual((await r.store.getDay(D))!.liveList, ["AAA", "BBB"]);
+    assert.ok(!r.said("commands").some((t) => t.startsWith("Afternoon load window on")));
+  }
+});
+
+test("round 3: after a cancel, `load afternoon` can be sent again (a fresh screen and check); two sent while one screen runs start it once", async () => {
+  const { r } = await flatAtMidday();
+  const h = slowScreen(r);
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  r.ownerSays("load afternoon", "16:40:10");
+  await r.at("16:40:15");
+  assert.ok(r.said("commands").some((t) => t === "Not started yet: the cheap-symbol screen for the afternoon load window is already running."));
+  r.ownerSays("stop", "16:40:20");
+  await r.at("16:40:25");
+  h.release({ symbols: ["CHP1"], names: {} });
+  await settle();
+  r.ownerSays("resume", "16:41:00");
+  await r.at("16:41:05");
+  (r.worker as any).d.buildLiveList = async () => ({ symbols: ["CHP1", "CHP2"], names: {} });
+  r.ownerSays("load afternoon", "16:42:00");
+  await r.at("16:42:05");
+  await r.at("16:42:10");
+  assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], z("16:42:10").toISOString());
+  assert.deepEqual((await r.store.getDay(D))!.liveList, ["CHP1", "CHP2"]);
+  assert.equal(r.said("commands").filter((t) => t.startsWith("Afternoon load window on")).length, 1);
+});
+
+test("round 3: a screen that finishes after 1:30 PM CT does not start the window; a failed command read holds the decision until a read succeeds", async () => {
+  const { r } = await flatAtMidday();
+  const h = slowScreen(r);
+  r.ownerSays("load afternoon", "19:25:00");
+  await r.at("19:25:05");
+  h.release({ symbols: ["CHP1"], names: {} });
+  await settle();
+  await r.at("19:30:10");
+  assert.ok(r.said("commands").some((t) => t.startsWith("Afternoon load window not started: it is 1:30 PM CT or later")), r.said("commands").join(" | "));
+  assert.equal((await readPause(r.store, D))!.on, true);
+
+  const w = await flatAtMidday();
+  const h2 = slowScreen(w.r);
+  w.r.ownerSays("load afternoon", "16:40:00");
+  await w.r.at("16:40:05");
+  h2.release({ symbols: ["CHP1"], names: {} });
+  await settle();
+  const bot: any = w.r.bot;
+  const real = bot.commandMessagesAfter.bind(bot);
+  bot.commandMessagesAfter = async () => { throw new Error("discord down"); };
+  await w.r.at("16:40:10");
+  assert.equal((await w.r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], undefined, "no decision without a successful command read");
+  bot.commandMessagesAfter = real;
+  await w.r.at("16:40:20");
+  assert.equal((await w.r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], z("16:40:20").toISOString());
+});
+
+test("round 3: on a load day with `load afternoon`, the summary keeps its morning window and adds one line for the afternoon window", async () => {
+  const { r } = await flatAtMidday({ load: true });
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  await r.at("20:55:00");
+  await until(async () => Boolean((await r.store.getDay(D))!.phases.closeout));
+  for (const t of ["20:56:00", "21:00:30", "21:05:00", "21:05:30"]) await r.at(t);
+  await until(async () => Boolean((await r.store.getDay(D))!.phases.summary));
+  const summary = r.said("trading").find((t) => t.includes("**Load day**"));
+  assert.ok(summary);
+  assert.ok(summary!.includes("- afternoon load window 10:40 AM CT to 2:00 PM CT (by `load afternoon`): its entries are counted in the rest of the day"), summary);
 });

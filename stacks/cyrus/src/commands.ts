@@ -32,6 +32,9 @@ export interface CommandDeps {
   // minutes, and the main loop must keep reading commands). The worker calls finishAfternoonLoad in a later pass, after that pass has
   // read commands, so a `stop` or `go` sent meanwhile is seen first (group 1 review, round 1). False if one is already running.
   afternoonScreen?: (date: string) => boolean;
+  // Michael's approval of 2026-11-11 (after round 2): a `stop`, `flatten` or `go` handled while that screen is running or done but not
+  // yet decided cancels the pending window for good. True if one was pending.
+  cancelAfternoonScreen?: (date: string) => boolean;
 }
 
 // Why `load afternoon` cannot start now, or null (Michael's standing requirement of 2026-11-11): today has a mid-day cycle, is approved
@@ -52,6 +55,9 @@ export function loadAfternoonRefusal(o: { day: DayRecord | null; now: Date; paus
   return null;
 }
 
+// Said when a `stop`, `flatten` or `go` cancels a pending afternoon load window.
+export const SCREEN_CANCELLED = "The afternoon load window is cancelled (its cheap-symbol screen had not finished): it will not start, and the live list stays as it is. Send `load afternoon` again if you want it.";
+
 // The `status` line for the afternoon load window (group 2 review, round 1).
 function afternoonStatusLine(day: DayRecord, now: Date): string {
   const w = afternoonLoadWindow(day)!;
@@ -68,7 +74,7 @@ const HELP = [
   "`limits` today's limits",
   "`approve` or `approve cap` accept the next trading day's limits; `position 1500`, `loss 150`, `trades 20`, `cap 2` change one (`trades` is orders a minute, 1 to 100, or up to 150 on a load day: send `load on` first, or in the same message). Until the `Armed` message 5 minutes before the open you can change any limit; after it only tighten (lower) a limit, until the evening post.",
   "`go` end the mid-day pause now (the pause starts at 10:30 AM CT; `go` works once the mid-day close-out is flat, with or without a deploy). `hold` no automatic resume after a mid-day deploy today (the automatic resume ends at 1:30 PM CT, or at the last entry if earlier; `go` still resumes).",
-  "`load afternoon` during the mid-day pause, while flat, before 1:30 PM CT (or the last entry, if earlier): the rest of today until the last entry (2:00 PM CT on a full day) is a load window (1 share churn, at most 75 dollars a position, up to 150 orders a minute even above today's approved limit), and trading resumes. If the morning was not a load day, the live list switches to the 30 cheap names first (the screen takes a few minutes; `stop` or `go` meanwhile cancels the window).",
+  "`load afternoon` during the mid-day pause, while flat, before 1:30 PM CT (or the last entry, if earlier): the rest of today until the last entry (2:00 PM CT on a full day) is a load window (1 share churn, at most 75 dollars a position, up to 150 orders a minute even above today's approved limit), and trading resumes. If the morning was not a load day, the live list switches to the 30 cheap names first (the screen takes a few minutes; `stop`, `flatten` or `go` meanwhile cancels the window for good).",
   "`load on` / `load off` make the next trading day a load day or a normal day (see line 5 of the limits); `load on` until the morning screen, 45 minutes before the open; after `Armed` only `load off`.",
   "You can send several commands in one message, one per line; I answer each line in one short reply and then show the limits once.",
 ].join("\n");
@@ -220,6 +226,7 @@ export class CommandProcessor {
         return;
       case "stop": {
         const saved = await this.trySetStop(true, "owner command (stop)", now);
+        const screenCancelled = this.d.cancelAfternoonScreen?.(etDate(now)) ?? false;
         let n = 0;
         let cancelFailed = false;
         try {
@@ -234,6 +241,7 @@ export class CommandProcessor {
         } else {
           await this.say(`Stopped. No new entries. Cancelled ${n} unfilled entr${n === 1 ? "y" : "ies"}. Open positions keep their protective stops and will be closed at the end of the day (or type \`flatten\`).`);
         }
+        if (screenCancelled) await this.say(SCREEN_CANCELLED);
         return;
       }
       case "resume": {
@@ -246,6 +254,7 @@ export class CommandProcessor {
       }
       case "flatten": {
         const saved = await this.trySetStop(true, "owner command (flatten)", now);
+        const screenCancelled = this.d.cancelAfternoonScreen?.(etDate(now)) ?? false;
         // The sale can take a while (it waits for cancels). It runs in the background so the next command, the heartbeat
         // and the rest of the pass are not held up; the reply follows when it is done.
         const task = (async () => {
@@ -271,6 +280,7 @@ export class CommandProcessor {
         this.pending.add(task);
         void task.finally(() => this.pending.delete(task));
         await this.say(saved ? "Stopped. Selling every position and cancelling every open order now; I will say when the account is flat." : "**The stop flag could not be saved.** Selling every position now anyway; I will say when it is done.");
+        if (screenCancelled) await this.say(SCREEN_CANCELLED);
         return;
       }
       case "limits": {
@@ -289,6 +299,7 @@ export class CommandProcessor {
         await this.say(await this.statusText(now));
         return;
       case "go": {
+        const screenCancelled = this.d.cancelAfternoonScreen?.(etDate(now)) ?? false;
         // The mid-day cycle (Michael, 2026-11-09): end the pause, only when the mid-day close-out is flat and no stop is on.
         const date = etDate(now);
         const day = await this.d.store.getDay(date);
@@ -297,11 +308,13 @@ export class CommandProcessor {
         const why = goRefusal({ hasCycle: Boolean(day && middayTimes(day)), pause, flat: Boolean(day && middayFlat(day)), stop });
         if (why) {
           await this.say(`Not resumed: ${why}.`);
+          if (screenCancelled) await this.say(SCREEN_CANCELLED);
           return;
         }
         await updatePause(this.d.store, date, { on: false, resumedAt: now.toISOString(), resumedBy: "go" });
         const lastEntryAt = middayTimes(day!)!.lastEntryAt;
         await this.say(now >= lastEntryAt ? `The mid-day pause is over, but no entries are left today (last entry ${centralClock(lastEntryAt)}).` : "Resumed: the mid-day pause is over. Same limits as this morning; the loss stop counts from the open.");
+        if (screenCancelled) await this.say(SCREEN_CANCELLED);
         return;
       }
       case "loadAfternoon": {
@@ -324,7 +337,7 @@ export class CommandProcessor {
         const started = this.d.afternoonScreen(date);
         await this.say(
           started
-            ? "Running the cheap-symbol screen for the afternoon load window now; it can take a few minutes. When it is done I check again that the account is flat and paused, then start the window and resume trading. `stop` or `go` before then cancels the window."
+            ? "Running the cheap-symbol screen for the afternoon load window now; it can take a few minutes. When it is done I check again that the account is flat and paused, then start the window and resume trading. `stop`, `flatten` or `go` before then cancels the window."
             : "Not started yet: the cheap-symbol screen for the afternoon load window is already running.",
         );
         return;
@@ -538,7 +551,7 @@ export class CommandProcessor {
     const why = loadAfternoonRefusal({ ...facts, now: at });
     if (why) {
       this.d.log?.("load_afternoon_refused", { date, why });
-      await this.say(`Afternoon load window not started: ${why}.${r.switched ? " The live list was switched to the cheap names; `go` trades the normal placeholder on them." : ""}`);
+      await this.say(`Afternoon load window not started: ${why}.${r.switched ? " The live list was switched to the cheap names while paused; if you send `go`, the normal placeholder trades on them." : ""}`);
       return;
     }
     await this.startAfternoonWindow(date, r, facts, at);

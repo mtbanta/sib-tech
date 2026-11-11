@@ -95,7 +95,7 @@ export const VIEW_EVERY_NO_STREAM_MS = 5_000;
 // The speed release, item 10: the request and stream statistics are written every minute of the session (they were every 5 minutes,
 // and every minute only around a load window).
 export const STATS_EVERY_MS = 60_000;
-// A self-monitoring sample covering more than this is not written (it only resets the starting points).
+// A self-monitoring sample covering more than this is written as a marker row only (`longWindow`).
 export const SELF_MONITOR_MAX_WINDOW_MS = 120_000;
 // Successful remainder sales (shares left without a stop, sold by the order sync) are gathered into one alert a minute (the speed
 // release, decision 6): on 2026-11-05 they were 101 separate alerts, and at the 3 second grace about 270 a day are expected.
@@ -262,6 +262,7 @@ export class Worker {
       now: deps.now,
       extraStatus: async () => this.statusLines(),
       afternoonScreen: (date) => this.startAfternoonScreen(date),
+      cancelAfternoonScreen: (date) => this.cancelAfternoonScreen(date),
       log: (e, data) => deps.log?.("info", e, data),
     });
     this.gate = new OrderGate({
@@ -810,7 +811,8 @@ export class Worker {
         await this.commands.finishAfternoonLoad(screened.date, screened.result!);
       } catch (err) {
         this.d.log?.("error", "load_afternoon_finish_failed", { error: (err as Error).message.slice(0, 200) });
-        await this.say("commands", "Afternoon load window not started: I could not finish the check. Still paused; `go` resumes a normal afternoon.").catch(() => undefined);
+        // The window's start is written before the pause is ended, so a failure may leave either state: say so plainly.
+        await this.say("commands", "Afternoon load window: I could not finish starting it (the database did not answer). Send `status` to see whether the window is on and whether trading is still paused.").catch(() => undefined);
       }
     }
 
@@ -929,9 +931,10 @@ export class Worker {
           } catch {
             row = null; // measurement must never break the pass
           }
-          // A window much longer than a minute (the first sample of a day or after a start) only resets the starting points: its
-          // numbers would cover the night (group 2 review, round 1).
-          if (row && !(typeof row.windowMs === "number" && row.windowMs > SELF_MONITOR_MAX_WINDOW_MS)) await this.d.store.addEvent("info", "self_monitor", row).catch(() => undefined);
+          // A window much longer than a minute (the first sample of a day, after a start, or a real stall) is written as a short
+          // marker row only: its length and the event loop's worst delay, flagged `longWindow` (group 2 review, rounds 1 and 2).
+          if (row && typeof row.windowMs === "number" && row.windowMs > SELF_MONITOR_MAX_WINDOW_MS) row = { windowMs: row.windowMs, longWindow: true, eventLoopDelayMs: row.eventLoopDelayMs ?? null };
+          if (row) await this.d.store.addEvent("info", "self_monitor", row).catch(() => undefined);
         }
       }
     }
@@ -1215,17 +1218,23 @@ export class Worker {
   // `load afternoon` on a normal morning (Michael's standing requirement of 2026-11-11): the command has checked every condition and
   // starts this. The screen runs in the background (it can take minutes); the window itself is decided later (see pass). False if one
   // is already running for today.
-  private afternoonScreenState: { date: string; state: "running" | "ready"; readyAt: number; result?: { switched: boolean; list: string[] } } | null = null;
+  private afternoonScreenState: { date: string; state: "running" | "ready" | "cancelled"; readyAt: number; result?: { switched: boolean; list: string[] } } | null = null;
   private lastPollStartedAt = -Infinity;
   private startAfternoonScreen(date: string): boolean {
-    if (this.afternoonScreenState?.date === date || this.inflight.has("afternoon-screen")) return false;
-    this.afternoonScreenState = { date, state: "running", readyAt: 0 };
+    if (this.inflight.has("afternoon-screen")) return false;
+    if (this.afternoonScreenState?.date === date && this.afternoonScreenState.state !== "cancelled") return false;
+    const mine = { date, state: "running" as "running" | "ready" | "cancelled", readyAt: 0 } as NonNullable<Worker["afternoonScreenState"]>;
+    this.afternoonScreenState = mine;
     this.background("afternoon-screen", async () => {
       try {
-        const result = await this.afternoonLoadList(date);
-        this.afternoonScreenState = { date, state: "ready", readyAt: this.d.now().getTime(), result };
+        const result = await this.afternoonLoadList(date, () => mine.state === "cancelled");
+        if (result === null || mine.state === "cancelled") return; // cancelled by a command: it said so
+        mine.state = "ready";
+        mine.readyAt = this.d.now().getTime();
+        mine.result = result;
       } catch (err) {
-        this.afternoonScreenState = null;
+        if (this.afternoonScreenState === mine) this.afternoonScreenState = null;
+        if (mine.state === "cancelled") return;
         const why = (err as Error).message.slice(0, 120).replace(/\.$/, "");
         this.d.log?.("info", "load_afternoon_failed", { error: why });
         await this.say("commands", `Afternoon load window not started: ${why}. Still paused; \`go\` resumes a normal afternoon.`);
@@ -1234,14 +1243,34 @@ export class Worker {
     return true;
   }
 
+  // A `stop`, `flatten` or `go` while the screen is running or done but not decided: the pending window is cancelled for good (the
+  // finished screen then changes nothing). True if one was pending.
+  private cancelAfternoonScreen(date: string): boolean {
+    const st = this.afternoonScreenState;
+    if (!st || st.date !== date || st.state === "cancelled") return false;
+    st.state = "cancelled";
+    this.d.log?.("info", "load_afternoon_cancelled", { date });
+    return true;
+  }
+
   // The screen and the feed switch for `load afternoon`. On a load day the cheap list is already live. Otherwise the cheap-symbol
   // screen runs and the price feed switches to its 30 names on the same connection. Throws if the screen fails or finds nothing.
-  private async afternoonLoadList(date: string): Promise<{ switched: boolean; list: string[] }> {
+  // Returns null (and changes nothing) if the window was cancelled while the screen ran, or if the mid-day pause is no longer on or a
+  // stop is set when the screen finishes: the list and the feed switch only at the pause, while nothing trades.
+  private async afternoonLoadList(date: string, cancelled: () => boolean = () => false): Promise<{ switched: boolean; list: string[] } | null> {
     const day = await this.d.store.getDay(date);
     if (!day) throw new Error("no day record for today");
     if (isLoadDay(day)) return { switched: false, list: day.liveList ?? [] };
     const { symbols: list, names } = await this.d.buildLiveList({ load: true });
+    if (cancelled()) return null;
     if (list.length === 0) throw new Error("the cheap-symbol screen found no names");
+    const pauseNow = await readPause(this.d.store, date);
+    const stopNow = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
+    if (cancelled()) return null;
+    if (!pauseNow?.on || stopNow?.on) {
+      this.d.log?.("info", "load_afternoon_not_switched", { pause: Boolean(pauseNow?.on), stop: Boolean(stopNow?.on) });
+      throw new Error(stopNow?.on ? "the stop flag is on, so the live list was not changed" : "trading is no longer paused for the mid-day cycle, so the live list was not changed");
+    }
     const updated = await this.d.store.updateDay(date, { liveList: list });
     await this.d.store.setControl(`live_names:${date}`, names).catch(() => undefined);
     this.lastDay = updated;
