@@ -3372,7 +3372,7 @@ Run at Michael's request in a fresh session, in the shape of `builds/monday-revi
 
 ### 4. Blocked sales
 
-**None all day.** No `sale_blocked` event, no attempt that sold nothing, no hidden hold. So the new logging recorded nothing (no held or free quantities, open orders or list ages to report), and A step 3 (selling past Alpaca's free count) still has no data. Monday's stuck sales (v12) have not recurred on v13 to v15.
+**None all day.** No `sale_blocked` event, no attempt that sold nothing, no hidden hold. So the new logging recorded nothing (no held or free quantities, open orders or list ages to report), and A step 3 (selling past Alpaca's free count) still has no data. Monday's stuck sales (v12) did not recur Tuesday (v15, the first trading day since Monday; v13 and v14 never traded a session).
 
 ### 5. The daily summary against the account
 
