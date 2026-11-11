@@ -18,7 +18,7 @@ import type { BrokerView } from "./broker-view.ts";
 import type { GateBroker } from "./broker.ts";
 import type { Governor } from "./governor.ts";
 import { checkEntry, tradesCeiling, type EntryContext } from "./limits.ts";
-import { LOAD_MAX_POSITION_USD, LOAD_WINDOW_SHARES, beforeLoadWindow, isLoadDay, loadState, loadWindow } from "./load-mode.ts";
+import { LOAD_MAX_POSITION_USD, LOAD_WINDOW_SHARES, beforeLoadWindow, isLoadDay, loadCeilingOn, loadRulesApply, loadWindow } from "./load-mode.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, type NotFlatState, type OrderRecord, type StopFlag, type Store } from "./store.ts";
 import { readPause, type MiddayPause } from "./midday.ts";
 import type { Signal } from "./strategy.ts";
@@ -194,11 +194,14 @@ export class OrderGate {
     if (pause?.on) return this.refuse(date, symbol, MIDDAY_PAUSED);
     const blocked = this.d.entryBlock?.();
     if (blocked) return this.refuse(date, symbol, blocked);
-    // Load day (load-mode.ts): no entries before the load window, and at most 75 dollars an entry all day.
+    // Load day (load-mode.ts): no entries before the load window, and at most 75 dollars an entry until the mid-day pause; from the
+    // pause on, a normal day (Michael's decision of 2026-11-10).
     if (beforeLoadWindow(day, now)) return this.refuse(date, symbol, `load day: entries start at ${centralTime(loadWindow(day)!.start)} Central`);
-    const dayLimits = isLoadDay(day) ? { ...limits, maxPositionUsd: Math.min(limits.maxPositionUsd, LOAD_MAX_POSITION_USD) } : limits;
-    // Michael's ruling of 2026-11-06: the ceiling is 150 orders a minute only while a load day's window is switched on, else 100.
-    const ceiling = tradesCeiling(loadState(day) === "on");
+    const loadRules = loadRulesApply(day, now, Boolean(pause?.since));
+    const dayLimits = loadRules ? { ...limits, maxPositionUsd: Math.min(limits.maxPositionUsd, LOAD_MAX_POSITION_USD) } : limits;
+    // Michael's ruling of 2026-11-06: the ceiling is 150 orders a minute only while a load day's window is switched on, else 100; since
+    // his decision of 2026-11-10, only until the mid-day pause.
+    const ceiling = tradesCeiling(loadCeilingOn(day, now));
 
     // Strategy work never spends Alpaca's last request headroom: if the snapshot would have to ask Alpaca for something
     // and the budget is down to the safety reserve, refuse before any request is made. After a failed refresh, wait a
@@ -234,7 +237,7 @@ export class OrderGate {
     const held = new Set(positions.map((p) => p.symbol));
     if (rows.some((o) => o.symbol === symbol && isActive(o) && !held.has(symbol))) return this.refuse(date, symbol, "an entry for this symbol is still working");
     // Decision 5's short backoff on a load day; a normal day keeps the minute (the proposal's item 7: normal days unchanged).
-    if (isLoadDay(day)) {
+    if (loadRules) {
       if (refusalWaitMs(rows, symbol, now.getTime()) > 0) return this.refuse(date, symbol, "Alpaca refused this symbol a moment ago, so I wait a few seconds before trying again");
     } else if (rows.some((o) => o.symbol === symbol && o.status === "failed" && o.createdAt && now.getTime() - new Date(o.createdAt).getTime() < 60_000)) return this.refuse(date, symbol, "Alpaca refused this symbol a moment ago, so I wait a minute before trying again");
     // Entries not yet in the (up to 15 seconds old) account view: sent but not filled, filled but not shown yet, or partly

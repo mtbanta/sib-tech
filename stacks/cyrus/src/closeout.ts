@@ -61,7 +61,8 @@ export type CloseoutPath = "close-out" | "retry" | "carried" | "emergency" | "mi
 export const OWN_SELLS_DEADLINE_BEFORE_CLOSE_MS = 2 * 60_000;
 // Without a known close (the emergency path), it waits at most this long.
 const OWN_SELLS_WAIT_NO_CLOSE_MS = 60_000;
-// While waiting: positions every 2 seconds, open orders every 5th look (about 0.6 requests a second).
+// While waiting: positions every 2 seconds, open orders every 5th timed look (about 0.6 requests a second); when a sale looks gone,
+// positions once more before ending (fix B of 2026-11-10).
 const OWN_SELLS_POLL_MS = 2_000;
 const OWN_SELLS_ORDERS_EVERY = 5;
 
@@ -124,9 +125,11 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
     stillWorking = true;
     let earlyWakes = 0; // at most MAX_EARLY_WAKES looks are brought forward by updates; after that every look waits its 2 seconds again
     for (let look = 1; look <= maxLooks && d.now().getTime() < deadline; look++) {
+      let early = false;
       if (d.waitEvent && earlyWakes < MAX_EARLY_WAKES) {
         if (await d.waitEvent(new Set(remaining), OWN_SELLS_POLL_MS)) {
           earlyWakes++;
+          early = true;
           look--; // a look brought forward by an update does not use up one of the timed looks
         }
       } else await sleep(OWN_SELLS_POLL_MS);
@@ -138,11 +141,25 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
           stillWorking = false;
           break;
         }
-        if (look % OWN_SELLS_ORDERS_EVERY === 0) {
+        // Fix B (Michael's approval of 2026-11-10): open orders are read on timed looks only. Before, a look brought forward by an
+        // update made `look` 0, and 0 % 5 is 0, so the check ran on it (on 2026-11-10 the wait ended after 544 ms).
+        if (!early && look % OWN_SELLS_ORDERS_EVERY === 0) {
           const open = (await d.broker.listOrdersPaged("open", "2000-01-01T00:00:00Z", 5)).orders;
-          if (!held.every((p) => ownOpenSellQty(open, p.symbol) >= p.qty - 1e-6)) {
-            stillWorking = false; // a sell of ours is gone (refused, cancelled) and shares are still held: report now
-            break;
+          const covered = (ps: Array<{ symbol: string; qty: number }>) => ps.every((p) => ownOpenSellQty(open, p.symbol) >= p.qty - 1e-6);
+          if (!covered(held)) {
+            // Fix B: a sale that filled between the positions read and the orders read looks gone. Positions are read once more
+            // before ending: only a symbol still held without a working sell of ours ends the wait.
+            const again = await d.broker.listPositions();
+            remaining = again.map((p) => p.symbol);
+            if (again.length === 0) {
+              flat = true;
+              stillWorking = false;
+              break;
+            }
+            if (!covered(again)) {
+              stillWorking = false; // a sell of ours is gone (refused, cancelled) and shares are still held: report now
+              break;
+            }
           }
         }
       } catch {

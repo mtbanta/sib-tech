@@ -230,6 +230,11 @@ export interface LiquidateResult {
   // one entry judges its own shares by the change, since a newer position on the same symbol may still be held).
   heldBefore?: Record<string, number>;
   heldAfter?: Record<string, number>;
+  // Fix A (Michael's approval of 2026-11-10), with `ownEntryOnly` only: the entry's own shares as recounted when its last sale was
+  // sent (the original count less the shares its exits took while their cancel landed), and the symbols whose holding has fallen by
+  // the entry's whole original count at the last look (every one of its shares is gone, whoever sold them).
+  ownTarget?: Record<string, number>;
+  ownGone?: string[];
 }
 
 // Shares that sells this stack sent (client id cyrus-x-) could still sell, for one symbol.
@@ -325,6 +330,18 @@ export class Liquidator {
     const soldBy = new Map<string, number>();
     const own = o.ownEntryOnly && only ? o.ownEntryOnly.maxQty : null;
     const need = (sym: string): number => (own ? Math.max(0, (own[sym] ?? 0) - (soldBy.get(sym) ?? 0)) : Infinity);
+    // Fix A (Michael's approval of 2026-11-10): the entry's own shares still to sell, recounted from the holding. On 2026-11-10 the
+    // take-profit filled more shares while its cancel was landing (QXO: 9 counted, 8 of them then filled at the take-profit), and the
+    // sale waited its full 6 seconds for a count that could never come free. Shares that leave the holding are no longer the entry's
+    // to sell: held now, less the shares that were not the entry's at the first look, less our own sells still working. Never above
+    // the original count less what this liquidation sold. No extra request: it uses the reads the wait already makes.
+    const ownLeft = (sym: string, heldQty: number, open: Order[]): number => {
+      if (!own) return Infinity;
+      const before = result.heldBefore?.[sym];
+      if (before === undefined) return need(sym);
+      const others = Math.max(0, before - (own[sym] ?? 0));
+      return Math.min(need(sym), Math.max(0, heldQty - others - ownOpenSellQty(open, sym)));
+    };
     // Part A, step 1: a cancel sent in this attempt explains a hold even when Alpaca's open list does not show the order (it has not
     // been seen to show a filled entry's exits), so a hold counts as unexplained only in an attempt that cancelled nothing.
     let cancelledInAttempt = false;
@@ -378,9 +395,9 @@ export class Liquidator {
         await this.sleep(1_000 * round);
         continue;
       }
-      // Part B (one entry only): that entry's own shares are all sold and the holding has fallen by that much: done (a newer position
-      // on the same symbol may still be held, with its own exits).
-      if (own && only && [...only].every((sym) => need(sym) <= EPS && (positions.find((p) => p.symbol === sym)?.qty ?? 0) <= (result.heldBefore?.[sym] ?? Infinity) - (own[sym] ?? 0) + EPS)) break;
+      // Part B (one entry only): the holding has fallen by that entry's whole count: done (a newer position on the same symbol may still
+      // be held, with its own exits). Fix A of 2026-11-10: whoever sold them (our sale, or its own take-profit while its cancel landed).
+      if (own && only && [...only].every((sym) => (positions.find((p) => p.symbol === sym)?.qty ?? 0) <= (result.heldBefore?.[sym] ?? Infinity) - (own[sym] ?? 0) + EPS)) break;
       if (positions.length === 0) {
         // Nothing to sell. A whole-account request still clears any order left open (an entry that never filled).
         if (!only && round === 1) {
@@ -485,8 +502,10 @@ export class Liquidator {
           const p = held.find((x) => x.symbol === sym);
           return p ? Math.min(p.qty - openSellQty(openOrders, sym), p.qtyAvailable ?? Infinity) : Infinity;
         };
+        // Fix A: against the recounted shares, so a count that the take-profit made stale no longer holds the wait for 6 seconds.
+        const leftNow = (sym: string): number => ownLeft(sym, held.find((x) => x.symbol === sym)?.qty ?? 0, openOrders);
         const stillHolding = own
-          ? [...symbols].some((sym) => need(sym) > EPS && freeNow(sym) < need(sym) - EPS)
+          ? [...symbols].some((sym) => leftNow(sym) > EPS && freeNow(sym) < leftNow(sym) - EPS)
           : [...symbols].some((sym) => openSellQty(openOrders, sym) > EPS) || held.some((p) => p.qtyAvailable != null && p.qtyAvailable < p.qty - EPS);
         if (!stillHolding || waited >= waitMs || (own && !cancelledInAttempt)) break;
         // Poll gently: a cancel usually finishes in a fraction of a second, and every look costs one of Alpaca's 200 requests a minute.
@@ -498,6 +517,7 @@ export class Liquidator {
       // 3. Sell each symbol with an explicit quantity, through the sell gate (never more than is free).
       const hiddenThisRound = new Set<string>();
       let soldThisRound = 0;
+      const capThisRound = new Map<string, number>(); // fix A: the recounted shares per symbol in this round
       if (readOk) {
         this.d.gate.invalidate();
         let freshPositions: Position[] = [];
@@ -508,8 +528,10 @@ export class Liquidator {
         }
         for (const p of freshPositions) {
           if (yieldNow()) return yielded();
-          if (own && !(need(p.symbol) > EPS)) continue; // that entry's own shares are sold (part B)
-          const free = Math.min(p.qty - openSellQty(openOrders, p.symbol), p.qtyAvailable ?? Infinity, need(p.symbol));
+          const cap = ownLeft(p.symbol, p.qty, openOrders);
+          capThisRound.set(p.symbol, cap);
+          if (own && !(cap > EPS)) continue; // that entry's own shares are sold, or gone at its own exits (part B, fix A)
+          const free = Math.min(p.qty - openSellQty(openOrders, p.symbol), p.qtyAvailable ?? Infinity, cap);
           if (!(free > EPS)) {
             // Part A, step 1: held, not free, and no open order visible that would explain it.
             const hidden = !cancelledInAttempt && openSellQty(openOrders, p.symbol) <= EPS && p.qtyAvailable != null && p.qtyAvailable < p.qty - EPS;
@@ -534,6 +556,7 @@ export class Liquidator {
           const id = `cyrus-x-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-${round}`;
           const r = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: id, reason: o.reason });
           if (r.status === "sent") {
+            if (own) (result.ownTarget ??= {})[p.symbol] = (soldBy.get(p.symbol) ?? 0) + cap; // fix A: the recount at this sale
             soldBy.set(p.symbol, (soldBy.get(p.symbol) ?? 0) + free);
             soldThisRound++;
             result.sold.push({ symbol: p.symbol, qty: free });
@@ -548,7 +571,7 @@ export class Liquidator {
       }
 
       // Part A, step 1: nothing sold and every symbol still to sell held with no open order visible: end this attempt now.
-      if (o.endWhenHiddenHold && soldThisRound === 0 && hiddenThisRound.size > 0 && [...symbols].every((sym) => need(sym) <= EPS || hiddenThisRound.has(sym))) {
+      if (o.endWhenHiddenHold && soldThisRound === 0 && hiddenThisRound.size > 0 && [...symbols].every((sym) => (capThisRound.get(sym) ?? need(sym)) <= EPS || hiddenThisRound.has(sym))) {
         result.hiddenHold = [...hiddenThisRound];
         break;
       }
@@ -562,6 +585,7 @@ export class Liquidator {
       result.flat = left.length === 0;
       result.remaining = left.map((p) => p.symbol);
       result.heldAfter = Object.fromEntries(left.map((p) => [p.symbol, p.qty]));
+      if (own && only) result.ownGone = [...only].filter((sym) => result.heldBefore?.[sym] !== undefined && (result.heldAfter?.[sym] ?? 0) <= result.heldBefore[sym]! - (own[sym] ?? 0) + EPS);
     } catch {
       result.remaining = result.remaining.length > 0 ? result.remaining : ["(could not read positions)"];
     }

@@ -476,7 +476,7 @@ test("decision 5, commands: `trades 150` needs `load on` (in the same message, e
   assert.deepEqual([d.limits.maxTradesPerMinute, d.phases.load, d.status], [150, "on", "approved"]);
   const reply = r.said("commands").at(-1)!;
   assert.ok(reply.indexOf("**trades 150**") < reply.indexOf("**load on**"), "the replies keep the order the lines were written in");
-  assert.ok(reply.includes("the ceiling is 150 on this load day"), reply);
+  assert.ok(reply.includes("the ceiling is 150 on this load day until the mid-day pause, then 100"), reply);
   r.ownerSays("load off", "2026-11-01T22:22:00Z");
   await r.at("2026-11-01T22:22:10Z");
   d = (await r.store.getDay(D))!;

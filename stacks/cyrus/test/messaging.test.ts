@@ -60,7 +60,7 @@ test("the morning review is one line when all four limits are decided; a warning
 
 test("Armed is one line; on a load day it describes the window, and after a load off it says the window is off (wording backlog)", () => {
   const on = armedLine(day({ phases: { load: "on" } }), 1, 19067.76);
-  assert.ok(!on.includes("\n") && on.startsWith("Armed for Monday 2026-11-02: cap 1, long only, the day starts at 19067.76 dollars.") && on.includes(loadWindowRules()) && on.includes("8:45 AM CT to 9:00 AM CT"), on);
+  assert.ok(!on.includes("\n") && on.startsWith("Armed for Monday 2026-11-02: cap 1, long only, the day starts at 19067.76 dollars.") && on.includes(loadWindowRules()) && on.includes("8:45 AM CT to 10:30 AM CT") && on.includes("after the mid-day pause, a normal day"), on); // Michael's decision of 2026-11-10: the window runs to the mid-day pause
   const ended = armedLine(day({ phases: { load: "ended" } }), 1, 19067.76);
   assert.ok(ended.includes("Load window switched off") && !ended.includes(loadWindowRules()) && !ended.includes("in the load window"), ended);
   assert.equal(armedLine(day(), 1, 20000), "Armed for Monday 2026-11-02: cap 1, long only, the day starts at 20000.00 dollars.");

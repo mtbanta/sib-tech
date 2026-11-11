@@ -25,6 +25,10 @@ export const STORED_INFO_EVENTS = new Set([
   // Michael's decision of 2026-11-09 (logging only): why a sale is blocked, and the remainder sales with the age of the order list.
   "sale_blocked",
   "bare_remainder",
+  // Michael's approval of 2026-11-10: a sale noticed late (logging only), and a remainder sale recounted because its take-profit filled
+  // more shares while its cancel landed (fix A).
+  "late_notice",
+  "remainder_recount",
 ]);
 
 export function shouldStoreEvent(level: "info" | "warn" | "error", event: string): boolean {

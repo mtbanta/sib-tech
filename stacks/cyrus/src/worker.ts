@@ -203,6 +203,10 @@ export class Worker {
   private stopGapSaving = false;
   private eventSyncTimer: unknown = null;
   private eventSyncAt: number | null = null;
+  // Logging only (Michael's approval of 2026-11-10), for `late_notice`: when the live updates last reported each symbol's stop cancelled,
+  // and what the timed sync did (last set, last fired, how often it was put off because a sync was still running).
+  private readonly stopCancelSeen = new Map<string, { alpacaAtMs: number; receivedMs: number; syncSetFor: number }>();
+  private syncTimerLog = { setAt: 0, setFor: 0, firedAt: 0, putOff: 0, lastPutOffAt: 0 };
   private syncAgain = false;
   private sessionForSync: { day: DayRecord; closeAt: Date } | null = null;
   private lastRawSampleAt = 0;
@@ -349,6 +353,22 @@ export class Worker {
       onBareSale: (sale: { symbol: string; shares: number; takeProfit: number | null; atMs: number; clientOrderId?: string }) => this.stopGap.onSale(sale),
       onRemainderSold: (symbol: string, shares: number) => void this.remainderSales.push({ symbol, shares }),
       onAccountRead: (account: { equity: number; cash: number }) => this.shadowEstimate(account),
+      lateNoticeContext: (symbol: string) => this.lateNoticeContext(symbol),
+    };
+  }
+
+  // Logging only (Michael's approval of 2026-11-10): what the worker knew when a sale was noticed late. Times are "ms ago" from now.
+  private lateNoticeContext(symbol: string): Record<string, unknown> {
+    const now = this.d.now().getTime();
+    const ago = (t: number) => (t > 0 ? now - t : null);
+    const seen = this.stopCancelSeen.get(symbol);
+    const t = this.syncTimerLog;
+    return {
+      streamReportedCancel: seen ? { alpacaAgoMs: ago(seen.alpacaAtMs), receivedAgoMs: ago(seen.receivedMs), syncSetForAgoMs: ago(seen.syncSetFor) } : null,
+      streamStatus: this.orderStream ? this.orderStreamLive() : false,
+      timedSync: { setAgoMs: ago(t.setAt), setForAgoMs: ago(t.setFor), firedAgoMs: ago(t.firedAt), putOff: t.putOff, lastPutOffAgoMs: ago(t.lastPutOffAt) },
+      syncStartedAgoMs: ago(this.lastSync),
+      saleRunning: this.liquidator.isLiquidating(),
     };
   }
 
@@ -1000,6 +1020,8 @@ export class Worker {
     if (this.eventSyncAt !== null && this.eventSyncAt <= atMs) return;
     if (this.eventSyncTimer) (this.d.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>)))(this.eventSyncTimer);
     this.eventSyncAt = atMs;
+    this.syncTimerLog.setAt = this.d.now().getTime();
+    this.syncTimerLog.setFor = atMs;
     const delay = Math.max(slackMs > 0 ? 100 : 0, atMs + slackMs - this.d.now().getTime());
     this.eventSyncTimer = (this.d.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms)))(() => this.syncFromTimer(), delay);
   }
@@ -1009,7 +1031,10 @@ export class Worker {
     this.eventSyncAt = null;
     const s = this.sessionForSync;
     if (!s || this.d.now() >= s.closeAt) return;
+    this.syncTimerLog.firedAt = this.d.now().getTime();
     if (this.inflight.has("risk")) {
+      this.syncTimerLog.putOff++;
+      this.syncTimerLog.lastPutOffAt = this.d.now().getTime();
       this.syncAt(this.d.now().getTime());
       return;
     }
@@ -1167,6 +1192,7 @@ export class Worker {
       onExitEnded: (clientOrderId) => this.syncMemory.mustLook.add(clientOrderId),
       onStopCancelled: (info) => {
         this.d.log?.("info", "stop_cancelled_at_partial_take_profit", { symbol: info.symbol });
+        this.stopCancelSeen.set(info.symbol, { alpacaAtMs: info.atMs, receivedMs: this.d.now().getTime(), syncSetFor: info.atMs + BARE_GRACE_MS });
         this.syncAt(info.atMs + BARE_GRACE_MS);
       },
       // Decision 1 of 2026-11-06: both exits of a filled entry ended with nothing filled. The order sync runs at once (not at the

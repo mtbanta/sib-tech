@@ -203,7 +203,7 @@ test("worker: on a load day the live order updates connect at Armed and stop at 
   assert.equal(r.counts().orderStreamStops, 1, "stopped at the close");
   const armed = r.said("commands").find((m) => m.startsWith("Armed for"))!;
   assert.ok(armed.includes("1 share a trade on any new print, a limit buy at or below the price seen, cancelled if not filled in 5 seconds, take-profit 1 cent up and stop 2 cents down from that price") && !armed.includes("time limit"), armed);
-  assert.ok(loadLine((await r.store.getDay(D))!).includes("1 share churn 8:45 AM CT to 9:00 AM CT"));
+  assert.ok(loadLine((await r.store.getDay(D))!).includes("1 share churn 8:45 AM CT to 10:30 AM CT")); // since Michael's decision of 2026-11-10
 });
 
 test("a normal day: the live order updates connect at Armed too (speed release); the uptick rule, the approved size, market entries and normal exits are unchanged", async () => {

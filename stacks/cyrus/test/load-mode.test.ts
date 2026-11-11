@@ -114,7 +114,7 @@ test("the load screen keeps 5 to 35 dollar names and ranks them by shares traded
 });
 
 // ---------- the churn and the gate ----------
-test("a load day: no entry before 8:45, release B churn in the window (1 share, the first new print, exits 1 cent up and 2 down), the normal placeholder after, still at most 75 dollars", async () => {
+test("a load day: no entry before 8:45, release B churn in the window (1 share, the first new print, exits 1 cent up and 2 down), the window still on at 9:10 (it runs to the mid-day pause since 2026-11-10)", async () => {
   const r = await day(true);
   await signal(r, "DDD", "14:40:00");
   assert.equal(entries(r).length, 0, "before the window: refused");
@@ -125,11 +125,11 @@ test("a load day: no entry before 8:45, release B churn in the window (1 share, 
   assert.equal(inWindow.takeProfitPrice, 50.01, "release B: any new print signals, here the first one at 50.00; 1 cent up");
   assert.equal(inWindow.stopPrice, 49.98, "and 2 cents down");
   await signal(r, "CCC", "15:10:00");
-  const after = entries(r).at(-1)!;
-  assert.equal(after.symbol, "CCC");
-  assert.equal(after.qty, 1, "the cap holds all day");
-  assert.equal(after.takeProfitPrice, 50.53, "normal exits again: 0.25 percent up");
-  assert.equal(after.stopPrice, 50.2, "and 0.4 percent down");
+  const later = entries(r).at(-1)!;
+  assert.equal(later.symbol, "CCC");
+  assert.equal(later.qty, 1, "still 1 share");
+  assert.equal(later.takeProfitPrice, 50.01, "Michael's decision of 2026-11-10: at 9:10 the window is still on (it runs to 10:30), so window exits");
+  assert.equal(later.stopPrice, 49.98);
 });
 
 test("the strategy's churn rules apply only while the load window is on (release B: any new print after 1 second, exits 1 cent up and 2 down)", () => {
