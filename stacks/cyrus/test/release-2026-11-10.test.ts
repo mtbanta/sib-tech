@@ -157,6 +157,32 @@ test("fix A keeps release 1's rule: a newer position on the same symbol keeps it
   assert.equal(mentions(w).length, 0);
 });
 
+test("fix A, with another position on the symbol: the newer position's take-profit fills during the older entry's cancel; the recount is not used there, and the older entry's shares are still sold in the same cleanup (never left without exits)", async () => {
+  const w = world();
+  const day = await remainderDay(w);
+  const older = await hold(w, "APLD", 5, 16.46, 107);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(older, 2, 16.54); // 3 left on the older entry
+  w.sim.advance(1_000);
+  const newer = await hold(w, "APLD", 4, 16.46, 108, false);
+  w.sim.advance(3_000);
+  const orig = w.sim.cancelOrder.bind(w.sim);
+  let done = false;
+  w.sim.cancelOrder = async (id: string) => {
+    await orig(id);
+    if (!done && id === tpOf(w, older).id) {
+      done = true;
+      w.sim.fillExit(newer, "take_profit", 16.54); // the holding drops by 4, none of them the older entry's
+    }
+  };
+  await syncOrders(w.risk, day, { protect: true });
+  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["APLD", 3]], "the older entry's 3 shares");
+  w.sim.advance(5_000);
+  assert.equal(w.sim.heldQty("APLD"), 0);
+  assert.equal(mentions(w).length, 0);
+  assert.ok(!w.events.some((e) => e.event === "remainder_recount" && e.data.recounted === 0), "not taken for 'its own exits sold the shares'");
+});
+
 // ------------------------------------------------------------- B -------------------------------------------------------------------
 
 async function closeoutWorld(symbols: string[]) {

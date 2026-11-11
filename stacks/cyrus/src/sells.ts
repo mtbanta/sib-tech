@@ -231,8 +231,8 @@ export interface LiquidateResult {
   heldBefore?: Record<string, number>;
   heldAfter?: Record<string, number>;
   // Fix A (Michael's approval of 2026-11-10), with `ownEntryOnly` only: the entry's own shares as recounted when its last sale was
-  // sent (the original count less the shares its exits took while their cancel landed), and the symbols whose holding has fallen by
-  // the entry's whole original count at the last look (every one of its shares is gone, whoever sold them).
+  // sent (the original count less the shares its exits took while their cancel landed), and the symbols the entry held alone at the
+  // first look that are no longer held at the last look (every one of its shares is gone, whoever sold them).
   ownTarget?: Record<string, number>;
   ownGone?: string[];
 }
@@ -333,14 +333,19 @@ export class Liquidator {
     // Fix A (Michael's approval of 2026-11-10): the entry's own shares still to sell, recounted from the holding. On 2026-11-10 the
     // take-profit filled more shares while its cancel was landing (QXO: 9 counted, 8 of them then filled at the take-profit), and the
     // sale waited its full 6 seconds for a count that could never come free. Shares that leave the holding are no longer the entry's
-    // to sell: held now, less the shares that were not the entry's at the first look, less our own sells still working. Never above
-    // the original count less what this liquidation sold. No extra request: it uses the reads the wait already makes.
+    // to sell: held now, less our own sells still working. Never above the original count less what this liquidation sold. No extra
+    // request: it uses the reads the wait already makes.
+    // Only when the entry's shares were the whole holding at the first look: with another position on the symbol, a drop in the holding
+    // could be that position's exit filling, so the original count is kept there (release 1's behaviour; the cleanup sale's one extra
+    // lookup still keeps a stale count from being reported stuck).
+    const soleHolder = (sym: string): boolean => {
+      const before = result.heldBefore?.[sym];
+      return own !== null && before !== undefined && before <= (own[sym] ?? 0) + EPS;
+    };
     const ownLeft = (sym: string, heldQty: number, open: Order[]): number => {
       if (!own) return Infinity;
-      const before = result.heldBefore?.[sym];
-      if (before === undefined) return need(sym);
-      const others = Math.max(0, before - (own[sym] ?? 0));
-      return Math.min(need(sym), Math.max(0, heldQty - others - ownOpenSellQty(open, sym)));
+      if (!soleHolder(sym)) return need(sym);
+      return Math.min(need(sym), Math.max(0, heldQty - ownOpenSellQty(open, sym)));
     };
     // Part A, step 1: a cancel sent in this attempt explains a hold even when Alpaca's open list does not show the order (it has not
     // been seen to show a filled entry's exits), so a hold counts as unexplained only in an attempt that cancelled nothing.
@@ -395,9 +400,10 @@ export class Liquidator {
         await this.sleep(1_000 * round);
         continue;
       }
-      // Part B (one entry only): the holding has fallen by that entry's whole count: done (a newer position on the same symbol may still
-      // be held, with its own exits). Fix A of 2026-11-10: whoever sold them (our sale, or its own take-profit while its cancel landed).
-      if (own && only && [...only].every((sym) => (positions.find((p) => p.symbol === sym)?.qty ?? 0) <= (result.heldBefore?.[sym] ?? Infinity) - (own[sym] ?? 0) + EPS)) break;
+      // Part B (one entry only): that entry's own shares are all sold and the holding has fallen by that much: done (a newer position on
+      // the same symbol may still be held, with its own exits). Fix A of 2026-11-10: when the entry held the whole symbol, its holding at
+      // 0 is enough, whoever sold the shares (our sale, or its own take-profit while its cancel landed).
+      if (own && only && [...only].every((sym) => (need(sym) <= EPS || soleHolder(sym)) && (positions.find((p) => p.symbol === sym)?.qty ?? 0) <= (result.heldBefore?.[sym] ?? Infinity) - (own[sym] ?? 0) + EPS)) break;
       if (positions.length === 0) {
         // Nothing to sell. A whole-account request still clears any order left open (an entry that never filled).
         if (!only && round === 1) {
@@ -585,7 +591,7 @@ export class Liquidator {
       result.flat = left.length === 0;
       result.remaining = left.map((p) => p.symbol);
       result.heldAfter = Object.fromEntries(left.map((p) => [p.symbol, p.qty]));
-      if (own && only) result.ownGone = [...only].filter((sym) => result.heldBefore?.[sym] !== undefined && (result.heldAfter?.[sym] ?? 0) <= result.heldBefore[sym]! - (own[sym] ?? 0) + EPS);
+      if (own && only) result.ownGone = [...only].filter((sym) => soleHolder(sym) && (result.heldAfter?.[sym] ?? 0) <= EPS);
     } catch {
       result.remaining = result.remaining.length > 0 ? result.remaining : ["(could not read positions)"];
     }
