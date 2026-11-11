@@ -30,8 +30,9 @@ const until = async (cond: () => boolean | Promise<boolean>, n = 400) => {
 };
 
 // An approved, armed normal day in the simulator, flat after the mid-day close-out (as midday.test.ts does it).
-async function flatAtMidday(opts: { load?: boolean } = {}) {
+async function flatAtMidday(opts: { load?: boolean; early?: boolean } = {}) {
   const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
+  if (opts.early) sim.calendar = [{ date: "2026-11-02", open: "09:30", close: "13:00" }];
   const events: Array<{ e: string; d: any }> = [];
   const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, log: (_l, e, d) => void events.push({ e, d }) });
   await r.at("2026-11-01T22:10:00Z");
@@ -122,8 +123,12 @@ test("on a normal morning, `load afternoon` while flat and paused runs the cheap
   assert.equal(r.screenOpts.filter((o) => o?.load).length, 0, "a normal morning used the normal screen");
   r.ownerSays("load afternoon", "16:40:00");
   await r.at("16:40:05");
+  assert.ok(r.said("commands").some((t) => t.startsWith("Running the cheap-symbol screen for the afternoon load window now")));
+  assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], undefined, "not in the pass that started the screen");
+  assert.equal((await readPause(r.store, D))!.on, true);
+  await r.at("16:40:10");
   const day = (await r.store.getDay(D))!;
-  assert.equal(day.phases[LOAD_AFTERNOON_PHASE], z("16:40:05").toISOString(), "the window starts when the command is carried out");
+  assert.equal(day.phases[LOAD_AFTERNOON_PHASE], z("16:40:10").toISOString(), "the window starts in the next pass, after its command read");
   const p = (await readPause(r.store, D))!;
   assert.equal(p.on, false);
   assert.equal(p.resumedBy, "load afternoon");
@@ -134,7 +139,8 @@ test("on a normal morning, `load afternoon` while flat and paused runs the cheap
   assert.ok(reply, r.said("commands").join(" | "));
   assert.match(reply!, /at most 75 dollars a position and up to 150 orders a minute \(your ruling, this window only\)/);
   assert.match(reply!, /Resumed: the mid-day pause is over/);
-  assert.ok(r.said("trading").some((t) => t.startsWith("Afternoon load window: the live list is now 2 cheap")));
+  assert.match(reply!, /the close-out runs as normal at 2:55 PM CT/);
+  assert.ok(r.said("trading").some((t) => t.startsWith("Live list switched for the afternoon load window (2 cheap")));
   r.ownerSays("load afternoon", "16:41:00");
   await r.at("16:41:05");
   assert.ok(r.said("commands").some((t) => t === "Not started: the afternoon load window is already on today."));
@@ -205,7 +211,8 @@ test("a failed cheap-symbol screen does not start the window or resume trading",
   (r.worker as any).d.buildLiveList = async () => ({ symbols: [], names: {} });
   r.ownerSays("load afternoon", "16:40:00");
   await r.at("16:40:05");
-  assert.ok(r.said("commands").some((t) => t.startsWith("Not started: the cheap-symbol screen found no names. Still paused")));
+  await r.at("16:40:10");
+  assert.ok(r.said("commands").some((t) => t.startsWith("Afternoon load window not started: the cheap-symbol screen found no names. Still paused")), r.said("commands").join(" | "));
   assert.equal((await readPause(r.store, D))!.on, true);
   assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], undefined);
 });
@@ -329,7 +336,8 @@ test("a self-monitoring row: the process's CPU, the machine's busy and steal sha
   let cpu = { user: 0, system: 0 };
   let stat = "cpu  0 0 0 0 0 0 0 0\n";
   let resets = 0;
-  const hist = { count: 10, percentile: (p: number) => (p === 50 ? 2e6 : 90e6), max: 400e6, mean: 5e6, reset: () => void resets++ };
+  // Node's histogram includes its 20 ms sampling interval: an idle loop reads about 22 ms, and 20 is taken off each figure.
+  const hist = { count: 10, percentile: (p: number) => (p === 50 ? 22e6 : 110e6), max: 420e6, mean: 15e6, reset: () => void resets++ };
   const m = new SelfMonitor({ nowMs: () => nowMs, cpuUsage: () => cpu, readProcStat: () => stat, readMemInfo: () => "MemAvailable: 320000 kB\n", memoryUsage: () => ({ rss: 150e6, heapUsed: 60e6 }) as any, histogram: hist as any });
   nowMs = 60_000;
   cpu = { user: 9_000_000, system: 3_000_000 }; // 12 seconds of CPU in 60 seconds: 20 percent
@@ -341,9 +349,9 @@ test("a self-monitoring row: the process's CPU, the machine's busy and steal sha
   assert.equal(row.stealPct, 65);
   assert.equal(row.rssMb, 150);
   assert.equal(row.memAvailableMb, 327.7);
-  assert.deepEqual(row.eventLoopDelayMs, { p50: 2, p99: 90, max: 400, mean: 5 });
+  assert.deepEqual(row.eventLoopDelayMs, { p50: 2, p99: 90, max: 400, mean: 0 }, "the interval taken off, never below 0");
   assert.equal(resets, 1, "the histogram starts afresh each window");
-  assert.deepEqual(row.decisions, { n: 3, medianMs: 70, p90Ms: 80, maxMs: 80, queueMedianMs: 10, queueMaxMs: 4000, storedOrders: 7470 });
+  assert.deepEqual(row.decisions, { n: 3, medianMs: 70, p90Ms: 80, maxMs: 80, queueMedianMs: 10, queueMaxMs: 4000, storedOrders: 7470, dropped: 0 });
   // Off Linux (no /proc): those fields are null, the rest still measured.
   const off = new SelfMonitor({ readProcStat: () => { throw new Error("no /proc"); }, readMemInfo: () => { throw new Error("no /proc"); }, histogram: null });
   const r2 = off.sample({ times: [], storedOrders: null });
@@ -473,4 +481,117 @@ test("the gate decides exactly as it did with copied rows: the same answers for 
   const b = await run(false);
   assert.deepEqual(b, a);
   assert.ok(a.some((x) => x.startsWith("sent")) && a.some((x) => x.includes("still working")), "the run covers sends and refusals");
+});
+
+// ---------------- round 2 (group 1 and group 2 reviews, round 1) ----------------
+
+test("group 1, round 1: a `stop` sent while the cheap-symbol screen runs wins; the window does not start and trading stays paused", async () => {
+  const { r } = await flatAtMidday();
+  let release: (v: { symbols: string[]; names: Record<string, string> }) => void = () => undefined;
+  (r.worker as any).d.buildLiveList = () => new Promise((res) => (release = res));
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  assert.ok(r.said("commands").some((t) => t.startsWith("Running the cheap-symbol screen")));
+  // The main loop is not held by the screen: later passes run and read commands.
+  r.ownerSays("stop", "16:41:00");
+  await r.at("16:41:05");
+  assert.ok(r.said("commands").some((t) => t.startsWith("Stopped.")), "the stop was read while the screen ran");
+  release({ symbols: ["CHP1", "CHP2"], names: {} });
+  await settle();
+  await r.at("16:41:10");
+  assert.ok(r.said("commands").some((t) => t.startsWith("Afternoon load window not started: the stop flag is on")), r.said("commands").join(" | "));
+  assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], undefined);
+  assert.equal((await readPause(r.store, D))!.on, true);
+  // `go` sent while the screen runs also cancels the window.
+  const w = await flatAtMidday();
+  let rel2: (v: { symbols: string[]; names: Record<string, string> }) => void = () => undefined;
+  (w.r.worker as any).d.buildLiveList = () => new Promise((res) => (rel2 = res));
+  w.r.ownerSays("load afternoon", "16:40:00");
+  await w.r.at("16:40:05");
+  w.r.ownerSays("go", "16:41:00");
+  await w.r.at("16:41:05");
+  rel2({ symbols: ["CHP1"], names: {} });
+  await settle();
+  await w.r.at("16:41:10");
+  assert.ok(w.r.said("commands").some((t) => t.startsWith("Afternoon load window not started: trading has already resumed today")));
+  assert.equal((await w.r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], undefined);
+});
+
+test("group 1, round 1: the window is decided only in a pass that read commands after the screen finished, with Alpaca read again (a position opened meanwhile refuses it; unreadable refuses it)", async () => {
+  const { r, sim } = await flatAtMidday();
+  let release: (v: { symbols: string[]; names: Record<string, string> }) => void = () => undefined;
+  (r.worker as any).d.buildLiveList = () => new Promise((res) => (release = res));
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  await sim.submitEntry({ symbol: "ZZZ", qty: 1, stopPrice: 9, takeProfitPrice: 11, referencePrice: 10, clientOrderId: "manual-zzz" });
+  sim.fillEntry("manual-zzz", 10);
+  release({ symbols: ["CHP1"], names: {} });
+  await settle();
+  await r.at("16:40:20");
+  assert.ok(r.said("commands").some((t) => t.startsWith("Afternoon load window not started: Alpaca shows 1 position(s)")), r.said("commands").join(" | "));
+  assert.equal((await readPause(r.store, D))!.on, true);
+
+  const w = await flatAtMidday();
+  let rel2: (v: { symbols: string[]; names: Record<string, string> }) => void = () => undefined;
+  (w.r.worker as any).d.buildLiveList = () => new Promise((res) => (rel2 = res));
+  w.r.ownerSays("load afternoon", "16:40:00");
+  await w.r.at("16:40:05");
+  const realPositions = w.sim.listPositions.bind(w.sim);
+  w.sim.listPositions = async () => { throw new Error("down"); };
+  rel2({ symbols: ["CHP1"], names: {} });
+  await settle();
+  await w.r.at("16:40:20");
+  assert.ok(w.r.said("commands").some((t) => t.startsWith("Afternoon load window not started: I could not read Alpaca's positions and open orders")));
+  w.sim.listPositions = realPositions;
+});
+
+test("group 2, round 1: on a half day the reply names the real close-out time; `status` shows the window and the resume by `load afternoon`", async () => {
+  const { r } = await flatAtMidday({ load: true, early: true });
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  const reply = r.said("commands").find((t) => t.startsWith("Afternoon load window on until"));
+  assert.ok(reply, r.said("commands").join(" | "));
+  assert.match(reply!, /^Afternoon load window on until 11:00 AM CT \(the last entry\)/);
+  assert.match(reply!, /the close-out runs as normal at 11:55 AM CT/);
+  r.ownerSays("status", "16:41:00");
+  await r.at("16:41:05");
+  const st = r.said("commands").find((t) => t.startsWith("**Status**"))!;
+  assert.match(st, /Afternoon load window: on since 10:40 AM CT, until 11:00 AM CT \(the last entry\)/);
+  assert.match(st, /Mid-day cycle: resumed at 10:40 AM CT \(by `load afternoon`\)/);
+});
+
+test("group 2, round 1: the daily summary on a normal day with `load afternoon` heads its window 'Afternoon load window' and credits the resume to it", async () => {
+  const { r } = await flatAtMidday();
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  await r.at("16:40:10");
+  await r.at("20:55:00");
+  await until(async () => Boolean((await r.store.getDay(D))!.phases.closeout));
+  for (const t of ["20:56:00", "21:00:30", "21:05:00", "21:05:30"]) await r.at(t);
+  await until(async () => Boolean((await r.store.getDay(D))!.phases.summary));
+  const summary = r.said("trading").find((t) => t.includes("Afternoon load window"));
+  assert.ok(summary, r.said("trading").map((t) => t.slice(0, 80)).join(" | "));
+  assert.ok(summary!.includes("**Afternoon load window**"));
+  assert.ok(!summary!.includes("**Load day**"));
+  assert.ok(summary!.includes("(by `load afternoon`)"));
+});
+
+test("group 2, round 1: a self-monitoring sample covering more than 2 minutes (the first of a day) is not written; the next one is", async () => {
+  const { r } = await flatAtMidday();
+  const windows = [600_000, 60_000];
+  (r.worker as any).d.selfMonitor = { sample: () => ({ windowMs: windows.shift() ?? 60_000, decisions: { n: 0 } }) };
+  await r.at("16:50:00");
+  await r.at("16:51:01");
+  const rows = (r.store as any).events.filter((e: any) => e.event === "self_monitor");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].data.windowMs, 60_000);
+});
+
+test("group 2, round 1: the gate's decision-time list stops at 20,000 and counts the rest, without shifting", async () => {
+  const s = await gateAt("17:00:00", { [MIDDAY_PHASE]: "x", middayFlat: "yes" });
+  for (let i = 0; i < 20_003; i++) (s.gate as any).noteTime(1, 2);
+  const t = s.gate.takeDecisionTimes();
+  assert.equal(t.times.length, 20_000);
+  assert.equal(t.dropped, 3);
+  assert.equal(s.gate.takeDecisionTimes().dropped, 0);
 });

@@ -115,15 +115,18 @@ export class OrderGate {
   // Self-monitoring (Michael's approval of 2026-11-11), measurement only: each decision's own time (from its start to its answer) and
   // its wait in the queue, and the day's stored orders the last decision read. Taken once a minute by the worker.
   private times: Array<{ runMs: number; queueMs: number }> = [];
+  private timesDropped = 0;
   private storedOrders: number | null = null;
   private noteTime(queueMs: number, runMs: number): void {
-    this.times.push({ runMs, queueMs });
-    if (this.times.length > 20_000) this.times.shift();
+    if (this.times.length < 20_000) this.times.push({ runMs, queueMs });
+    else this.timesDropped++; // full (no sample for a long time): counted, not kept
   }
-  takeDecisionTimes(): { times: Array<{ runMs: number; queueMs: number }>; storedOrders: number | null } {
+  takeDecisionTimes(): { times: Array<{ runMs: number; queueMs: number }>; storedOrders: number | null; dropped: number } {
     const t = this.times;
+    const dropped = this.timesDropped;
     this.times = [];
-    return { times: t, storedOrders: this.storedOrders };
+    this.timesDropped = 0;
+    return { times: t, storedOrders: this.storedOrders, dropped };
   }
 
   // Resolves when every background write the gate started (the record update after a send) has finished.

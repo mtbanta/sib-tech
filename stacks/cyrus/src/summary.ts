@@ -23,6 +23,10 @@ export interface SummaryInput {
   listComplete?: boolean;
   // A load day (load-mode.ts): the window is reported apart from the rest of the day.
   loadWindow?: { start: Date; end: Date } | null;
+  // Which window loadWindow is: a load day's morning window (the default) or the afternoon load window on a normal day.
+  loadWindowKind?: "morning" | "afternoon";
+  // On a load day, the afternoon load window if `load afternoon` started one (its entries are in "Rest of the day").
+  afternoonOnLoadDay?: { start: Date; end: Date } | null;
   // A load day: the window's settings and Alpaca's live order updates.
   loadExtras?: {
     orderStream: { events: number; freed: number; reconnects: number; medianFreeMs: number | null } | null;
@@ -274,10 +278,11 @@ export function formatSummary(i: SummaryInput): string {
     i.requests ? `Alpaca requests: about ${i.requests.requestsLastMinute} in the minute before this summary; lowest budget seen ${i.requests.lowestBudget === null ? "unknown" : Math.floor(i.requests.lowestBudget)} of 200; busiest minute ${i.requests.peakTradesPerMinute} orders; held back by the governor ${i.requests.refusedByGovernor} times${i.requests.rateLimitAnswers !== undefined ? `; rate-limit answers from Alpaca ${i.requests.rateLimitAnswers}` : ""}` : "",
     ...(i.loadWindow
       ? [
-          "**Load day**",
-          ...partLines(`Load window (${centralClock(i.loadWindow.start)} to ${centralClock(i.loadWindow.end)})`, i.stored.filter((r) => r.createdAt && Date.parse(r.createdAt) >= i.loadWindow!.start.getTime() && Date.parse(r.createdAt) < i.loadWindow!.end.getTime()), i.alpacaOrders),
+          i.loadWindowKind === "afternoon" ? "**Afternoon load window**" : "**Load day**",
+          ...partLines(`${i.loadWindowKind === "afternoon" ? "Afternoon load window" : "Load window"} (${centralClock(i.loadWindow.start)} to ${centralClock(i.loadWindow.end)})`, i.stored.filter((r) => r.createdAt && Date.parse(r.createdAt) >= i.loadWindow!.start.getTime() && Date.parse(r.createdAt) < i.loadWindow!.end.getTime()), i.alpacaOrders),
           ...(i.loadExtras ? loadExtraLines(i.loadExtras, windowLimitCounts(i.stored.filter((r) => r.createdAt && Date.parse(r.createdAt) >= i.loadWindow!.start.getTime() && Date.parse(r.createdAt) < i.loadWindow!.end.getTime()), i.alpacaOrders)) : []),
           ...partLines("Rest of the day", i.stored.filter((r) => !(r.createdAt && Date.parse(r.createdAt) >= i.loadWindow!.start.getTime() && Date.parse(r.createdAt) < i.loadWindow!.end.getTime())), i.alpacaOrders),
+          ...(i.afternoonOnLoadDay ? [`- afternoon load window ${centralClock(i.afternoonOnLoadDay.start)} to ${centralClock(i.afternoonOnLoadDay.end)} (by \`load afternoon\`): its entries are counted in the rest of the day`] : []),
         ]
       : []),
     `Refused entries: ${refusedTotal}${refusedTotal ? ` (${[...reasons].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([r, n]) => `${r.slice(0, 70)}: ${n}`).join("; ")})` : ""}`,

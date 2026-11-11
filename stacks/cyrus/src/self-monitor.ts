@@ -33,6 +33,9 @@ export function parseMemAvailable(text: string): number | null {
   return m ? Number(m[1]) * 1024 : null;
 }
 
+// The event-loop histogram's sampling interval (ms).
+export const EVENT_LOOP_RESOLUTION_MS = 20;
+
 const pct = (part: number, whole: number) => (whole > 0 ? Math.round((part / whole) * 1000) / 10 : null);
 const q = (sorted: number[], p: number) => (sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))]! : null);
 const ms1 = (x: number | null) => (x === null ? null : Math.round(x * 10) / 10);
@@ -45,6 +48,9 @@ export interface SelfMonitorDeps {
   memoryUsage?: () => NodeJS.MemoryUsage;
   // An event-loop delay histogram (nanoseconds). Null: not measured.
   histogram?: Pick<ELDHistogram, "percentile" | "max" | "mean" | "reset" | "count"> | null;
+  // The histogram's sampling interval (ms). Node records the whole gap between its timer's firings, interval included, so it is
+  // taken off each figure (group 2 review, round 1: an idle loop read about 22 ms at a 20 ms resolution).
+  histogramResolutionMs?: number;
   nowMs?: () => number;
 }
 
@@ -60,7 +66,8 @@ export interface SelfMonitorRow {
   memAvailableMb: number | null;
   eventLoopDelayMs: { p50: number | null; p99: number | null; max: number | null; mean: number | null } | null;
   // The order gate: each decision's time from its start to its answer (queue wait not included), and its queue wait.
-  decisions: { n: number; medianMs: number | null; p90Ms: number | null; maxMs: number | null; queueMedianMs: number | null; queueMaxMs: number | null; storedOrders: number | null };
+  // `dropped`: decisions not timed because the gate's list was full (only if no sample was taken for a long time).
+  decisions: { n: number; medianMs: number | null; p90Ms: number | null; maxMs: number | null; queueMedianMs: number | null; queueMaxMs: number | null; storedOrders: number | null; dropped: number };
 }
 
 export class SelfMonitor {
@@ -77,6 +84,7 @@ export class SelfMonitor {
       memoryUsage: deps.memoryUsage ?? (() => process.memoryUsage()),
       nowMs: deps.nowMs ?? (() => performance.now()),
       histogram: deps.histogram === undefined ? SelfMonitor.liveHistogram() : deps.histogram,
+      histogramResolutionMs: deps.histogramResolutionMs ?? EVENT_LOOP_RESOLUTION_MS,
     };
     this.lastMs = this.d.nowMs();
     this.lastCpu = this.d.cpuUsage();
@@ -86,7 +94,7 @@ export class SelfMonitor {
   // The live event-loop histogram (20 ms resolution). Its timer does not keep the process alive.
   static liveHistogram(): ELDHistogram | null {
     try {
-      const h = monitorEventLoopDelay({ resolution: 20 });
+      const h = monitorEventLoopDelay({ resolution: EVENT_LOOP_RESOLUTION_MS });
       h.enable();
       return h;
     } catch {
@@ -103,7 +111,7 @@ export class SelfMonitor {
   }
 
   // One row for the time since the last call, then starts the next window.
-  sample(gate: { times: Array<{ runMs: number; queueMs: number }>; storedOrders: number | null }): SelfMonitorRow {
+  sample(gate: { times: Array<{ runMs: number; queueMs: number }>; storedOrders: number | null; dropped?: number }): SelfMonitorRow {
     const now = this.d.nowMs();
     const windowMs = Math.max(1, now - this.lastMs);
     const cpu = this.d.cpuUsage();
@@ -125,7 +133,8 @@ export class SelfMonitor {
     }
     const mem = this.d.memoryUsage();
     const h = this.d.histogram;
-    const loop = h && h.count > 0 ? { p50: ms1(h.percentile(50) / 1e6), p99: ms1(h.percentile(99) / 1e6), max: ms1(h.max / 1e6), mean: ms1(h.mean / 1e6) } : h ? { p50: null, p99: null, max: null, mean: null } : null;
+    const delay = (ns: number) => ms1(Math.max(0, ns / 1e6 - this.d.histogramResolutionMs));
+    const loop = h && h.count > 0 ? { p50: delay(h.percentile(50)), p99: delay(h.percentile(99)), max: delay(h.max), mean: delay(h.mean) } : h ? { p50: null, p99: null, max: null, mean: null } : null;
     h?.reset();
     const runs = gate.times.map((t) => t.runMs).sort((a, b) => a - b);
     const waits = gate.times.map((t) => t.queueMs).sort((a, b) => a - b);
@@ -138,7 +147,7 @@ export class SelfMonitor {
       heapUsedMb: Math.round(mem.heapUsed / 1e5) / 10,
       memAvailableMb: memAvailable === null ? null : Math.round(memAvailable / 1e5) / 10,
       eventLoopDelayMs: loop,
-      decisions: { n: runs.length, medianMs: ms1(q(runs, 0.5)), p90Ms: ms1(q(runs, 0.9)), maxMs: ms1(runs.length ? runs[runs.length - 1]! : null), queueMedianMs: ms1(q(waits, 0.5)), queueMaxMs: ms1(waits.length ? waits[waits.length - 1]! : null), storedOrders: gate.storedOrders },
+      decisions: { n: runs.length, medianMs: ms1(q(runs, 0.5)), p90Ms: ms1(q(runs, 0.9)), maxMs: ms1(runs.length ? runs[runs.length - 1]! : null), queueMedianMs: ms1(q(waits, 0.5)), queueMaxMs: ms1(waits.length ? waits[waits.length - 1]! : null), storedOrders: gate.storedOrders, dropped: gate.dropped ?? 0 },
     };
     this.lastMs = now;
     this.lastCpu = cpu;

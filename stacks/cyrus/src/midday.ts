@@ -47,7 +47,7 @@ export interface MiddayPause {
   since: string | null; // when the pause started
   reason: string;
   resumedAt: string | null;
-  resumedBy: string | null; // "deploy" or "go"
+  resumedBy: string | null; // "deploy", "go" or "load afternoon"
   deployedAt?: string | null; // a new release started while paused
 }
 
@@ -107,6 +107,13 @@ export function startupAction(o: { pause: MiddayPause | null; hold: boolean; fla
 }
 
 // Why `go` cannot end the pause now, or null when it can.
+// How a resume is named in `status` and the daily summary.
+export function resumedByText(by: string | null | undefined): string {
+  if (by === "deploy") return "after a deploy";
+  if (by === "load afternoon") return "by `load afternoon`";
+  return "by `go`";
+}
+
 export function goRefusal(o: { hasCycle: boolean; pause: MiddayPause | null; flat: boolean; stop: { on: boolean; reason: string } | null }): string | null {
   if (!o.hasCycle) return "there is no mid-day cycle today";
   if (o.pause?.resumedAt && !o.pause.on) return "trading has already resumed today";
