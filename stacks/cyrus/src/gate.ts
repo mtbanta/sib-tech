@@ -104,9 +104,26 @@ export class OrderGate {
   enter(signal: Signal): Promise<GateResult> {
     const queuedAt = this.d.now().getTime();
     const t0 = this.clockMs(); // the time to accept runs from the moment the signal reaches the gate, queue included
-    const run = this.chain.then(() => this.run(signal, queuedAt, t0));
+    const run = this.chain.then(() => {
+      const started = this.clockMs();
+      return this.run(signal, queuedAt, t0).finally(() => this.noteTime(started - t0, this.clockMs() - started));
+    });
     this.chain = run.catch(() => undefined);
     return run;
+  }
+
+  // Self-monitoring (Michael's approval of 2026-11-11), measurement only: each decision's own time (from its start to its answer) and
+  // its wait in the queue, and the day's stored orders the last decision read. Taken once a minute by the worker.
+  private times: Array<{ runMs: number; queueMs: number }> = [];
+  private storedOrders: number | null = null;
+  private noteTime(queueMs: number, runMs: number): void {
+    this.times.push({ runMs, queueMs });
+    if (this.times.length > 20_000) this.times.shift();
+  }
+  takeDecisionTimes(): { times: Array<{ runMs: number; queueMs: number }>; storedOrders: number | null } {
+    const t = this.times;
+    this.times = [];
+    return { times: t, storedOrders: this.storedOrders };
   }
 
   // Resolves when every background write the gate started (the record update after a send) has finished.
@@ -222,6 +239,7 @@ export class OrderGate {
       this.lastSnapshotFailure = now.getTime();
       return this.refuse(date, symbol, "broker or database unavailable, so no entry", undefined, false);
     }
+    this.storedOrders = rows.length;
     // After a restart, tell the governor about the entries sent in the last minute (once).
     if (!this.primed) {
       this.d.governor.prime(rows.filter((o) => o.status !== "failed" && o.createdAt && now.getTime() - new Date(o.createdAt).getTime() < 60_000).map((o) => Math.min(now.getTime(), new Date(o.createdAt!).getTime())));

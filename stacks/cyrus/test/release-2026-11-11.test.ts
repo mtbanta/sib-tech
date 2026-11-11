@@ -22,6 +22,7 @@ import { MIDDAY_PHASE, readPause, updatePause, emptyPause } from "../src/midday.
 import { loadAfternoonRefusal } from "../src/commands.ts";
 import { TradeStream } from "../src/stream.ts";
 import { settings } from "./helpers.ts";
+import { SelfMonitor, parseMemAvailable, parseProcStat } from "../src/self-monitor.ts";
 
 const until = async (cond: () => boolean | Promise<boolean>, n = 400) => {
   for (let i = 0; i < n && !(await cond()); i++) await settle();
@@ -310,4 +311,72 @@ test("the placeholder with the load hook behaves exactly as before on a normal d
   void order;
   void CONTROL_STOP;
   void setPhase;
+});
+
+// ---------------- part 2: self-monitoring (Michael's approval of 2026-11-11) ----------------
+
+test("self-monitoring reads /proc/stat and /proc/meminfo; Fly's throttling shows as steal", () => {
+  const stat = "cpu  100 0 50 1000 0 0 0 20 0 0\ncpu0 100 0 50 1000 0 0 0 20 0 0\n";
+  assert.deepEqual(parseProcStat(stat), { user: 100, nice: 0, system: 50, idle: 1000, iowait: 0, irq: 0, softirq: 0, steal: 20 });
+  assert.equal(parseProcStat("nonsense"), null);
+  assert.equal(parseMemAvailable("MemTotal: 472576 kB\nMemAvailable:  312500 kB\n"), 312500 * 1024);
+  assert.equal(parseMemAvailable(""), null);
+});
+
+test("a self-monitoring row: the process's CPU, the machine's busy and steal shares, memory, the event loop's delay and the gate's decision times over the window", () => {
+  let nowMs = 0;
+  let cpu = { user: 0, system: 0 };
+  let stat = "cpu  0 0 0 0 0 0 0 0\n";
+  let resets = 0;
+  const hist = { count: 10, percentile: (p: number) => (p === 50 ? 2e6 : 90e6), max: 400e6, mean: 5e6, reset: () => void resets++ };
+  const m = new SelfMonitor({ nowMs: () => nowMs, cpuUsage: () => cpu, readProcStat: () => stat, readMemInfo: () => "MemAvailable: 320000 kB\n", memoryUsage: () => ({ rss: 150e6, heapUsed: 60e6 }) as any, histogram: hist as any });
+  nowMs = 60_000;
+  cpu = { user: 9_000_000, system: 3_000_000 }; // 12 seconds of CPU in 60 seconds: 20 percent
+  stat = "cpu  1000 0 200 900 0 0 0 3900\n"; // of 6,000 ticks: 1,200 busy (20 percent), 3,900 steal (65 percent)
+  const row = m.sample({ times: [{ runMs: 70, queueMs: 10 }, { runMs: 80, queueMs: 4000 }, { runMs: 60, queueMs: 5 }], storedOrders: 7470 });
+  assert.equal(row.windowMs, 60_000);
+  assert.equal(row.processCpuPct, 20);
+  assert.equal(row.machineBusyPct, 20);
+  assert.equal(row.stealPct, 65);
+  assert.equal(row.rssMb, 150);
+  assert.equal(row.memAvailableMb, 327.7);
+  assert.deepEqual(row.eventLoopDelayMs, { p50: 2, p99: 90, max: 400, mean: 5 });
+  assert.equal(resets, 1, "the histogram starts afresh each window");
+  assert.deepEqual(row.decisions, { n: 3, medianMs: 70, p90Ms: 80, maxMs: 80, queueMedianMs: 10, queueMaxMs: 4000, storedOrders: 7470 });
+  // Off Linux (no /proc): those fields are null, the rest still measured.
+  const off = new SelfMonitor({ readProcStat: () => { throw new Error("no /proc"); }, readMemInfo: () => { throw new Error("no /proc"); }, histogram: null });
+  const r2 = off.sample({ times: [], storedOrders: null });
+  assert.equal(r2.stealPct, null);
+  assert.equal(r2.memAvailableMb, null);
+  assert.equal(r2.eventLoopDelayMs, null);
+  assert.equal(r2.decisions.n, 0);
+});
+
+test("the gate records each decision's own time and queue wait and the stored orders it read; taking them empties the list", async () => {
+  const s = await gateAt("17:00:00", { [MIDDAY_PHASE]: "x", middayFlat: "yes" });
+  await s.gate.enter(normalSignal("A1", 20, s.now()));
+  await s.gate.enter(normalSignal("A2", 20, s.now()));
+  const t = s.gate.takeDecisionTimes();
+  assert.equal(t.times.length, 2);
+  assert.ok(t.times.every((x) => x.runMs >= 0 && x.queueMs >= 0));
+  assert.equal(t.storedOrders, 1, "the second decision read the first entry's row");
+  assert.equal(s.gate.takeDecisionTimes().times.length, 0);
+});
+
+test("the worker writes one self_monitor row a minute in the session, beside the per-minute statistics; none without a monitor", async () => {
+  const { r } = await flatAtMidday();
+  const samples: any[] = [];
+  (r.worker as any).d.selfMonitor = { sample: (g: any) => (samples.push(g), { decisions: { n: g.times.length }, stealPct: 0 }) };
+  await r.at("16:50:00");
+  await r.at("16:51:01");
+  await r.at("16:52:02");
+  const rows = (r.store as any).events.filter((e: any) => e.event === "self_monitor");
+  assert.ok(rows.length >= 2, `rows ${rows.length}`);
+  assert.equal(rows.length, samples.length);
+  const stats = (r.store as any).events.filter((e: any) => e.event === "governor_stats").length;
+  assert.ok(stats >= rows.length);
+  // A monitor that throws does not break the pass.
+  (r.worker as any).d.selfMonitor = { sample: () => { throw new Error("boom"); } };
+  await r.at("16:53:03");
+  assert.equal((r.store as any).events.filter((e: any) => e.event === "self_monitor").length, rows.length);
 });

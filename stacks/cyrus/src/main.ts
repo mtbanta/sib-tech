@@ -10,6 +10,7 @@ import { describeError, makeLogger } from "./log.ts";
 import { makePool, PgStore } from "./pg-store.ts";
 import { makeRedactor } from "./redact.ts";
 import { DEFAULT_SCREEN, liveListSize, screen } from "./screen.ts";
+import { SelfMonitor } from "./self-monitor.ts";
 import { LOAD_SCREEN } from "./load-mode.ts";
 import { TradeStream } from "./stream.ts";
 import { OrderStream } from "./order-stream.ts";
@@ -69,6 +70,7 @@ const worker = new Worker({
   now: () => new Date(),
   ping: (kind) => ping(settings.healthchecksPingUrl, kind),
   buildLiveList,
+  selfMonitor: new SelfMonitor(),
   makeStream: (symbols, onTrade) => {
     let status = "starting";
     const alerter = new FeedAlerter();

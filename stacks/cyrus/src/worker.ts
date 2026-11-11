@@ -22,6 +22,7 @@ import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
 import { BARE_GRACE_MS, enforceDailyLoss, LossStopMemory, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
+import type { SelfMonitor } from "./self-monitor.ts";
 import { LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
 import { BusyPlaceholder } from "./strategy.ts";
 import { OrderUpdateHandler, type TradeUpdate } from "./order-stream.ts";
@@ -63,6 +64,8 @@ export interface WorkerDeps {
   // Builds the day's live list (universe, daily bars, screen). Slow (minutes), so it runs in the background.
   buildLiveList: (opts?: { load?: boolean }) => Promise<LiveListResult>;
   makeStream: (symbols: string[], onTrade: (t: Trade) => void) => StreamLike;
+  // Self-monitoring (Michael's approval of 2026-11-11): one `self_monitor` row a minute in the session. Absent: none.
+  selfMonitor?: Pick<SelfMonitor, "sample">;
   // Alpaca's live order updates (order-stream.ts), connected from "Armed" to the close on every day (the speed release; release B
   // had them on load days only). Optional: without it the order sync alone frees symbols, as before.
   makeOrderStream?: (onUpdate: (u: TradeUpdate) => void) => StreamLike & { reconnects?: () => number };
@@ -903,6 +906,15 @@ export class Worker {
       if (inSession && now.getTime() - this.lastStatsEvent >= STATS_EVERY_MS) {
         this.lastStatsEvent = now.getTime();
         await this.d.store.addEvent("info", "governor_stats", this.minuteStats()).catch(() => undefined);
+        if (this.d.selfMonitor) {
+          let row: Record<string, unknown> | null = null;
+          try {
+            row = this.d.selfMonitor.sample(this.gate.takeDecisionTimes()) as unknown as Record<string, unknown>;
+          } catch {
+            row = null; // measurement must never break the pass
+          }
+          if (row) await this.d.store.addEvent("info", "self_monitor", row).catch(() => undefined);
+        }
       }
     }
 
