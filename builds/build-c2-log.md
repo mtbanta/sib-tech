@@ -3704,3 +3704,146 @@ Both found the same blocking gap in group 1's round 1 fix: a command sent while 
 - The parts that ship: the no-copy fix is correct (rows frozen on load, insert and both updates, replaced never changed, same order, `getOrder` a copy; no writer to a listed row in `src/`; the whole-day tests through `CachingStore` pass); the self-monitoring is measurement only and reads no Fly token.
 - Notes: `finishAfternoonLoad` could check the flag itself as a second guard when the window is finished; the `self_monitor` write is awaited like `governor_stats` (a hung database delays, cannot throw).
 - 544 tests pass; `tsc --noEmit` clean.
+
+## Wednesday 2026-11-11 end-of-day review (release v16, load day; written at about 3:45 PM, read only)
+
+Run from `builds/daily-review-brief.md` by the wait held in the builder's Claude session (Michael's request of 2026-11-10, night), starting 3:15 PM. Read only on Fly, Alpaca, Supabase, Discord and Healthchecks: no code changed, nothing deployed, no orders. Limits (Michael, load day): `load on`, largest position 250 dollars (75 until the pause), daily loss stop 500 dollars, 150 orders a minute (100 after the pause), cap 1. Day start 18,127.56 dollars. Fly v16 (`2b0bb6e`), one machine (San Jose), running since 2026-11-10 7:18 PM, no restart today (`start_history` unchanged). The morning's detail is in "Wednesday 2026-11-11 mid-day session review" and the slowdown's cause in "Wednesday 2026-11-11 slowdown investigation"; neither is repeated. Paper only. Research input for a human decision, never an instruction to act.
+
+**First: the 3:05 PM daily summary was never posted.** The step fails every 35 seconds with "The operation was aborted due to timeout" (first at 3:05:34 PM; 69 failures by 3:45, none succeeded), and `alerts` gets "Step "summary" failed" every 5 minutes. Cause (measured from the Mac): the summary's first read is Alpaca's order listing from midnight with no end time, and on a day with this many orders (7,855 entries, each with two exits) Alpaca takes about 27 to 28 seconds to answer it, against the worker's 10 second limit for any Alpaca request. It will not clear by itself: it retries until midnight Eastern (11 PM Central), so about 95 more such alerts tonight (no mention of Michael). Tonight's planned deploy (option B) does not change it, and a load day on Thursday would fail the same way. A fix is proposed in section 12 (A).
+
+**Verdict for the whole day under Michael's rule: does not hold, on one criterion: safety sales were delayed in the morning** (5 positions without exits for 10.4 to 17.4 s; mid-day review, section 2). Every other criterion holds all day: 0 rate-limit answers; remaining below the reserve only in the morning dip (lowest 73 against 80, 8:50 to 8:54, reported under the dip ruling); the mid-day close-out flat at 10:30:18 AM; the 2:55 close-out flat at 2:55:30.7 PM. **The afternoon on its own holds on the stack's own steps** (no sale waited beyond its designed steps), with two waits inside Alpaca for Michael to rule on: BMNR-496's remainder sale took Alpaca 4.8 s to fill (10.4 s without a stop in all), and at 2:55 Alpaca held PCG's take-profit "pending cancel" for 8.7 s and then held the stack's sale 14.6 s before submitting it (26.5 s without a stop, within the close-out, which ended flat). **The day lost 49.06 dollars** (morning -35.52, afternoon -13.54); equity 18,078.50, which matches the fills to the cent. **0 alerts mentioned Michael all day.**
+
+### 1. The morning load window (8:45 to the pause at 10:30:09)
+
+As in the mid-day review, section 1: highest 138 accepted orders a minute (8:46), busiest 60 seconds 150 (the ceiling); 7,725 entries sent, all accepted, 3,583 filled; 0 rate-limit answers; lowest remaining 73 (8:50 to 8:54); every entry before the pause at most 75 dollars; the morning lost 35.52 dollars. Verdict: does not hold (delayed safety sales). The worker slowed from 10:21 because Fly's CPU burst balance ran out (measured; section 10).
+
+### 2. The mid-day close-out and what followed
+
+- The close-out: as in the mid-day review, section 3 (20 positions, flat at 10:30:18.5, 71 and 80 requests in the 10:30 and 10:31 minutes, 0 rate-limit answers, fix B's wait ended flat, cap unchanged).
+- **No deploy** (none planned; after `go` the mid-day exception no longer applied).
+- **`go`** (Michael, 11:18:54): resumed at 11:18:56.6 (`midday_pause:2026-11-11` off, `resumedBy: go`), "Resumed: the mid-day pause is over. Same limits as this morning; the loss stop counts from the open." First entry 11:18:58.1.
+- **`hold`** (11:20:59): "Trading has already resumed today, so `hold` changes nothing. Send `stop` to halt new entries." As designed.
+- **`stop`** (11:21:10): stop flag on at 11:21:11.6, "Stopped. No new entries. Cancelled 0 unfilled entries." Last entry before it: SMR-106 at 11:21:03.3.
+- **`flatten`** (11:55:31; the line "flattten" five seconds earlier was answered "I did not understand"): 5 positions sold (ADT, CMCSA, JHX, SOFI, T; sales sent 11:55:33.9 to 11:55:34.2, filled by 11:55:37.4), "the account is flat" at 11:55:40, 9 seconds after the command.
+- **The 1:30 PM note:** the phase was set at 1:30:01 with no post, because the pause had already ended with `go` (consistent with the design: the note is for a day still paused).
+- **`resume`** (1:31:04): stop flag off at 1:31:06.9, reply "Stop cleared. Entries still need the day's limits approved." **That reply was wrong:** the day's limits were already approved, and the first entry (JOBY-75) went at 1:31:07.4, 15 seconds before Michael's `Approve` (1:31:22), which accepted the same four limits again (`limits_decision` mode "tighten", no change). Section 11.
+
+### 3. The afternoon
+
+- **Entries: 130, all accepted and all filled** (market entries): 27 from 11:18:58 to 11:21:03 (after `go`) and 103 from 1:31:07 to 1:59:46 (after `resume`). Alpaca refused none (no stored entry without an Alpaca id). Highest in a calendar minute 18 (11:19), then 17 (1:31). Decision to acceptance: median 237 ms, 95th percentile 472 ms, slowest 735 ms (the morning's 5.5 s did not return).
+- **Normal limits after the pause:** yes. Largest entry 249.72 dollars (IREN-683, 1:41 PM), all at most 250 (not 75); at most 18 a minute, under the 100 ceiling (not 150).
+- **Requests:** at most 106 in a minute (the row at 1:57:37), **lowest remaining 170** (same row) against the reserve of 80; **rate-limit answers 0**; the governor held nothing back in the afternoon.
+- **Refusals after 11:00 (signals):** stop flag set 3,238 (11:21 to 1:31), paused for the mid-day cycle 529 (to 11:18), too close to the close for a new entry 54 (from 2:00 PM), already holding the symbol 31, entry still working 1.
+- **Cost: -13.54 dollars** (the fills' cash flow after 11:00), about 10 cents an entry at about 250 dollars (Tuesday's normal day: 71 cents at about 500). Peak exposure 7,283.55 dollars, 0.40 times equity (1:45:42 PM).
+- **The daily loss stop did not fire.** The lowest equity in the records is 18,071.15 (the shadow book's account read at 1:42 PM), a loss of 56.41, 11 percent of the 500 limit. The stop flag that was on from 11:21 to 1:31 was Michael's `stop`, not the loss stop.
+- **Lost exits: none in the afternoon** (no `unprotected_position` after 11:00).
+- **Remainders (a take-profit partly filled and Alpaca cancelled the stop): 13**, the first of the week (1-share load entries cannot leave one). From Alpaca's stop cancel to the stack's sale (Alpaca's submit time) and its fill:
+
+  | Entry | Stop cancelled | Left | Sale sent | Filled | Without a stop |
+  | :-- | :-- | :-- | :-- | :-- | --: |
+  | HL-187 | 11:23:00.2 | 12 of 17 | 11:23:05.2 | 11:23:07.6 | 7.4 s |
+  | CDE-192 | 1:35:39.0 | 1 of 16 | 1:35:45.1 | 1:35:45.6 | 6.6 s |
+  | BMNR-496 | 1:36:57.4 | 8 of 13 | 1:37:03.0 | 1:37:07.8 | **10.4 s** |
+  | SNAP-106 | 1:38:00.6 | logged 25; the take-profit filled all 46 at 1:38:04.5 | none (recount 0) | | 4.0 s |
+  | CIFR-266 | 1:45:56.2 | 6 of 35 | 1:46:01.6 | 1:46:02.2 | 6.0 s |
+  | WULF-424 | 1:47:36.4 | 15 of 18 | 1:47:41.4 | 1:47:45.3 | 8.9 s |
+  | WULF-425 | 1:53:44.2 | 3 of 18 | 1:53:49.6 | 1:53:51.2 | 6.9 s |
+  | CIFR-270 | 1:56:55.0 | 2 of 34 | 1:57:00.5 | 1:57:01.3 | 6.4 s |
+  | RIOT-514 | 1:56:55.9 | 10 of 13 | 1:57:03.8 | 1:57:05.6 | 9.6 s |
+  | MARA-230 | 1:57:50.3 | 2 of 32 | 1:57:55.4 | 1:57:58.4 | 8.1 s |
+  | RIOT-516 | 1:59:41.6 | logged 5; the take-profit filled all 13 at 1:59:45.6 | none | | 4.1 s |
+  | WULF-428 | 2:00:30.8 | logged 11; recounted to 1 (the take-profit filled 17 at 2:00:34.9) | 2:00:37.0 | 2:00:39.0 | 8.2 s |
+  | T-172 | 2:50:24.7 | logged 2; the take-profit filled all 11 at 2:50:29.0 | none (recount 0) | | 4.3 s |
+
+  - The sales went 5.0 to 6.2 s after the stop cancel (the 3 second stop-gap wait, then the take-profit's cancel), except RIOT-514 at 7.8 s (section 11). Only BMNR-496 passed 10 s, and 4.8 s of it was Alpaca filling an 8-share market sale; the stack sent it 1.5 s after the take-profit's cancel landed.
+  - **Fix A was exercised for the first time and behaved as designed:** three `remainder_recount` cases (SNAP-106 and T-172 recounted to 0 and sold nothing; WULF-428 recounted to 1 and sold 1), no sale of shares the take-profit had already sold, and **no false "could not sell it yet" alert** (Tuesday: 8).
+  - **Fix C behaved as designed:** each of the 4 "Alpaca has not filled it yet" lines (HL, BMNR, WULF-424, MARA) got its closing line in the once-a-minute "Sold ... remainder" batch, 6 to 70 s later.
+  - The stop-gap record: 10 sales, 60 shares, 2 would have filled at the stop, -0.02 dollars against waiting.
+
+### 4. The 2:55 close-out
+
+- Held at 2:55: PCG-57 (19 shares, entered 1:31:44). One cancel of everything sent 2:55:04.156, answered 2:55:04.272. Alpaca cancelled the stop at 2:55:04.239 but kept the take-profit "pending cancel" until **2:55:12.960 (8.7 s)**.
+- Round 1 waited its 6.55 s for the shares to come free, then logged `sale_blocked` (section 6) at 2:55:13.1. Round 2 created the sale at 2:55:14.55 (client id time; Alpaca's `created_at` 2:55:14.760). **Alpaca submitted it only at 2:55:29.358 (14.6 s later)** and filled it at 2:55:30.700. The stack's own part after the cancel landed was 1.6 s.
+- **Fix B behaved as designed:** the liquidator ended with PCG's sale working (`working: ["PCG"]`); the wait for the close-out's own sales ran 15,780 ms and ended flat (`closeout_result` flat at 2:55:30.824). No NOT FLAT alert, no retry; "Close-out done: the account is flat." at 2:55:31; `not_flat` off. Cap at Alpaca 1 (multiplier 1).
+- PCG was without a stop for 26.5 s (2:55:04.2 to 2:55:30.7). The missing-exit check stands aside from 2:55 by design, and 23.3 s of it was Alpaca's (the pending cancel and the held sale). Under Michael's words ("any ... close-out ... that waited, for any reason") this sale waited; it waited on Alpaca, not on the stack. For Michael to rule.
+
+### 5. Alerts that mentioned Michael
+
+**None all day** (`alerts`, `trading`, `commands`; Tuesday 9). Alerts without a mention after the pause: 14 remainder lines (4 "not filled yet" and 10 "Sold ... remainder" batch lines), all true; and the "Step "summary" failed: The operation was aborted due to timeout" lines from 3:05:35, every 5 minutes, true (section 11).
+
+### 6. Blocked sales and late notices
+
+**One `sale_blocked`, the first since the logging shipped (A step 3's first data point):**
+- PCG, 2:55:13.113, reason close-out, round 1. Alpaca's position: `qty` 19, **`qtyAvailable` 19**. `openSellQty` 19: one open sell listed, the take-profit leg `8615bdfb` (limit, 19 shares, filled 0, status **`pending_cancel`**). `openListAgeMs` 135, `waitedMs` 6,550, `hiddenHold` false.
+- What Alpaca's records show: the take-profit held the shares in its "pending cancel" state until 2:55:12.960, so the stack's own count of open sells blocked the sale. Alpaca's position read at the same moment already showed all 19 shares available. Sold by round 2 (created 2:55:14.76, held at Alpaca until 2:55:29.36, filled 2:55:30.70): 17.6 s from the block to the fill.
+- What it suggests (one case, not proof): Alpaca counted the shares free while its own take-profit was still "pending cancel". Whether Alpaca would have accepted a sale at that moment is not shown.
+
+**`late_notice`: one in the afternoon.** RIOT-514, 1:57:01.97: noticed by the order listing 6.0 s after Alpaca's stop cancel. The live updates had reported the cancel within 45 ms, and the timed sync was set for 3 s after it (the stop-gap wait), but it started only at about 1:57:01.75, 2.8 s late. The sync before it had just finished selling CIFR-270's remainder (its `liquidation_result` at 1:57:01.617; CIFR's stop was cancelled 1 s before RIOT's). The two remainders were handled one after the other (inferred from the times; no field names the hold-up). RIOT was without a stop for 9.6 s.
+
+### 7. The daily summary against the account
+
+**Not posted** (section 11), so there is no summary to check. What it would have been checked against, from Alpaca (this review's reads):
+
+| Line | Alpaca, or the stack's records |
+| :-- | :-- |
+| Entries | 7,855 stored (7,725 morning, 130 afternoon), all with an Alpaca id, none refused. Filled: 3,713 buy orders in Alpaca's fills. The stack stores 3,712 filled, because two entries were left "submitted" in the slowdown (RIOT-499, not filled; BMNR-493, filled) |
+| Sells filled | 3,723 distinct sell orders in the day's 7,755 fills |
+| Profit or loss | -49.06 (the fills' cash flow) |
+| Equity | `last_equity` 18,127.56, `equity` 18,078.50, cash 18,078.50: -49.06, to the cent. No positions, no open orders |
+| Per symbol | worst SMCI -5.52, BMNR -5.19, IONQ -4.68, RIG -4.22, DKNG -3.63; best MARA +1.20, CIFR +1.19, T +0.88 |
+| Peak exposure | 7,283.55 dollars, 0.40 times equity (`peak_exposure:2026-11-11`, 1:45:42 PM) |
+| Stop-gap sales | 10 sales, 60 shares, 2 would have filled, -0.02 (`stop_gap:2026-11-11`) |
+| Requests | lowest budget 73 of 200 (the morning) |
+| Fees (estimate by the formula) | SEC: 98,893.50 dollars of sales times 20.60 per million is 2.037, rounded up to 2.04; CAT: 12,566 shares times 0.000003 is 0.038, rounded up to 0.04; total 2.08. Tuesday's posted fees (REG 6.85, CAT 0.08) matched Tuesday's estimate of 6.93 to the cent. Today's will post at about 7 PM |
+| Restart note | none due (no restart or deploy today) |
+
+Side effects of the missing summary: `fees_running` has no 2026-11-11 entry (the running total stays 23.05); the governor's day figures and the 5 second cancel counts were not reset (tonight's deploy restarts the worker, which resets both).
+
+### 8. The shadow loss-stop book
+
+Largest difference to the 5 second account check: 2.19 dollars (1:42 PM; the morning's 0.14). The loss stop was never near, so whether the book would have fired sooner cannot be judged today. Its `maxCheckCashGap` still reads 19.81 dollars, as in the morning (not explained).
+
+### 9. Discord and Healthchecks
+
+- Whole day (7 AM to 3:45 PM): `alerts` 47, `trading` 46, `commands` 20. After the 10:31 pause: `alerts` 22 (14 remainder lines and 8 "Step "summary" failed"), `trading` 23, `commands` 17.
+- Healthchecks: the cyrus check is up, no flips today, last ping 3:45:23 PM. One Discord 503 on the command read at 1:57:07 PM (`command_poll_failed`), recovered at the next read.
+
+### 10. The Fly machine
+
+From Fly's metrics (read with `FLY_METRICS_TOKEN` from Michael's Mac), machine `847319a2d79518`, 8:30 AM to 3:20 PM:
+- **The CPU burst balance:** full (50,000) at 8:30; **0 from 10:22 to 10:30** (lowest 0.5 at 10:22); refilled to 11,121 by `go` (11:18) and 40,994 by `resume` (1:31). **During the afternoon's trading it stopped refilling:** 40,994 to 41,850 from 1:31 to 2:03, so the worker used about the 6.25 percent baseline then. 42,829 at 2:55, full again (50,000) at 3:19.
+- **Throttling:** only 10:22 to 10:31 (31 percent at 10:22, 83 to 91 percent from 10:23 to 10:30, 24 percent at 10:31). **None in the afternoon.** Steal 0.0 to 0.15 percent outside that stretch.
+- **CPU in use:** the morning as measured at 1:05 PM (5 percent at 8:50 rising to 25 percent at 10:16); 2.1 to 2.5 percent while stopped (11:30 to 1:30); **4.2 to 7.2 percent from 1:32 to 2:56** at 1 to 17 entries a minute with about 7,800 stored orders, including 2:03 to 2:55 with no entries and positions still open; 0.4 to 0.9 percent after the close. Every 10 minutes in the afternoon: 1:40 5.4, 1:50 6.9, 2:00 6.0, 2:10 4.2, 2:20 4.9, 2:30 4.9, 2:40 5.2, 2:50 5.8.
+- **Load average** (1 minute): at most 1.62 (10:24); at most 0.6 in the afternoon. **Memory available:** 352 MB at 8:30, 320 MB from 10:30 to the close, 342 MB after 3:03 (the live streams stop at the close; inferred).
+- **The worker's own self-monitoring rows: none.** v16 has no self-monitoring; the first rows come after tonight's deploy.
+- **Against 2026-11-11 morning:** the afternoon's 4 to 7 percent at a few entries a minute is at or above the baseline, which fits the measured cause (each order-gate decision and order sync copies the whole day's list, about 7,800 rows by then). The no-copy fix in tonight's release should bring it down; Thursday's mid-day review compares.
+
+### 11. Anything else that did not behave as designed
+
+1. **The daily summary failed and keeps failing (new).** Every try's first read, Alpaca's order listing from midnight with no end time (`listOrdersPaged`), is aborted by the worker's 10 second request limit. From the Mac (read only): that listing took 27.5 s (limit 500) and 27.9 s (limit 50), and came back short both times (172 of 500, 27 of 50). The same listing from 11:00 AM answered in 0.55 s, and a bounded 5 minute slice of the busiest morning (`after` 8:45, `until` 8:50) answered in 0.75 s with the full 500, while the same start without an end time took 27.7 s and returned 172. So Alpaca is slow, and returns a short page, on open-ended listings over a day this large; bounded slices are fast (measured). The mid-day review's "paging gaps" (7,466 of 7,725 entries listed) are likely the same short pages (inferred). Retries every 35 s cost about 3 requests each (Alpaca still does its 28 s of work each time); the alert repeats every 5 minutes until 11 PM Central. Nothing else reads the summary phase. Summary code only: it touches no order.
+2. **The `resume` reply said "Entries still need the day's limits approved" when they did not** (new, messaging): the limits were approved, the pause had ended with `go`, and entries restarted at once (1:31:07.4). Michael then sent `Approve`, which changed nothing.
+3. **RIOT-514's timed sync started 2.8 s after the time it was set for,** behind the sync selling CIFR-270's remainder (section 6). 9.6 s without a stop, under 10.
+4. **Alpaca was slow at 2:55** (PCG's take-profit "pending cancel" 8.7 s; the stack's sale held 14.6 s before it was submitted), and BMNR-496's market sale took 4.8 s to fill. Alpaca's side; a link to the account's order count today is possible but not shown (inferred).
+5. (Carried from the morning) Two stored entries left "submitted" (RIOT-499, BMNR-493).
+6. This review's own Alpaca reads: 78 pages of fills, one page of afternoon orders, the account, positions and open orders, and four listing probes (three of about 28 s). Nothing was refused (remaining 197 to 199).
+
+Everything else behaved as designed: `go`, `hold`'s answer, `stop`, `flatten` (9 s to flat), the stop flag refusing entries, `resume`'s effect, normal limits after the pause, the 2:00 PM last entry, remainders and fix A's recount, fix C's closing lines, the 2:55 close-out with fix B's wait, the cap, the evening limits post at 3:10 PM, Healthchecks.
+
+### 12. Recommended fixes (a proposal only, no code)
+
+**A. The summary's order listing (summary code only; not money-touching; group 2 review).**
+- Change: read the day's orders in bounded time slices (`after` and `until`, for example 5 minutes, splitting a slice that comes back full) instead of one open-ended listing; treat a slice as complete only when it is bounded. Also: one "summary failed" alert, then one line when it succeeds, instead of one every 5 minutes.
+- **A longer timeout alone would make it worse:** the open-ended listing returns a short page, which the code takes as "complete", so about 7,700 entries would look missing and each would be fetched by its client id (thousands of requests over an hour or more, paced only by the summary's budget floor).
+- Today, measured: a 5 minute slice of the busiest morning answered in 0.75 s. About 7,855 entries with their exits need roughly 20 to 50 slices (an estimate), about 25 to 60 seconds and as many requests after the close, against a failure now.
+- Today's summary: if a release with this fix is deployed before 11 PM Central tonight, the worker posts today's summary on its own (the step runs while it is still 2026-11-11 Eastern). Otherwise today's summary is never posted; this review's section 7 stands in for it.
+- Michael's decision: he said to fold in any fix he approves from this review. It needs a group 2 review and must not delay option B past 7:30 AM. If it is not done, Thursday's summary (a load day) will fail the same way.
+
+**B. The `resume` reply (messaging only; group 2).** Say what actually happens: "Stop cleared. Trading resumes now under today's approved limits" when the limits are approved and no pause is on, and the current line only when a limit is undecided. No requests.
+
+**C. A step 3, selling against Alpaca's free count (money-touching: Michael's approval and a group 1 review).** Today's single case: Alpaca's `qtyAvailable` showed all 19 shares free while the take-profit was "pending cancel". Selling then would have sent PCG's sale about 6.5 s sooner (an estimate; whether Alpaca would accept it is not shown, and Alpaca then held the sale 14.6 s anyway). Recommended: no change yet; collect more cases.
+
+**D. (Question for Michael, no change proposed.) Two remainders at once are sold one after the other** (RIOT-514 waited 2.8 s behind CIFR-270). One case, under 10 s. Selling them side by side touches the sell path (money-touching).
+
+**E. (Question for Michael.) How to score waits inside Alpaca** (BMNR-496's 4.8 s fill, PCG's 8.7 s pending cancel and 14.6 s held sale) under "no safety sale is delayed": the stack's own steps were within design.
+
+**Thursday's limits (Michael's decision).** The evening post at 3:10 PM suggests 250 dollars, loss stop 500, 100 a minute, cap 1, normal mode; nothing is decided. Today's cost: the load window lost about 1 cent a filled entry; the normal-sized afternoon about 10 cents an entry at 250 dollars. If Thursday is the load morning Michael planned (to test the no-copy fix past 7,000 orders), he sends `load on` and his limits and `approve` before 7:45 AM (the load-day screen). Lowering a limit is a tightening he can make; raising the loss stop or a ceiling is a hard stop, his alone.
