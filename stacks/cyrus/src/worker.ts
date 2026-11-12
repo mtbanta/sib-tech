@@ -24,7 +24,7 @@ import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
 import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import type { SelfMonitor } from "./self-monitor.ts";
-import { AFTERNOON_FLAT_PHASE, LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
+import { AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
 import { BusyPlaceholder } from "./strategy.ts";
 import { OrderUpdateHandler, type TradeUpdate } from "./order-stream.ts";
 import { EntryExpiry } from "./entry-expiry.ts";
@@ -1609,7 +1609,7 @@ export class Worker {
     const pause = await readPause(this.d.store, date);
     if (!pause?.on) {
       // The pause's start time stays the mid-day one (the summary and `status` name it); only the flag and the reason change.
-      await updatePause(this.d.store, date, { on: true, since: pause?.since ?? this.d.now().toISOString(), reason: "afternoon load window ended" });
+      await updatePause(this.d.store, date, { on: true, since: pause?.since ?? this.d.now().toISOString(), reason: AFTERNOON_PAUSE_REASON });
       this.d.log?.("info", "afternoon_closeout", { date, step: "paused" });
     }
     const before = this.d.governor.stats().requestsLastMinute;
@@ -1627,8 +1627,12 @@ export class Worker {
       await this.say("trading", "Afternoon load window over: the close-out after it is done and the account is flat. Entries stay paused.");
       const dayNow = await this.d.store.getDay(date).catch(() => null);
       const lastEntryAt = dayNow ? (middayTimes(dayNow)?.lastEntryAt ?? null) : null;
-      const goText = lastEntryAt && this.d.now() < lastEntryAt ? ` \`go\` resumes a normal afternoon until ${centralClock(lastEntryAt)} (the last entry).` : "";
-      await this.say("commands", `Afternoon load window over: entries paused and the account is flat. Trading does not resume on its own.${goText} The regular close-out and the daily summary run as usual.`);
+      // Group 2, round 1: what really comes next, as the mid-day line says it (the stop flag, the daily loss stop, no entries left), else
+      // what `go` does.
+      const now = this.d.now();
+      const blocked = dayNow && lastEntryAt ? (await this.middayBlocked(dayNow, now, lastEntryAt).catch(() => null))?.blocked ?? null : null;
+      const next = blocked ?? (lastEntryAt && now < lastEntryAt ? `\`go\` resumes a normal afternoon until ${centralClock(lastEntryAt)} (the last entry).` : "");
+      await this.say("commands", `Afternoon load window over: entries paused and the account is flat. Trading does not resume on its own.${next ? ` ${next}` : ""} The regular close-out and the daily summary run as usual.`);
       return;
     }
     this.afternoonLastRemaining = result.remaining;

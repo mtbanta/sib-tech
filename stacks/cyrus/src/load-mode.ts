@@ -80,6 +80,8 @@ export function afternoonLoadStart(day: Pick<DayRecord, "phases"> | null | undef
 export const AFTERNOON_LOAD_MAX_MINUTES = 30;
 // Day phase: the close-out after the afternoon load window finished flat (its time).
 export const AFTERNOON_FLAT_PHASE = "afternoonFlat";
+// The pause's reason once the afternoon load window has ended (its close-out).
+export const AFTERNOON_PAUSE_REASON = "afternoon load window ended";
 
 // The afternoon window's span: from `load afternoon` to the earlier of 30 minutes later and the day's last entry. Null if it was not
 // started or the times are unknown.

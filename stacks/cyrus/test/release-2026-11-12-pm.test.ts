@@ -120,9 +120,21 @@ test("after 30 minutes the window ends: entries pause, the close-out sells to fl
   }
   assert.ok((await r.store.getDay(D))!.phases[AFTERNOON_FLAT_PHASE], "flat: its own phase");
   assert.equal((await sim.listPositions()).length, 0);
-  assert.ok(r.said("commands").some((t) => t.startsWith("Afternoon load window over: entries paused and the account is flat.")));
-  await r.at("17:30:00");
+  assert.ok(r.said("commands").some((t) => t.startsWith("Afternoon load window over: entries paused and the account is flat.") && t.includes("`go` resumes a normal afternoon until 2:00 PM CT")), r.said("commands").join(" | "));
+  // Group 2, round 1: `status` after the window is true: flat, paused, and the pause named as the window's end.
+  r.ownerSays("status", "17:13:00");
+  await r.at("17:13:05");
+  const st = r.said("commands").filter((t) => t.startsWith("**Status**")).at(-1)!;
+  assert.match(st, /Afternoon load window: ran from 10:40 AM CT to 11:10 AM CT; its close-out finished flat, entries paused/);
+  assert.match(st, /Mid-day cycle: entries paused again at 11:10 AM CT, when the afternoon load window ended \(flat\)/);
   assert.equal((await readPause(r.store, D))!.on, true, "no automatic return to normal trading");
+  // A `go` after the close-out is flat resumes a normal afternoon, and `status` then says so.
+  r.ownerSays("go", "17:14:00");
+  await r.at("17:14:05");
+  r.ownerSays("status", "17:15:00");
+  await r.at("17:15:05");
+  const st2 = r.said("commands").filter((t) => t.startsWith("**Status**")).at(-1)!;
+  assert.match(st2, /its close-out finished flat, trading resumed at 11:14 AM CT \(by `go`\)/);
   assert.ok(events.some((e) => e.e === "afternoon_closeout" && e.d.flat === true));
   const tries = events.filter((e) => e.e === "afternoon_closeout" && e.d.step !== "paused");
   assert.equal(tries[0]!.d.step, "first");
@@ -210,4 +222,18 @@ test("group 1, round 1: an entry whose checks began inside the window is cancell
   assert.equal(s.broker.orders.filter((o) => o.symbol === "EDGE").length, 0, "nothing reached Alpaca");
   const stored = (await s.store.listOrders(D)).find((o) => o.symbol === "EDGE");
   assert.equal(stored?.note, "afternoon load window ended before sending", "refused by the check just before sending");
+});
+
+test("group 2, round 1: with the stop on when the afternoon close-out finishes flat, its line names the stop instead of offering `go`", async () => {
+  const { r } = await flatAtMidday({ load: true });
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  r.ownerSays("stop", "17:00:00");
+  await r.at("17:00:05");
+  await r.at("17:10:06");
+  await until(async () => Boolean((await r.store.getDay(D))!.phases[AFTERNOON_FLAT_PHASE]) && !r.worker["inflight"].has("midday"));
+  const line = r.said("commands").find((t) => t.startsWith("Afternoon load window over:"));
+  assert.ok(line, r.said("commands").join(" | "));
+  assert.ok(!line!.includes("`go` resumes"), line);
+  assert.match(line!, /The stop flag is on/);
 });

@@ -49,6 +49,11 @@ export const STORED_INFO_EVENTS = new Set([
   "load_afternoon",
   "afternoon_closeout",
   "screen_not_tradable",
+  // Group 2, round 1 (rare, part of the day's story): the afternoon window's failures and cancels.
+  "load_afternoon_failed",
+  "load_afternoon_refused",
+  "load_afternoon_cancelled",
+  "load_afternoon_not_switched",
 ]);
 
 export function shouldStoreEvent(level: "info" | "warn" | "error", event: string): boolean {

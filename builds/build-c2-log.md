@@ -4070,6 +4070,12 @@ What it changes (branch `release-2026-11-12-pm`):
 
 Tests: `test/release-2026-11-12-pm.test.ts` (new) and the existing tests updated for the 30 minute end and the wording. Full suite 625 tests, 624 passed on the first full run; the one failure was a wording check, fixed and its file re-run (30 of 30).
 
+Review:
+- **Group 1, round 1: CHANGES REQUIRED.** (1) A worker test still expected the old wording (fixed). (2) Blocking: after the 30 minutes, entries could go on at normal size until the worker's next pass wrote the pause back on (longer if a pass was held by Discord or the pause write failed). Fixed: the gate refuses every entry by the clock once the window has ended, until its close-out has finished flat, both at its early check and just before sending. Also: the pause keeps its mid-day start time; the flat line says what `go` does.
+- **Group 1, round 2 (commit fad735a): PASS.** Non-blocking notes: the stop route is narrower than the ruling on a normal morning (refused; the safe direction); the screen path now carries the same load-day guard (added after round 2); no 5 minute second alert and the NOT FLAT alert date kept in memory only; no dedicated tests for the screen wiring in `main.ts` or the 2:55 handover.
+- **Group 2, round 1: CHANGES REQUIRED** (messages only). (1) The flat line offered `go` by the clock alone, even with the stop flag or the daily loss stop on: it now says what really blocks trading, as the mid-day line does. (2) `status` after the window could contradict itself: it now names the window's end, whether its close-out finished flat (or was overtaken by the regular close-out), and whether a later `go` resumed trading. (3) The help line again says "before 1:30 PM CT (or the last entry, if earlier)". Also: a clearer next step on the normal-morning stop refusal, and the afternoon window's failure and cancel events stored too.
+- **Open question for Michael:** his deploy ruling was "for this afternoon". The deploy check in this release keeps "flat with the stop flag on" as an alternative to the mid-day pause from now on. If he wants it for today only, it is one line to take out; CLAUDE.md is not changed until he says.
+
 ## Proposals for tonight (Michael's request of 2026-11-12, afternoon; read only so far, nothing built)
 
 **A. The 6 take-profits cancelled while the stop "stayed live" (PFE-1, APLD-100, RIOT-102, CMCSA-47, SMCI-179, WULF-383).** Checked from Alpaca's order records and the consolidated trades (read only):
