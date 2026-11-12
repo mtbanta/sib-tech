@@ -35,7 +35,7 @@ export interface CommandDeps {
   afternoonScreen?: (date: string) => boolean | "finishing";
   // Michael's approval of 2026-11-11 (after round 2): a `stop`, `flatten` or `go` handled while that screen is running or done but not
   // yet decided cancels the pending window for good. True if one was pending.
-  cancelAfternoonScreen?: (date: string) => boolean;
+  cancelAfternoonScreen?: (date: string) => boolean | "switched";
   // `load afternoon` was built but switched OFF in the release of 2026-11-11 (option B). The release of 2026-11-12 fixes group 1's
   // round 3 findings and main.ts switches it on (one line there, `loadAfternoon: true`, turns it off again).
   loadAfternoonEnabled?: boolean;
@@ -68,9 +68,12 @@ export function afternoonFailureTail(stop: StopFlag | null, pause: MiddayPause |
 }
 
 // Michael's answer 6 of 2026-11-11 (night): `load afternoon` sent while a cancelled screen is still finishing.
-export const SCREEN_STILL_FINISHING = "The earlier screen was cancelled and is still finishing. Send `load afternoon` again in a minute or two.";
+// Group 1, round 1 of 2026-11-12 (wording): true whether the earlier screen was cancelled or failed.
+export const SCREEN_STILL_FINISHING = "The earlier screen is still finishing. Send `load afternoon` again in a minute or two.";
 
 // Said when a `stop`, `flatten` or `go` cancels a pending afternoon load window.
+// Group 1, round 1 of 2026-11-12 (wording): the same cancel once the screen had already switched the live list.
+export const SCREEN_CANCELLED_SWITCHED = "The afternoon load window is cancelled: it will not start. Its screen had already switched the live list to the cheap names, so they stay live, and any trading on them uses today's normal limits (not the window's).";
 export const SCREEN_CANCELLED = "The afternoon load window is cancelled (its cheap-symbol screen had not finished): it will not start, and the live list stays as it is. Send `load afternoon` again if you want it.";
 
 // The `status` line for the afternoon load window (group 2 review, round 1).
@@ -265,7 +268,7 @@ export class CommandProcessor {
         } else {
           await this.say(`Stopped. No new entries. Cancelled ${n} unfilled entr${n === 1 ? "y" : "ies"}. Open positions keep their protective stops and will be closed at the end of the day (or type \`flatten\`).`);
         }
-        if (screenCancelled) await this.say(SCREEN_CANCELLED);
+        if (screenCancelled) await this.say(screenCancelled === "switched" ? SCREEN_CANCELLED_SWITCHED : SCREEN_CANCELLED);
         return;
       }
       case "resume": {
@@ -304,7 +307,7 @@ export class CommandProcessor {
         this.pending.add(task);
         void task.finally(() => this.pending.delete(task));
         await this.say(saved ? "Stopped. Selling every position and cancelling every open order now; I will say when the account is flat." : "**The stop flag could not be saved.** Selling every position now anyway; I will say when it is done.");
-        if (screenCancelled) await this.say(SCREEN_CANCELLED);
+        if (screenCancelled) await this.say(screenCancelled === "switched" ? SCREEN_CANCELLED_SWITCHED : SCREEN_CANCELLED);
         return;
       }
       case "limits": {
@@ -332,13 +335,13 @@ export class CommandProcessor {
         const why = goRefusal({ hasCycle: Boolean(day && middayTimes(day)), pause, flat: Boolean(day && middayFlat(day)), stop });
         if (why) {
           await this.say(`Not resumed: ${why}.`);
-          if (screenCancelled) await this.say(SCREEN_CANCELLED);
+          if (screenCancelled) await this.say(screenCancelled === "switched" ? SCREEN_CANCELLED_SWITCHED : SCREEN_CANCELLED);
           return;
         }
         await updatePause(this.d.store, date, { on: false, resumedAt: now.toISOString(), resumedBy: "go" });
         const lastEntryAt = middayTimes(day!)!.lastEntryAt;
         await this.say(now >= lastEntryAt ? `The mid-day pause is over, but no entries are left today (last entry ${centralClock(lastEntryAt)}).` : "Resumed: the mid-day pause is over. Same limits as this morning; the loss stop counts from the open.");
-        if (screenCancelled) await this.say(SCREEN_CANCELLED);
+        if (screenCancelled) await this.say(screenCancelled === "switched" ? SCREEN_CANCELLED_SWITCHED : SCREEN_CANCELLED);
         return;
       }
       case "loadAfternoon": {

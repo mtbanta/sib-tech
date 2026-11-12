@@ -7,7 +7,7 @@ import { rig, settle, z, D } from "./rig.ts";
 import { CONTROL_STOP } from "../src/store.ts";
 import { LOAD_AFTERNOON_PHASE } from "../src/load-mode.ts";
 import { MIDDAY_PHASE, readPause, updatePause } from "../src/midday.ts";
-import { SCREEN_CANCELLED, SCREEN_STILL_FINISHING, afternoonFailureTail } from "../src/commands.ts";
+import { SCREEN_CANCELLED, SCREEN_CANCELLED_SWITCHED, SCREEN_STILL_FINISHING, afternoonFailureTail } from "../src/commands.ts";
 
 const until = async (cond: () => boolean | Promise<boolean>, n = 400) => {
   for (let i = 0; i < n && !(await cond()); i++) await settle();
@@ -111,7 +111,7 @@ test("fix 2: `load afternoon` sent while a cancelled screen is still finishing a
   r.ownerSays("load afternoon", "16:40:30");
   await r.at("16:40:35");
   assert.ok(r.said("commands").includes(SCREEN_STILL_FINISHING), r.said("commands").join(" | "));
-  assert.equal(SCREEN_STILL_FINISHING, "The earlier screen was cancelled and is still finishing. Send `load afternoon` again in a minute or two.");
+  assert.equal(SCREEN_STILL_FINISHING, "The earlier screen is still finishing. Send `load afternoon` again in a minute or two.");
   assert.ok(!r.said("commands").some((t) => t === "Not started yet: the cheap-symbol screen for the afternoon load window is already running."));
   assert.equal(r.counts().screens, screens, "no second screen");
   h.release({ symbols: ["CHP1"], names: {} });
@@ -220,4 +220,132 @@ test("switched on: `help` shows the real `load afternoon` line, not the switched
   const help = r.said("commands").find((t) => t.startsWith("**Commands**"))!;
   assert.ok(help.includes("up to 150 orders a minute even above today's approved limit"));
   assert.ok(!help.includes("switched off in this release"));
+});
+
+// ---------------- group 1, round 1 of 2026-11-12 ----------------
+
+// Makes the screen's write-back of the old list (the second live-list write) fail; the first write is held open until `release`.
+function holdThenFailWriteBack(r: any): { release: () => void; reached: () => boolean; writes: string[][] } {
+  const real = r.store.updateDay.bind(r.store);
+  let gate: () => void = () => undefined;
+  let reached = false;
+  const writes: string[][] = [];
+  r.store.updateDay = async (date: string, patch: any) => {
+    if (patch.liveList) {
+      writes.push([...patch.liveList]);
+      if (writes.length === 1) {
+        reached = true;
+        await new Promise<void>((res) => (gate = res));
+      } else throw new Error("database timeout (test)");
+    }
+    return real(date, patch);
+  };
+  return { release: () => gate(), reached: () => reached, writes };
+}
+
+const RESTORE_ALERT = "The stored live list may still be the cheap names; check `status` before any restart.";
+
+test("group 1 round 1, scenario A: `go` during the list write, then the write-back fails: logged and an alert in `alerts` (although the window was cancelled)", async () => {
+  const { r, events } = await flatAtMidday();
+  (r.worker as any).d.buildLiveList = async () => ({ symbols: ["CHP1", "CHP2"], names: {} });
+  const h = holdThenFailWriteBack(r);
+  const strategyBefore = (r.worker as any).strategy;
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  await until(() => h.reached());
+  r.ownerSays("go", "16:40:10");
+  await r.at("16:40:15");
+  h.release();
+  await until(() => r.said("alerts").some((t) => t.includes(RESTORE_ALERT)));
+  assert.deepEqual(h.writes, [["CHP1", "CHP2"], ["AAA", "BBB"]], "the write-back was attempted once");
+  const alert = r.said("alerts").find((t) => t.includes(RESTORE_ALERT))!;
+  assert.ok(alert, r.said("alerts").join(" | "));
+  assert.ok(alert.startsWith("Afternoon load window: I could not put the live list back after the window did not start (cancelled by a command)."), alert);
+  assert.ok(events.some((x) => x.e === "load_afternoon_restore_failed"));
+  assert.equal((r.worker as any).strategy, strategyBefore, "memory still trades the morning list");
+  assert.ok(!r.said("trading").some((t) => t.startsWith("Live list switched")));
+});
+
+test("group 1 round 1, scenario B: a read failing after the list write: the old list is written back; if the write-back fails too, the alert", async () => {
+  // B1: the stop read after the write fails; the write-back works.
+  const { r, events } = await flatAtMidday();
+  (r.worker as any).d.buildLiveList = async () => ({ symbols: ["CHP1"], names: {} });
+  const realGet = r.store.getControl.bind(r.store);
+  let wrote = false;
+  const realUpd = r.store.updateDay.bind(r.store);
+  r.store.updateDay = async (d: string, p: any) => (p.liveList && (wrote = true), realUpd(d, p));
+  r.store.getControl = (async (k: string) => {
+    if (wrote && k === CONTROL_STOP) throw new Error("db read timeout (test)");
+    return realGet(k);
+  }) as typeof r.store.getControl;
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  await until(() => events.some((x) => x.e === "load_afternoon_list_restored"));
+  r.store.getControl = realGet;
+  assert.deepEqual((await r.store.getDay(D))!.liveList, ["AAA", "BBB"], "the old list was written back");
+  assert.ok(events.some((x) => x.e === "load_afternoon_write_failed"));
+  assert.ok(!r.said("alerts").some((t) => t.includes(RESTORE_ALERT)), "no alert when the write-back worked");
+  assert.ok(!r.said("trading").some((t) => t.startsWith("Live list switched")));
+
+  // B2: the pause read after the write fails, and the write-back fails too: the alert.
+  const w = await flatAtMidday();
+  (w.r.worker as any).d.buildLiveList = async () => ({ symbols: ["CHP1"], names: {} });
+  let n = 0;
+  const upd = w.r.store.updateDay.bind(w.r.store);
+  w.r.store.updateDay = async (d: string, p: any) => {
+    if (p.liveList && ++n === 2) throw new Error("database timeout (test)");
+    return upd(d, p);
+  };
+  const get2 = w.r.store.getControl.bind(w.r.store);
+  w.r.store.getControl = (async (k: string) => {
+    if (n >= 1 && k.startsWith("midday_pause")) throw new Error("db read timeout (test)");
+    return get2(k);
+  }) as typeof w.r.store.getControl;
+  w.r.ownerSays("load afternoon", "16:40:00");
+  await w.r.at("16:40:05");
+  await until(() => w.r.said("alerts").some((t) => t.includes(RESTORE_ALERT)));
+  w.r.store.getControl = get2;
+  assert.equal(n, 2, "the write-back was attempted once");
+  assert.ok(w.r.said("alerts").some((t) => t.includes(RESTORE_ALERT)), w.r.said("alerts").join(" | "));
+});
+
+test("group 1 round 1 (wording): a `go` after the screen switched the list but before the window is decided says the cheap names stay live under today's normal limits", async () => {
+  const { r } = await flatAtMidday();
+  const h = slowScreen(r);
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  h.release({ symbols: ["CHP1"], names: {} });
+  await until(() => r.said("trading").some((t) => t.startsWith("Live list switched")));
+  const post = r.said("trading").find((t) => t.startsWith("Live list switched"))!;
+  assert.ok(post.includes("a `stop`, `flatten` or `go` before then cancels it, and these names stay live under today's normal limits"), post);
+  r.ownerSays("go", "16:40:06");
+  await r.at("16:40:07");
+  assert.ok(r.said("commands").some((t) => t.includes(SCREEN_CANCELLED_SWITCHED)), r.said("commands").join(" | "));
+  assert.ok(!r.said("commands").some((t) => t.includes(SCREEN_CANCELLED)), "not the 'screen had not finished' line");
+  await r.at("16:40:15");
+  assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], undefined, "no window");
+  assert.deepEqual((await r.store.getDay(D))!.liveList, ["CHP1"], "the cheap names stay, as the reply says");
+});
+
+test("group 1 round 1 (wording): a resend while a failed screen is still posting its failure gets the 'still finishing' line, which is true for a failure too", async () => {
+  const { r } = await flatAtMidday();
+  let fail: (e: Error) => void = () => undefined;
+  (r.worker as any).d.buildLiveList = () => new Promise((_res, rej) => (fail = rej));
+  // The failure line's post is held open, so the failed screen is still in flight when the resend arrives.
+  const bot: any = r.bot;
+  const realPost = bot.post.bind(bot);
+  let holdPost: () => void = () => undefined;
+  bot.post = async (ch: string, text: string, o?: unknown) => {
+    if (text.startsWith("Afternoon load window not started")) await new Promise<void>((res) => (holdPost = res));
+    return realPost(ch, text, o);
+  };
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  fail(new Error("the screen failed (test)"));
+  await settle();
+  r.ownerSays("load afternoon", "16:40:10");
+  await r.at("16:40:15");
+  assert.ok(r.said("commands").includes(SCREEN_STILL_FINISHING), r.said("commands").join(" | "));
+  holdPost();
+  await settle();
 });
