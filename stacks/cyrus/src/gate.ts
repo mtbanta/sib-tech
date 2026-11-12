@@ -18,7 +18,7 @@ import type { BrokerView } from "./broker-view.ts";
 import type { GateBroker } from "./broker.ts";
 import type { Governor } from "./governor.ts";
 import { MAX_TRADES_PER_MINUTE_LOAD_DAY, checkEntry, tradesCeiling, type EntryContext } from "./limits.ts";
-import { LOAD_MAX_POSITION_USD, LOAD_WINDOW_SHARES, beforeLoadWindow, hasLoadEntries, inAfternoonLoad, loadCeilingOn, loadRulesApply, loadWindow } from "./load-mode.ts";
+import { LOAD_MAX_POSITION_USD, LOAD_WINDOW_SHARES, afternoonCloseoutPending, beforeLoadWindow, hasLoadEntries, inAfternoonLoad, loadCeilingOn, loadRulesApply, loadWindow } from "./load-mode.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, type NotFlatState, type OrderRecord, type StopFlag, type Store } from "./store.ts";
 import { readPause, type MiddayPause } from "./midday.ts";
 import type { Signal } from "./strategy.ts";
@@ -26,6 +26,7 @@ import { centralTime, etDate, minutesBetween } from "./time.ts";
 
 // The refusal while the mid-day cycle has entries paused.
 export const MIDDAY_PAUSED = "paused for the mid-day cycle";
+export const AFTERNOON_WINDOW_ENDED = "the afternoon load window has ended (its close-out sells to flat)";
 
 export type GateResult =
   | { status: "sent"; clientOrderId: string; qty: number; acceptMs: number }
@@ -212,6 +213,9 @@ export class OrderGate {
     if (!limits) return this.refuse(date, symbol, "no limits approved for today");
     // The mid-day cycle (Michael, 2026-11-09): from 10:30 AM Central until a deploy or `go` ends it, no new entry. Before any request.
     if (pause?.on) return this.refuse(date, symbol, MIDDAY_PAUSED);
+    // Michael, 2026-11-12 (afternoon): once the afternoon load window's 30 minutes are up, no entry until its close-out has finished
+    // flat, by the clock alone, so entries stop even before the worker's pass writes the pause back on (group 1, round 1).
+    if (afternoonCloseoutPending(day, now)) return this.refuse(date, symbol, AFTERNOON_WINDOW_ENDED);
     const blocked = this.d.entryBlock?.();
     if (blocked) return this.refuse(date, symbol, blocked);
     // Load day (load-mode.ts): no entries before the load window, and at most 75 dollars an entry until the mid-day pause; from the
@@ -345,6 +349,10 @@ export class OrderGate {
       if ((await readPause(this.d.store, date))?.on) {
         await this.d.store.updateOrder(clientOrderId, { status: "canceled", note: "mid-day pause set before sending" });
         return this.refuse(date, symbol, MIDDAY_PAUSED);
+      }
+      if (afternoonCloseoutPending(day, this.d.now())) {
+        await this.d.store.updateOrder(clientOrderId, { status: "canceled", note: "afternoon load window ended before sending" });
+        return this.refuse(date, symbol, AFTERNOON_WINDOW_ENDED);
       }
       const blockedNow = this.d.entryBlock?.();
       if (blockedNow) {

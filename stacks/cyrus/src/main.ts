@@ -9,7 +9,7 @@ import { loadLocalEnv } from "./local-env.ts";
 import { describeError, makeLogger } from "./log.ts";
 import { makePool, PgStore } from "./pg-store.ts";
 import { makeRedactor } from "./redact.ts";
-import { DEFAULT_SCREEN, liveListSize, screen } from "./screen.ts";
+import { DEFAULT_SCREEN, TRADABLE_SPARE, liveListSize, pickTradable, screen } from "./screen.ts";
 import { SelfMonitor } from "./self-monitor.ts";
 import { LOAD_SCREEN } from "./load-mode.ts";
 import { TradeStream } from "./stream.ts";
@@ -48,7 +48,10 @@ async function buildLiveList(opts: { load?: boolean } = {}): Promise<{ symbols: 
   const bars = await data.dailyBars(universe, start, end, "sip"); // history older than 15 minutes is consolidated and free
   const base = opts.load ? LOAD_SCREEN : DEFAULT_SCREEN; // a load day: 30 cheap, heavily traded names (load-mode.ts)
   const size = liveListSize(base.listSize, data.feed);
-  const symbols = screen(bars, { ...base, listSize: size }).map((c) => c.symbol);
+  // Ranked names plus spares, then Alpaca's tradable check in rank order (Michael, 2026-11-12, afternoon).
+  const ranked = screen(bars, { ...base, listSize: size + TRADABLE_SPARE }).map((c) => c.symbol);
+  const { kept: symbols, dropped, unchecked } = await pickTradable(ranked, size, (s) => broker.assetTradable(s));
+  if (dropped.length > 0 || unchecked.length > 0) logAndStore?.(dropped.length > 0 ? "info" : "warn", "screen_not_tradable", { load: Boolean(opts.load), dropped, unchecked });
   return { symbols, names: Object.fromEntries(symbols.filter((s) => names.has(s)).map((s) => [s, names.get(s)!])) };
 }
 

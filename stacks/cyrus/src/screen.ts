@@ -62,3 +62,29 @@ export const IEX_STREAM_CAP = 30;
 export function liveListSize(requested: number, feed: "iex" | "sip"): number {
   return feed === "iex" ? Math.min(requested, IEX_STREAM_CAP) : requested;
 }
+
+// Michael, 2026-11-12 (afternoon): every screen asks Alpaca whether each name is tradable and drops any that is not (OMH, refused 166
+// times on 2026-11-12 as "not tradable"). Names are checked in rank order until the list is full. A check that fails (not an answer)
+// keeps the name and is reported as unchecked: a name Alpaca refuses only costs refused entries, while dropping on a failed check
+// could empty the list.
+export const TRADABLE_SPARE = 15; // extra ranked names screened so dropped ones can be replaced
+export async function pickTradable(ranked: readonly string[], size: number, tradable: (symbol: string) => Promise<boolean>): Promise<{ kept: string[]; dropped: string[]; unchecked: string[] }> {
+  const kept: string[] = [];
+  const dropped: string[] = [];
+  const unchecked: string[] = [];
+  for (const s of ranked) {
+    if (kept.length >= size) break;
+    let ok: boolean | null;
+    try {
+      ok = await tradable(s);
+    } catch {
+      ok = null;
+    }
+    if (ok === false) dropped.push(s);
+    else {
+      kept.push(s);
+      if (ok === null) unchecked.push(s);
+    }
+  }
+  return { kept, dropped, unchecked };
+}
