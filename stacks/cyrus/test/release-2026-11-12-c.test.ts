@@ -7,7 +7,7 @@ import { rig, settle, z, D } from "./rig.ts";
 import { CONTROL_STOP } from "../src/store.ts";
 import { LOAD_AFTERNOON_PHASE } from "../src/load-mode.ts";
 import { MIDDAY_PHASE, readPause, updatePause } from "../src/midday.ts";
-import { SCREEN_CANCELLED, SCREEN_CANCELLED_SWITCHED, SCREEN_STILL_FINISHING, afternoonFailureTail } from "../src/commands.ts";
+import { SCREEN_CANCELLED, SCREEN_CANCELLED_SWITCHED, SCREEN_STILL_FINISHING, afternoonFailureTail, screenCancelledLine } from "../src/commands.ts";
 
 const until = async (cond: () => boolean | Promise<boolean>, n = 400) => {
   for (let i = 0; i < n && !(await cond()); i++) await settle();
@@ -149,14 +149,20 @@ for (const cmd of ["stop", "flatten"] as const) {
   });
 }
 
-test("fix 4: the failure's closing sentence depends on the reason", () => {
-  assert.equal(afternoonFailureTail({ on: true, at: "x", reason: "daily loss stop" }, { on: true } as any), "The stop flag is on: `resume`, then `go`, for a normal afternoon.");
+test("fix 4 (group 2 round 1 of 2026-11-12): the failure's closing sentence depends on the reason and never repeats the line", () => {
+  const loss = { on: true, at: "x", reason: "daily loss stop reached (510.00 dollars)" };
+  const plain = { on: true, at: "x", reason: "owner command (stop)" };
+  assert.equal(afternoonFailureTail(loss, { on: true } as any), "The daily loss stop is in force, so there is no more trading today.");
+  assert.equal(afternoonFailureTail(loss, { on: true } as any, "the daily loss stop is in force"), "There is no more trading today.");
+  assert.equal(afternoonFailureTail(plain, { on: true } as any), "The stop flag is on: send `resume`, then `go`, for a normal afternoon.");
+  assert.equal(afternoonFailureTail(plain, { on: true } as any, "the stop flag is on, so the live list was not changed"), "Send `resume`, then `go`, for a normal afternoon.");
   assert.equal(afternoonFailureTail(null, { on: false, resumedAt: "x", resumedBy: "go" } as any), "Trading has already resumed.");
+  assert.equal(afternoonFailureTail(null, { on: false, resumedAt: "x", resumedBy: "go" } as any, "trading has already resumed today"), "", "not said twice");
   assert.equal(afternoonFailureTail(null, { on: true } as any), "Still paused; `go` resumes a normal afternoon.");
-  assert.equal(afternoonFailureTail(null, null), "Still paused; `go` resumes a normal afternoon.");
+  assert.equal(afternoonFailureTail(null, undefined, "trading is no longer paused for the mid-day cycle"), "Send `status` to see whether trading is paused.", "a pause that could not be read: neutral");
 });
 
-test("fix 4: a stop set without a command (the loss stop) while the screen runs: the line says to `resume`, then `go`", async () => {
+test("fix 4: the daily loss stop set while the screen runs: the line says there is no more trading today (no `resume`)", async () => {
   const { r } = await flatAtMidday();
   const h = slowScreen(r);
   r.ownerSays("load afternoon", "16:40:00");
@@ -165,11 +171,24 @@ test("fix 4: a stop set without a command (the loss stop) while the screen runs:
   h.release({ symbols: ["CHP1"], names: {} });
   await until(() => r.said("commands").some((t) => t.startsWith("Afternoon load window not started")));
   const line = r.said("commands").find((t) => t.startsWith("Afternoon load window not started"))!;
-  assert.equal(line, "Afternoon load window not started: the stop flag is on, so the live list was not changed. The stop flag is on: `resume`, then `go`, for a normal afternoon.");
-  assert.ok(!line.includes("Still paused"));
+  assert.equal(line, "Afternoon load window not started: the stop flag is on, so the live list was not changed. The daily loss stop is in force, so there is no more trading today.");
+  assert.ok(!line.includes("`resume`"));
 });
 
-test("fix 4: a stop set without a command after the screen finished: the decision's refusal says to `resume`, then `go`", async () => {
+test("fix 4: a plain stop flag (not the loss stop) set while the screen runs: the line says to send `resume`, then `go`, once", async () => {
+  const { r } = await flatAtMidday();
+  const h = slowScreen(r);
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  await r.store.setControl(CONTROL_STOP, { on: true, at: z("16:40:06").toISOString(), reason: "owner command (stop)" });
+  h.release({ symbols: ["CHP1"], names: {} });
+  await until(() => r.said("commands").some((t) => t.startsWith("Afternoon load window not started")));
+  const line = r.said("commands").find((t) => t.startsWith("Afternoon load window not started"))!;
+  assert.equal(line, "Afternoon load window not started: the stop flag is on, so the live list was not changed. Send `resume`, then `go`, for a normal afternoon.");
+  assert.equal(line.split("stop flag is on").length, 2, "said once");
+});
+
+test("fix 4: the daily loss stop set after the screen finished: the decision's refusal does not contradict itself", async () => {
   const { r } = await flatAtMidday();
   const h = slowScreen(r);
   r.ownerSays("load afternoon", "16:40:00");
@@ -179,10 +198,69 @@ test("fix 4: a stop set without a command after the screen finished: the decisio
   await r.store.setControl(CONTROL_STOP, { on: true, at: z("16:40:07").toISOString(), reason: "daily loss stop reached (510.00 dollars)" });
   await r.at("16:40:10");
   const line = r.said("commands").find((t) => t.startsWith("Afternoon load window not started"))!;
-  assert.ok(line, r.said("commands").join(" | "));
-  assert.ok(line.endsWith("The live list was switched to the cheap names while paused. The stop flag is on: `resume`, then `go`, for a normal afternoon."), line);
-  assert.ok(!line.includes("if you send `go`"));
+  assert.equal(line, "Afternoon load window not started: the daily loss stop is in force. The live list was switched to the cheap names while paused. There is no more trading today.");
 });
+
+test("group 2 round 1: the refusal does not say 'trading has already resumed' twice", async () => {
+  const { r } = await flatAtMidday();
+  const h = slowScreen(r);
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  h.release({ symbols: ["CHP1"], names: {} });
+  await until(() => r.said("trading").some((t) => t.startsWith("Live list switched")));
+  await updatePause(r.store, D, { on: false, resumedAt: z("16:40:07").toISOString(), resumedBy: "deploy" });
+  await r.at("16:40:10");
+  const line = r.said("commands").find((t) => t.startsWith("Afternoon load window not started"))!;
+  assert.equal(line, "Afternoon load window not started: trading has already resumed today. The live list was switched to the cheap names while paused.");
+});
+
+test("group 2 round 1: the cancel line's next step depends on the command and its result", async () => {
+  assert.equal(screenCancelledLine(true, "go-resumed", false), `${SCREEN_CANCELLED} Trading has resumed, so the window cannot be started again today.`);
+  assert.equal(screenCancelledLine(true, "go-refused", false), `${SCREEN_CANCELLED} Send \`load afternoon\` again if you want it.`);
+  assert.equal(screenCancelledLine(true, "go-refused", true), `${SCREEN_CANCELLED} The daily loss stop is in force, so there is no more trading today.`);
+  assert.equal(screenCancelledLine("switched", "stop", false), `${SCREEN_CANCELLED_SWITCHED} To try again, send \`resume\`, then \`load afternoon\`.`);
+  assert.equal(screenCancelledLine(true, "stop", true), `${SCREEN_CANCELLED} The daily loss stop is in force, so there is no more trading today.`);
+  assert.ok(!SCREEN_CANCELLED.includes("again"));
+
+  // In the worker: a `go` that resumes; a `go` refused (not flat is not possible here, so a plain stop); a `stop`.
+  const a = await flatAtMidday();
+  slowScreen(a.r);
+  a.r.ownerSays("load afternoon", "16:40:00");
+  await a.r.at("16:40:05");
+  a.r.ownerSays("go", "16:40:10");
+  await a.r.at("16:40:15");
+  assert.ok(a.r.said("commands").some((t) => t.includes(`${SCREEN_CANCELLED} Trading has resumed, so the window cannot be started again today.`)), a.r.said("commands").join(" | "));
+
+  const b = await flatAtMidday();
+  slowScreen(b.r);
+  b.r.ownerSays("load afternoon", "16:40:00");
+  await b.r.at("16:40:05");
+  await b.r.store.setControl(CONTROL_STOP, { on: true, at: z("16:40:06").toISOString(), reason: "owner command (stop)" });
+  b.r.ownerSays("go", "16:40:10");
+  await b.r.at("16:40:15");
+  assert.ok(b.r.said("commands").some((t) => t.includes("Not resumed: the stop flag is on") && t.includes(`${SCREEN_CANCELLED} Send \`load afternoon\` again if you want it.`)), b.r.said("commands").join(" | "));
+
+  const c = await flatAtMidday();
+  slowScreen(c.r);
+  c.r.ownerSays("load afternoon", "16:40:00");
+  await c.r.at("16:40:05");
+  c.r.ownerSays("stop", "16:40:10");
+  await c.r.at("16:40:15");
+  assert.ok(c.r.said("commands").some((t) => t.includes(`${SCREEN_CANCELLED} To try again, send \`resume\`, then \`load afternoon\`.`)), c.r.said("commands").join(" | "));
+
+  const help = (await import("../src/commands.ts")) as any;
+  void help;
+});
+
+test("group 2 round 1: `help` no longer says the window is cancelled 'for good'", async () => {
+  const { r } = await flatAtMidday();
+  r.ownerSays("help", "16:41:00");
+  await r.at("16:41:05");
+  const text = r.said("commands").find((t) => t.startsWith("**Commands**"))!;
+  assert.ok(!text.includes("for good"));
+  assert.ok(text.includes("after a `go` that resumes trading it cannot be started again today, after `stop` or `flatten` send `resume`, then `load afternoon`"));
+});
+
 
 test("fix 5: a command read that returns Discord's maximum of 50 messages does not decide the window; the next shorter read does", async () => {
   const { r } = await flatAtMidday();
@@ -243,7 +321,24 @@ function holdThenFailWriteBack(r: any): { release: () => void; reached: () => bo
   return { release: () => gate(), reached: () => reached, writes };
 }
 
-const RESTORE_ALERT = "The stored live list may still be the cheap names; check `status` before any restart.";
+const RESTORE_ALERT = "Send `status`; if its live list shows the cheap names, tell the builder before any restart or deploy.";
+
+test("group 2 round 1, finding 3: the pause ended during the writes and the write-back failed: the line does not claim the list was not changed", async () => {
+  const { r } = await flatAtMidday();
+  (r.worker as any).d.buildLiveList = async () => ({ symbols: ["CHP1"], names: {} });
+  const h = holdThenFailWriteBack(r);
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  await until(() => h.reached());
+  await updatePause(r.store, D, { on: false, resumedAt: z("16:40:06").toISOString(), resumedBy: "deploy" });
+  h.release();
+  await until(() => r.said("commands").some((t) => t.startsWith("Afternoon load window not started")));
+  const line = r.said("commands").find((t) => t.startsWith("Afternoon load window not started"))!;
+  assert.equal(line, "Afternoon load window not started: trading is no longer paused for the mid-day cycle; the names trading are unchanged, but the stored live list could not be put back (see the alert in alerts). Trading has already resumed.");
+  assert.ok(!line.includes("so the live list was not changed"));
+  const alert = r.said("alerts").find((t) => t.includes(RESTORE_ALERT))!;
+  assert.ok(alert && alert.includes("The names trading now are unchanged, but the stored live list may still be the cheap names, and a restart would trade them."), r.said("alerts").join(" | "));
+});
 
 test("group 1 round 1, scenario A: `go` during the list write, then the write-back fails: logged and an alert in `alerts` (although the window was cancelled)", async () => {
   const { r, events } = await flatAtMidday();

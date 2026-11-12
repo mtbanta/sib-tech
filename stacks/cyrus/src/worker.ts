@@ -1249,11 +1249,13 @@ export class Worker {
       } catch (err) {
         if (this.afternoonScreenState === mine) this.afternoonScreenState = null;
         if (mine.state === "cancelled") return;
-        const why = (err as Error).message.slice(0, 120).replace(/\.$/, "");
+        const why = (err as Error).message.slice(0, 200).replace(/\.$/, "");
         this.d.log?.("info", "load_afternoon_failed", { error: why });
         const stopNow = await this.d.store.getControl<StopFlag>(CONTROL_STOP).catch(() => null);
-        const pauseNow = await readPause(this.d.store, date).catch(() => null);
-        await this.say("commands", `Afternoon load window not started: ${why}. ${afternoonFailureTail(stopNow, pauseNow)}`);
+        // `undefined` when the pause cannot be read: the tail is then neutral (never "Still paused" after "no longer paused").
+        const pauseNow = await readPause(this.d.store, date).catch(() => undefined);
+        const tail = afternoonFailureTail(stopNow, pauseNow, why);
+        await this.say("commands", `Afternoon load window not started: ${why}.${tail ? ` ${tail}` : ""}`);
       }
     });
     return true;
@@ -1297,6 +1299,7 @@ export class Worker {
     const oldList = day.liveList ?? [];
     const oldNames = await this.d.store.getControl<Record<string, string>>(`live_names:${date}`).catch(() => null);
     let restored = false;
+    let restoreFailed = false;
     const putBack = async (why: string): Promise<void> => {
       restored = true;
       try {
@@ -1305,8 +1308,9 @@ export class Worker {
         this.lastDay = back;
         this.d.log?.("info", "load_afternoon_list_restored", { why });
       } catch (err) {
+        restoreFailed = true;
         this.d.log?.("error", "load_afternoon_restore_failed", { why, error: (err as Error).message.slice(0, 160) });
-        await this.say("alerts", `Afternoon load window: I could not put the live list back after the window did not start (${why}). The stored live list may still be the cheap names; check \`status\` before any restart. The names trading now are unchanged.\n${PAPER_ONLY}`).catch(() => undefined);
+        await this.say("alerts", `Afternoon load window: I could not put the live list back after the window did not start (${why}). The names trading now are unchanged, but the stored live list may still be the cheap names, and a restart would trade them. Send \`status\`; if its live list shows the cheap names, tell the builder before any restart or deploy.\n${PAPER_ONLY}`).catch(() => undefined);
       }
     };
     let updated: DayRecord;
@@ -1319,7 +1323,10 @@ export class Worker {
         const why = cancelled() ? "cancelled by a command" : stopAfter?.on ? "the stop flag is on" : "trading is no longer paused";
         await putBack(why);
         if (cancelled()) return null;
-        throw new Error(stopAfter?.on ? "the stop flag is on, so the live list was not changed" : "trading is no longer paused for the mid-day cycle, so the live list was not changed");
+        // Group 2, round 1 of 2026-11-12: "the live list was not changed" only when the write-back worked; otherwise the stored list
+        // may still be the cheap names (the alert says so).
+        const after = restoreFailed ? "; the names trading are unchanged, but the stored live list could not be put back (see the alert in alerts)" : ", so the live list was not changed";
+        throw new Error(stopAfter?.on ? `the stop flag is on${after}` : `trading is no longer paused for the mid-day cycle${after}`);
       }
     } catch (err) {
       if (!restored) {
