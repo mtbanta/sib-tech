@@ -469,7 +469,7 @@ test("finding 1, restart: a fresh-stopped remainder 11 minutes old, a new worker
   assert.ok(used <= 110, `${used} requests in 5 minutes (the reviewer's probe found 266)`);
 });
 
-test("finding 1, restart when the first read of open orders fails: the sale path finds the resting fresh stop, sells nothing, cancels nothing, says nothing, and remembers it", async () => {
+test("finding 1, restart with the open-orders read failing once: the sale path alone (round 2: there is no rebuild) finds the resting fresh stop, sells nothing, cancels nothing, says nothing, and remembers it", async () => {
   const { w, dd, id } = await freshStopped();
   w.sim.advance(11 * 60_000);
   w.risk.syncMemory = new SyncMemory();
@@ -642,4 +642,174 @@ test("finding 2 (M5, M9): no fast sale while the mid-day close-out owns selling,
     await f.fire();
     assert.deepEqual(f.sim.sellLog.map((x) => [x.symbol, x.qty]), [["APLD", 1]], "and with none of these, it sells");
   }
+});
+
+// ------------------------------------------- group 1 review, round 2 (2026-11-12, night) ----------------------------------------------
+// A fresh stop counts as protection only when it covers the symbol's whole holding. With two positions on one symbol: E1 (the older) keeps
+// its resting fresh stop untouched (never re-sold, no alert: the order sync only ever checks the newest entry of a symbol); E2 (the newer)
+// is checked as before, so if it loses its exits it is sold, or reported if its shares are still held by a cancel landing.
+
+// E1: 5 shares, partial take-profit of 2, fresh stop for 3. Then E2: 4 shares of the same symbol, bought later, with its bracket.
+async function twoOnOneSymbol() {
+  const w = world();
+  const dd = await day(w);
+  const e1 = await hold(w, "SOUN", 5, 10, 40);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(e1, 2, 10.08);
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.deepEqual(w.sim.stopLog.map((x) => [x.symbol, x.qty]), [["SOUN", 3]], "E1's fresh stop");
+  w.sim.advance(60_000);
+  const e2 = await hold(w, "SOUN", 4, 10.2, 41);
+  assert.equal(w.sim.heldQty("SOUN"), 7);
+  return { w, dd, e1, e2 };
+}
+const e1StopResting = (w: World) => freshStopOrder(w, "SOUN")!.status === "accepted";
+
+test("round 2, PA as a restart: E1's 3-share fresh stop rests, E2 (4 shares) loses its exits, a new worker memory 11 minutes on: E2 is sold, E1 keeps its stop, is not re-sold, no alert, bounded requests", async () => {
+  const { w, dd, e2 } = await twoOnOneSymbol();
+  w.sim.advance(11 * 60_000);
+  w.risk.syncMemory = new SyncMemory(); // a restart
+  for (const l of entryOf(w, e2).legs) await w.sim.cancelOrder(l.id); // E2's exits are lost
+  const req0 = w.sim.requests;
+  for (let i = 0; i < 18; i++) {
+    w.sim.advance(10_000);
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  }
+  const used = w.sim.requests - req0;
+  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["SOUN", 4]], "E2's 4 shares sold; E1's 3 never re-sold");
+  assert.equal(w.sim.heldQty("SOUN"), 3, "E1's 3 shares, still held");
+  assert.ok(e1StopResting(w), "E1's fresh stop still rests");
+  assert.ok(w.said.some((m) => m.text.includes("SOUN had no live protective stop, so I sold it")), "E2's sale is reported");
+  assert.equal(mentions(w).length, 0, "no alert to Michael");
+  assert.equal(w.sim.oversellAttempts, 0);
+  // 91 measured: 18 syncs (2 each), E2's sale, and E1's stop looked up every 30 seconds once it is older than the sync's 10 minute read.
+  assert.ok(used <= 100, `${used} requests in 3 minutes`);
+});
+
+test("round 2, PB2: E2's take-profit partly fills and its cancel takes 40 seconds; E1's fresh stop does not stand in for E2: E2 is reported once, then sold when the cancel lands; E1 is not re-sold", async () => {
+  const { w, dd, e2 } = await twoOnOneSymbol();
+  w.sim.cancelMs = 40_000;
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(e2, 1, 10.28); // E2: 3 shares left on its take-profit, its stop cancelled
+  const req0 = w.sim.requests;
+  for (let i = 0; i < 12; i++) {
+    w.sim.advance(10_000);
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    // While both positions are held (6 shares), E1's 3-share stop never counts as E2's protection, in memory or in the sale path.
+    if (w.sim.heldQty("SOUN") > 3) {
+      assert.ok(!w.memory.freshStops.has(e2), `sync ${i}: E1's stop must not stand in for E2`);
+      assert.ok(!w.events.some((e) => e.event === "fresh_stop_recovered" && e.data.clientOrderId === e2), `sync ${i}: not adopted for E2`);
+    }
+  }
+  const used = w.sim.requests - req0;
+  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["SOUN", 3]], "E2's 3 shares sold once its take-profit's cancel landed; E1's 3 never re-sold");
+  assert.equal(w.sim.stopLog.length, 1, "no fresh stop for E2 (not the whole holding)");
+  assert.equal(w.sim.heldQty("SOUN"), 3);
+  assert.ok(e1StopResting(w));
+  assert.ok(mentions(w).length <= 1, "E2 reported at most once while its shares were held by the cancel landing");
+  assert.ok(mentions(w).every((m) => m.text.includes("SOUN") && !m.text.includes("5 shares")), "never about E1's shares");
+  assert.equal(w.sim.oversellAttempts, 0);
+  // 151 measured: most is release 1's retry, at every sync, of a sale held by a visible cancel still landing (E2's take-profit, 40 s).
+  assert.ok(used <= 165, `${used} requests in 2 minutes`);
+});
+
+test("round 2, inside 10 minutes: E1's fresh stop is in the sync's own order list, E2 loses its exits: E2 is not skipped (sold in the same sync), E1 is not re-sold, no alert", async () => {
+  const { w, dd, e2 } = await twoOnOneSymbol();
+  for (const l of entryOf(w, e2).legs) await w.sim.cancelOrder(l.id);
+  w.sim.advance(1_000);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["SOUN", 4]], "E2 sold at once, not left for up to 10 minutes");
+  for (let i = 0; i < 6; i++) {
+    w.sim.advance(10_000);
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  }
+  assert.equal(w.sim.sellLog.length, 1, "E1 never re-sold");
+  assert.equal(w.sim.heldQty("SOUN"), 3);
+  assert.ok(e1StopResting(w));
+  assert.equal(mentions(w).length, 0);
+  assert.equal(w.sim.oversellAttempts, 0);
+});
+
+test("round 2, P3c: the order sync's cleanup is past its checks when the fast sale's sale goes out first and has not filled; the sync's cleanup finds the share covered by our own sale: no second sale, not stuck, no alert", async () => {
+  const w = world();
+  w.sim.sellFillDelayMs = 20_000;
+  const dd = await day(w);
+  const id = await loadEntry(w, "APLD", 16.46, 86);
+  const fillAt = w.sim.simMs;
+  w.sim.cancelExitsAtFill(id);
+  const row = (await w.store.listOrders(D)).find((r) => r.clientOrderId === id)!;
+  // The sync's cleanup looks the entry up (after its protect check); at that moment the fast sale runs to the end and sends its sale.
+  const realFind = w.sim.findOrderByClientId.bind(w.sim);
+  let hooked = false;
+  w.sim.findOrderByClientId = async (cid: string) => {
+    const o = await realFind(cid);
+    if (!hooked && cid === id) {
+      hooked = true;
+      await fastLostExitSale(w.risk, dd, w.memory, row, fillAt); // its own lookup comes back here with `hooked` set
+    }
+    return o;
+  };
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.ok(hooked);
+  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["APLD", 1]], "one sale, the fast sale's");
+  assert.equal(mentions(w).length, 0);
+  assert.ok(!w.memory.stuck.has(id), "not marked stuck");
+  assert.ok(w.events.some((e) => e.event === "cleanup_covered_by_own_sale" && e.data.symbol === "APLD"));
+  assert.equal(w.sim.oversellAttempts, 0);
+});
+
+test("round 2, the second guard: even if the worker's memory wrongly tied E1's 3-share stop to E2, it does not count while 7 shares are held; E2's lost exits are sold", async () => {
+  const { w, dd, e2 } = await twoOnOneSymbol();
+  const st = freshStopOrder(w, "SOUN")!;
+  w.memory.freshStops.set(e2, { symbol: "SOUN", entryClientOrderId: e2, stopClientOrderId: st.clientOrderId, orderId: st.id, qty: 3, stopPrice: st.stopPrice ?? 0, placedAt: w.sim.simMs, status: "accepted", lookedAt: w.sim.simMs });
+  w.sim.advance(11 * 60_000); // E1's stop is out of the sync's 10 minute list
+  for (const l of entryOf(w, e2).legs) await w.sim.cancelOrder(l.id);
+  w.sim.advance(1_000);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["SOUN", 4]]);
+  assert.ok(e1StopResting(w));
+  assert.equal(mentions(w).length, 0);
+});
+
+test("A and C: in the afternoon load window the same 1-share limit entries get the 5 second cancel, and an entry that fills after it gets the fast sale (A5)", async () => {
+  const { rig, settle, z } = await import("./rig.ts");
+  const { order } = await import("./helpers.ts");
+  const { LOAD_AFTERNOON_PHASE, LOAD_ENTRY_WAIT_MS, hasLoadEntries } = await import("../src/load-mode.ts");
+  const upd = (event: string, o: Parameters<typeof order>[0], positionQty: number | null, atMs: number | null = null) => ({ event, order: order(o), positionQty, atMs });
+  const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
+  sim.hideFilledParents = true;
+  const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, orderStream: true });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("approve", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:25:00");
+  await r.at("14:30:05");
+  const { MIDDAY_PHASE } = await import("../src/midday.ts");
+  await r.at("16:30:00"); // the mid-day pause and its close-out (flat: nothing held)
+  for (let i = 0; i < 200 && !(await r.store.getDay(D))!.phases[MIDDAY_PHASE]; i++) await settle();
+  assert.ok((await r.store.getDay(D))!.phases[MIDDAY_PHASE], "the mid-day close-out finished");
+  sim.advanceTo(z("18:00:00").getTime()); // 12:00 PM Central
+  await r.at("18:00:00");
+  const dd = (await r.store.getDay(D))!;
+  await r.store.updateDay(D, { phases: { ...dd.phases, [LOAD_AFTERNOON_PHASE]: z("17:45:00").toISOString() } });
+  assert.ok(hasLoadEntries((await r.store.getDay(D))!), "the afternoon load window gives load entries (1-share limit buys)");
+  const id = clientOrderIdFor(D, "RIOT", 90);
+  const sent = await sim.submitEntry({ symbol: "RIOT", qty: 1, stopPrice: 15.18, takeProfitPrice: 15.21, limitPrice: 15.2, referencePrice: 15.2, clientOrderId: id });
+  await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "RIOT", qty: 1, referencePrice: 15.2, stopPrice: 15.18, takeProfitPrice: 15.21, status: "submitted", alpacaOrderId: sent.id, filledQty: null, filledAvgPrice: null, note: null, createdAt: new Date(sim.simMs).toISOString() });
+  // What the gate does for a limit entry (gate.ts onLimitEntrySent): the worker's 5 second wait.
+  (r.worker as any).entryExpiry.schedule({ clientOrderId: id, alpacaOrderId: sent.id, symbol: "RIOT", qty: 1 }, LOAD_ENTRY_WAIT_MS);
+  r.setNow("18:00:05.1"); // the wait is over: the cancel is sent
+  sim.advanceTo(z("18:00:05.1").getTime());
+  for (let i = 0; i < 10; i++) await settle();
+  assert.ok((r.worker as any).entryExpiry.cancelSentAt(id) !== undefined, "the cancel was sent");
+  // Alpaca fills the entry as the cancel lands, and cancels both exits.
+  const o = sim.orders.find((x) => x.clientOrderId === id)!;
+  o.status = "new";
+  sim.fillEntry(id, 15.2);
+  sim.cancelExitsAtFill(id);
+  await r.orderUpdate(upd("fill", { id: o.id, clientOrderId: id, symbol: "RIOT", side: "buy", status: "filled", qty: 1, filledQty: 1, filledAvgPrice: 15.2, groupId: o.groupId }, 1, sim.simMs) as any);
+  for (let i = 0; i < 30 && sim.sellLog.length === 0; i++) await settle();
+  assert.deepEqual(sim.sellLog.map((x) => [x.symbol, x.qty]), [["RIOT", 1]]);
+  assert.equal(sim.oversellAttempts, 0);
 });

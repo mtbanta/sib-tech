@@ -138,9 +138,6 @@ export class SyncMemory {
   readonly lateLogged = new Set<string>();
   // A4 of the proposal of 2026-11-12: entries (client ids) whose remainder is protected by a fresh stop the stack placed.
   readonly freshStops = new Map<string, FreshStop>();
-  // A4 (group 1 review, round 1): true once this worker has read Alpaca's open orders for resting fresh stops (cyrus-p-) after its start,
-  // so a restart never forgets them.
-  freshStopsRebuilt = false;
 }
 
 // A4 of the proposal of 2026-11-12 (Michael's approval): after a partial take-profit, Alpaca cancels the bracket's stop on the first share
@@ -359,26 +356,12 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     const prev = latestPerSymbol.get(s.symbol);
     if (!prev || (s.createdAt ?? "") > (prev.createdAt ?? "") || ((s.createdAt ?? "") === (prev.createdAt ?? "") && s.clientOrderId > prev.clientOrderId)) latestPerSymbol.set(s.symbol, s);
   }
-  // A4 (group 1 review, round 1): on the first sync after a start, the resting fresh stops (cyrus-p-) are read back from Alpaca's open
-  // orders (one request, once) and tied to the newest open entry of their symbol, so a restart does not make a protected remainder look
-  // unprotected. If the read fails it is tried again at the next sync (and the sale path also recognises a resting fresh stop).
-  if (!mem.freshStopsRebuilt) {
-    try {
-      const open = await d.broker.listOrdersPaged("open", "2000-01-01T00:00:00Z", 5);
-      for (const x of open.orders) {
-        if (x.side !== "sell" || !x.clientOrderId.startsWith("cyrus-p-") || !OPEN_STATUSES.has(x.status)) continue;
-        const e = latestPerSymbol.get(x.symbol);
-        if (!e || mem.freshStops.has(e.clientOrderId)) continue;
-        mem.freshStops.set(e.clientOrderId, { symbol: x.symbol, entryClientOrderId: e.clientOrderId, stopClientOrderId: x.clientOrderId, orderId: x.id, qty: Math.max(0, x.qty - x.filledQty), stopPrice: x.stopPrice ?? 0, placedAt: nowMs, status: x.status, lookedAt: nowMs });
-        d.log?.("fresh_stop_recovered", { symbol: x.symbol, clientOrderId: e.clientOrderId });
-      }
-      if (open.complete) mem.freshStopsRebuilt = true;
-    } catch (err) {
-      d.log?.("fresh_stop_recover_failed", { error: (err as Error).message.slice(0, 120) });
-    }
-  }
   // A sell already working on a symbol (a liquidation in progress) explains a missing exit: no false alarm.
-  const sellingSymbols = new Set(listed.orders.filter((x) => x.side === "sell" && OPEN_STATUSES.has(x.status)).map((x) => x.symbol));
+  // A4 (group 1 review, round 2): a fresh stop of ours (cyrus-p-) counts only when it covers the symbol's whole holding (it is placed only
+  // when its entry holds the whole symbol). With another position on the symbol it protects only its own shares, so it must not keep the
+  // check away from the other position.
+  const heldQty = new Map(positions.map((p) => [p.symbol, p.qty]));
+  const sellingSymbols = new Set(listed.orders.filter((x) => x.side === "sell" && OPEN_STATUSES.has(x.status) && (!x.clientOrderId.startsWith("cyrus-p-") || x.qty - x.filledQty >= (heldQty.get(x.symbol) ?? 0) - 1e-9)).map((x) => x.symbol));
   const unprotected: string[] = [];
   // Michael's decision of 2026-11-09: the 5 minute alert goes by the clock, for every entry reported stuck, whether or not its retry
   // has had room yet.
@@ -433,7 +416,8 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     // expired or rejected by anyone but our own sale) and the shares are still held, the missing-exit check below sells them, as before.
     const fresh = mem.freshStops.get(s.clientOrderId);
     if (fresh) {
-      if (held.has(s.symbol) && (await freshStopLive(d, fresh, listed.orders, nowMs, opts.streamLive === true))) continue;
+      // Only while it covers the whole holding (group 1 review, round 2).
+      if (held.has(s.symbol) && fresh.qty >= (heldQty.get(s.symbol) ?? 0) - 1e-9 && (await freshStopLive(d, fresh, listed.orders, nowMs, opts.streamLive === true))) continue;
       mem.freshStops.delete(s.clientOrderId);
       if (held.has(s.symbol)) d.log?.("fresh_stop_gone", { symbol: s.symbol, clientOrderId: s.clientOrderId, status: fresh.status });
     }
@@ -649,8 +633,10 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     await resolveStuck(d, mem, s.clientOrderId, "it has a fresh protective stop");
     return { attempted: false, stuck: false };
   }
-  if (extra.fast && soldQty === 0 && r.coveredByOwnSale?.includes(s.symbol)) {
-    d.log?.("lost_exit_fast_skipped", { symbol: s.symbol, clientOrderId: s.clientOrderId, reason: "a sale of ours already covers it" });
+  if (soldQty === 0 && r.coveredByOwnSale?.includes(s.symbol)) {
+    // A5 (group 1 review, rounds 1 and 2): another sale of ours (the fast sale, or the order sync's own) already covers the entry's
+    // shares: nothing to do here, and not stuck. That sale says what happened.
+    d.log?.(extra.fast ? "lost_exit_fast_skipped" : "cleanup_covered_by_own_sale", { symbol: s.symbol, clientOrderId: s.clientOrderId, kind, reason: "a sale of ours already covers it" });
     return { attempted: false, stuck: false };
   }
   if (extra.fast && soldQty === 0 && r.exitsKept?.includes(s.symbol)) {

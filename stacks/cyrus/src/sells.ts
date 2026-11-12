@@ -255,7 +255,7 @@ export interface LiquidateResult {
   freshStopUnclear?: { symbol: string; qty: number; stopPrice: number; clientOrderId: string };
   // A5: the symbols whose shares never came free because Alpaca kept the exits (nothing was sold for them).
   exitsKept?: string[];
-  // A5: the symbols whose shares a sale of ours (cyrus-x-) already covers, so the fast sale had nothing to do.
+  // A5, with `ownEntryOnly`: the symbols whose shares a sale of ours (cyrus-x-) already covers, so this cleanup had nothing to do.
   coveredByOwnSale?: string[];
   // A4 (group 1 review, round 1): the symbols whose shares a resting fresh stop of ours (cyrus-p-) holds, so nothing was sold: the
   // position is protected. With the open fresh stop that covers them, so the caller can remember it.
@@ -571,13 +571,15 @@ export class Liquidator {
           if (own && !(cap > EPS)) {
             // A5 (group 1 review, round 1): a sale of ours already covers the entry's shares (the order sync's own missing-exit sale got
             // there first): nothing to do, and not "stuck".
-            if (o.waitForAlpacaCancel && ownOpenSellQty(openOrders, p.symbol) > EPS) (result.coveredByOwnSale ??= []).push(p.symbol);
+            if (ownOpenSellQty(openOrders, p.symbol) > EPS) (result.coveredByOwnSale ??= []).push(p.symbol);
             continue; // that entry's own shares are sold, or gone at its own exits (part B, fix A)
           }
           const free = Math.min(p.qty - openSellQty(openOrders, p.symbol), p.qtyAvailable ?? Infinity, cap);
-          // A4 (group 1 review, round 1): a resting fresh stop of ours (cyrus-p-) holds the entry's shares (for example after a restart, when
-          // the worker's memory of it is gone): the position is protected, so nothing is sold, nothing is cancelled, and it is not stuck.
-          const freshHolding = own && !(free > EPS) ? openOrders.find((x) => x.symbol === p.symbol && x.side === "sell" && x.clientOrderId.startsWith("cyrus-p-") && OPEN_STATUSES.has(x.status) && x.status !== "pending_cancel" && remaining(x) >= cap - EPS) : undefined;
+          // A4 (group 1 review, rounds 1 and 2): a resting fresh stop of ours (cyrus-p-) holds the shares (for example after a restart, when
+          // the worker's memory of it is gone). It counts as protection only when it covers the symbol's WHOLE holding (it is placed only
+          // when its entry holds the whole symbol); then nothing is sold, nothing is cancelled, and it is not stuck. With another position
+          // on the symbol it protects only its own shares, and this sale goes on as before.
+          const freshHolding = own && !(free > EPS) ? openOrders.find((x) => x.symbol === p.symbol && x.side === "sell" && x.clientOrderId.startsWith("cyrus-p-") && OPEN_STATUSES.has(x.status) && x.status !== "pending_cancel" && remaining(x) >= p.qty - EPS) : undefined;
           if (freshHolding) {
             (result.heldByFreshStop ??= []).push({ symbol: p.symbol, clientOrderId: freshHolding.clientOrderId, orderId: freshHolding.id, qty: remaining(freshHolding), stopPrice: freshHolding.stopPrice, status: freshHolding.status });
             continue;
