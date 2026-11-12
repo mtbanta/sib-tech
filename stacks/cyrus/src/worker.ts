@@ -11,7 +11,8 @@
 // "fail" after a tick that did not, so Healthchecks hears when the worker is unwell, not only when it is dead.
 import type { FullBroker } from "./broker.ts";
 import { BrokerView } from "./broker-view.ts";
-import { CommandProcessor, type CommandBot } from "./commands.ts";
+import { CommandProcessor, afternoonFailureTail, type CommandBot } from "./commands.ts";
+import { COMMAND_READ_LIMIT } from "./discord-bot.ts";
 import { DIGEST_PERIOD_MS, TradeDigest } from "./digest.ts";
 import { addToRunning, CONTROL_FEES, estimateFees, type FeesRunning } from "./fees.ts";
 import type { Governor } from "./governor.ts";
@@ -804,7 +805,9 @@ export class Worker {
       try {
         await this.commands.poll();
         this.commandsReadOk();
-        this.lastPollStartedAt = pollStartedAt;
+        // Fix of 2026-11-12 (round 3 note): a read that returned Discord's maximum of 50 messages may have left more waiting, so only a
+        // read that returned fewer counts for deciding the afternoon load window.
+        if (this.commands.lastReadCount < COMMAND_READ_LIMIT) this.lastPollStartedAt = pollStartedAt;
       } catch (err) {
         // Logged (and kept in the run log) every time; Michael is told once, when it has lasted 2 minutes (commandsWatch).
         this.lastTickError = `commands: ${(err as Error).message.slice(0, 120)}`;
@@ -1229,8 +1232,10 @@ export class Worker {
   // is already running for today.
   private afternoonScreenState: { date: string; state: "running" | "ready" | "cancelled"; readyAt: number; result?: { switched: boolean; list: string[] } } | null = null;
   private lastPollStartedAt = -Infinity;
-  private startAfternoonScreen(date: string): boolean {
-    if (this.inflight.has("afternoon-screen")) return false;
+  private startAfternoonScreen(date: string): boolean | "finishing" {
+    // Fix of 2026-11-12 (round 3, group 2): a cancelled screen still running is told apart from one that is live, so the reply can ask
+    // Michael to send the command again instead of saying "already running" with nothing to follow.
+    if (this.inflight.has("afternoon-screen")) return this.afternoonScreenState === null || this.afternoonScreenState.state === "cancelled" ? "finishing" : false;
     if (this.afternoonScreenState?.date === date && this.afternoonScreenState.state !== "cancelled") return false;
     const mine = { date, state: "running" as "running" | "ready" | "cancelled", readyAt: 0 } as NonNullable<Worker["afternoonScreenState"]>;
     this.afternoonScreenState = mine;
@@ -1246,7 +1251,9 @@ export class Worker {
         if (mine.state === "cancelled") return;
         const why = (err as Error).message.slice(0, 120).replace(/\.$/, "");
         this.d.log?.("info", "load_afternoon_failed", { error: why });
-        await this.say("commands", `Afternoon load window not started: ${why}. Still paused; \`go\` resumes a normal afternoon.`);
+        const stopNow = await this.d.store.getControl<StopFlag>(CONTROL_STOP).catch(() => null);
+        const pauseNow = await readPause(this.d.store, date).catch(() => null);
+        await this.say("commands", `Afternoon load window not started: ${why}. ${afternoonFailureTail(stopNow, pauseNow)}`);
       }
     });
     return true;
@@ -1280,8 +1287,25 @@ export class Worker {
       this.d.log?.("info", "load_afternoon_not_switched", { pause: Boolean(pauseNow?.on), stop: Boolean(stopNow?.on) });
       throw new Error(stopNow?.on ? "the stop flag is on, so the live list was not changed" : "trading is no longer paused for the mid-day cycle, so the live list was not changed");
     }
+    // Fix of 2026-11-12 (group 1, round 3, probes G and H): a `go` or `stop` handled while these writes are in flight must still win. The
+    // old list and names are kept; after the writes the cancel, the pause and the stop are read again, and if any changed the old list
+    // is written back and nothing else changes (no strategy or feed switch, no post). From the last check to the switch in memory
+    // there is no wait, so nothing can slip in between.
+    const oldList = day.liveList ?? [];
+    const oldNames = await this.d.store.getControl<Record<string, string>>(`live_names:${date}`).catch(() => null);
     const updated = await this.d.store.updateDay(date, { liveList: list });
     await this.d.store.setControl(`live_names:${date}`, names).catch(() => undefined);
+    const pauseAfter = await readPause(this.d.store, date);
+    const stopAfter = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
+    if (cancelled() || !pauseAfter?.on || stopAfter?.on) {
+      const restored = await this.d.store.updateDay(date, { liveList: oldList });
+      if (oldNames !== null) await this.d.store.setControl(`live_names:${date}`, oldNames).catch(() => undefined);
+      this.lastDay = restored;
+      this.d.log?.("info", "load_afternoon_list_restored", { cancelled: cancelled(), pause: Boolean(pauseAfter?.on), stop: Boolean(stopAfter?.on) });
+      if (cancelled()) return null;
+      throw new Error(stopAfter?.on ? "the stop flag is on, so the live list was not changed" : "trading is no longer paused for the mid-day cycle, so the live list was not changed");
+    }
+    // No await from here to the end of the switch.
     this.lastDay = updated;
     if (this.stream && this.streamDate === date) {
       this.strategy = this.makeStrategy(updated, list);

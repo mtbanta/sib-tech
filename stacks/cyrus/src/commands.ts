@@ -31,12 +31,13 @@ export interface CommandDeps {
   // `load afternoon` on a normal morning: starts the cheap-symbol screen and the price feed switch in the background (it can take
   // minutes, and the main loop must keep reading commands). The worker calls finishAfternoonLoad in a later pass, after that pass has
   // read commands, so a `stop` or `go` sent meanwhile is seen first (group 1 review, round 1). False if one is already running.
-  afternoonScreen?: (date: string) => boolean;
+  // Returns "finishing" when an earlier screen was cancelled and is still running (fix of 2026-11-12).
+  afternoonScreen?: (date: string) => boolean | "finishing";
   // Michael's approval of 2026-11-11 (after round 2): a `stop`, `flatten` or `go` handled while that screen is running or done but not
   // yet decided cancels the pending window for good. True if one was pending.
   cancelAfternoonScreen?: (date: string) => boolean;
-  // `load afternoon` is built but switched OFF in the release of 2026-11-11 (Michael's fallback, option B: group 1's round 3 found a
-  // gap in its cancel). Only a deps flag turns it on (the tests); main.ts does not set it.
+  // `load afternoon` was built but switched OFF in the release of 2026-11-11 (option B). The release of 2026-11-12 fixes group 1's
+  // round 3 findings and main.ts switches it on (one line there, `loadAfternoon: true`, turns it off again).
   loadAfternoonEnabled?: boolean;
 }
 
@@ -57,6 +58,17 @@ export function loadAfternoonRefusal(o: { day: DayRecord | null; now: Date; paus
   if (o.openOrders !== 0) return `Alpaca shows ${o.openOrders} open order(s)`;
   return null;
 }
+
+// Fix of 2026-11-12 (group 2, round 3): a failed afternoon load window's last sentence depends on why it failed, so it never tells
+// Michael that `go` resumes while a stop is on, or that trading is paused when it has already resumed.
+export function afternoonFailureTail(stop: StopFlag | null, pause: MiddayPause | null): string {
+  if (stop?.on) return "The stop flag is on: `resume`, then `go`, for a normal afternoon.";
+  if (pause && !pause.on) return "Trading has already resumed.";
+  return "Still paused; `go` resumes a normal afternoon.";
+}
+
+// Michael's answer 6 of 2026-11-11 (night): `load afternoon` sent while a cancelled screen is still finishing.
+export const SCREEN_STILL_FINISHING = "The earlier screen was cancelled and is still finishing. Send `load afternoon` again in a minute or two.";
 
 // Said when a `stop`, `flatten` or `go` cancels a pending afternoon load window.
 export const SCREEN_CANCELLED = "The afternoon load window is cancelled (its cheap-symbol screen had not finished): it will not start, and the live list stays as it is. Send `load afternoon` again if you want it.";
@@ -125,6 +137,9 @@ export class CommandProcessor {
   // Reads new messages and acts on the owner's. The cursor moves after each message is handled, so a restart
   // never skips a command. A replayed command is harmless: every command is safe to run twice, and limit
   // decisions older than this morning's request are ignored.
+  // How many messages the last command read returned (the worker treats a read of Discord's maximum, 50, as possibly incomplete).
+  lastReadCount = 0;
+
   async poll(): Promise<number> {
     const cursor = await this.d.store.getControl<{ id: string }>(CONTROL_COMMAND_CURSOR);
     if (!cursor) {
@@ -134,6 +149,7 @@ export class CommandProcessor {
       return 0;
     }
     const messages = await this.d.bot.commandMessagesAfter(cursor.id);
+    this.lastReadCount = messages.length;
     let handled = 0;
     for (const m of messages) {
       if (isOwnerCommand(m, this.d.settings)) {
@@ -231,8 +247,10 @@ export class CommandProcessor {
         await this.say(`I did not understand the line "${cmd.text}". Nothing was done for it. Type \`help\` for the list.`);
         return;
       case "stop": {
-        const saved = await this.trySetStop(true, "owner command (stop)", now);
+        // Fix of 2026-11-12 (group 2, round 3): the pending afternoon window is cancelled before the stop is saved, so a screen finishing
+        // during the save is already cancelled (it says nothing) and this reply keeps its cancel line.
         const screenCancelled = this.d.cancelAfternoonScreen?.(etDate(now)) ?? false;
+        const saved = await this.trySetStop(true, "owner command (stop)", now);
         let n = 0;
         let cancelFailed = false;
         try {
@@ -259,8 +277,8 @@ export class CommandProcessor {
         return;
       }
       case "flatten": {
+        const screenCancelled = this.d.cancelAfternoonScreen?.(etDate(now)) ?? false; // before the stop's save, as for `stop`
         const saved = await this.trySetStop(true, "owner command (flatten)", now);
-        const screenCancelled = this.d.cancelAfternoonScreen?.(etDate(now)) ?? false;
         // The sale can take a while (it waits for cancels). It runs in the background so the next command, the heartbeat
         // and the rest of the pass are not held up; the reply follows when it is done.
         const task = (async () => {
@@ -346,9 +364,11 @@ export class CommandProcessor {
         }
         const started = this.d.afternoonScreen(date);
         await this.say(
-          started
-            ? "Running the cheap-symbol screen for the afternoon load window now; it can take a few minutes. When it is done I check again that the account is flat and paused, then start the window and resume trading. `stop`, `flatten` or `go` before then cancels the window."
-            : "Not started yet: the cheap-symbol screen for the afternoon load window is already running.",
+          started === "finishing"
+            ? SCREEN_STILL_FINISHING
+            : started
+              ? "Running the cheap-symbol screen for the afternoon load window now; it can take a few minutes. When it is done I check again that the account is flat and paused, then start the window and resume trading. `stop`, `flatten` or `go` before then cancels the window."
+              : "Not started yet: the cheap-symbol screen for the afternoon load window is already running.",
         );
         return;
       }
@@ -588,13 +608,18 @@ export class CommandProcessor {
   // already read commands since the screen finished. Every condition is read again (Alpaca included, fail closed) just before the
   // window starts.
   async finishAfternoonLoad(date: string, r: { switched: boolean; list: string[] }): Promise<void> {
+    // A second guard (group 1's quick review of option B): nothing here runs unless `load afternoon` is switched on.
+    if (!this.d.loadAfternoonEnabled) return;
     const at = this.d.now();
     if (etDate(at) !== date) return;
     const facts = await this.afternoonFacts(date);
     const why = loadAfternoonRefusal({ ...facts, now: at });
     if (why) {
       this.d.log?.("load_afternoon_refused", { date, why });
-      await this.say(`Afternoon load window not started: ${why}.${r.switched ? " The live list was switched to the cheap names while paused; if you send `go`, the normal placeholder trades on them." : ""}`);
+      const listNote = r.switched ? " The live list was switched to the cheap names while paused." : "";
+      // Fix of 2026-11-12: the closing sentence depends on the reason (a stop on, or trading already resumed).
+      const tail = facts.stop?.on || (facts.pause && !facts.pause.on) ? afternoonFailureTail(facts.stop, facts.pause) : r.switched ? "If you send `go`, the normal placeholder trades on them." : "";
+      await this.say(`Afternoon load window not started: ${why}.${listNote}${tail ? ` ${tail}` : ""}`);
       return;
     }
     await this.startAfternoonWindow(date, r, facts, at);

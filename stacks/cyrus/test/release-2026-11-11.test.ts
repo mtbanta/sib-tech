@@ -724,8 +724,9 @@ test("option B: in this release `load afternoon` is switched off unless the work
   void sim;
 });
 
-test("option B: main.ts builds the worker without `load afternoon`", async () => {
+test("release of 2026-11-12: main.ts switches `load afternoon` on, in exactly one line", async () => {
   const { readFileSync } = await import("node:fs");
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-  assert.ok(!/loadAfternoon\s*:/.test(main), "main.ts must not switch `load afternoon` on in this release");
+  assert.equal((main.match(/loadAfternoon\s*:/g) ?? []).length, 1, "one switch");
+  assert.match(main, /^\s*loadAfternoon: true,$/m, "main.ts switches `load afternoon` on in this release");
 });
