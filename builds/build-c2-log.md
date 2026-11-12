@@ -4079,6 +4079,13 @@ Review:
 - **Group 2, round 3 (commit e85039d): PASS.** It confirmed e85039d changes text only (what group 1 passed on 1e39f17 is unchanged). Non-blocking, for a later wording pass: `blockedNext` names the stop before "no entries left" (after the last entry the first reply corrects it); `resume` in the one-pass gap after the window end, before the pause is written, would say entries resume while the gate refuses by the clock; `resume` during the afternoon close-out offers a `go` that is refused until flat; the NOT FLAT alert could say "at most every 20 seconds". Full suite on e85039d: 630 of 630.
 - **Open question for Michael:** his deploy ruling was "for this afternoon". The deploy check in this release keeps "flat with the stop flag on" as an alternative to the mid-day pause from now on. If he wants it for today only, it is one line to take out; CLAUDE.md is not changed until he says.
 
+## Deploy (2026-11-12, 3:07 PM Central, market closed): Fly release v20, the afternoon release of 2026-11-12
+
+- **Checked first (read only):** the 2:55 close-out finished at 2:55:44 PM (day phase `closeout`); Alpaca 0 positions, 0 open orders, 0 orders since 2:56 PM; the stop flag off, the pause off (Michael's `go` of 12:05 PM).
+- **What shipped:** `main` `dd8af0e` (the merge of branch `release-2026-11-12-pm`; code of `e85039d`, group 1 PASS in round 3 on `1e39f17` with `e85039d` text only per group 2's round 3, group 2 PASS in round 3 on `e85039d`; full suite 630 of 630). `scripts/secret-scan.mjs --tree` with the real key values: clean (204 files, 14 values). Deployed from a fresh clone at `dd8af0e` (no key file in it) with `fly deploy --ha=false -a sib-tech-cyrus`, the token read through the Node parser and scrubbed from the output.
+- **Result:** Fly **release v20**, image `deployment-01M78SBGW4QKKXGPAE9A9V1Z03`, the one machine (`847319a2d79518`, San Jose) healthy at 3:07 PM. Start note in `commands` at 3:07:25 PM: "Worker started at 3:07 PM CT (paper): new release 9A9V1Z03 (was 4SBSP3FR): a deploy. Starts in the last hour: 1." Healthchecks up (ping 3:07:26), no flips today. Alpaca after the start: 0 positions, 0 open orders, 0 orders (nothing sent at start-up).
+- **Posted in `commands`:** "Fly release v20 is live (paper only), deployed at 3:07 PM after the close ... Next: your rulings A to E, built and reviewed tonight."
+
 ## Proposals for tonight (Michael's request of 2026-11-12, afternoon; read only so far, nothing built)
 
 **A. The 6 take-profits cancelled while the stop "stayed live" (PFE-1, APLD-100, RIOT-102, CMCSA-47, SMCI-179, WULF-383).** Checked from Alpaca's order records and the consolidated trades (read only):
@@ -4098,3 +4105,21 @@ Review:
 - **Proposals (they change what the gate reads, so money-touching: Michael's approval and group 1):** (1) the gate reads the list unsorted (every use ignores order), about 40 percent of the measured cost; (2) an index kept in the cache, updated on each insert and update: the day's symbols, orders by symbol, and the active set, so the full list is read only at start-up; (3) the account view and the sync use the same active set.
 
 Paper only. Research input for a human decision, never an instruction to act.
+
+## Michael's rulings of 2026-11-12, afternoon (on tonight's proposals), saved verbatim
+
+"Michael's rulings, 2026-11-12, afternoon. Paper only. Deploy tonight's reviewed release (e85039d) after the close as planned first; build the items below after it.
+
+A. Take-profit cancels: no order change. Review scripts count "take-profit cancelled, then stop filled" as a stop exit.
+
+B. Approved with changes: time limit 15 seconds, not 60. A fresh stop still unclear 15 s after it was sent: cancel it by client id, wait for Alpaca's cancel, sell the remainder through the checked sell path, post the alert mentioning Michael at once, and one line when it resolves. Look up unclear fresh stops every 5 seconds, not 30. Store time-to-confirm for every fresh stop, so the share confirmed after 15 s can be reported. Group 1 review.
+
+C. Approved: CPU proposals 1, 2 and 3 (gate reads unsorted; index in the cache updated on insert and update; account view and sync use the same active set). Group 1 review.
+
+D. Deploys: keep "flat with the stop flag on" in the deploy check permanently, and drop its time-of-day conditions (after the mid-day close-out, before 1:30 PM). During market hours a deploy also needs Michael's explicit go-ahead for that deploy. Every other condition stays: flat at Alpaca, no open orders, Michael's own stop (stop or flatten, never the daily loss stop), reviewed commit, clean checkout. Update the CLAUDE.md market-hours rule to say this. Group 1 review.
+
+E. load afternoon on a normal morning: allow it after go and then stop or flatten, under the same conditions as the load-day route (flat at Alpaca, no open orders, not-flat flag off, Michael's own stop, never the daily loss stop, before 1:30 PM). It clears the stop, runs the screen with the tradable check to switch to the load list, and starts the 30 minute window. Group 1 for the logic, group 2 for the messages, including the stop-refusal wording that now says the window cannot start today.
+
+No change to money-touching code beyond these items without asking first. Up to three review rounds per group; stop and flag me if round three fails. Deploy after the close."
+
+Michael's addition to D (2026-11-12, afternoon), verbatim: "On D: set the market-hours go-ahead flag only after I have written an explicit yes for that specific deploy in this session or in Discord commands. Never infer it from stop, flatten, an earlier approval or a standing rule. Record that in CLAUDE.md with the rule."
