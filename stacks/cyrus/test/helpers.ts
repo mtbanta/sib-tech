@@ -77,6 +77,18 @@ export class FakeBroker implements FullBroker {
     if (this.fillsFail) throw new Error("fills unavailable (test)");
     return { fills: this.fillsForDay ?? [], complete: true, pages: 1 };
   }
+  // The summary's bounded windows (fix of 2026-11-11): orders whose time falls strictly inside the window (all of them when an order
+  // has no time). `windowFail` makes a call throw while it returns true.
+  windowFail: ((afterIso: string, untilIso: string) => boolean) | null = null;
+  async listOrdersWindow(afterIso: string, untilIso: string, _maxPages = 10) {
+    this.rec("listOrdersWindow", afterIso, untilIso);
+    if (this.windowFail?.(afterIso, untilIso)) throw new Error("The operation was aborted due to timeout");
+    const orders = this.orders.filter((o) => {
+      const t = o.submittedAt ?? o.createdAt;
+      return !t || (t > afterIso && t < untilIso);
+    });
+    return { orders, complete: true, pages: 1 };
+  }
   async listOrdersPaged(status: "open" | "closed" | "all", afterIso: string, _maxPages = 20) {
     this.rec("listOrdersPaged", status, afterIso);
     const orders = await this.listOrders(status, afterIso);

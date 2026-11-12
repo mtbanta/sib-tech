@@ -85,6 +85,9 @@ export interface Order {
   // Release B: Alpaca's group id. A bracket's entry and its two exit legs share it, which is how a live order update about an
   // exit leg (which carries no client id of ours) is tied back to its entry.
   groupId?: string | null;
+  // When Alpaca submitted the order (its order listing's `after` and `until` filter on this). Optional so older test doubles need
+  // not set it.
+  submittedAt?: string | null;
   legs: Order[];
 }
 
@@ -142,6 +145,7 @@ export function parseOrder(raw: Json): Order {
     canceledAt: raw.canceled_at ? String(raw.canceled_at) : null,
     updatedAt: raw.updated_at ? String(raw.updated_at) : null,
     groupId: raw.group_id ? String(raw.group_id) : null,
+    submittedAt: raw.submitted_at ? String(raw.submitted_at) : null,
     legs,
   };
 }
@@ -329,6 +333,31 @@ export class AlpacaTrading {
         break;
       }
       const last = page[page.length - 1]!.createdAt;
+      if (!last || last === cursor) break; // cannot advance: do not claim completeness
+      cursor = last;
+    }
+    return { orders: [...seen.values()], complete, pages };
+  }
+
+  // The daily summary only (fix of 2026-11-11): every order submitted inside one bounded window (`after` and `until`, both
+  // exclusive at Alpaca), oldest first, 500 a page. On 2026-11-11 Alpaca took about 28 s to answer an open-ended listing of a day of
+  // about 8,000 orders (past the 10 s limit, so the summary never posted) and then sent back a short page; a 5 minute window
+  // answered in under a second with full pages. Read only. Stops at `maxPages` and says so.
+  async listOrdersWindow(afterIso: string, untilIso: string, maxPages = 10): Promise<{ orders: Order[]; complete: boolean; pages: number }> {
+    const seen = new Map<string, Order>();
+    let cursor = afterIso;
+    let pages = 0;
+    let complete = false;
+    while (pages < maxPages) {
+      const page = ((await this.read("/v2/orders", { status: "all", limit: "500", nested: "true", direction: "asc", after: cursor, until: untilIso })) as Json[]).map(parseOrder);
+      pages++;
+      for (const o of page) seen.set(o.id, o);
+      if (page.length < 500) {
+        complete = true;
+        break;
+      }
+      const lastOrder = page[page.length - 1]!;
+      const last = lastOrder.submittedAt ?? lastOrder.createdAt;
       if (!last || last === cursor) break; // cannot advance: do not claim completeness
       cursor = last;
     }
