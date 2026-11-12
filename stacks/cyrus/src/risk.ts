@@ -103,6 +103,9 @@ export const STUCK_RETRY_PER_MINUTE = 40;
 export const STUCK_RETRY_PER_5S = 15;
 export const STUCK_RETRY_COST = 10;
 export interface StuckEntry {
+  // Messaging only (group 2 review of 2026-11-12): true when the stuck case is a remainder the stack is trying to give a fresh stop (A4),
+  // so the alerts say "protect or sell", not only "sell". Read by the alert texts alone, never by the retry or the sync's decisions.
+  protecting?: boolean;
   symbol: string;
   since: number;
   nextAt: number;
@@ -365,7 +368,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   const unprotected: string[] = [];
   // Michael's decision of 2026-11-09: the 5 minute alert goes by the clock, for every entry reported stuck, whether or not its retry
   // has had room yet.
-  if (!opts.middayOwnsSelling?.()) for (const id of [...mem.stuck.keys()]) await escalateIfDue(d, mem, id);
+  if (!opts.middayOwnsSelling?.()) for (const id of [...mem.stuck.keys()]) await escalateIfDue(d, mem, id, positions.find((p) => p.symbol === mem.stuck.get(id)?.symbol)?.qty);
   // Michael's decision of 2026-11-09: entries on the short retry list are walked last, longest waiting first, so the first one due
   // takes the allowance's room and the others take turns (before, the same few won every minute).
   const shortRetry = (s: OrderRecord) => (mem.stuck.get(s.clientOrderId)?.nextAt ?? 0) > 0;
@@ -505,12 +508,18 @@ const plural = (n: number, one: string, many: string = `${one}s`): string => `${
 const minutesText = (ms: number): string => (ms < 60_000 ? plural(Math.max(1, Math.round(ms / 1000)), "second") : plural(Math.round(ms / 60_000), "minute"));
 
 // Part A, step 4: the one alert after 5 minutes stuck (mentions Michael), by the clock (Michael's decision of 2026-11-09).
-async function escalateIfDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string): Promise<void> {
+// Group 2 review of 2026-11-12 (messaging only): not posted while the entry has a remembered fresh stop that Alpaca shows working and that
+// covers the holding (a fresh stop confirmed after an unclear first answer): the position is protected. Nothing in the stuck record is
+// changed then, so the alert can still come if that stop ends.
+async function escalateIfDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string, heldQty?: number): Promise<void> {
   const st = mem.stuck.get(clientOrderId);
   const now = d.now().getTime();
   if (!st || !st.alerted || st.escalated || now - st.since < STUCK_ESCALATE_MS) return;
+  const fresh = mem.freshStops.get(clientOrderId);
+  if (fresh && OPEN_STATUSES.has(fresh.status) && (heldQty === undefined || fresh.qty >= heldQty - 1e-9)) return;
   st.escalated = true;
-  await d.say("alerts", `**Michael: ${st.symbol} still has no protective stop after ${minutesText(now - st.since)}, and I still cannot sell it** (${st.why || "still held"}). Please close it in Alpaca's dashboard. I keep trying.`, { mentionOwner: true });
+  const what = st.protecting ? "I still cannot protect or sell it" : "I still cannot sell it";
+  await d.say("alerts", `**Michael: ${st.symbol} still has no protective stop after ${minutesText(now - st.since)}, and ${what}** (${st.why || "still held"}). Please close it in Alpaca's dashboard. I keep trying.`, { mentionOwner: true });
 }
 
 // Fix C (Michael's approval of 2026-11-10): the closing line for a sale reported as "not filled yet": when every sale of the entry is seen
@@ -720,13 +729,18 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   const left = Math.max(0, target - soldQty) || ownShares - soldQty;
   const why = hidden ? "Alpaca reports the shares as not free to sell, and no open order explains it" : (r.errors.at(-1) ?? "still held").slice(0, 120);
   st.why = why;
+  // Messaging only: a remainder the stack is trying to give a fresh stop (A4) is waiting to be protected, not only to be sold.
+  const protecting = kind === "bare" && protectAt !== null;
+  st.protecting = protecting;
   const how = kind === "missing" ? "its exits are gone" : "Alpaca cancelled the stop when the take-profit partly filled";
   if (!st.alerted) {
     st.alerted = true;
     // Group 2 review, round 1: since when. The latest cancel or expiry among the entry's own exits (as Alpaca reports it), else now.
     const endedAt = flattenLegs(o).filter((l) => l.side === "sell" && !OPEN_STATUSES.has(l.status)).map((l) => Date.parse(l.canceledAt ?? l.updatedAt ?? "")).filter((t) => Number.isFinite(t) && t <= now);
     const lostAt = new Date(endedAt.length > 0 ? Math.max(...endedAt) : now);
-    await d.say("alerts", `**Michael: ${s.symbol} has ${plural(left, "share")} with no protective stop since ${centralClock(lostAt)}, and I could not sell ${left === 1 ? "it" : "them"} yet** (${how}; ${why}). I keep trying and will post again when ${left === 1 ? "it is" : "they are"} sold or gone.`, { mentionOwner: true });
+    const it = left === 1 ? "it" : "them";
+    const tail = protecting ? `I keep trying and will post again when ${left === 1 ? "it has" : "they have"} a stop, ${left === 1 ? "is" : "are"} sold, or ${left === 1 ? "is" : "are"} gone.` : `I keep trying and will post again when ${left === 1 ? "it is" : "they are"} sold or gone.`;
+    await d.say("alerts", `**Michael: ${s.symbol} has ${plural(left, "share")} with no protective stop since ${centralClock(lostAt)}, and I could not ${protecting ? "protect or sell" : "sell"} ${it} yet** (${how}; ${why}). ${tail}`, { mentionOwner: true });
   } else await escalateIfDue(d, mem, s.clientOrderId);
   return { attempted: true, stuck: true, ...(st.nextAt > 0 ? { recheckAt: st.nextAt } : {}) };
 }

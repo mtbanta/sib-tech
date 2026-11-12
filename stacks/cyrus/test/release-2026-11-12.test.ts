@@ -306,10 +306,93 @@ test("A4: the summary's stop-gap line counts the fresh stops beside the sales; a
   m.onFreshStop({ shares: 3 });
   assert.equal(m.settle(MID), true, "a fresh stop counts as a change to save");
   const line = stopGapLine(m.totals());
-  assert.ok(line.startsWith("Remainders after a partial take-profit given a fresh stop at once: 2 (12 shares)."), line);
-  assert.ok(line.includes("sold at market instead: none today"), line);
+  assert.equal(line, "Remainders after a partial take-profit: 2 given a fresh stop (12 shares); none sold at market.");
   const old = stopGapLine({ sales: 1, shares: 7, wouldHaveFilled: 0, unmeasured: 0, dollarsVsWaiting: 0.5 });
-  assert.ok(old.startsWith("Shares left without a stop and sold at market instead: 1 sales, 7 shares"), old);
+  assert.ok(old.startsWith("Remainders after a partial take-profit: 1 sold at market (7 shares; "), old);
+});
+
+// ------------------------------------------- group 2 review, round 1 (messaging only) -------------------------------------------------
+
+test("group 2, finding 1: the stop-gap line names the remainders it counts; none today; no dangling 'instead'; singular and plural right", () => {
+  assert.equal(stopGapLine({ sales: 0, shares: 0, wouldHaveFilled: 0, unmeasured: 0, dollarsVsWaiting: 0 }), "Remainders after a partial take-profit: none today.");
+  const one = stopGapLine({ sales: 1, shares: 1, wouldHaveFilled: 0, unmeasured: 0, dollarsVsWaiting: -0.01, freshStops: 1, freshStopShares: 1 });
+  assert.ok(one.startsWith("Remainders after a partial take-profit: 1 given a fresh stop (1 share); 1 sold at market instead (1 share; Alpaca refused the fresh stop, or another position shared the symbol). Of the sales, 0 would have filled"), one);
+  const salesOnly = stopGapLine({ sales: 2, shares: 9, wouldHaveFilled: 1, unmeasured: 0, dollarsVsWaiting: 0.12 });
+  assert.ok(salesOnly.startsWith("Remainders after a partial take-profit: 2 sold at market (9 shares;"), salesOnly);
+  assert.ok(!salesOnly.includes("instead"), "no 'instead' without fresh stops");
+  for (const l of [one, salesOnly]) assert.ok(!/\b1 shares\b|\b1 sales\b|at once/.test(l), l);
+});
+
+test("group 2, finding 3: a remainder waiting for its fresh stop (the take-profit's cancel outlasting the cleanup) is reported as 'could not protect or sell', and the 5 minute alert says the same", async () => {
+  const w = world();
+  w.sim.cancelMs = 40_000;
+  const dd = await day(w);
+  const id = await hold(w, "NVTS", 6, 8, 50);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 2, 8.08);
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  const first = mentions(w).at(-1)!.text;
+  assert.ok(first.includes("I could not protect or sell them yet"), first);
+  assert.ok(first.includes("will post again when they have a stop, are sold, or are gone"), first);
+  // Keep the cancel landing past 5 minutes so the escalation comes.
+  w.sim.cancelMs = 10 * 60_000;
+  w.memory.stuck.get(id)!.since -= 5 * 60_000;
+  await syncOrders(w.risk, dd, { protect: true });
+  const esc = mentions(w).at(-1)!.text;
+  assert.ok(esc.includes("I still cannot protect or sell it"), esc);
+});
+
+test("group 2, finding 4: no 5 minute alert while a remembered fresh stop (confirmed after an unclear answer) is working and covers the holding; the stuck record itself is unchanged", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "LUNR", 5, 12, 51);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 2, 12.08);
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  const st = freshStopOrder(w, "LUNR")!;
+  // As if this entry had been reported stuck earlier, and its fresh stop was then confirmed working.
+  w.memory.stuck.set(id, { symbol: "LUNR", since: w.sim.simMs - 6 * 60_000, nextAt: 0, delayMs: 0, alerted: true, escalated: false, lastTriedAt: w.sim.simMs, why: "still held", protecting: true });
+  w.memory.freshStops.get(id)!.status = "accepted";
+  const before = mentions(w).length;
+  w.sim.advance(10_000);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(mentions(w).length, before, "no escalation while protected");
+  const rec = w.memory.stuck.get(id)!;
+  assert.equal(rec.escalated, false, "the stuck record is unchanged");
+  assert.equal(rec.alerted, true);
+  // If the fresh stop ends, the escalation can still come.
+  w.memory.freshStops.get(id)!.status = "canceled";
+  await w.sim.cancelOrder(st.id);
+  w.sim.advance(1_000);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.ok(mentions(w).length > before, "the alert comes once the stop is gone");
+});
+
+test("group 2, finding 2: the trade digest counts a fresh stop's fill as a stop, and a take-profit once at its first fill or partial fill", async () => {
+  const { rig, z } = await import("./rig.ts");
+  const { order } = await import("./helpers.ts");
+  const upd = (event: string, o: Parameters<typeof order>[0], positionQty: number | null, atMs: number | null = null) => ({ event, order: order(o), positionQty, atMs });
+  const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
+  const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, orderStream: true });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("approve", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:25:00");
+  sim.advanceTo(z("15:00:00").getTime());
+  await r.at("15:00:00");
+  const counts = () => Object.fromEntries((r.worker as any).digest.counts as Map<string, number>) as Record<string, number>;
+  const before = counts();
+  await r.orderUpdate(upd("partial_fill", { id: "tp-1", clientOrderId: "x", symbol: "QXO", side: "sell", type: "limit", status: "partially_filled", qty: 10, filledQty: 1, groupId: "g1" }, 9) as any);
+  await r.orderUpdate(upd("fill", { id: "tp-1", clientOrderId: "x", symbol: "QXO", side: "sell", type: "limit", status: "filled", qty: 10, filledQty: 10, groupId: "g1" }, 0) as any);
+  await r.orderUpdate(upd("fill", { id: "fs-1", clientOrderId: "cyrus-p-20261102-RRC-x-s1", symbol: "RRC", side: "sell", type: "stop", stopPrice: 51.14, status: "filled", qty: 3, filledQty: 3, groupId: null }, 0) as any);
+  // A4's case: a partial take-profit whose rest the stack cancels (its full fill never comes).
+  await r.orderUpdate(upd("partial_fill", { id: "tp-2", clientOrderId: "x", symbol: "SOFI", side: "sell", type: "limit", status: "partially_filled", qty: 10, filledQty: 4, groupId: "g2" }, 6) as any);
+  await r.orderUpdate(upd("canceled", { id: "tp-2", clientOrderId: "x", symbol: "SOFI", side: "sell", type: "limit", status: "canceled", qty: 10, filledQty: 4, groupId: "g2" }, null) as any);
+  const after = counts();
+  assert.equal((after.take_profit ?? 0) - (before.take_profit ?? 0), 2, "each take-profit counted once: one filled after a partial fill, one cancelled after a partial fill");
+  assert.equal((after.stop ?? 0) - (before.stop ?? 0), 1, "the fresh stop's fill counted as a stop");
 });
 
 // ------------------------------------------------------------ A5 -------------------------------------------------------------------

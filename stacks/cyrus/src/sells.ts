@@ -600,7 +600,7 @@ export class Liquidator {
             // Its own prefix (cyrus-p-, "protect"), not cyrus-x-: every whole-account sale (the close-outs, the loss stop and its retry, `flatten`)
             // treats an open cyrus-x- sell as a sale of ours still working and leaves it alone, but must cancel a fresh stop like any exit.
             const sid = `cyrus-p-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-s${round}`;
-            const st = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: sid, reason: `${o.reason} (fresh stop)`, stopPrice });
+            const st = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: sid, reason: `${o.reason}, as a fresh stop`, stopPrice });
             if (st.status === "sent") {
               result.freshStop = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, orderId: st.order.id };
               steps.sells.push({ symbol: p.symbol, qty: free, at: stamp() });

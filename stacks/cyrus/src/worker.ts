@@ -102,10 +102,12 @@ export const STATS_EVERY_MS = 60_000;
 // A self-monitoring sample covering more than this is written as a marker row only (`longWindow`).
 export const SELF_MONITOR_MAX_WINDOW_MS = 120_000;
 // Successful remainder sales (shares left without a stop, sold by the order sync) are gathered into one alert a minute (the speed
-// release, decision 6): on 2026-11-05 they were 101 separate alerts, and at the 3 second grace about 270 a day are expected.
+// release, decision 6): on 2026-11-05 they were 101 separate alerts, and at the 3 second grace of that time about 270 a day were expected.
 // A sell not filled yet is still posted at once; a position that cannot be sold gets one alert, one after 5 minutes and one line when it
 // resolves (release 1 of 2026-11-09, risk.ts `cleanupSale`).
 export const REMAINDER_ALERT_EVERY_MS = 60_000;
+// (Since A4 of 2026-11-12 a remainder gets a fresh stop, so these sales are only the fallbacks: a refused fresh stop, or another position on
+// the symbol.)
 
 // The batched alert: one line listing each symbol and the shares sold.
 export function remainderAlert(sales: Array<{ symbol: string; shares: number }>): string {
@@ -218,6 +220,8 @@ export class Worker {
   // and what the timed sync did (last set, last fired, how often it was put off because a sync was still running, since the last sync
   // the timer started).
   private readonly stopCancelSeen = new Map<string, { alpacaAtMs: number; receivedMs: number; syncSetFor: number }>();
+  // The trade digest only (messaging): take-profit legs already counted (Alpaca order ids), so a partial fill and a later fill count once.
+  private readonly digestTakeProfits = new Set<string>();
   private syncTimerLog = { setAt: 0, setFor: 0, firedAt: 0, putOff: 0, lastPutOffAt: 0 };
   private syncAgain = false;
   private sessionForSync: { day: DayRecord; closeAt: Date } | null = null;
@@ -1470,9 +1474,17 @@ export class Worker {
     const entryOfOurs = o.side === "buy" && o.clientOrderId.startsWith("cyrus-") && !o.clientOrderId.startsWith("cyrus-x-");
     if (entryOfOurs && u.event === "fill") this.digest.count("filled");
     else if (entryOfOurs && (u.event === "canceled" || u.event === "expired") && !(o.filledQty > 0)) this.digest.count("cancelled");
-    else if (o.side === "sell" && u.event === "fill" && o.groupId) {
-      if (o.type === "stop" || o.stopPrice !== null) this.digest.count("stop");
-      else if (o.type === "limit") this.digest.count("take_profit");
+    // A4 of 2026-11-12 (group 2 review, messaging only): a fresh stop (cyrus-p-, no group id) that fills is a stop; a take-profit leg is
+    // counted once, at its first fill or partial fill, because A4 cancels the rest of a partly filled take-profit (its full fill never comes).
+    else if (o.side === "sell" && u.event === "fill" && o.clientOrderId.startsWith("cyrus-p-")) this.digest.count("stop");
+    else if (o.side === "sell" && o.groupId && (u.event === "fill" || u.event === "partial_fill")) {
+      if (o.type === "stop" || o.stopPrice !== null) {
+        if (u.event === "fill") this.digest.count("stop");
+      } else if (o.type === "limit" && !this.digestTakeProfits.has(o.id)) {
+        this.digestTakeProfits.add(o.id);
+        if (this.digestTakeProfits.size > 20_000) this.digestTakeProfits.delete(this.digestTakeProfits.values().next().value!);
+        this.digest.count("take_profit");
+      }
     }
     if (u.raw && nowMs - this.lastRawSampleAt >= 60_000) {
       this.lastRawSampleAt = nowMs;

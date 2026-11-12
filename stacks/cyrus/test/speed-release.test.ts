@@ -288,7 +288,8 @@ test("decision 3, measurement: each sale is valued against waiting 5 more second
   const { formatSummary } = await import("../src/summary.ts");
   const dayRec = { tradeDate: D, isTradingDay: true, openAt: z("14:30:00"), closeAt: z("21:00:00"), status: "approved", dayStartEquity: 20000, suggested: {}, limits: { maxPositionUsd: 500, dailyLossStopUsd: 500, maxTradesPerMinute: 100, borrowingCap: 1 }, decided: {}, liveList: [], phases: {} } as never;
   assert.ok(formatSummary({ day: dayRec, stored: [], refusals: [], alpacaOrders: [], account: { equity: 20000 } as never, peak: null, stop: null, flat: true, stopGap: m.saved() }).includes(stopGapLine(m.saved())), "the summary carries the line");
-  assert.ok(stopGapLine(m.saved()).includes("3 sales, 13 shares; 1 would have filled at their take-profit within the next 5 seconds; selling at once came out +0.02 dollars against waiting 5 seconds (1 not measured)"));
+  // Wording of the group 2 review of 2026-11-12 (the line names the remainders it counts).
+  assert.ok(stopGapLine(m.saved()).includes("3 sold at market (13 shares; Alpaca refused the fresh stop, or another position shared the symbol). Of the sales, 1 would have filled at their take-profit within the next 5 seconds; selling came out +0.02 dollars against waiting 5 seconds (1 not measured)"), stopGapLine(m.saved()));
 });
 
 // ------------------------------------------------ item 6: the loss stop's sale goes first --------------------------------------------
