@@ -76,6 +76,7 @@ try {
 // 3. Alpaca (paper): positions and open orders.
 const H = { "APCA-API-KEY-ID": process.env.ALPACA_PAPER_API_KEY_ID, "APCA-API-SECRET-KEY": process.env.ALPACA_PAPER_API_SECRET_KEY };
 let positions = -1;
+let alpacaOpen = null;
 let openOrders = -1;
 try {
   const p = await fetch(`${PAPER}/v2/positions`, { headers: H, redirect: "error" });
@@ -83,15 +84,22 @@ try {
   if (!p.ok || !o.ok) throw new Error(`Alpaca answered ${p.status} / ${o.status}`);
   positions = (await p.json()).length;
   openOrders = (await o.json()).length;
+  // Alpaca's own clock, for the market-hours yes (it fails closed: an unread clock counts as possibly open).
+  try {
+    const c = await fetch(`${PAPER}/v2/clock`, { headers: H, redirect: "error" });
+    alpacaOpen = c.ok ? (await c.json()).is_open === true : null;
+  } catch {
+    alpacaOpen = null;
+  }
 } catch (err) {
   console.log("refused: could not read Alpaca:", scrub(err.message).slice(0, 200));
   process.exit(2);
 }
 
 const michaelYes = value("--michael-yes");
-const facts = { now, day, pause, stop, positions, openOrders, afterOneThirtyAllowed: flag("--after-130"), michaelYes, reviewedCommit: reviewed, checkedOutCommit: checkedOut, gitStatus };
+const facts = { now, day, pause, stop, positions, openOrders, afterOneThirtyAllowed: flag("--after-130"), michaelYes, alpacaOpen, reviewedCommit: reviewed, checkedOutCommit: checkedOut, gitStatus };
 const refusals = deployRefusals(facts);
-console.log(`date ${date}; checkout ${checkedOut.slice(0, 7)}; positions ${positions}; open orders ${openOrders}; pause ${pause?.on ? "on" : "off"}; stop flag ${stop?.on ? "on" : "off"}; mid-day flat ${day?.phases?.middayFlat === "yes" ? "yes" : "no"}`);
+console.log(`date ${date}; checkout ${checkedOut.slice(0, 7)}; positions ${positions}; open orders ${openOrders}; pause ${pause?.on ? "on" : "off"}; stop flag ${stop?.on ? "on" : "off"}; Alpaca clock ${alpacaOpen === null ? "unread" : alpacaOpen ? "open" : "closed"}; mid-day flat ${day?.phases?.middayFlat === "yes" ? "yes" : "no"}`);
 if (refusals.length > 0) {
   console.log("refused:");
   for (const r of refusals) console.log(`  - ${r}`);

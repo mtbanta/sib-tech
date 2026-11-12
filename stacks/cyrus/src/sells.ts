@@ -621,13 +621,13 @@ export class Liquidator {
               // Unclear (a network error, a timeout, a 5xx) or refused by our own sell gate: the stop may exist, so no market sale on top
               // of it; the next order sync looks again.
               result.errors.push(`round ${round}: ${p.symbol}: fresh stop not confirmed: ${st.reason}`);
-              this.d.log?.("fresh_stop_unclear", { symbol: p.symbol, qty: free, stopPrice, reason: st.reason.slice(0, 160) });
+              this.d.log?.("fresh_stop_unclear", { symbol: p.symbol, stopClientOrderId: sid, qty: free, stopPrice, reason: st.reason.slice(0, 160) });
               result.freshStopUnclear = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, sentAtMs };
               result.remaining = [p.symbol];
               return done();
             }
             result.freshStopRefused = st.reason.slice(0, 160);
-            this.d.log?.("fresh_stop_refused", { symbol: p.symbol, qty: free, stopPrice, reason: st.reason.slice(0, 160), httpStatus: st.status === "error" ? (st.httpStatus ?? null) : null });
+            this.d.log?.("fresh_stop_refused", { symbol: p.symbol, stopClientOrderId: sid, qty: free, stopPrice, reason: st.reason.slice(0, 160), httpStatus: st.status === "error" ? (st.httpStatus ?? null) : null });
             this.d.gate.invalidate();
             // Falls through to the market sale below, as before A4.
           }

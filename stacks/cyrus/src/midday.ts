@@ -188,6 +188,8 @@ export interface DeployFacts {
   afterOneThirtyAllowed: boolean;
   // Michael's ruling D (2026-11-12): where and when Michael wrote his explicit yes for THIS deploy (set only after he has written it).
   michaelYes?: string | null;
+  // Alpaca's own clock (the tool reads it): true while it says the market is open, null if it could not be read.
+  alpacaOpen?: boolean | null;
   reviewedCommit: string | null;
   checkedOutCommit: string;
   // What `git status --porcelain` printed for the checkout (fly deploy ships the working files, so they must be exactly the commit).
@@ -216,11 +218,21 @@ function pauseRouteRefusals(f: DeployFacts): string[] {
   return out;
 }
 
+// Group 1, round 1 of the night release: fail closed. The yes is required in market hours by the day record, while Alpaca's clock says
+// open, and whenever it cannot be told (no day record, a trading day without its open and close times, or Alpaca's clock unread).
+function mayBeMarketHours(f: DeployFacts): boolean {
+  if (f.alpacaOpen === true || f.alpacaOpen === null) return true;
+  if (!f.day) return true;
+  if (!f.day.isTradingDay) return false;
+  if (!f.day.openAt || !f.day.closeAt) return true;
+  return inMarketHours(f.day, f.now);
+}
+
 function stopRouteRefusals(f: DeployFacts): string[] {
   const out: string[] = [];
   if (!f.stop?.on) out.push("the stop flag is not on");
   else if (f.stop.reason.startsWith("daily loss stop")) out.push("the stop flag is the daily loss stop, not Michael's own `stop` or `flatten`");
-  if (inMarketHours(f.day, f.now) && (f.michaelYes ?? "").trim().length < MICHAEL_YES_MIN_CHARS) out.push("it is market hours: --michael-yes \"<where and when Michael wrote his yes for this deploy>\" is required, only after he has written it");
+  if (mayBeMarketHours(f) && (f.michaelYes ?? "").trim().length < MICHAEL_YES_MIN_CHARS) out.push("it is or may be market hours: --michael-yes \"<where and when Michael wrote his yes for this deploy>\" is required, only after he has written it");
   return out;
 }
 

@@ -235,6 +235,124 @@ test("ruling B: an unclear fresh stop that the sync's own order list shows worki
   assert.equal(w.sim.sellLog.length, 0);
 });
 
+test("group 2, round 1 (night): no 5 minute escalation while ruling B's own sale is working at Alpaca, and the one line comes when it fills", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "WULF", 6, 9.5, 1);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 2, 9.58);
+  unclearStops(w, false);
+  w.sim.sellFillDelayMs = 7 * 60_000; // Alpaca holds the sale about 7 minutes
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  w.sim.advance(FRESH_STOP_CONFIRM_MS);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(w.sim.sellLog.length, 1, "the sale was sent");
+  for (let i = 0; i < 50; i++) {
+    w.sim.advance(10_000);
+    await syncOrders(w.risk, dd, { protect: true });
+  }
+  assert.ok(!w.said.some((m) => m.text.includes("still has no protective stop")), w.said.map((m) => m.text).join(" | "));
+  assert.equal(w.said.filter((m) => m.mention).length, 1, "only the one alert at once");
+  assert.equal(await heldQty(w, "WULF"), 0);
+  assert.ok(w.said.some((m) => m.text.startsWith("WULF: ")), w.said.map((m) => m.text).join(" | "));
+});
+
+test("group 2, round 1 (night): every unclear fresh stop ends in one outcome event; one whose stop filled first ends in fresh_stop_unclear_end, joined by its stop's client id", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "PLUG", 4, 3, 1);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 1, 3.08);
+  unclearStops(w, true);
+  const realPaged = w.sim.listOrdersPaged.bind(w.sim);
+  w.sim.listOrdersPaged = async (...a: any[]) => {
+    const r: any = await (realPaged as any)(...a);
+    return a[0] === "all" ? { ...r, orders: r.orders.filter((o: any) => !o.clientOrderId.startsWith("cyrus-p-")) } : r;
+  };
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  const sent = w.events.find((e) => e.event === "fresh_stop_unclear")!;
+  assert.ok(sent.data.stopClientOrderId?.startsWith("cyrus-p-"), "the join key");
+  w.sim.triggerStop("PLUG"); // the stop fills before anything confirms it
+  for (let i = 0; i < 4; i++) {
+    w.sim.advance(3_000);
+    await syncOrders(w.risk, dd, { protect: true });
+  }
+  const ends = w.events.filter((e) => ["fresh_stop_confirmed", "fresh_stop_timeout", "fresh_stop_unclear_end"].includes(e.event) && e.data.stopClientOrderId === sent.data.stopClientOrderId);
+  assert.equal(ends.length, 1, JSON.stringify(w.events.map((e) => e.event)));
+  assert.equal(ends[0]!.event, "fresh_stop_unclear_end");
+  assert.equal(w.sim.oversellAttempts, 0);
+});
+
+test("group 1, round 1 (night): with the live updates on, an entry older than the sync's 10 minute list still gets its unclear stop looked up every 5 seconds and its limit at 15 seconds", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "OLD", 5, 12, 1);
+  w.sim.advance(11 * 60_000); // older than the sync's 10 minute list
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  w.sim.partialTakeProfit(id, 1, 12.08);
+  w.risk.syncMemory.mustLook.add(id); // as the live update of the stop's cancel does
+  unclearStops(w, false);
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.equal(w.memory.freshStops.get(id)?.status, "unclear");
+  const sentAt = w.memory.freshStops.get(id)!.placedAt; // when the stop was sent
+  let lookups = 0;
+  const realFind = w.sim.findOrderByClientId.bind(w.sim);
+  w.sim.findOrderByClientId = async (x: string) => (x.startsWith("cyrus-p-") && lookups++, realFind(x));
+  for (const t of [2_500, 7_500, 12_500]) {
+    w.sim.advance(sentAt + t - w.sim.simMs);
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  }
+  assert.ok(lookups >= 3, `${lookups} lookups of the unclear stop before the limit`);
+  assert.ok(!w.events.some((e) => e.event === "fresh_stop_timeout"));
+  w.sim.advance(sentAt + 15_200 - w.sim.simMs);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  const ev = w.events.find((e) => e.event === "fresh_stop_timeout");
+  assert.ok(ev, "the limit at 15 seconds");
+  assert.ok(ev!.data.msFromSent < 16_000, `${ev!.data.msFromSent}`);
+});
+
+test("group 1, round 1 (night): a stop that hit the limit and later shows working in the sync's own list is cancelled, then the shares are sold", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "RKLB", 5, 20, 1);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 1, 20.08);
+  unclearStops(w, true);
+  const realPaged = w.sim.listOrdersPaged.bind(w.sim);
+  let hide = true;
+  w.sim.listOrdersPaged = async (...a: any[]) => {
+    const r: any = await (realPaged as any)(...a);
+    return hide && a[0] === "all" ? { ...r, orders: r.orders.filter((o: any) => !o.clientOrderId.startsWith("cyrus-p-")) } : r;
+  };
+  // At the limit nothing can find it: the lookup fails and so do the open orders (the timeout's own read and the sale's).
+  const realList = w.sim.listOrders.bind(w.sim);
+  let openFails = false;
+  w.sim.listOrders = async (status: any, after?: string) => {
+    if (status === "open" && openFails) throw new Error("timeout (test)");
+    return realList(status, after);
+  };
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  openFails = true;
+  w.sim.advance(FRESH_STOP_CONFIRM_MS);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.ok(w.events.some((e) => e.event === "fresh_stop_timeout"));
+  // Later the sync's own list shows the stop working.
+  openFails = false;
+  hide = false;
+  for (let i = 0; i < 5 && (await heldQty(w, "RKLB")) > 0; i++) {
+    w.sim.advance(2_000);
+    await syncOrders(w.risk, dd, { protect: true });
+  }
+  assert.ok(w.events.some((e) => e.event === "fresh_stop_timeout_cancel"), JSON.stringify(w.events.map((e) => e.event)));
+  assert.equal(freshStops(w, "RKLB")[0]!.status, "canceled");
+  assert.equal(await heldQty(w, "RKLB"), 0);
+  assert.equal(w.sim.oversellAttempts, 0);
+});
+
 // ---------------- ruling C: the order index ----------------
 import { CachingStore } from "../src/caching-store.ts";
 import { DayOrders, dayOrderIndex, isActiveOrder, activeOrdersOldestFirst } from "../src/order-index.ts";

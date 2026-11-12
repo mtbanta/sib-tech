@@ -323,3 +323,33 @@ test("group 2, round 2: if the afternoon close-out never finished flat, `status`
   assert.match(st, /entries paused again at 11:10 AM CT, when the afternoon load window ended \(the regular close-out took over\)/);
   assert.ok(!st.includes("its close-out still selling"), st);
 });
+
+test("group 2, round 1 (night): a stop-route window does not start after a `resume` sent once its screen has finished; the line says the list was switched while the stop kept entries off", async () => {
+  const { r } = await flatAtMidday();
+  r.ownerSays("stop", "16:38:00");
+  await r.at("16:38:05");
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  await until(() => !r.worker["inflight"].has("afternoon-screen"));
+  // The screen is done; `resume` arrives before the next pass decides the window.
+  r.ownerSays("resume", "16:40:07");
+  await r.at("16:40:08");
+  await r.at("16:40:15");
+  assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], undefined, "no window");
+  const line = r.said("commands").find((t) => t.startsWith("Afternoon load window not started:"));
+  assert.ok(line, r.said("commands").join(" | "));
+  assert.match(line!, /^Afternoon load window not started: the stop flag was cleared\. The live list was switched to the cheap names while your stop kept entries off; any trading on them uses today's normal limits \(not the window's\)\./);
+});
+
+test("group 1, round 1 (night): the stop route is refused while today's loss is past the daily loss stop, even if a `stop` replaced the loss stop's reason", async () => {
+  const { r, sim } = await flatAtMidday({ load: true });
+  r.ownerSays("stop", "16:38:00");
+  await r.at("16:38:05");
+  const day = (await r.store.getDay(D))!;
+  (sim as any).cash -= 600; // equity now past the 200 dollar loss stop (no positions held)
+  void day;
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  assert.ok(r.said("commands").some((t) => t === "Not started: today's loss is past the daily loss stop."), r.said("commands").join(" | "));
+  assert.equal((await r.store.getControl<StopFlag>(CONTROL_STOP))!.on, true, "the stop stays on");
+});

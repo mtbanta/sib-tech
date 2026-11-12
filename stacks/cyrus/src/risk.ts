@@ -179,7 +179,16 @@ export function settleFreshStop(log: ((event: string, data?: Record<string, unkn
   const was = f.status;
   f.status = status;
   f.lookedAt = nowMs;
-  if (was === "unclear" && status !== "unclear") log?.("fresh_stop_confirmed", { symbol: f.symbol, clientOrderId: f.entryClientOrderId, status, by, found: status !== "unknown_at_alpaca", msToConfirm: nowMs - f.placedAt, afterLimit: nowMs - f.placedAt >= FRESH_STOP_CONFIRM_MS });
+  if (was === "unclear" && status !== "unclear") log?.("fresh_stop_confirmed", { symbol: f.symbol, clientOrderId: f.entryClientOrderId, stopClientOrderId: f.stopClientOrderId, status, by, found: status !== "unknown_at_alpaca", msToConfirm: nowMs - f.placedAt, afterLimit: nowMs - f.placedAt >= FRESH_STOP_CONFIRM_MS });
+}
+
+// Forgets an entry's fresh stop. Group 2, round 1 of the night release: one that was still unclear gets its outcome logged
+// (`fresh_stop_unclear_end`), so every unclear fresh stop ends in exactly one of fresh_stop_confirmed, fresh_stop_timeout or this.
+function dropFreshStop(d: RiskDeps, mem: SyncMemory, entryClientOrderId: string, how: string, nowMs: number): void {
+  const f = mem.freshStops.get(entryClientOrderId);
+  if (!f) return;
+  mem.freshStops.delete(entryClientOrderId);
+  if (f.status === "unclear") d.log?.("fresh_stop_unclear_end", { symbol: f.symbol, clientOrderId: entryClientOrderId, stopClientOrderId: f.stopClientOrderId, how, msFromSent: nowMs - f.placedAt });
 }
 
 // True while the fresh stop can still protect its remainder. Its status is taken from the sync's own order list when it is there, else
@@ -274,6 +283,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     for (const id of [...mem.stuck.keys()]) await resolveStuck(d, mem, id, "no longer held");
     mem.bareSeen.clear();
     mem.lastSeen.clear();
+    for (const id of [...mem.freshStops.keys()]) dropFreshStop(d, mem, id, "its entry is no longer open", syncStartMs);
     mem.lastSyncAt = d.now().getTime();
     return { unprotected: [], incomplete: false };
   }
@@ -282,7 +292,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   for (const id of [...mem.oldLookedAt.keys()]) if (!activeIds.has(id)) mem.oldLookedAt.delete(id);
   for (const id of [...mem.mustLook]) if (!activeIds.has(id)) mem.mustLook.delete(id);
   for (const id of [...mem.lateLogged]) if (!activeIds.has(id)) mem.lateLogged.delete(id);
-  for (const id of [...mem.freshStops.keys()]) if (!activeIds.has(id)) mem.freshStops.delete(id);
+  for (const id of [...mem.freshStops.keys()]) if (!activeIds.has(id)) dropFreshStop(d, mem, id, "its entry is no longer open", syncStartMs);
   for (const id of [...mem.stuck.keys()]) if (!activeIds.has(id)) await resolveStuck(d, mem, id, "no longer held");
   const midnight = etInstant(day.tradeDate, "00:00").getTime();
   const nowMs = d.now().getTime();
@@ -386,7 +396,8 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   const unprotected: string[] = [];
   // Michael's decision of 2026-11-09: the 5 minute alert goes by the clock, for every entry reported stuck, whether or not its retry
   // has had room yet.
-  if (!opts.middayOwnsSelling?.()) for (const id of [...mem.stuck.keys()]) await escalateIfDue(d, mem, id, positions.find((p) => p.symbol === mem.stuck.get(id)?.symbol)?.qty, listed.orders);
+  // Group 2, round 1 of the night release: a symbol the position list does not show is passed as 0 held (nothing left to protect).
+  if (!opts.middayOwnsSelling?.()) for (const id of [...mem.stuck.keys()]) await escalateIfDue(d, mem, id, positions.find((p) => p.symbol === mem.stuck.get(id)?.symbol)?.qty ?? 0, listed.orders);
   // Michael's decision of 2026-11-09: entries on the short retry list are walked last, longest waiting first, so the first one due
   // takes the allowance's room and the others take turns (before, the same few won every minute).
   const shortRetry = (s: OrderRecord) => (mem.stuck.get(s.clientOrderId)?.nextAt ?? 0) > 0;
@@ -399,6 +410,21 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     if (shown) {
       f.orderId = shown.id;
       settleFreshStop(d.log, f, shown.status, "order list", nowMs);
+    }
+  }
+  // Ruling B (group 1, round 1 of the night release): a stop that hit the limit and now shows working in the sync's own list is cancelled
+  // here (the walk would skip its symbol as having a working sell, which would in effect take it as protection again). The next sync
+  // then sees it ended and sells the shares.
+  if (mem.timedOutStops.size > 0 && (typeof opts.protect === "function" ? opts.protect() : opts.protect)) {
+    for (const x of listed.orders) {
+      if (!mem.timedOutStops.has(x.clientOrderId) || !OPEN_STATUSES.has(x.status) || x.status === "pending_cancel") continue;
+      try {
+        await d.broker.cancelOrder(x.id);
+        d.log?.("fresh_stop_timeout_cancel", { symbol: x.symbol, stopClientOrderId: x.clientOrderId, by: "order list" });
+      } catch (err) {
+        d.log?.("fresh_stop_timeout_cancel_failed", { symbol: x.symbol, error: (err as Error).message.slice(0, 120) });
+      }
+      recheckAt = recheckAt === undefined ? nowMs + 1_000 : Math.min(recheckAt, nowMs + 1_000);
     }
   }
   const walk = [...active.filter((s) => !shortRetry(s)), ...active.filter(shortRetry).sort((a, b) => mem.stuck.get(a.clientOrderId)!.lastTriedAt - mem.stuck.get(b.clientOrderId)!.lastTriedAt)];
@@ -436,7 +462,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       await d.store.updateOrder(s.clientOrderId, { closedAt: d.now().toISOString() });
       mem.bareSeen.delete(s.clientOrderId);
       mem.lastSeen.delete(s.clientOrderId);
-      mem.freshStops.delete(s.clientOrderId);
+      dropFreshStop(d, mem, s.clientOrderId, "its entry closed (its shares are gone)", nowMs);
       await resolveStuck(d, mem, s.clientOrderId, "no longer held");
       continue;
     }
@@ -460,14 +486,16 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       }
       if (covering && (await freshStopLive(d, fresh, listed.orders, nowMs, opts.streamLive === true))) {
         if (fresh.status === "unclear") {
-          // Still unclear: looked up again within 5 seconds, and the sync runs at the 15 second limit.
+          // Still unclear: looked up again within 5 seconds, and the sync runs at the 15 second limit (the entry is looked up at that
+          // sync too, even if it is older than the 10 minute list).
           const due = Math.min(nowMs + FRESH_STOP_UNCLEAR_LOOKUP_MS, fresh.placedAt + FRESH_STOP_CONFIRM_MS);
           recheckAt = recheckAt === undefined ? due : Math.min(recheckAt, due);
+          mem.mustLook.add(s.clientOrderId);
         }
         continue;
       }
-      mem.freshStops.delete(s.clientOrderId);
-      if (held.has(s.symbol)) d.log?.("fresh_stop_gone", { symbol: s.symbol, clientOrderId: s.clientOrderId, status: fresh.status, msFromSent: nowMs - fresh.placedAt });
+      dropFreshStop(d, mem, s.clientOrderId, held.has(s.symbol) ? "it no longer covers the holding" : "the shares are no longer held", nowMs);
+      if (held.has(s.symbol)) d.log?.("fresh_stop_gone", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: fresh.stopClientOrderId, status: fresh.status, msFromSent: nowMs - fresh.placedAt });
     }
     if (!hasLiveExit(o)) {
       const due = retryDue(mem, s.clientOrderId, d.now().getTime());
@@ -561,6 +589,8 @@ async function escalateIfDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string
   const st = mem.stuck.get(clientOrderId);
   const now = d.now().getTime();
   if (!st || !st.alerted || st.escalated || now - st.since < STUCK_ESCALATE_MS) return;
+  // Messaging only (group 2, round 1 of the night release): nothing held, nothing to escalate; the entry's closing line follows.
+  if (heldQty !== undefined && heldQty <= 1e-9) return;
   const fresh = mem.freshStops.get(clientOrderId);
   const covers = (q: number) => heldQty === undefined || q >= heldQty - 1e-9;
   const working = (status: string) => OPEN_STATUSES.has(status) && status !== "pending_cancel";
@@ -568,6 +598,10 @@ async function escalateIfDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string
   // A status still "unclear" holds it too: the sync's walk looks that stop up (or the list shows it) and settles it, so a real problem is
   // reported at most one sync later.
   if (fresh && (fresh.status === "unclear" || (working(fresh.status) && covers(fresh.qty)) || (shown && covers(shown.qty - shown.filledQty)))) return;
+  // Group 2, round 1 of the night release (messaging only): not posted while a sale of ours (cyrus-x-) covering the holding is working
+  // in the list the sync has already read (ruling B's sale after the 15 second limit, waiting for Alpaca to fill it).
+  const ourSale = (listed ?? []).filter((x) => x.symbol === st.symbol && x.side === "sell" && x.clientOrderId.startsWith("cyrus-x-") && working(x.status)).reduce((n, x) => n + Math.max(0, x.qty - x.filledQty), 0);
+  if (ourSale > 0 && covers(ourSale)) return;
   st.escalated = true;
   const what = st.protecting ? "I still cannot protect or sell it" : "I still cannot sell it";
   await d.say("alerts", `**Michael: ${st.symbol} still has no protective stop after ${minutesText(now - st.since)}, and ${what}** (${st.why || "still held"}). Please close it in Alpaca's dashboard. I keep trying.`, { mentionOwner: true });
@@ -714,7 +748,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     mem.freshStops.set(s.clientOrderId, { symbol: s.symbol, entryClientOrderId: s.clientOrderId, stopClientOrderId: f.clientOrderId, orderId: f.orderId, qty: f.qty, stopPrice: f.stopPrice, placedAt: f.sentAtMs, status: "accepted", lookedAt: now });
     const cancelled = extra.stopCancelledAt ? Date.parse(extra.stopCancelledAt) : NaN;
     // Ruling B: its time to confirm is Alpaca's answer to the order itself (`msToConfirm`).
-    d.log?.("fresh_stop", { symbol: s.symbol, clientOrderId: s.clientOrderId, qty: f.qty, stopPrice: f.stopPrice, msFromStopCancel: Number.isFinite(cancelled) ? now - cancelled : null, msToConfirm: f.answerMs, confirmedBy: "answer" });
+    d.log?.("fresh_stop", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: f.clientOrderId, qty: f.qty, stopPrice: f.stopPrice, msFromStopCancel: Number.isFinite(cancelled) ? now - cancelled : null, msToConfirm: f.answerMs, confirmedBy: "answer" });
     try {
       d.onFreshStop?.({ symbol: s.symbol, shares: f.qty });
     } catch {
@@ -725,7 +759,10 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   }
   if (r.freshStopUnclear && r.freshStopUnclear.symbol === s.symbol) {
     const f = r.freshStopUnclear;
-    // Ruling B: timed from its sending; looked up at the next sync, 2 seconds on, then every 5 seconds while still unclear.
+    // Ruling B: timed from its sending; looked up at the next sync, 2 seconds on, then every 5 seconds while still unclear. The entry
+    // itself is looked up at each of those syncs too (group 1, round 1 of the night release): one older than the sync's 10 minute list
+    // would otherwise be skipped by the walk and its limit would come late.
+    mem.mustLook.add(s.clientOrderId);
     mem.freshStops.set(s.clientOrderId, { symbol: s.symbol, entryClientOrderId: s.clientOrderId, stopClientOrderId: f.clientOrderId, orderId: null, qty: f.qty, stopPrice: f.stopPrice, placedAt: f.sentAtMs, status: "unclear", lookedAt: 0 });
     return { attempted: true, stuck: false, recheckAt: now + 2_000 };
   }

@@ -1324,8 +1324,9 @@ export class Worker {
 
   // The screen and the feed switch for `load afternoon`. On a load day the cheap list is already live. Otherwise the cheap-symbol
   // screen runs and the price feed switches to its 30 names on the same connection. Throws if the screen fails or finds nothing.
-  // Returns null (and changes nothing) if the window was cancelled while the screen ran, or if the mid-day pause is no longer on or a
-  // stop is set when the screen finishes: the list and the feed switch only at the pause, while nothing trades.
+  // Returns null (and changes nothing) if the window was cancelled while the screen ran; throws if, when it finishes, its route no longer
+  // holds (the pause route: the pause on with no stop; the stop route, ruling E of 2026-11-12: Michael's own stop still on): the list
+  // and the feed switch only while nothing trades.
   private async afternoonLoadList(date: string, cancelled: () => boolean = () => false, onSwitched: () => void = () => undefined, route: "pause" | "stop" = "pause"): Promise<{ switched: boolean; list: string[] } | null> {
     const day = await this.d.store.getDay(date);
     if (!day) throw new Error("no day record for today");

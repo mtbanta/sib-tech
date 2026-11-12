@@ -59,6 +59,7 @@ export const STORED_INFO_EVENTS = new Set([
   "fresh_stop_timeout",
   "fresh_stop_timeout_cancel",
   "fresh_stop_timeout_cancel_failed",
+  "fresh_stop_unclear_end",
 ]);
 
 export function shouldStoreEvent(level: "info" | "warn" | "error", event: string): boolean {

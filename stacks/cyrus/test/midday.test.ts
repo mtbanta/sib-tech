@@ -443,7 +443,14 @@ test("the deploy check refuses unless flat, paused, no positions or open orders,
   const resumed = { ...emptyPause(), on: false, resumedAt: z("16:35:00").toISOString(), resumedBy: "go" };
   const own = { on: true, reason: "owner command (flatten)" };
   const yes = "Michael in the session, 2:41 PM: yes, deploy e85039d now";
-  has({ pause: resumed, stop: own }, "own stop route: it is market hours: --michael-yes");
+  has({ pause: resumed, stop: own }, "own stop route: it is or may be market hours: --michael-yes");
+  // Group 1, round 1 of the night release: fail closed when it cannot be told whether it is market hours, or Alpaca's clock says open.
+  has({ pause: resumed, stop: own, day: null }, "own stop route: it is or may be market hours");
+  has({ pause: resumed, stop: own, day: { ...day, openAt: null, closeAt: null } as any }, "own stop route: it is or may be market hours");
+  has({ pause: resumed, stop: own, now: z("13:00:00"), alpacaOpen: true }, "own stop route: it is or may be market hours");
+  has({ pause: resumed, stop: own, now: z("13:00:00"), alpacaOpen: null }, "own stop route: it is or may be market hours");
+  assert.deepEqual(deployRefusals({ ...ok, now: z("13:00:00"), pause: resumed, stop: own, alpacaOpen: false }), [], "before the open, Alpaca's clock closed: no yes needed");
+  assert.deepEqual(deployRefusals({ ...ok, pause: resumed, stop: own, day: null, michaelYes: yes }), [], "with his yes, a missing day record does not block");
   assert.deepEqual(deployRefusals({ ...ok, pause: resumed, stop: own, michaelYes: yes }), [], "market hours: his own stop plus his written yes");
   has({ pause: resumed, stop: own, michaelYes: "yes" }, "--michael-yes", );
   assert.equal(deployRoute({ ...ok, pause: resumed, stop: own, michaelYes: yes }), "own stop");
