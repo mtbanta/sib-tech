@@ -5,6 +5,9 @@ import type { Settings } from "./config.ts";
 import type { Redactor } from "./redact.ts";
 import { NOT_ADVICE, messagesFor, type ChannelName } from "./discord.ts";
 
+// Discord returns at most this many messages per read of the command channel.
+export const COMMAND_READ_LIMIT = 50;
+
 const API = "https://discord.com/api/v10";
 const MAX_CONTENT = 2000;
 
@@ -111,7 +114,7 @@ export class DiscordBot {
 
   // Messages newer than `afterId`, oldest first.
   async commandMessagesAfter(afterId: string): Promise<DiscordMessage[]> {
-    const rows = (await this.call("GET", `/channels/${this.settings.discord.commandChannelId}/messages?limit=50&after=${afterId}`)) as Array<any>;
+    const rows = (await this.call("GET", `/channels/${this.settings.discord.commandChannelId}/messages?limit=${COMMAND_READ_LIMIT}&after=${afterId}`)) as Array<any>;
     return rows
       .map((m) => ({ id: String(m.id), channelId: String(m.channel_id), content: String(m.content ?? ""), authorId: String(m.author?.id ?? ""), authorIsBot: m.author?.bot === true, at: new Date(m.timestamp) }))
       .sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));

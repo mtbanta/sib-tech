@@ -11,7 +11,8 @@
 // "fail" after a tick that did not, so Healthchecks hears when the worker is unwell, not only when it is dead.
 import type { FullBroker } from "./broker.ts";
 import { BrokerView } from "./broker-view.ts";
-import { CommandProcessor, type CommandBot } from "./commands.ts";
+import { CommandProcessor, afternoonFailureTail, type CommandBot } from "./commands.ts";
+import { COMMAND_READ_LIMIT } from "./discord-bot.ts";
 import { DIGEST_PERIOD_MS, TradeDigest } from "./digest.ts";
 import { addToRunning, CONTROL_FEES, estimateFees, type FeesRunning } from "./fees.ts";
 import type { Governor } from "./governor.ts";
@@ -805,7 +806,9 @@ export class Worker {
       try {
         await this.commands.poll();
         this.commandsReadOk();
-        this.lastPollStartedAt = pollStartedAt;
+        // Fix of 2026-11-12 (round 3 note): a read that returned Discord's maximum of 50 messages may have left more waiting, so only a
+        // read that returned fewer counts for deciding the afternoon load window.
+        if (this.commands.lastReadCount < COMMAND_READ_LIMIT) this.lastPollStartedAt = pollStartedAt;
       } catch (err) {
         // Logged (and kept in the run log) every time; Michael is told once, when it has lasted 2 minutes (commandsWatch).
         this.lastTickError = `commands: ${(err as Error).message.slice(0, 120)}`;
@@ -1228,16 +1231,18 @@ export class Worker {
   // `load afternoon` on a normal morning (Michael's standing requirement of 2026-11-11): the command has checked every condition and
   // starts this. The screen runs in the background (it can take minutes); the window itself is decided later (see pass). False if one
   // is already running for today.
-  private afternoonScreenState: { date: string; state: "running" | "ready" | "cancelled"; readyAt: number; result?: { switched: boolean; list: string[] } } | null = null;
+  private afternoonScreenState: { date: string; state: "running" | "ready" | "cancelled"; readyAt: number; switched?: boolean; result?: { switched: boolean; list: string[] } } | null = null;
   private lastPollStartedAt = -Infinity;
-  private startAfternoonScreen(date: string): boolean {
-    if (this.inflight.has("afternoon-screen")) return false;
+  private startAfternoonScreen(date: string): boolean | "finishing" {
+    // Fix of 2026-11-12 (round 3, group 2): a cancelled screen still running is told apart from one that is live, so the reply can ask
+    // Michael to send the command again instead of saying "already running" with nothing to follow.
+    if (this.inflight.has("afternoon-screen")) return this.afternoonScreenState === null || this.afternoonScreenState.state === "cancelled" ? "finishing" : false;
     if (this.afternoonScreenState?.date === date && this.afternoonScreenState.state !== "cancelled") return false;
     const mine = { date, state: "running" as "running" | "ready" | "cancelled", readyAt: 0 } as NonNullable<Worker["afternoonScreenState"]>;
     this.afternoonScreenState = mine;
     this.background("afternoon-screen", async () => {
       try {
-        const result = await this.afternoonLoadList(date, () => mine.state === "cancelled");
+        const result = await this.afternoonLoadList(date, () => mine.state === "cancelled", () => void (mine.switched = true));
         if (result === null || mine.state === "cancelled") return; // cancelled by a command: it said so
         mine.state = "ready";
         mine.readyAt = this.d.now().getTime();
@@ -1245,9 +1250,15 @@ export class Worker {
       } catch (err) {
         if (this.afternoonScreenState === mine) this.afternoonScreenState = null;
         if (mine.state === "cancelled") return;
-        const why = (err as Error).message.slice(0, 120).replace(/\.$/, "");
+        const why = (err as Error).message.slice(0, 200).replace(/\.$/, "");
         this.d.log?.("info", "load_afternoon_failed", { error: why });
-        await this.say("commands", `Afternoon load window not started: ${why}. Still paused; \`go\` resumes a normal afternoon.`);
+        const stopNow = await this.d.store.getControl<StopFlag>(CONTROL_STOP).catch(() => null);
+        // `undefined` when the pause cannot be read: the tail is then neutral (never "Still paused" after "no longer paused").
+        const pauseNow = await readPause(this.d.store, date).catch(() => undefined);
+        const dayNow = await this.d.store.getDay(date).catch(() => null);
+        const timesNow = dayNow ? middayTimes(dayNow) : null;
+        const tail = afternoonFailureTail(stopNow, pauseNow, why, timesNow !== null && this.d.now() >= timesNow.lastEntryAt);
+        await this.say("commands", `Afternoon load window not started: ${why}.${tail ? ` ${tail}` : ""}`);
       }
     });
     return true;
@@ -1255,19 +1266,20 @@ export class Worker {
 
   // A `stop`, `flatten` or `go` while the screen is running or done but not decided: the pending window is cancelled for good (the
   // finished screen then changes nothing). True if one was pending.
-  private cancelAfternoonScreen(date: string): boolean {
+  // "switched" when the screen had already switched the live list to the cheap names (they then stay live; the reply says so).
+  private cancelAfternoonScreen(date: string): boolean | "switched" {
     const st = this.afternoonScreenState;
     if (!st || st.date !== date || st.state === "cancelled") return false;
     st.state = "cancelled";
-    this.d.log?.("info", "load_afternoon_cancelled", { date });
-    return true;
+    this.d.log?.("info", "load_afternoon_cancelled", { date, switched: Boolean(st.switched) });
+    return st.switched ? "switched" : true;
   }
 
   // The screen and the feed switch for `load afternoon`. On a load day the cheap list is already live. Otherwise the cheap-symbol
   // screen runs and the price feed switches to its 30 names on the same connection. Throws if the screen fails or finds nothing.
   // Returns null (and changes nothing) if the window was cancelled while the screen ran, or if the mid-day pause is no longer on or a
   // stop is set when the screen finishes: the list and the feed switch only at the pause, while nothing trades.
-  private async afternoonLoadList(date: string, cancelled: () => boolean = () => false): Promise<{ switched: boolean; list: string[] } | null> {
+  private async afternoonLoadList(date: string, cancelled: () => boolean = () => false, onSwitched: () => void = () => undefined): Promise<{ switched: boolean; list: string[] } | null> {
     const day = await this.d.store.getDay(date);
     if (!day) throw new Error("no day record for today");
     if (isLoadDay(day)) return { switched: false, list: day.liveList ?? [] };
@@ -1281,8 +1293,52 @@ export class Worker {
       this.d.log?.("info", "load_afternoon_not_switched", { pause: Boolean(pauseNow?.on), stop: Boolean(stopNow?.on) });
       throw new Error(stopNow?.on ? "the stop flag is on, so the live list was not changed" : "trading is no longer paused for the mid-day cycle, so the live list was not changed");
     }
-    const updated = await this.d.store.updateDay(date, { liveList: list });
-    await this.d.store.setControl(`live_names:${date}`, names).catch(() => undefined);
+    // Fix of 2026-11-12 (group 1, round 3, probes G and H): a `go` or `stop` handled while these writes are in flight must still win. The
+    // old list and names are kept; after the writes the cancel, the pause and the stop are read again, and if any changed the old list
+    // is written back and nothing else changes (no strategy or feed switch, no post). From the last check to the switch in memory
+    // there is no wait, so nothing can slip in between. Group 1, round 1 of 2026-11-12: any error from the first list write on (a
+    // failed write, a failed read after it) is handled the same way: logged, the old list written back once, and if that write-back
+    // fails, an alert, because a restart that day would start the feed from the stored list. This runs when the window was cancelled too.
+    const oldList = day.liveList ?? [];
+    const oldNames = await this.d.store.getControl<Record<string, string>>(`live_names:${date}`).catch(() => null);
+    let restored = false;
+    let restoreFailed = false;
+    const putBack = async (why: string): Promise<void> => {
+      restored = true;
+      try {
+        const back = await this.d.store.updateDay(date, { liveList: oldList });
+        if (oldNames !== null) await this.d.store.setControl(`live_names:${date}`, oldNames).catch(() => undefined);
+        this.lastDay = back;
+        this.d.log?.("info", "load_afternoon_list_restored", { why });
+      } catch (err) {
+        restoreFailed = true;
+        this.d.log?.("error", "load_afternoon_restore_failed", { why, error: (err as Error).message.slice(0, 160) });
+        await this.say("alerts", `Afternoon load window: I could not put the live list back after the window did not start (${why}). The names trading now are unchanged, but the stored live list may still be the cheap names, and a restart would trade them. Send \`status\`; if its live list shows the cheap names, tell the builder before any restart or deploy.\n${PAPER_ONLY}`).catch(() => undefined);
+      }
+    };
+    let updated: DayRecord;
+    try {
+      updated = await this.d.store.updateDay(date, { liveList: list });
+      await this.d.store.setControl(`live_names:${date}`, names).catch(() => undefined);
+      const pauseAfter = await readPause(this.d.store, date);
+      const stopAfter = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
+      if (cancelled() || !pauseAfter?.on || stopAfter?.on) {
+        const why = cancelled() ? "cancelled by a command" : stopAfter?.on ? "the stop flag is on" : "trading is no longer paused";
+        await putBack(why);
+        if (cancelled()) return null;
+        // Group 2, round 1 of 2026-11-12: "the live list was not changed" only when the write-back worked; otherwise the stored list
+        // may still be the cheap names (the alert says so).
+        const after = restoreFailed ? "; the names trading are unchanged, but the stored live list could not be put back (see the alert in alerts)" : ", so the live list was not changed";
+        throw new Error(stopAfter?.on ? `the stop flag is on${after}` : `trading is no longer paused for the mid-day cycle${after}`);
+      }
+    } catch (err) {
+      if (!restored) {
+        this.d.log?.("error", "load_afternoon_write_failed", { error: (err as Error).message.slice(0, 160) });
+        await putBack(`an error: ${(err as Error).message.slice(0, 80)}`);
+      }
+      throw err;
+    }
+    // No await from here to the end of the switch.
     this.lastDay = updated;
     if (this.stream && this.streamDate === date) {
       this.strategy = this.makeStrategy(updated, list);
@@ -1292,8 +1348,11 @@ export class Worker {
         this.startStream(updated, list);
       }
     }
+    onSwitched();
     this.d.log?.("info", "afternoon_load_list", { symbols: list.length });
-    await this.say("trading", `Live list switched for the afternoon load window (${list.length} cheap, heavily traded names; the window starts once I have checked again that the account is flat and paused):\n${formatLiveList(list, names)}\n${PAPER_ONLY}`);
+    // Group 1, round 1 of 2026-11-12 (wording): the post does not promise the window, since a `stop`, `flatten` or `go` before the
+    // decision cancels it and leaves these names live.
+    await this.say("trading", `Live list switched to ${list.length} cheap, heavily traded names for the afternoon load window. The window starts only after I check again that the account is flat and paused; a \`stop\`, \`flatten\` or \`go\` before then cancels it, and these names stay live under today's normal limits:\n${formatLiveList(list, names)}\n${PAPER_ONLY}`);
     return { switched: true, list };
   }
 
