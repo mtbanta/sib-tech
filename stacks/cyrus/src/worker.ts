@@ -21,7 +21,7 @@ import type { Settings } from "./config.ts";
 import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
-import { BARE_GRACE_MS, enforceDailyLoss, LossStopMemory, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
+import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import type { SelfMonitor } from "./self-monitor.ts";
 import { LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
 import { BusyPlaceholder } from "./strategy.ts";
@@ -254,7 +254,7 @@ export class Worker {
     this.view = new BrokerView(deps.broker, () => deps.now().getTime());
     this.sellGate = new SellGate({ broker: deps.broker, say: (c, t, o) => this.say(c, t, o), log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime() });
     this.liquidator = new Liquidator({ broker: deps.broker, gate: this.sellGate, now: deps.now, sleep: deps.sleep, log: (e, data) => deps.log?.("info", e, data), waitEvent: (symbols, ms) => this.waitEvent(symbols, ms) });
-    this.entryExpiry = new EntryExpiry({ cancelOrder: (id) => deps.broker.cancelOrder(id), wasFilled: (id) => this.orderHandler?.wasFilled(id) ?? false, log: (e, data) => deps.log?.("info", e, data), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}) });
+    this.entryExpiry = new EntryExpiry({ cancelOrder: (id) => deps.broker.cancelOrder(id), wasFilled: (id) => this.orderHandler?.wasFilled(id) ?? false, log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}) });
     this.commands = new CommandProcessor({
       sessions: this.sessions,
       settings: deps.settings,
@@ -365,6 +365,7 @@ export class Worker {
       governor: this.d.governor,
       log: (e: string, data?: Record<string, unknown>) => this.d.log?.("info", e, data),
       onBareSale: (sale: { symbol: string; shares: number; takeProfit: number | null; atMs: number; clientOrderId?: string }) => this.stopGap.onSale(sale),
+      onFreshStop: (x: { symbol: string; shares: number }) => this.stopGap.onFreshStop(x),
       onRemainderSold: (symbol: string, shares: number) => void this.remainderSales.push({ symbol, shares }),
       onAccountRead: (account: { equity: number; cash: number }) => this.shadowEstimate(account),
       lateNoticeContext: (symbol: string) => this.lateNoticeContext(symbol),
@@ -1319,7 +1320,28 @@ export class Worker {
       onStopCancelled: (info) => {
         this.d.log?.("info", "stop_cancelled_at_partial_take_profit", { symbol: info.symbol });
         this.stopCancelSeen.set(info.symbol, { alpacaAtMs: info.atMs, receivedMs: this.d.now().getTime(), syncSetFor: info.atMs + BARE_GRACE_MS });
-        this.syncAt(info.atMs + BARE_GRACE_MS);
+        // A4 of 2026-11-12: BARE_GRACE_MS is 0, so the sync runs at once and the remainder gets its fresh stop.
+        this.syncAt(info.atMs + BARE_GRACE_MS, BARE_GRACE_MS > 0 ? 250 : 0);
+      },
+      // A4 of 2026-11-12: a fresh stop's status. If it ended (cancelled, expired or rejected) other than by one of our own sales, the
+      // remainder is unprotected again: the order sync runs at once and its missing-exit check sells it, as before A4.
+      onFreshStopUpdate: (info) => {
+        const f = [...this.syncMemory.freshStops.values()].find((x) => x.stopClientOrderId === info.clientOrderId);
+        if (!f) return;
+        f.status = info.status;
+        f.lookedAt = this.d.now().getTime();
+        if (info.event === "canceled" || info.event === "expired" || info.event === "rejected") {
+          this.d.log?.("info", "fresh_stop_ended", { symbol: info.symbol, event: info.event });
+          if (this.closingOut || this.liquidator.isLiquidating() || this.middayOwnsSelling) return;
+          this.syncAt(this.d.now().getTime(), 0);
+        }
+      },
+      // A5 of 2026-11-12: an entry filled after the load window's 5 second cancel was sent: its exits are most likely being cancelled by
+      // Alpaca, so its share is sold at once (the sale waits for that cancel; nothing is sold if Alpaca kept the exits).
+      onEntryFill: (info) => {
+        const sentAt = this.entryExpiry.cancelSentAt(info.clientOrderId);
+        if (sentAt === undefined) return;
+        void this.fastLostExit(info.clientOrderId, info.symbol, info.atMs);
       },
       // Decision 1 of 2026-11-06: both exits of a filled entry ended with nothing filled. The order sync runs at once (not at the
       // next 10 second sync); its missing-exit check sells the shares, with its guards (no sale while a close-out or any other sale
@@ -1343,6 +1365,28 @@ export class Worker {
     });
     this.orderStream.start();
     this.d.log?.("info", "order_stream_started", {});
+  }
+
+  // A5 of 2026-11-12: the fast sale of an entry that filled as its cancel reached Alpaca. Not while a close-out, the mid-day close-out or
+  // a carried-position sale runs, nor from the close-out time on, nor while the daily loss stop is in force (they sell it themselves);
+  // only the newest open entry of its symbol (the order sync's rule). Another sale running does not stop it: it waits its turn in the
+  // one-at-a-time sell path. Never throws.
+  private async fastLostExit(clientOrderId: string, symbol: string, fillAtMs: number): Promise<void> {
+    try {
+      const s = this.sessionForSync;
+      if (!s || this.d.now() >= addMinutes(s.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE)) return;
+      if (this.closingOut || this.middayOwnsSelling || this.inflight.has("closeout") || this.inflight.has("carried") || this.inflight.has("midday")) return;
+      if (await this.lossStopInForce(s.day.tradeDate)) return;
+      const rows = await this.d.store.listOrders(s.day.tradeDate);
+      const row = rows.find((r) => r.clientOrderId === clientOrderId);
+      if (!row || row.closedAt || row.symbol !== symbol) return;
+      const newer = rows.some((r) => r.symbol === symbol && !r.closedAt && r.clientOrderId !== clientOrderId && (r.createdAt ?? "") > (row.createdAt ?? ""));
+      if (newer) return;
+      this.d.log?.("info", "lost_exit_fast_start", { symbol, msFromFill: this.d.now().getTime() - fillAtMs });
+      await fastLostExitSale(this.riskDeps(), s.day, this.syncMemory, row, fillAtMs);
+    } catch (err) {
+      this.d.log?.("warn", "lost_exit_fast_failed", { symbol, error: (err as Error).message.slice(0, 120) });
+    }
   }
 
   // After the handler has seen an update: wake the waits for that symbol (item 9), give the stop-gap measurement the fill price of one

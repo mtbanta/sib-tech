@@ -66,8 +66,9 @@ test("Armed is one line; on a load day it describes the window, and after a load
   assert.equal(armedLine(day(), 1, 20000), "Armed for Monday 2026-11-02: cap 1, long only, the day starts at 20000.00 dollars.");
 });
 
-test("remainder sales: the order sync hands a successful sale to the batch instead of posting it; the worker posts one alert a minute, full and with the footer", async () => {
+test("remainder sales: the order sync hands a successful sale to the batch instead of posting it; the worker posts one alert a minute, full and with the footer (A4 fallback: Alpaca refuses the fresh stop, so the remainder is sold at market as before)", async () => {
   const sim = new SimBroker(Date.UTC(2026, 10, 2, 15, 0));
+  sim.refuseStops = true;
   sim.hideFilledParents = true;
   const said: string[] = [];
   const say = async (_c: string, text: string) => (said.push(text), true);

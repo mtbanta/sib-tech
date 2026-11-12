@@ -169,7 +169,7 @@ test("part A and C, Monday's IONQ case: shares held with no open order visible; 
   assert.ok(/^IONQ: sold \(\d+ minutes after I reported it without a protective stop\)\.$/.test(lines[2]!.text) && !lines[2]!.mention, lines[2]!.text);
 });
 
-test("part A: a stuck symbol does not hold up a remainder sale on another symbol in the same sync", async () => {
+test("part A: a stuck symbol does not hold up a remainder's fresh stop (A4) on another symbol in the same sync", async () => {
   const w = world();
   await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
   const day = (await w.store.getDay(D))!;
@@ -182,12 +182,13 @@ test("part A: a stuck symbol does not hold up a remainder sale on another symbol
   w.sim.advance(4_000);
   const t0 = w.sim.simMs;
   await syncOrders(w.risk, day, { protect: true });
-  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["CIFR", 7]], "CIFR's remainder sold in the same sync");
-  assert.ok(w.sim.sellLog[0]!.at - t0 < 3_000, `CIFR sold ${w.sim.sellLog[0]!.at - t0} ms after the sync began`);
+  assert.deepEqual(w.sim.stopLog.map((x) => [x.symbol, x.qty]), [["CIFR", 7]], "CIFR's remainder protected in the same sync");
+  assert.ok(w.sim.stopLog[0]!.at - t0 < 3_000, `CIFR's fresh stop ${w.sim.stopLog[0]!.at - t0} ms after the sync began`);
 });
 
-test("part A and C: a sale held by a cancel still landing (visible) keeps the old waits, is tried again at the next sync, alerts once, and posts one line when sold", async () => {
+test("part A and C: a sale held by a cancel still landing (visible) keeps the old waits, is tried again at the next sync, alerts once, and posts one line when sold (A4 fallback: Alpaca refuses the fresh stop, so the remainder is sold at market as before)", async () => {
   const w = world();
+  w.sim.refuseStops = true;
   w.sim.cancelMs = 40_000; // longer than the whole attempt
   await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
   const day = (await w.store.getDay(D))!;

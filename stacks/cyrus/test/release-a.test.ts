@@ -47,30 +47,32 @@ const MID = Date.UTC(2026, 10, 2, 15, 0); // 10:00 New York, in the session
 
 // ---------------- Fix 1: shares left with no stop after a partial take-profit ----------------
 
-test("fix 1, the CIFR case: the stop is cancelled at the take-profit's first partial fill, the take-profit is hidden from the open list; the remaining 7 shares are sold about 5 seconds later, with no oversell", async () => {
+const tpLeg = (w: { sim: SimBroker }, id: string) => w.sim.orders.find((o) => o.clientOrderId === id)!.legs.find((l) => l.type === "limit")!;
+
+test("fix 1, the CIFR case: the stop is cancelled at the take-profit's first partial fill, the take-profit is hidden from the open list; the remaining 7 shares are sold about 5 seconds later, with no oversell (A4 fallback: Alpaca refuses the fresh stop, so the remainder is sold at market as before)", async () => {
   const w = world(MID, { hide: true });
+  w.sim.refuseStops = true;
   await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
   const day = (await w.store.getDay(D))!;
   const id = await hold(w, "CIFR", 10, 7.27);
   w.sim.advance(10_000);
   w.sim.partialTakeProfit(id, 3, 7.28); // Alpaca paper cancels the stop here
   const cancelledAt = w.sim.simMs;
-  w.sim.advance(2_000);
-  const first = await syncOrders(w.risk, day, { protect: true });
-  assert.equal(w.sim.sellLog.length, 0, "inside the grace time: nothing sold yet");
-  assert.equal(first.recheckAt, cancelledAt + BARE_GRACE_MS, "the sync asks to look again exactly when the grace time ends");
-  w.sim.advanceTo(first.recheckAt!);
+  w.sim.advance(500);
+  // A4 of 2026-11-12: no grace any more (BARE_GRACE_MS is 0): the first sync acts at once.
+  assert.equal(BARE_GRACE_MS, 0);
   await syncOrders(w.risk, day, { protect: true });
+  assert.deepEqual(w.sim.stopLog.map((x) => x.symbol), [], "Alpaca refused the fresh stop");
   assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["CIFR", 7]]);
   const gap = w.sim.sellLog[0]!.at - cancelledAt;
-  assert.ok(gap >= BARE_GRACE_MS && gap < BARE_GRACE_MS + 2_000, `the sell went out ${gap} ms after the stop was cancelled`);
+  assert.ok(gap < 2_000, `the sell went out ${gap} ms after the stop was cancelled`);
   assert.equal(w.sim.oversellAttempts, 0);
   w.sim.advance(5_000);
   assert.equal(w.sim.heldQty("CIFR"), 0, "flat in CIFR");
   assert.ok(w.said.some((m) => m.ch === "alerts" && m.text.includes("CIFR: Alpaca cancelled its stop when the take-profit partly filled, so I sold the remaining 7 shares")));
 });
 
-test("fix 1 with Wednesday's slow cancel (11 seconds): the take-profit is cancelled first, then the remainder is sold, no oversell, no false alarm", async () => {
+test("fix 1 with Wednesday's slow cancel (11 seconds): the take-profit is cancelled first, then the remainder gets its fresh stop (A4), no sale, no oversell, no false alarm", async () => {
   const w = world(MID, { hide: true });
   w.sim.cancelMs = 11_000;
   await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
@@ -79,25 +81,30 @@ test("fix 1 with Wednesday's slow cancel (11 seconds): the take-profit is cancel
   w.sim.partialTakeProfit(id, 3, 7.28);
   w.sim.advance(6_000);
   await syncOrders(w.risk, day, { protect: true });
-  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["CIFR", 7]]);
+  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), []);
+  assert.deepEqual(w.sim.stopLog.map((x) => [x.symbol, x.qty, x.stopPrice]), [["CIFR", 7, 7.21]], "a fresh stop for the 7 shares left, at the bracket's own stop price");
   assert.equal(w.sim.oversellAttempts, 0);
   assert.ok(!w.said.some((m) => m.text.includes("COULD NOT SELL")), "no false could-not-sell alarm");
 });
 
-test("fix 1: a take-profit that finishes inside the grace time is left alone (the usual case: 604 of 655 on Wednesday)", async () => {
+// A4 of 2026-11-12 (Michael's approval): the grace is gone, so a take-profit that would have finished on its own is cancelled at once and
+// the share left gets a fresh stop (the proposal: "It cancels the take-profits that would have finished on their own").
+test("A4: a take-profit that would have finished on its own is no longer waited for: its rest is cancelled at once and the share left gets a fresh stop", async () => {
   const w = world(MID, { hide: true });
   await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
   const day = (await w.store.getDay(D))!;
   const id = await hold(w, "CMG", 2, 34.75);
   w.sim.partialTakeProfit(id, 1, 34.76);
-  w.sim.advance(2_000);
+  w.sim.advance(500);
   await syncOrders(w.risk, day, { protect: true });
-  w.sim.partialTakeProfit(id, 1, 34.76); // the rest fills at 3 seconds
+  assert.equal(w.sim.sellLog.length, 0);
+  assert.deepEqual(w.sim.stopLog.map((x) => [x.symbol, x.qty]), [["CMG", 1]]);
+  assert.equal(tpLeg(w, id).status, "canceled", "the take-profit's rest was cancelled");
   w.sim.advance(5_000);
   const r = await syncOrders(w.risk, day, { protect: true });
-  assert.equal(w.sim.sellLog.length, 0);
-  assert.equal(r.recheckAt, undefined);
-  assert.ok((await w.store.listOrders(D))[0]!.closedAt, "closed by its own take-profit");
+  assert.equal(w.sim.sellLog.length, 0, "the fresh stop protects it: nothing is sold");
+  assert.equal(w.sim.stopLog.length, 1, "and no second stop");
+  assert.equal(r.unprotected.length, 0);
 });
 
 test("fix 1: Alpaca's documented behaviour (the stop resized and still live after a partial take-profit) is not touched", async () => {
@@ -137,7 +144,7 @@ test("normal behaviour unchanged: an entry with no live exit at all is still sol
   assert.ok(w.said.some((m) => m.text.includes("AAA had no live protective stop, so I sold it")));
 });
 
-test("fix 1, worker level: a bare remainder found by a sync before its grace is over is sold by a timer at the grace time (3 seconds since the speed release), not at the next sync", async () => {
+test("A4, worker level: a remainder found by a regular sync gets its fresh stop at once (no grace, no timer), and nothing is sold", async () => {
   const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
   sim.hideFilledParents = true;
   const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim });
@@ -153,14 +160,11 @@ test("fix 1, worker level: a bare remainder found by a sync before its grace is 
   await r.at("15:00:00"); // a regular sync: nothing wrong yet
   sim.advanceTo(z("15:00:28").getTime());
   sim.partialTakeProfit(id, 3, 7.28);
-  await r.at("15:00:30"); // the regular sync sees it 2 seconds old: not yet
-  for (let i = 0; i < 5; i++) await settle();
+  await r.at("15:00:30"); // the regular sync sees it 2 seconds old: acted on at once
+  for (let i = 0; i < 10 && sim.stopLog.length === 0; i++) await settle();
   assert.equal(sim.sellLog.length, 0);
-  assert.ok(r.timers().some((t) => t >= z("15:00:31").getTime() && t <= z("15:00:31.5").getTime()), "a timer at the grace time (the cancel plus 3 seconds, plus a quarter second for the clocks)");
-  r.setNow("15:00:32"); // the timer fires; no pass runs (the next 5 second pass would be 15:00:35)
-  for (let i = 0; i < 10 && sim.sellLog.length === 0; i++) await settle();
-  assert.deepEqual(sim.sellLog.map((x) => [x.symbol, x.qty]), [["CIFR", 7]]);
-  assert.ok(sim.sellLog[0]!.at < z("15:00:33").getTime(), "sold within about 4 seconds of the stop's cancel, not at the next sync");
+  assert.deepEqual(sim.stopLog.map((x) => [x.symbol, x.qty, x.stopPrice]), [["CIFR", 7, 7.21]]);
+  assert.ok(sim.stopLog[0]!.at < z("15:00:31.5").getTime(), "the fresh stop within about 3.5 seconds of the stop's cancel (2 of them before this sync)");
 });
 
 // ---------------- Fix 2: no NOT FLAT while the close-out's own sells are working ----------------

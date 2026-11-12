@@ -61,6 +61,14 @@ export class SimBroker implements FullBroker {
   }
   private cancels: Pending[] = [];
   private sellFills: Array<{ id: string; at: number }> = [];
+  // A4: fresh stops placed, and whether Alpaca refuses them.
+  readonly stopLog: Array<{ symbol: string; qty: number; stopPrice: number; at: number; clientOrderId: string }> = [];
+  refuseStops = false;
+  // A4: the price fell to a resting stop sell of this symbol: it fills now.
+  triggerStop(symbol: string): void {
+    const o = this.orders.find((x) => x.symbol === symbol && x.side === "sell" && x.type === "stop" && OPEN.has(x.status) && x.status !== "pending_cancel");
+    if (o) this.fillSell(o.id);
+  }
 
 
   // ---- simulated time ----
@@ -350,6 +358,15 @@ export class SimBroker implements FullBroker {
     if (s.qty > free + 1e-9) {
       this.oversellAttempts++;
       throw new AlpacaError(`insufficient qty available for order (requested: ${s.qty}, available: ${Math.max(0, free)})`, 403);
+    }
+    // A4 of 2026-11-12: a stop sell rests at Alpaca (it holds the shares) until `triggerStop` fills it. `refuseStops` makes Alpaca refuse
+    // it outright, as it does when the price is already below the stop price.
+    if (s.stopPrice !== undefined) {
+      if (this.refuseStops) throw new AlpacaError("stop price must be below the current price (test)", 422);
+      const st = order({ id: this.id(), clientOrderId: s.clientOrderId, symbol: s.symbol, side: "sell", qty: s.qty, status: "accepted", type: "stop", stopPrice: s.stopPrice, orderClass: "", createdAt: new Date(this.simMs + this.n).toISOString() });
+      this.orders.push(st);
+      this.stopLog.push({ symbol: s.symbol, qty: s.qty, stopPrice: s.stopPrice, at: this.simMs, clientOrderId: s.clientOrderId });
+      return structuredClone(st);
     }
     const o = order({ id: this.id(), clientOrderId: s.clientOrderId, symbol: s.symbol, side: "sell", qty: s.qty, status: "accepted", type: "market", orderClass: "", createdAt: new Date(this.simMs + this.n).toISOString() });
     this.orders.push(o);

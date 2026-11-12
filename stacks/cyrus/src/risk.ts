@@ -35,6 +35,8 @@ export interface RiskDeps {
   // Logging only (Michael's approval of 2026-11-10): what the worker knows about a symbol when a sale is noticed late (when the live
   // update reported the stop's cancel, the timed sync it set, syncs put off because one was running). Must not throw.
   lateNoticeContext?: (symbol: string) => Record<string, unknown>;
+  // A4 (counting only): told about each fresh stop placed for a remainder, for the summary's stop-gap line. Must not throw.
+  onFreshStop?: (x: { symbol: string; shares: number }) => void;
 }
 
 // Logging only (Michael's approval of 2026-11-10): a shares-without-a-stop case noticed this long after Alpaca's cancel is logged as
@@ -59,7 +61,13 @@ export interface AwaitingFill {
 // The speed release (Michael's decision 3, 2026-11-05): 3 seconds, counted from Alpaca's cancel. The live update of the stop's cancel
 // brings the next sync forward to that moment (worker.ts); the 10 second sync stays the backstop. On 2026-11-05, of 1,100 such
 // cancels the take-profit finished on its own within 3 seconds in 827.
-export const BARE_GRACE_MS = 3_000;
+// A4 of the proposal of 2026-11-12 (Michael's approval): at once. The take-profit's rest is cancelled and a fresh stop placed for the
+// shares left as soon as the stop's cancel is seen (the take-profits that would have finished on their own, about two thirds, are given
+// up for that; the remainder ends at its fresh stop or the close-out).
+export const BARE_GRACE_MS = 0;
+// A5: how long the fast sale of a lost-exit entry waits for Alpaca's own cancel of its exits to free the share (this morning's cancels
+// landed 0.05 to 1.06 seconds after the fill); if the share is still held by its exits after that, Alpaca kept them and nothing is sold.
+export const FAST_LOST_EXIT_WAIT_MS = 2_500;
 // Release A, fix 4: at most this many entries missing from Alpaca's listing are looked up by id in one sync, and an id Alpaca
 // does not know is not asked again for this long.
 export const MISSING_LOOKUPS_PER_SYNC = 10;
@@ -127,6 +135,49 @@ export class SyncMemory {
   readonly awaitingFill = new Map<string, AwaitingFill>();
   // Entries already logged as `late_notice` (once per entry: a stuck entry's retries are not new late notices).
   readonly lateLogged = new Set<string>();
+  // A4 of the proposal of 2026-11-12: entries (client ids) whose remainder is protected by a fresh stop the stack placed.
+  readonly freshStops = new Map<string, FreshStop>();
+}
+
+// A4 of the proposal of 2026-11-12 (Michael's approval): after a partial take-profit, Alpaca cancels the bracket's stop on the first share
+// sold (436 of 436 cases this week). The stack then cancels the take-profit's rest at once and places a fresh stop sell for the shares
+// left, at the bracket's own stop price. The remainder ends at that stop or at the next close-out (Michael's option a): no new take-profit.
+export interface FreshStop {
+  symbol: string;
+  entryClientOrderId: string;
+  stopClientOrderId: string;
+  orderId: string | null;
+  qty: number;
+  stopPrice: number;
+  placedAt: number;
+  // Alpaca's last known status of the fresh stop ("unclear" while its first answer was unclear and it has not been looked up yet).
+  status: string;
+  lookedAt: number;
+}
+// The fresh stop's status comes from the sync's own order list when it is there (any sell working on the symbol already keeps the
+// missing-exit check away), else from the live order updates; this often it is also looked up by its client id (one request), and at
+// every such sync while the live updates are down or its first answer was unclear.
+export const FRESH_STOP_LOOKUP_MS = 30_000;
+
+// True while the fresh stop can still protect its remainder. Its status is taken from the sync's own order list when it is there, else
+// from the live updates, else looked up. A failed look keeps what was known (an unclear stop counts as live, so no sale goes on top).
+async function freshStopLive(d: RiskDeps, f: FreshStop, listed: Order[], nowMs: number, streamLive: boolean): Promise<boolean> {
+  const inList = listed.find((x) => x.clientOrderId === f.stopClientOrderId);
+  if (inList) {
+    f.status = inList.status;
+    f.orderId = inList.id;
+    f.lookedAt = nowMs;
+  } else if (f.status === "unclear" || !streamLive || nowMs - f.lookedAt >= FRESH_STOP_LOOKUP_MS) {
+    try {
+      const x = await d.broker.findOrderByClientId(f.stopClientOrderId);
+      f.lookedAt = nowMs;
+      f.status = x ? x.status : "unknown_at_alpaca";
+      if (x) f.orderId = x.id;
+    } catch (err) {
+      d.log?.("fresh_stop_lookup_failed", { symbol: f.symbol, error: (err as Error).message.slice(0, 120) });
+    }
+  }
+  return OPEN_STATUSES.has(f.status) || f.status === "unclear";
 }
 
 // Michael's choice of 2026-11-09: the earliest moment a short retry fits the allowance (now if it fits), and charge it if it does.
@@ -209,6 +260,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   for (const id of [...mem.oldLookedAt.keys()]) if (!activeIds.has(id)) mem.oldLookedAt.delete(id);
   for (const id of [...mem.mustLook]) if (!activeIds.has(id)) mem.mustLook.delete(id);
   for (const id of [...mem.lateLogged]) if (!activeIds.has(id)) mem.lateLogged.delete(id);
+  for (const id of [...mem.freshStops.keys()]) if (!activeIds.has(id)) mem.freshStops.delete(id);
   for (const id of [...mem.stuck.keys()]) if (!activeIds.has(id)) await resolveStuck(d, mem, id, "no longer held");
   const midnight = etInstant(day.tradeDate, "00:00").getTime();
   const nowMs = d.now().getTime();
@@ -347,6 +399,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       await d.store.updateOrder(s.clientOrderId, { closedAt: d.now().toISOString() });
       mem.bareSeen.delete(s.clientOrderId);
       mem.lastSeen.delete(s.clientOrderId);
+      mem.freshStops.delete(s.clientOrderId);
       await resolveStuck(d, mem, s.clientOrderId, "no longer held");
       continue;
     }
@@ -354,6 +407,14 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     // Group 1 review, round 1 (messaging): an entry reported stuck that is no longer the newest on its symbol gets its resolution line.
     if (latestPerSymbol.get(s.symbol)?.clientOrderId !== s.clientOrderId) await resolveStuck(d, mem, s.clientOrderId, `a newer ${s.symbol} position took over, and I watch that one now`);
     if (!protectNow || latestPerSymbol.get(s.symbol)?.clientOrderId !== s.clientOrderId || sellingSymbols.has(s.symbol)) continue;
+    // A4: a remainder protected by its fresh stop is left alone while that stop can still execute. Once the stop is gone (cancelled,
+    // expired or rejected by anyone but our own sale) and the shares are still held, the missing-exit check below sells them, as before.
+    const fresh = mem.freshStops.get(s.clientOrderId);
+    if (fresh) {
+      if (held.has(s.symbol) && (await freshStopLive(d, fresh, listed.orders, nowMs, opts.streamLive === true))) continue;
+      mem.freshStops.delete(s.clientOrderId);
+      if (held.has(s.symbol)) d.log?.("fresh_stop_gone", { symbol: s.symbol, clientOrderId: s.clientOrderId, status: fresh.status });
+    }
     if (!hasLiveExit(o)) {
       const due = retryDue(mem, s.clientOrderId, d.now().getTime());
       if (due !== null) {
@@ -411,7 +472,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
         /* a measurement must never break the sync */
       }
     };
-    const c = await timedCleanup(d, day, mem, s, o, "bare", onSellSent);
+    const c = await timedCleanup(d, day, mem, s, o, "bare", onSellSent, { stopPrice: bare.stop.stopPrice ?? s.stopPrice, stopCancelledAt: cancelTime });
     if (c.attempted) unprotected.push(s.symbol);
     if (c.recheckAt !== undefined) recheckAt = recheckAt === undefined ? c.recheckAt : Math.min(recheckAt, c.recheckAt);
     if (!c.stuck) mem.bareSeen.delete(s.clientOrderId);
@@ -488,7 +549,10 @@ async function resolveStuck(d: RiskDeps, mem: SyncMemory, clientOrderId: string,
 // - Part A, step 1: a round that finds the shares held with no open order visible ends the attempt; it is retried after 5, 10, 20, then
 //   every 30 seconds.
 // - Part C and part A, step 4: one alert when first stuck, one after 5 minutes stuck, one line when it resolves.
-async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, listedCopy: Order, kind: "missing" | "bare", onSellSent?: (x: { symbol: string; qty: number; clientOrderId: string; atMs: number }) => void): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }> {
+// A4: `extra.stopPrice` (a "bare" remainder): a fresh stop at that price instead of the market sale (sells.ts protectWithStop).
+// A5: `extra.fast` (a "missing" entry that filled as the stack's 5 second cancel reached Alpaca): sold at once, without waiting for
+// Alpaca's cancel of its exits to show; the sale waits in sells.ts until that cancel frees the share, and nothing happens if Alpaca kept them.
+async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, listedCopy: Order, kind: "missing" | "bare", onSellSent?: (x: { symbol: string; qty: number; clientOrderId: string; atMs: number }) => void, extra: { stopPrice?: number | null; stopCancelledAt?: string | null; fast?: { fillAtMs: number } } = {}): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }> {
   let o = listedCopy;
   try {
     const fresh = await d.broker.findOrderByClientId(s.clientOrderId);
@@ -498,23 +562,67 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     d.log?.("cleanup_lookup_failed", { symbol: s.symbol, clientOrderId: s.clientOrderId, kind, error: (err as Error).message.slice(0, 120) });
   }
   const ownShares = o.filledQty - exitFilledQty(o);
-  const stillNeeded = kind === "missing" ? !hasLiveExit(o) : bareRemainder(o) !== null;
+  // A5: at the moment the entry's fill arrives, Alpaca has not cancelled its exits yet, so they still look live: the sale goes ahead and
+  // waits for that cancel in sells.ts (if Alpaca keeps the exits, nothing is sold).
+  const stillNeeded = extra.fast ? true : kind === "missing" ? !hasLiveExit(o) : bareRemainder(o) !== null;
   if (!(ownShares > EPS_QTY) || !stillNeeded) {
     d.log?.("cleanup_skipped", { symbol: s.symbol, clientOrderId: s.clientOrderId, kind, ownShares, liveExit: hasLiveExit(o) });
     await resolveStuck(d, mem, s.clientOrderId, ownShares > EPS_QTY ? "it has a live exit again" : "its own exit orders sold the shares");
     return { attempted: false, stuck: false };
   }
-  const cancelIds = flattenLegs(o).filter((l) => l.side === "sell" && OPEN_STATUSES.has(l.status)).map((l) => l.id);
+  // A5: nothing is cancelled by the fast sale (the exits are Alpaca's to cancel, or to keep).
+  const cancelIds = extra.fast ? [] : flattenLegs(o).filter((l) => l.side === "sell" && OPEN_STATUSES.has(l.status)).map((l) => l.id);
   const reason = kind === "missing" ? "no live protective stop" : "stop cancelled after a partial take-profit";
   // Fix C of 2026-11-10: the client ids of this entry's sales, for the closing line when a sale is not seen filled yet.
   const saleIds: string[] = [];
+  let firstSaleAt: number | null = null;
   const sent = (x: { symbol: string; qty: number; clientOrderId: string; atMs: number }) => {
-    if (x.symbol === s.symbol) saleIds.push(x.clientOrderId);
+    if (x.symbol === s.symbol) {
+      saleIds.push(x.clientOrderId);
+      firstSaleAt ??= x.atMs;
+    }
     onSellSent?.(x);
   };
-  const r = await d.liquidator.flatten({ reason, tradeDate: day.tradeDate, only: [s.symbol], maxRounds: 3, cancelIds, yieldToPriority: true, ownEntryOnly: { maxQty: { [s.symbol]: ownShares } }, endWhenHiddenHold: true, onSellSent: sent });
+  const protectAt = kind === "bare" && extra.stopPrice != null && extra.stopPrice > 0 ? extra.stopPrice : null;
+  const r = await d.liquidator.flatten({
+    reason,
+    tradeDate: day.tradeDate,
+    only: [s.symbol],
+    maxRounds: extra.fast ? 1 : 3,
+    cancelIds,
+    yieldToPriority: true,
+    ownEntryOnly: { maxQty: { [s.symbol]: ownShares } },
+    endWhenHiddenHold: !extra.fast,
+    onSellSent: sent,
+    ...(protectAt !== null ? { protectWithStop: { [s.symbol]: protectAt } } : {}),
+    ...(extra.fast ? { waitForAlpacaCancel: true, waitCancelMs: FAST_LOST_EXIT_WAIT_MS } : {}),
+  });
   const soldQty = r.sold.filter((x) => x.symbol === s.symbol).reduce((n, x) => n + x.qty, 0);
   const now = d.now().getTime();
+  // A4: the remainder now has a fresh stop. Nothing is sold; the entry stays open until the stop fills or the close-out sells it.
+  if (r.freshStop && r.freshStop.symbol === s.symbol) {
+    const f = r.freshStop;
+    mem.freshStops.set(s.clientOrderId, { symbol: s.symbol, entryClientOrderId: s.clientOrderId, stopClientOrderId: f.clientOrderId, orderId: f.orderId, qty: f.qty, stopPrice: f.stopPrice, placedAt: now, status: "accepted", lookedAt: now });
+    const cancelled = extra.stopCancelledAt ? Date.parse(extra.stopCancelledAt) : NaN;
+    d.log?.("fresh_stop", { symbol: s.symbol, clientOrderId: s.clientOrderId, qty: f.qty, stopPrice: f.stopPrice, msFromStopCancel: Number.isFinite(cancelled) ? now - cancelled : null });
+    try {
+      d.onFreshStop?.({ symbol: s.symbol, shares: f.qty });
+    } catch {
+      /* a count must never break the sync */
+    }
+    await resolveStuck(d, mem, s.clientOrderId, "it has a fresh protective stop");
+    return { attempted: true, stuck: false };
+  }
+  if (r.freshStopUnclear && r.freshStopUnclear.symbol === s.symbol) {
+    const f = r.freshStopUnclear;
+    mem.freshStops.set(s.clientOrderId, { symbol: s.symbol, entryClientOrderId: s.clientOrderId, stopClientOrderId: f.clientOrderId, orderId: null, qty: f.qty, stopPrice: f.stopPrice, placedAt: now, status: "unclear", lookedAt: 0 });
+    return { attempted: true, stuck: false, recheckAt: now + 2_000 };
+  }
+  if (extra.fast && soldQty === 0 && r.exitsKept?.includes(s.symbol)) {
+    d.log?.("lost_exit_fast_skipped", { symbol: s.symbol, clientOrderId: s.clientOrderId, reason: "Alpaca kept the exits" });
+    return { attempted: false, stuck: false };
+  }
+  if (extra.fast && firstSaleAt !== null) d.log?.("lost_exit_fast", { symbol: s.symbol, clientOrderId: s.clientOrderId, msFromFill: firstSaleAt - extra.fast.fillAtMs });
   if (r.yielded && soldQty === 0) {
     d.log?.(kind === "missing" ? "unprotected_position_yielded" : "bare_remainder_yielded", { symbol: s.symbol });
     return { attempted: true, stuck: false };
@@ -873,4 +981,19 @@ export async function sweepEntriesWhileStopped(d: RiskDeps): Promise<number> {
     await d.say("commands", `The stop flag is on and ${n} unfilled entr${n === 1 ? "y" : "ies"} reached Alpaca late, so I cancelled ${n === 1 ? "it" : "them"}.`);
   }
   return n;
+}
+
+// A5 of the proposal of 2026-11-12 (Michael's approval): a load-window entry filled as the stack's 5 second cancel reached Alpaca. On
+// 2026-11-11 Alpaca then cancelled both exits in 24 of 24 such cases (0.05 to 1.06 s later), and five waited 10 to 17 s for the order sync.
+// The entry's share is sold at once through the checked sell path; the sale waits in sells.ts for Alpaca's cancel to free the share, and
+// sells nothing if Alpaca kept the exits. Never throws.
+export async function fastLostExitSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, fillAtMs: number): Promise<void> {
+  try {
+    const o = await d.broker.findOrderByClientId(s.clientOrderId);
+    if (!o || !(o.filledQty > 0) || o.side !== "buy") return;
+    if (exitFilledQty(o) > 1e-9) return; // an exit has sold shares: it was not a lost-exit case
+    await cleanupSale(d, day, mem, s, o, "missing", undefined, { fast: { fillAtMs } });
+  } catch (err) {
+    d.log?.("lost_exit_fast_failed", { symbol: s.symbol, error: (err as Error).message.slice(0, 120) });
+  }
 }

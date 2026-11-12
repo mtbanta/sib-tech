@@ -85,7 +85,8 @@ export class StopGapMeter {
 
   // Moves every sale whose 5 seconds are over and whose fill is known into the day's totals. Returns true when the totals changed.
   settle(nowMs: number): boolean {
-    let changed = false;
+    let changed = this.freshDirty;
+    this.freshDirty = false;
     const still: Watch[] = [];
     for (const w of this.watching) {
       const watched = nowMs >= w.atMs + STOP_GAP_WATCH_MS;
@@ -103,6 +104,15 @@ export class StopGapMeter {
     }
     this.watching = still;
     return changed;
+  }
+
+  // A4 of 2026-11-12: a remainder given a fresh stop at once instead of a sale (counted for the summary's line; nothing to measure).
+  private freshDirty = false;
+  onFreshStop(x: { shares: number }): void {
+    if (!(x.shares > 0)) return;
+    this.day.freshStops = (this.day.freshStops ?? 0) + 1;
+    this.day.freshStopShares = (this.day.freshStopShares ?? 0) + x.shares;
+    this.freshDirty = true;
   }
 
   private add(w: Watch, hit: boolean, dollars: number): void {

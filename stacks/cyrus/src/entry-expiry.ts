@@ -5,12 +5,17 @@
 // Safety:
 //   - only an entry the gate sent as a 1-share limit buy is ever scheduled here (a 1-share order cannot partly fill, so a cancel can
 //     never leave part of a position behind);
-//   - the cancel goes to the entry order itself. If Alpaca filled it in the meantime, Alpaca refuses the cancel ("already filled",
-//     treated as done by the client) and the position keeps both of its exits;
+//   - the cancel goes to the entry order itself. If Alpaca has already filled it, Alpaca may refuse the cancel ("already filled",
+//     treated as done by the client) and the position keeps both of its exits. But when the cancel reaches Alpaca as the entry fills,
+//     Alpaca fills the entry and still cancels both exits (0.05 to 1.06 seconds later): 24 of 24 such cases on 2026-11-11, and 3 on
+//     2026-11-09 (the earlier comment here said the exits were kept, which was wrong). A5 of 2026-11-12: the time each cancel was sent is
+//     kept, so a fill that arrives after it starts the fast sale at once (worker.ts, risk.ts fastLostExitSale);
 //   - an entry whose fill has already arrived on the live order updates is not cancelled at all;
 //   - nothing here sends an order or a sell, and the symbol is freed only by the live update of the cancel (order-stream.ts), or by
 //     the order sync, never by this timer.
 // Each cancel is one request to Alpaca (not an order: it does not count against the trades-a-minute ceiling).
+
+const CANCEL_SENT_KEEP = 20_000;
 
 export interface EntryExpiryDeps {
   cancelOrder: (alpacaOrderId: string) => Promise<void>;
@@ -18,6 +23,8 @@ export interface EntryExpiryDeps {
   wasFilled: (clientOrderId: string) => boolean;
   setTimer?: (fn: () => void, ms: number) => unknown;
   log?: (event: string, data?: Record<string, unknown>) => void;
+  // Milliseconds now (A5: when each cancel was sent). The tests use a simulated clock.
+  nowMs?: () => number;
 }
 
 export interface ExpiryCounts {
@@ -35,6 +42,8 @@ export class EntryExpiry {
   private readonly d: EntryExpiryDeps;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly pending = new Set<Promise<void>>();
+  // A5: when the cancel of each entry (client id) was sent, for the day (at most CANCEL_SENT_KEEP entries are kept).
+  private readonly cancelSent = new Map<string, number>();
 
   constructor(deps: EntryExpiryDeps) {
     this.d = deps;
@@ -58,6 +67,12 @@ export class EntryExpiry {
 
   resetDay(): void {
     this.counts = { scheduled: 0, cancelled: 0, filledFirst: 0, failed: 0 };
+    this.cancelSent.clear();
+  }
+
+  // A5: when this entry's cancel was sent (milliseconds), or undefined if it was never sent.
+  cancelSentAt(clientOrderId: string): number | undefined {
+    return this.cancelSent.get(clientOrderId);
   }
 
   private async expire(e: { clientOrderId: string; alpacaOrderId: string; symbol: string }): Promise<void> {
@@ -65,6 +80,8 @@ export class EntryExpiry {
       this.counts.filledFirst++;
       return;
     }
+    this.cancelSent.set(e.clientOrderId, (this.d.nowMs ?? Date.now)());
+    if (this.cancelSent.size > CANCEL_SENT_KEEP) this.cancelSent.delete(this.cancelSent.keys().next().value!);
     try {
       await this.d.cancelOrder(e.alpacaOrderId);
       this.counts.cancelled++;
