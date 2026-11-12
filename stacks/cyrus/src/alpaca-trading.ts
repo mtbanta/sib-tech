@@ -109,6 +109,9 @@ export interface SellOrder {
   symbol: string;
   qty: number;
   clientOrderId: string;
+  // A4 of the proposal of 2026-11-12 (Michael's approval): a plain stop sell at this price instead of a market sell. It protects a
+  // remainder after a partial take-profit; it fills only if the price falls to it.
+  stopPrice?: number;
 }
 
 // What the rate-limit headers on a response said. Alpaca counts the account, order and position calls in one
@@ -506,13 +509,15 @@ export class AlpacaTrading {
     if (!/^[A-Z.]{1,6}$/.test(sell.symbol)) throw new AlpacaError("Bad symbol", 0);
     if (!(sell.qty > 0) || !Number.isFinite(sell.qty)) throw new AlpacaError("Sell quantity must be positive", 0);
     if (!/^[\w.-]{8,128}$/.test(sell.clientOrderId)) throw new AlpacaError("Bad client order id", 0);
+    if (sell.stopPrice !== undefined && !(sell.stopPrice > 0 && Number.isFinite(sell.stopPrice))) throw new AlpacaError("Stop price must be positive", 0);
     const body: Json = {
       symbol: sell.symbol,
       qty: Number.isInteger(sell.qty) ? String(sell.qty) : String(Number(sell.qty.toFixed(9))),
       side: "sell",
-      type: "market",
+      type: sell.stopPrice !== undefined ? "stop" : "market",
       time_in_force: "day",
       client_order_id: sell.clientOrderId,
+      ...(sell.stopPrice !== undefined ? { stop_price: this.cents(sell.stopPrice) } : {}),
     };
     return this.postOrder(body, sell.clientOrderId, true);
   }

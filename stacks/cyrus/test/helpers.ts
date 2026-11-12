@@ -100,11 +100,19 @@ export class FakeBroker implements FullBroker {
     this.orders.push(o);
     return o;
   }
+  // A4 of 2026-11-12: a stop sell rests (it does not change the position); `refuseStops` makes Alpaca refuse it.
+  refuseStops = false;
   async submitSell(s: SellOrder) {
     this.rec("submitSell", s);
     await this.onSell?.(s);
     const held = this.positions.find((p) => p.symbol === s.symbol)?.qty ?? 0;
     if (s.qty > held + 1e-9) throw new AlpacaError("insufficient qty available for order", 403);
+    if (s.stopPrice !== undefined) {
+      if (this.refuseStops) throw new AlpacaError("stop price must be below the current price (test)", 422);
+      const st = order({ id: `00000000-0000-0000-0000-${String(++this.n).padStart(12, "0")}`, clientOrderId: s.clientOrderId, symbol: s.symbol, side: "sell", qty: s.qty, status: "accepted", filledQty: 0, filledAvgPrice: null, type: "stop", stopPrice: s.stopPrice, orderClass: "" });
+      this.orders.push(st);
+      return st;
+    }
     const o = order({ id: `00000000-0000-0000-0000-${String(++this.n).padStart(12, "0")}`, clientOrderId: s.clientOrderId, symbol: s.symbol, side: "sell", qty: s.qty, status: this.sellsStick ? "accepted" : "filled", filledQty: this.sellsStick ? 0 : s.qty, filledAvgPrice: this.sellsStick ? null : 100, type: "market", orderClass: "" });
     this.orders.push(o);
     if (!this.sellsStick) this.positions = this.positions.filter((p) => p.symbol !== s.symbol);

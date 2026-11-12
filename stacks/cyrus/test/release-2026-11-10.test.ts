@@ -74,8 +74,9 @@ async function remainderDay(w: World) {
 
 // ------------------------------------------------------------- A -------------------------------------------------------------------
 
-test("fix A, Tuesday's QXO case: 9 shares left without a stop, the take-profit fills 8 of them while its cancel lands; the 1 share left is sold at once, no alert to Michael, and the sale's line comes in the batch", async () => {
+test("fix A, Tuesday's QXO case: 9 shares left without a stop, the take-profit fills 8 of them while its cancel lands; the 1 share left is sold at once, no alert to Michael, and the sale's line comes in the batch (A4 fallback: Alpaca refuses the fresh stop, so the remainder is sold at market as before)", async () => {
   const w = world();
+  w.sim.refuseStops = true;
   const day = await remainderDay(w);
   const id = await hold(w, "QXO", 10, 13.5, 11);
   w.sim.advance(5_000);
@@ -114,8 +115,9 @@ test("fix A: the take-profit fills every share left while its cancel lands; noth
   assert.ok(!w.events.some((e) => e.event === "sale_blocked"));
 });
 
-test("fix A, the narrow case: the take-profit fills more just before the sale's first look at the holding; the share left is sold and it is not reported stuck", async () => {
+test("fix A, the narrow case: the take-profit fills more just before the sale's first look at the holding; the share left is sold and it is not reported stuck (A4 fallback: Alpaca refuses the fresh stop, so the remainder is sold at market as before)", async () => {
   const w = world();
+  w.sim.refuseStops = true;
   const day = await remainderDay(w);
   const id = await hold(w, "RRC", 9, 51.27, 4);
   w.sim.advance(5_000);
@@ -264,8 +266,9 @@ test("fix B keeps the early report: a sale of ours that Alpaca cancelled ends th
 
 // ------------------------------------------------------------- C -------------------------------------------------------------------
 
-test("fix C: a remainder sale Alpaca has not filled when the cleanup ends is reported once, and gets its closing line when it fills", async () => {
+test("fix C: a remainder sale Alpaca has not filled when the cleanup ends is reported once, and gets its closing line when it fills (A4 fallback: Alpaca refuses the fresh stop, so the remainder is sold at market as before)", async () => {
   const w = world();
+  w.sim.refuseStops = true;
   const day = await remainderDay(w);
   w.sim.sellFillDelayMs = 9_000; // longer than the cleanup's rounds
   const id = await hold(w, "ONON", 14, 34.8, 60);
@@ -365,8 +368,9 @@ test("group 2 review: a stuck remainder retried for a minute and a half gives at
   assert.ok(w.events.filter((e) => e.event === "late_notice").length <= 1, `${w.events.filter((e) => e.event === "late_notice").length} late notices`);
 });
 
-test("group 2 review: a 'not filled yet' sale that Alpaca ends unfilled gets no closing line and one stored drop", async () => {
+test("group 2 review: a 'not filled yet' sale that Alpaca ends unfilled gets no closing line and one stored drop (A4 fallback: Alpaca refuses the fresh stop, so the remainder is sold at market as before)", async () => {
   const w = world();
+  w.sim.refuseStops = true;
   const day = await remainderDay(w);
   w.sim.sellFillDelayMs = 60_000;
   const id = await hold(w, "ONON", 14, 34.8, 61);
@@ -387,8 +391,9 @@ test("group 2 review: a 'not filled yet' sale that Alpaca ends unfilled gets no 
   assert.ok(shouldStoreEvent("info", "awaiting_fill_dropped"), "stored in the run log");
 });
 
-test("group 2 review: a 'not filled yet' sale still unfilled after 2 minutes is dropped once, stored, and never gets a late line", async () => {
+test("group 2 review: a 'not filled yet' sale still unfilled after 2 minutes is dropped once, stored, and never gets a late line (A4 fallback: Alpaca refuses the fresh stop, so the remainder is sold at market as before)", async () => {
   const w = world();
+  w.sim.refuseStops = true;
   const day = await remainderDay(w);
   w.sim.sellFillDelayMs = 200_000;
   const id = await hold(w, "ONON", 14, 34.8, 62);

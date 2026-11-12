@@ -275,8 +275,9 @@ test("decision 3: the sell path reports each sale the moment Alpaca accepts it, 
   assert.equal(sent[0]!.atMs, sim.sellLog[0]!.at);
 });
 
-test("decision 3, sync: the remainder sale is handed to the meter at send time with its client id", async () => {
+test("decision 3, sync: the remainder sale is handed to the meter at send time with its client id (A4 fallback: Alpaca refuses the fresh stop, so the remainder is sold at market as before)", async () => {
   const sim = new SimBroker(Date.UTC(2026, 10, 2, 15, 0));
+  sim.refuseStops = true;
   sim.hideFilledParents = true;
   sim.sellFillDelayMs = 1_500;
   const store = new MemoryStore();
@@ -318,8 +319,9 @@ test("decision 3, meter: a fill is matched by the sale's client id (not the symb
   assert.equal(d.dollarsVsWaiting, -0.23);
 });
 
-test("decision 3, worker: a remainder sale with its fill on the live updates is measured (not 'not measured')", async () => {
+test("decision 3, worker: a remainder sale with its fill on the live updates is measured (not 'not measured') (A4 fallback: Alpaca refuses the fresh stop, so the remainder is sold at market as before)", async () => {
   const { sim, r } = await simDay();
+  sim.refuseStops = true;
   const id = clientOrderIdFor(D, "CIFR", 1);
   await sim.submitEntry({ symbol: "CIFR", qty: 10, stopPrice: 7.21, takeProfitPrice: 7.28, referencePrice: 7.27, clientOrderId: id });
   sim.fillEntry(id, 7.27);

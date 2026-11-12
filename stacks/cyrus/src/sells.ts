@@ -102,7 +102,9 @@ export class SellGate {
   // One sell at a time, for every path (close-out, flatten, loss stop, an unprotected position, a carried position).
   // The check is made against what the broker says NOW (never against a snapshot a caller built), minus the sells this
   // gate has sent since that read, and it is also kept below the shares Alpaca itself reports as free.
-  sell(req: { symbol: string; qty: number; clientOrderId: string; reason: string }): Promise<SellResult> {
+  // `stopPrice` (A4 of 2026-11-12): a stop sell instead of a market sell. The same check applies: it may not be larger than the shares
+  // held minus the sells already open.
+  sell(req: { symbol: string; qty: number; clientOrderId: string; reason: string; stopPrice?: number }): Promise<SellResult> {
     const run = this.chain.then(() => this.run(req));
     this.chain = run.catch(() => undefined);
     return run;
@@ -139,7 +141,7 @@ export class SellGate {
     return this.view;
   }
 
-  private async run(req: { symbol: string; qty: number; clientOrderId: string; reason: string }): Promise<SellResult> {
+  private async run(req: { symbol: string; qty: number; clientOrderId: string; reason: string; stopPrice?: number }): Promise<SellResult> {
     let v: { positions: Position[]; open: Order[] };
     try {
       v = await this.read();
@@ -162,7 +164,7 @@ export class SellGate {
       return { status: "refused", reason };
     }
     try {
-      const order = await this.d.broker.submitSell({ symbol: req.symbol, qty: req.qty, clientOrderId: req.clientOrderId });
+      const order = await this.d.broker.submitSell({ symbol: req.symbol, qty: req.qty, clientOrderId: req.clientOrderId, ...(req.stopPrice !== undefined ? { stopPrice: req.stopPrice } : {}) });
       this.sent.push({ symbol: req.symbol, qty: req.qty, at: this.nowMs() });
       return { status: "sent", order };
     } catch (err) {
@@ -205,6 +207,16 @@ export interface LiquidateOptions {
   // order visible (Alpaca reports fewer shares free than held, and no open sell explains it). Those symbols are returned in
   // `hiddenHold`, so the caller can retry them later without holding up its other work.
   endWhenHiddenHold?: boolean;
+  // A4 of the proposal of 2026-11-12 (Michael's approval), with `ownEntryOnly` only: instead of selling a symbol's remainder at market,
+  // place one stop sell for it at this price (per symbol), once every share of it is free, and end the liquidation there. Only when the
+  // entry's shares were the whole holding at the first look (with another position on the symbol, the remainder is sold at market, as
+  // before). If Alpaca refuses the stop outright (an answer in the 400s other than 429, for example the price is already below the stop
+  // price), the shares are sold at market in the same round, as before.
+  protectWithStop?: Record<string, number>;
+  // A5 of the proposal of 2026-11-12, with `ownEntryOnly` only: the entry filled as the stack's cancel reached Alpaca, and Alpaca cancels
+  // its exits itself. Nothing is cancelled here; the sale waits (up to `waitCancelMs`) for Alpaca's cancel to free the shares. If they
+  // never come free (Alpaca kept the exits), nothing is sold, no blocked sale is logged, and `exitsKept` lists the symbol.
+  waitForAlpacaCancel?: boolean;
 }
 
 // What a sale did and when (release A, fix 5: written to the close-out's run-log event).
@@ -235,6 +247,19 @@ export interface LiquidateResult {
   // are no longer held at the last look (every one of its shares is gone, whoever sold them).
   ownTarget?: Record<string, number>;
   ownGone?: string[];
+  // A4: the fresh stop placed (with `protectWithStop`), when one was.
+  freshStop?: { symbol: string; qty: number; stopPrice: number; clientOrderId: string; orderId: string };
+  // A4: Alpaca refused the fresh stop and the shares were sold at market instead (the reason Alpaca gave).
+  freshStopRefused?: string;
+  // A4: the fresh stop's answer was unclear (it may exist at Alpaca); nothing else was sent.
+  freshStopUnclear?: { symbol: string; qty: number; stopPrice: number; clientOrderId: string };
+  // A5: the symbols whose shares never came free because Alpaca kept the exits (nothing was sold for them).
+  exitsKept?: string[];
+  // A5, with `ownEntryOnly`: the symbols whose shares a sale of ours (cyrus-x-) already covers, so this cleanup had nothing to do.
+  coveredByOwnSale?: string[];
+  // A4 (group 1 review, round 1): the symbols whose shares a resting fresh stop of ours (cyrus-p-) holds, so nothing was sold: the
+  // position is protected. With the open fresh stop that covers them, so the caller can remember it.
+  heldByFreshStop?: Array<{ symbol: string; clientOrderId: string; orderId: string; qty: number; stopPrice: number | null; status: string }>;
 }
 
 // Shares that sells this stack sent (client id cyrus-x-) could still sell, for one symbol.
@@ -349,7 +374,8 @@ export class Liquidator {
     };
     // Part A, step 1: a cancel sent in this attempt explains a hold even when Alpaca's open list does not show the order (it has not
     // been seen to show a filled entry's exits), so a hold counts as unexplained only in an attempt that cancelled nothing.
-    let cancelledInAttempt = false;
+    // A5: Alpaca's own cancel of the exits is what the wait is for, so the attempt counts as having cancelled something.
+    let cancelledInAttempt = o.waitForAlpacaCancel === true;
     // Item 9: a pause that ends early at a live update for these symbols. Returns the time to count as waited: the full pause when it
     // ran out, the time that really passed when an update ended it (at most MAX_EARLY_WAKES times, then the full pause again).
     const pauseFor = async (symbols: ReadonlySet<string>, ms: number): Promise<number> => {
@@ -542,8 +568,65 @@ export class Liquidator {
           if (yieldNow()) return yielded();
           const cap = ownLeft(p.symbol, p.qty, openOrders);
           capThisRound.set(p.symbol, cap);
-          if (own && !(cap > EPS)) continue; // that entry's own shares are sold, or gone at its own exits (part B, fix A)
+          if (own && !(cap > EPS)) {
+            // A5 (group 1 review, round 1): a sale of ours already covers the entry's shares (the order sync's own missing-exit sale got
+            // there first): nothing to do, and not "stuck".
+            if (ownOpenSellQty(openOrders, p.symbol) > EPS) (result.coveredByOwnSale ??= []).push(p.symbol);
+            continue; // that entry's own shares are sold, or gone at its own exits (part B, fix A)
+          }
           const free = Math.min(p.qty - openSellQty(openOrders, p.symbol), p.qtyAvailable ?? Infinity, cap);
+          // A4 (group 1 review, rounds 1 and 2): a resting fresh stop of ours (cyrus-p-) holds the shares (for example after a restart, when
+          // the worker's memory of it is gone). It counts as protection only when it covers the symbol's WHOLE holding (it is placed only
+          // when its entry holds the whole symbol); then nothing is sold, nothing is cancelled, and it is not stuck. With another position
+          // on the symbol it protects only its own shares, and this sale goes on as before.
+          const freshHolding = own && !(free > EPS) ? openOrders.find((x) => x.symbol === p.symbol && x.side === "sell" && x.clientOrderId.startsWith("cyrus-p-") && OPEN_STATUSES.has(x.status) && x.status !== "pending_cancel" && remaining(x) >= p.qty - EPS) : undefined;
+          if (freshHolding) {
+            (result.heldByFreshStop ??= []).push({ symbol: p.symbol, clientOrderId: freshHolding.clientOrderId, orderId: freshHolding.id, qty: remaining(freshHolding), stopPrice: freshHolding.stopPrice, status: freshHolding.status });
+            continue;
+          }
+          if (o.waitForAlpacaCancel && own && !(free > EPS)) {
+            // A5: Alpaca kept the exits (it refused the cancel because the entry had filled): the position is protected, nothing to do.
+            (result.exitsKept ??= []).push(p.symbol);
+            continue;
+          }
+          const stopPrice = o.protectWithStop?.[p.symbol];
+          if (stopPrice !== undefined && own && soleHolder(p.symbol) && free > EPS && free < cap - EPS) {
+            // A4: only part of the remainder is free yet; a stop is placed only for all of it at once, so look again next round.
+            blocked++;
+            this.d.log?.("sale_blocked", { symbol: p.symbol, reason: o.reason, round, qty: p.qty, qtyAvailable: p.qtyAvailable ?? null, openSellQty: openSellQty(openOrders, p.symbol), openSells: openSellOrdersFor(openOrders, p.symbol).slice(0, 5), openListAgeMs: this.d.now().getTime() - openReadAt, waitedMs: waited, hiddenHold: false, freshStopWaitsFor: cap });
+            continue;
+          }
+          if (stopPrice !== undefined && own && soleHolder(p.symbol) && free > EPS) {
+            // Its own prefix (cyrus-p-, "protect"), not cyrus-x-: every whole-account sale (the close-outs, the loss stop and its retry, `flatten`)
+            // treats an open cyrus-x- sell as a sale of ours still working and leaves it alone, but must cancel a fresh stop like any exit.
+            const sid = `cyrus-p-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-s${round}`;
+            const st = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: sid, reason: `${o.reason}, as a fresh stop`, stopPrice });
+            if (st.status === "sent") {
+              result.freshStop = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, orderId: st.order.id };
+              steps.sells.push({ symbol: p.symbol, qty: free, at: stamp() });
+              try {
+                result.heldAfter = Object.fromEntries((await heldNow()).map((x) => [x.symbol, x.qty]));
+              } catch {
+                /* only for the record */
+              }
+              result.remaining = [p.symbol];
+              return done();
+            }
+            const definite = st.status === "error" && st.httpStatus !== undefined && st.httpStatus >= 400 && st.httpStatus < 500 && st.httpStatus !== 429;
+            if (!definite) {
+              // Unclear (a network error, a timeout, a 5xx) or refused by our own sell gate: the stop may exist, so no market sale on top
+              // of it; the next order sync looks again.
+              result.errors.push(`round ${round}: ${p.symbol}: fresh stop not confirmed: ${st.reason}`);
+              this.d.log?.("fresh_stop_unclear", { symbol: p.symbol, qty: free, stopPrice, reason: st.reason.slice(0, 160) });
+              result.freshStopUnclear = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid };
+              result.remaining = [p.symbol];
+              return done();
+            }
+            result.freshStopRefused = st.reason.slice(0, 160);
+            this.d.log?.("fresh_stop_refused", { symbol: p.symbol, qty: free, stopPrice, reason: st.reason.slice(0, 160), httpStatus: st.status === "error" ? (st.httpStatus ?? null) : null });
+            this.d.gate.invalidate();
+            // Falls through to the market sale below, as before A4.
+          }
           if (!(free > EPS)) {
             // Part A, step 1: held, not free, and no open order visible that would explain it.
             const hidden = !cancelledInAttempt && openSellQty(openOrders, p.symbol) <= EPS && p.qtyAvailable != null && p.qtyAvailable < p.qty - EPS;

@@ -59,7 +59,9 @@ export function loadExtraLines(x: NonNullable<SummaryInput["loadExtras"]>, windo
   ];
 }
 
-// The speed release (Michael's decision 3): what selling 3 seconds after Alpaca cancelled a stop did, against waiting 5 more seconds.
+// The speed release (Michael's decision 3): the remainders after a partial take-profit (Alpaca cancels the stop on the take-profit's first
+// share). Since A4 of 2026-11-12 each gets a fresh stop; one is sold at market only when Alpaca refuses that stop or another position
+// shares the symbol, and each such sale is valued against waiting 5 more seconds. (Lost-exit sales are not counted here.)
 export interface StopGapDay {
   sales: number;
   shares: number;
@@ -69,12 +71,26 @@ export interface StopGapDay {
   unmeasured: number;
   // Dollars the sales made against waiting 5 seconds (positive means selling at once did better).
   dollarsVsWaiting: number;
+  // A4 of 2026-11-12: remainders given a fresh stop instead of a sale, and their shares. Optional so older saved days still read.
+  freshStops?: number;
+  freshStopShares?: number;
 }
 
+// Group 2 review of 2026-11-12, rounds 1 and 2: the line names only what it counts, the fresh-stop step after a partial take-profit and that
+// step's own market sales (a remainder sold later by the missing-exit check, or after its fresh stop ended, is not counted here), so it
+// never claims "none" about remainders in general.
 export function stopGapLine(g: StopGapDay): string {
-  if (g.sales === 0) return "Shares left without a stop (sold after a 3 second wait from Alpaca's cancel of the stop): none today.";
-  const sign = g.dollarsVsWaiting >= 0 ? "+" : "-";
-  return `Shares left without a stop, sold after a 3 second wait from Alpaca's cancel of the stop: ${g.sales} sales, ${g.shares} shares; ${g.wouldHaveFilled} would have filled at their take-profit within the next 5 seconds; selling at once came out ${sign}${Math.abs(g.dollarsVsWaiting).toFixed(2)} dollars against waiting 5 seconds${g.unmeasured ? ` (${g.unmeasured} not measured)` : ""}. Estimate from the free feed's prints.`;
+  const n = (k: number, one: string, many = `${one}s`) => `${k} ${k === 1 ? one : many}`;
+  const fresh = g.freshStops ?? 0;
+  if (fresh === 0 && g.sales === 0) return "Fresh stops after a partial take-profit: none placed today, and no remainder sold at market at that step.";
+  const placed = fresh > 0 ? `${fresh} placed (${n(g.freshStopShares ?? 0, "share")})` : "none placed";
+  const sold = g.sales > 0 ? `${n(g.sales, "remainder")} sold at market at that step instead (${n(g.shares, "share")}; Alpaca refused the fresh stop, or another position shared the symbol)` : "no remainder sold at market at that step";
+  let line = `Fresh stops after a partial take-profit: ${placed}; ${sold}.`;
+  if (g.sales > 0) {
+    const sign = g.dollarsVsWaiting >= 0 ? "+" : "-";
+    line += ` Of the sales, ${g.wouldHaveFilled} would have filled at their take-profit within the next 5 seconds; selling came out ${sign}${Math.abs(g.dollarsVsWaiting).toFixed(2)} dollars against waiting 5 seconds${g.unmeasured ? ` (${g.unmeasured} not measured)` : ""}. Estimate from the free feed's prints.`;
+  }
+  return line;
 }
 
 const money = (x: number) => `${x >= 0 ? "+" : "-"}${Math.abs(x).toFixed(2)}`;

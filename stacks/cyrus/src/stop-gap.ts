@@ -1,7 +1,8 @@
-// MEASURING THE 3 SECOND STOP-GAP SALE (the speed release, Michael's decision 3 of 2026-11-05). When Alpaca cancels a bracket's stop
-// at a partial take-profit, the shares left are sold 3 seconds after the cancel (risk.ts). Michael asked to see, every day, how
-// many of those sold shares would have filled at their take-profit within the next 5 seconds, and the dollars gained or lost
-// against waiting.
+// MEASURING THE STOP-GAP SALE (the speed release, Michael's decision 3 of 2026-11-05). When Alpaca cancels a bracket's stop at a partial
+// take-profit, the shares left were sold 3 seconds after the cancel; since A4 of 2026-11-12 they get a fresh stop instead (counted by
+// `onFreshStop`), and are sold at market only when Alpaca refuses that stop or another position shares the symbol (risk.ts). Michael asked
+// to see, every day, how many of those sold shares would have filled at their take-profit within the next 5 seconds, and the dollars
+// gained or lost against waiting.
 //
 // For each such sale: the free feed's prints of that symbol in the 5 seconds after the sale was sent are watched, and the sale's own
 // fill price is taken from Alpaca's live order updates. Waiting 5 more seconds is valued at the take-profit price if a print reached
@@ -85,7 +86,8 @@ export class StopGapMeter {
 
   // Moves every sale whose 5 seconds are over and whose fill is known into the day's totals. Returns true when the totals changed.
   settle(nowMs: number): boolean {
-    let changed = false;
+    let changed = this.freshDirty;
+    this.freshDirty = false;
     const still: Watch[] = [];
     for (const w of this.watching) {
       const watched = nowMs >= w.atMs + STOP_GAP_WATCH_MS;
@@ -103,6 +105,15 @@ export class StopGapMeter {
     }
     this.watching = still;
     return changed;
+  }
+
+  // A4 of 2026-11-12: a remainder given a fresh stop instead of a sale (counted for the summary's line; nothing to measure).
+  private freshDirty = false;
+  onFreshStop(x: { shares: number }): void {
+    if (!(x.shares > 0)) return;
+    this.day.freshStops = (this.day.freshStops ?? 0) + 1;
+    this.day.freshStopShares = (this.day.freshStopShares ?? 0) + x.shares;
+    this.freshDirty = true;
   }
 
   private add(w: Watch, hit: boolean, dollars: number): void {

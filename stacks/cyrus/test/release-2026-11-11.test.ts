@@ -140,7 +140,7 @@ test("on a normal morning, `load afternoon` while flat and paused runs the cheap
   assert.match(reply!, /at most 75 dollars a position and up to 150 orders a minute \(your ruling, this window only\)/);
   assert.match(reply!, /Resumed: the mid-day pause is over/);
   assert.match(reply!, /the close-out runs as normal at 2:55 PM CT/);
-  assert.ok(r.said("trading").some((t) => t.startsWith("Live list switched for the afternoon load window (2 cheap")));
+  assert.ok(r.said("trading").some((t) => t.startsWith("Live list switched to 2 cheap, heavily traded names for the afternoon load window.")));
   r.ownerSays("load afternoon", "16:41:00");
   await r.at("16:41:05");
   assert.ok(r.said("commands").some((t) => t === "Not started: the afternoon load window is already on today."));
@@ -724,8 +724,9 @@ test("option B: in this release `load afternoon` is switched off unless the work
   void sim;
 });
 
-test("option B: main.ts builds the worker without `load afternoon`", async () => {
+test("release of 2026-11-12: main.ts switches `load afternoon` on, in exactly one line", async () => {
   const { readFileSync } = await import("node:fs");
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-  assert.ok(!/loadAfternoon\s*:/.test(main), "main.ts must not switch `load afternoon` on in this release");
+  assert.equal((main.match(/loadAfternoon\s*:/g) ?? []).length, 1, "one switch");
+  assert.match(main, /^\s*loadAfternoon: true,$/m, "main.ts switches `load afternoon` on in this release");
 });

@@ -71,6 +71,9 @@ const worker = new Worker({
   ping: (kind) => ping(settings.healthchecksPingUrl, kind),
   buildLiveList,
   selfMonitor: new SelfMonitor(),
+  // Michael's standing requirement of 2026-11-11: `load afternoon` (fixed in the release of 2026-11-12). This one line is the switch:
+  // false turns the command off again (it then answers that it is off and changes nothing).
+  loadAfternoon: true,
   makeStream: (symbols, onTrade) => {
     let status = "starting";
     const alerter = new FeedAlerter();

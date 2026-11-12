@@ -230,10 +230,10 @@ test("decision 3: the handler reports a stop cancelled while the take-profit had
   for (const u of [entry("WULF"), tp("WULF", 10, "fill"), stop("WULF")]) await h.handle(u);
   for (const u of [entry("IREN"), stop("IREN")]) await h.handle(u);
   assert.deepEqual(seen, ["CIFR"]);
-  assert.equal(BARE_GRACE_MS, 3_000);
+  assert.equal(BARE_GRACE_MS, 0, "A4 of 2026-11-12: at once (it was 3 seconds from the speed release until then)");
 });
 
-test("decision 3, worker: the live update of the stop's cancel runs the sync 3 seconds later by a timer, which sells the shares left without a stop", async () => {
+test("decision 3 and A4, worker: the live update of the stop's cancel runs the sync at once, which gives the shares left a fresh stop (no sale)", async () => {
   const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
   sim.hideFilledParents = true;
   const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, orderStream: true });
@@ -255,11 +255,11 @@ test("decision 3, worker: the live update of the stop's cancel runs the sync 3 s
   const sl = o.legs.find((l) => l.type === "stop")!;
   await r.orderUpdate(upd("partial_fill", { ...structuredClone(tp), groupId: o.groupId }, 7, sim.simMs));
   await r.orderUpdate(upd("canceled", { ...structuredClone(sl), groupId: o.groupId }, null, sim.simMs));
+  r.setNow("15:00:01.2"); // the timer is set for now: it fires at once; the next pass and the next 10 second sync are later
+  for (let i = 0; i < 20 && sim.stopLog.length === 0; i++) await settle();
   assert.equal(sim.sellLog.length, 0);
-  r.setNow("15:00:04.3"); // 3.3 seconds after the cancel: the timer has fired; the next pass and the next 10 second sync are later
-  for (let i = 0; i < 10 && sim.sellLog.length === 0; i++) await settle();
-  assert.deepEqual(sim.sellLog.map((x) => [x.symbol, x.qty]), [["CIFR", 7]]);
-  assert.ok(sim.sellLog[0]!.at < z("15:00:05").getTime(), "sold about 3 seconds after Alpaca cancelled the stop");
+  assert.deepEqual(sim.stopLog.map((x) => [x.symbol, x.qty, x.stopPrice]), [["CIFR", 7, 7.21]]);
+  assert.ok(sim.stopLog[0]!.at < z("15:00:02.5").getTime(), `the fresh stop at ${new Date(sim.stopLog[0]!.at).toISOString()}, about a second after Alpaca cancelled the stop`);
 });
 
 test("decision 3, measurement: each sale is valued against waiting 5 more seconds, from the free feed's prints and the sale's fill", async () => {
@@ -288,7 +288,8 @@ test("decision 3, measurement: each sale is valued against waiting 5 more second
   const { formatSummary } = await import("../src/summary.ts");
   const dayRec = { tradeDate: D, isTradingDay: true, openAt: z("14:30:00"), closeAt: z("21:00:00"), status: "approved", dayStartEquity: 20000, suggested: {}, limits: { maxPositionUsd: 500, dailyLossStopUsd: 500, maxTradesPerMinute: 100, borrowingCap: 1 }, decided: {}, liveList: [], phases: {} } as never;
   assert.ok(formatSummary({ day: dayRec, stored: [], refusals: [], alpacaOrders: [], account: { equity: 20000 } as never, peak: null, stop: null, flat: true, stopGap: m.saved() }).includes(stopGapLine(m.saved())), "the summary carries the line");
-  assert.ok(stopGapLine(m.saved()).includes("3 sales, 13 shares; 1 would have filled at their take-profit within the next 5 seconds; selling at once came out +0.02 dollars against waiting 5 seconds (1 not measured)"));
+  // Wording of the group 2 review of 2026-11-12 (the line names the remainders it counts).
+  assert.ok(stopGapLine(m.saved()).includes("3 remainders sold at market at that step instead (13 shares; Alpaca refused the fresh stop, or another position shared the symbol). Of the sales, 1 would have filled at their take-profit within the next 5 seconds; selling came out +0.02 dollars against waiting 5 seconds (1 not measured)"), stopGapLine(m.saved()));
 });
 
 // ------------------------------------------------ item 6: the loss stop's sale goes first --------------------------------------------
@@ -345,7 +346,7 @@ test("item 6: the daily loss stop's sale is marked priority, the order sync's on
   const risk = readFileSync(new URL("../src/risk.ts", import.meta.url), "utf8");
   assert.ok(/reason: "daily loss stop", tradeDate: day\.tradeDate, maxRounds: 1, priority: true/.test(risk));
   // Release 1 of 2026-11-09: both one-position sales (missing exit, remainder) go through one helper, whose sale gives way.
-  assert.equal((risk.match(/only: \[s\.symbol\], maxRounds: 3,[^)]*yieldToPriority: true/g) ?? []).length, 1);
+  assert.equal((risk.match(/only: \[s\.symbol\],\s*maxRounds: extra\.fast \? 1 : 3,[^)]*yieldToPriority: true/g) ?? []).length, 1);
   assert.equal((risk.match(/await timedCleanup\(d, day, mem, s, o, "(missing|bare)"/g) ?? []).length, 2); // 2026-11-10: timed for the late-notice log
 });
 
@@ -481,7 +482,7 @@ test("item 10: one statistics line a minute, all session, with the live updates,
 
 // ------------------------------------------------ group 1 review, round 1: regressions ---------------------------------------------
 
-test("review 1, finding 1: a stop cancelled on an entry older than the sync's 10 minute read is still sold about 3 seconds after the cancel", async () => {
+test("review 1, finding 1 (with A4): a stop cancelled on an entry older than the sync's 10 minute read still gets its fresh stop at once", async () => {
   const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
   sim.hideFilledParents = true;
   const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, orderStream: true });
@@ -504,10 +505,11 @@ test("review 1, finding 1: a stop cancelled on an entry older than the sync's 10
   const sl = o.legs.find((l) => l.type === "stop")!;
   await r.orderUpdate(upd("partial_fill", { ...structuredClone(tp), groupId: o.groupId }, 7, sim.simMs));
   await r.orderUpdate(upd("canceled", { ...structuredClone(sl), groupId: o.groupId }, null, sim.simMs));
-  r.setNow("15:00:04.3");
-  for (let i = 0; i < 10 && sim.sellLog.length === 0; i++) await settle();
-  assert.deepEqual(sim.sellLog.map((x) => [x.symbol, x.qty]), [["CIFR", 7]]);
-  assert.ok(sim.sellLog[0]!.at < z("15:00:05").getTime(), `sold at ${new Date(sim.sellLog[0]!.at).toISOString()}`);
+  r.setNow("15:00:01.2");
+  for (let i = 0; i < 20 && sim.stopLog.length === 0; i++) await settle();
+  assert.equal(sim.sellLog.length, 0);
+  assert.deepEqual(sim.stopLog.map((x) => [x.symbol, x.qty]), [["CIFR", 7]]);
+  assert.ok(sim.stopLog[0]!.at < z("15:00:02.5").getTime(), `the fresh stop at ${new Date(sim.stopLog[0]!.at).toISOString()}`);
 });
 
 test("review 1, finding 1: every open entry older than the 10 minute read is looked up at least every 30 seconds, however many there are", async () => {
@@ -575,7 +577,7 @@ test("review 1, finding 3: on a normal day a refused symbol still waits a minute
   assert.equal(entries(r).length, 2, "after a minute: tried again");
 });
 
-test("review 2: a regular sync inside the 3 second grace does not make an older entry wait 30 seconds; the grace-time sync looks it up again and sells", async () => {
+test("review 2 (with A4, no grace): a regular sync right after the cancel of an older entry's stop looks it up again and gives it a fresh stop at once", async () => {
   const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
   sim.hideFilledParents = true;
   const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, orderStream: true });
@@ -598,11 +600,9 @@ test("review 2: a regular sync inside the 3 second grace does not make an older 
   const sl = o.legs.find((l) => l.type === "stop")!;
   await r.orderUpdate(upd("partial_fill", { ...structuredClone(tp), groupId: o.groupId }, 7, sim.simMs));
   await r.orderUpdate(upd("canceled", { ...structuredClone(sl), groupId: o.groupId }, null, sim.simMs));
-  await r.at("15:00:10"); // the regular 10 second sync lands inside the grace
-  for (let i = 0; i < 10; i++) await settle();
-  assert.equal(sim.sellLog.length, 0, "nothing sold inside the grace");
-  r.setNow("15:00:12.3");
-  for (let i = 0; i < 20 && sim.sellLog.length === 0; i++) await settle();
-  assert.deepEqual(sim.sellLog.map((x) => [x.symbol, x.qty]), [["CIFR", 7]]);
-  assert.ok(sim.sellLog[0]!.at < z("15:00:13").getTime(), `sold at ${new Date(sim.sellLog[0]!.at).toISOString()}`);
+  await r.at("15:00:10"); // the regular 10 second sync, a second after the cancel
+  for (let i = 0; i < 20 && sim.stopLog.length === 0; i++) await settle();
+  assert.equal(sim.sellLog.length, 0);
+  assert.deepEqual(sim.stopLog.map((x) => [x.symbol, x.qty]), [["CIFR", 7]]);
+  assert.ok(sim.stopLog[0]!.at < z("15:00:11").getTime(), `the fresh stop at ${new Date(sim.stopLog[0]!.at).toISOString()}`);
 });

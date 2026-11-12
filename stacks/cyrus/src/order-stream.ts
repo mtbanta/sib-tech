@@ -196,6 +196,12 @@ export interface FreeDeps {
   // filled anything, so its shares have no exit at all. (On 2026-11-06 paper did this 6 times: the load window's 5 second cancel
   // reached Alpaca as the entry filled.) The worker runs the order sync at once; its missing-exit check sells the shares.
   onExitsLost?: (info: { clientOrderId: string; symbol: string; atMs: number }) => void;
+  // A4 of 2026-11-12: an update about a fresh stop the stack placed for a remainder (client id cyrus-p-): its status, so the order sync
+  // knows whether it still protects the shares.
+  onFreshStopUpdate?: (info: { clientOrderId: string; symbol: string; event: string; status: string; atMs: number }) => void;
+  // A5 of 2026-11-12: the first fill of an entry of ours arrived (Alpaca's time), so the worker can tell whether it filled after the
+  // load window's 5 second cancel was sent.
+  onEntryFill?: (info: { clientOrderId: string; symbol: string; filledQty: number; atMs: number }) => void;
   // The entry (Alpaca's parent order, with its fill) for a group id, from the order sync's latest view, if the stream has not seen it.
   entryForGroup?: (groupId: string) => Order | null;
   now: () => number;
@@ -287,7 +293,9 @@ export class OrderUpdateHandler {
       const ours = o.clientOrderId.startsWith("cyrus-") && !o.clientOrderId.startsWith("cyrus-x-");
       if (g && ours) this.entries.set(g, { clientOrderId: o.clientOrderId, symbol: o.symbol, filledQty: o.filledQty, filledAvgPrice: o.filledAvgPrice, final: o.status === "filled" });
       if (isFill) {
+        const first = ours && !this.filledIds.has(o.clientOrderId);
         if (ours) this.filledIds.add(o.clientOrderId);
+        if (first && o.filledQty > 0) this.d.onEntryFill?.({ clientOrderId: o.clientOrderId, symbol: o.symbol, filledQty: o.filledQty, atMs: u.atMs ?? this.d.now() });
         if (u.positionQty !== null) this.d.setPosition?.(o.symbol, u.positionQty, fillPrice);
         // Decision 1 of 2026-11-06: the entry's fill can arrive after both exits' cancels; check again now that it is known.
         if (ours && g && o.filledQty > 0) this.checkLostExits(g, o.symbol, u.atMs);
@@ -306,6 +314,7 @@ export class OrderUpdateHandler {
       return;
     }
     if (o.side !== "sell") return;
+    if (o.clientOrderId.startsWith("cyrus-p-")) this.d.onFreshStopUpdate?.({ clientOrderId: o.clientOrderId, symbol: o.symbol, event: u.event, status: o.status, atMs: u.atMs ?? this.d.now() });
     if ((u.event === "canceled" || u.event === "expired" || u.event === "rejected") && g) {
       const info = this.entry(g);
       if (info && info.filledQty > 0) this.d.onExitEnded?.(info.clientOrderId);
