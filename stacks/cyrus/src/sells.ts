@@ -248,11 +248,13 @@ export interface LiquidateResult {
   ownTarget?: Record<string, number>;
   ownGone?: string[];
   // A4: the fresh stop placed (with `protectWithStop`), when one was.
-  freshStop?: { symbol: string; qty: number; stopPrice: number; clientOrderId: string; orderId: string };
+  // `sentAtMs`: when the fresh stop was sent (Michael's ruling B of 2026-11-12: its time to confirm is stored, and an unclear one is
+  // timed from it).
+  freshStop?: { symbol: string; qty: number; stopPrice: number; clientOrderId: string; orderId: string; sentAtMs: number; answerMs: number };
   // A4: Alpaca refused the fresh stop and the shares were sold at market instead (the reason Alpaca gave).
   freshStopRefused?: string;
   // A4: the fresh stop's answer was unclear (it may exist at Alpaca); nothing else was sent.
-  freshStopUnclear?: { symbol: string; qty: number; stopPrice: number; clientOrderId: string };
+  freshStopUnclear?: { symbol: string; qty: number; stopPrice: number; clientOrderId: string; sentAtMs: number };
   // A5: the symbols whose shares never came free because Alpaca kept the exits (nothing was sold for them).
   exitsKept?: string[];
   // A5, with `ownEntryOnly`: the symbols whose shares a sale of ours (cyrus-x-) already covers, so this cleanup had nothing to do.
@@ -579,7 +581,8 @@ export class Liquidator {
           // the worker's memory of it is gone). It counts as protection only when it covers the symbol's WHOLE holding (it is placed only
           // when its entry holds the whole symbol); then nothing is sold, nothing is cancelled, and it is not stuck. With another position
           // on the symbol it protects only its own shares, and this sale goes on as before.
-          const freshHolding = own && !(free > EPS) ? openOrders.find((x) => x.symbol === p.symbol && x.side === "sell" && x.clientOrderId.startsWith("cyrus-p-") && OPEN_STATUSES.has(x.status) && x.status !== "pending_cancel" && remaining(x) >= p.qty - EPS) : undefined;
+          // Michael's ruling B of 2026-11-12: a fresh stop this sale is cancelling (named in `cancelIds`) never counts as protection.
+          const freshHolding = own && !(free > EPS) ? openOrders.find((x) => x.symbol === p.symbol && x.side === "sell" && x.clientOrderId.startsWith("cyrus-p-") && OPEN_STATUSES.has(x.status) && x.status !== "pending_cancel" && !cancelIds.includes(x.id) && remaining(x) >= p.qty - EPS) : undefined;
           if (freshHolding) {
             (result.heldByFreshStop ??= []).push({ symbol: p.symbol, clientOrderId: freshHolding.clientOrderId, orderId: freshHolding.id, qty: remaining(freshHolding), stopPrice: freshHolding.stopPrice, status: freshHolding.status });
             continue;
@@ -600,9 +603,10 @@ export class Liquidator {
             // Its own prefix (cyrus-p-, "protect"), not cyrus-x-: every whole-account sale (the close-outs, the loss stop and its retry, `flatten`)
             // treats an open cyrus-x- sell as a sale of ours still working and leaves it alone, but must cancel a fresh stop like any exit.
             const sid = `cyrus-p-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-s${round}`;
+            const sentAtMs = this.d.now().getTime();
             const st = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: sid, reason: `${o.reason}, as a fresh stop`, stopPrice });
             if (st.status === "sent") {
-              result.freshStop = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, orderId: st.order.id };
+              result.freshStop = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, orderId: st.order.id, sentAtMs, answerMs: this.d.now().getTime() - sentAtMs };
               steps.sells.push({ symbol: p.symbol, qty: free, at: stamp() });
               try {
                 result.heldAfter = Object.fromEntries((await heldNow()).map((x) => [x.symbol, x.qty]));
@@ -618,7 +622,7 @@ export class Liquidator {
               // of it; the next order sync looks again.
               result.errors.push(`round ${round}: ${p.symbol}: fresh stop not confirmed: ${st.reason}`);
               this.d.log?.("fresh_stop_unclear", { symbol: p.symbol, qty: free, stopPrice, reason: st.reason.slice(0, 160) });
-              result.freshStopUnclear = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid };
+              result.freshStopUnclear = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, sentAtMs };
               result.remaining = [p.symbol];
               return done();
             }

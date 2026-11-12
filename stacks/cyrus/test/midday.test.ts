@@ -19,7 +19,7 @@ import { parseCommand } from "../src/morning.ts";
 import { recordStart } from "../src/start-note.ts";
 import { FakeBroker, FakeBot } from "./helpers.ts";
 import type { Signal } from "../src/strategy.ts";
-import { MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MiddayBudget, blockedNext, deployRefusals, emptyPause, type DeployFacts, goRefusal, middayHoldKey, middayKey, middayTimes, readHold, readPause, retryAllowed, retrySymbols, startupAction, updatePause, type MiddayPause } from "../src/midday.ts";
+import { MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MiddayBudget, blockedNext, deployRefusals, deployRoute, emptyPause, type DeployFacts, goRefusal, middayHoldKey, middayKey, middayTimes, readHold, readPause, retryAllowed, retrySymbols, startupAction, updatePause, type MiddayPause } from "../src/midday.ts";
 
 const until = async (cond: () => boolean | Promise<boolean>, n = 400) => {
   for (let i = 0; i < n && !(await cond()); i++) await settle();
@@ -437,12 +437,33 @@ test("the deploy check refuses unless flat, paused, no positions or open orders,
   assert.deepEqual(deployRefusals(ok), []);
   const has = (o: Partial<DeployFacts>, text: string) => assert.ok(deployRefusals({ ...ok, ...o }).some((r) => r.includes(text)), `${text}: ${deployRefusals({ ...ok, ...o }).join("; ")}`);
   has({ day: { ...day, phases: {} } }, "has not finished flat");
-  has({ pause: { ...emptyPause(), on: false } }, "neither the mid-day pause nor the stop flag is on");
-  // Michael's ruling of 2026-11-12 (afternoon): flat with the stop flag on is as safe as the pause (after a `go`, then `stop`, `flatten`).
+  has({ pause: { ...emptyPause(), on: false } }, "mid-day pause route: the mid-day pause is not on");
+  has({ pause: { ...emptyPause(), on: false } }, "own stop route: the stop flag is not on");
+  // Michael's ruling D of 2026-11-12: flat with his own stop on, at any time of day; during market hours only with his written yes.
   const resumed = { ...emptyPause(), on: false, resumedAt: z("16:35:00").toISOString(), resumedBy: "go" };
-  assert.deepEqual(deployRefusals({ ...ok, pause: resumed, stop: { on: true, reason: "owner command (flatten)" } }), [], "the stop flag on stands in for the pause");
-  has({ pause: resumed, stop: { on: false, reason: "owner command (resume)" } }, "neither the mid-day pause nor the stop flag is on");
-  has({ pause: resumed, stop: { on: true, reason: "owner command (stop)" }, positions: 1 }, "1 position");
+  const own = { on: true, reason: "owner command (flatten)" };
+  const yes = "Michael in the session, 2:41 PM: yes, deploy e85039d now";
+  has({ pause: resumed, stop: own }, "own stop route: it is market hours: --michael-yes");
+  assert.deepEqual(deployRefusals({ ...ok, pause: resumed, stop: own, michaelYes: yes }), [], "market hours: his own stop plus his written yes");
+  has({ pause: resumed, stop: own, michaelYes: "yes" }, "--michael-yes", );
+  assert.equal(deployRoute({ ...ok, pause: resumed, stop: own, michaelYes: yes }), "own stop");
+  assert.equal(deployRoute(ok), "mid-day pause");
+  // No time-of-day conditions on the own stop route: before the mid-day close-out, after 1:30 PM, no mid-day flat, a half day.
+  for (const o of [{ now: z("15:00:00") }, { now: z("19:45:00") }, { day: { ...day, phases: {} } }, { day: { ...day, closeAt: z("16:35:00") } }]) {
+    assert.deepEqual(deployRefusals({ ...ok, pause: resumed, stop: own, michaelYes: yes, ...o }), [], JSON.stringify(o));
+  }
+  // Outside market hours (before the open, after the close, a day off) the own stop route needs no yes.
+  for (const t of ["13:00:00", "21:05:00"]) assert.deepEqual(deployRefusals({ ...ok, now: z(t), pause: resumed, stop: own }), [], t);
+  assert.deepEqual(deployRefusals({ ...ok, day: { ...day, isTradingDay: false }, pause: resumed, stop: own }), [], "a day off");
+  // Never the daily loss stop; never a stop that is off; the common conditions still hold.
+  has({ pause: resumed, stop: { on: true, reason: "daily loss stop: loss 510 dollars" }, michaelYes: yes }, "own stop route: the stop flag is the daily loss stop");
+  has({ pause: resumed, stop: { on: false, reason: "owner command (resume)" }, michaelYes: yes }, "own stop route: the stop flag is not on");
+  has({ pause: resumed, stop: own, michaelYes: yes, positions: 1 }, "1 position");
+  has({ pause: resumed, stop: own, michaelYes: yes, openOrders: 1 }, "1 open order");
+  has({ pause: resumed, stop: own, michaelYes: yes, reviewedCommit: "fff9999" }, "not the reviewed commit");
+  has({ pause: resumed, stop: own, michaelYes: yes, gitStatus: " M x\n" }, "git status is not clean");
+  // The mid-day pause route (2026-11-09) is unchanged: no yes needed.
+  assert.deepEqual(deployRefusals({ ...ok, stop: null }), []);
   has({ positions: 1 }, "1 position");
   has({ openOrders: 2 }, "2 open order");
   has({ now: z("19:30:00") }, "1:30 PM CT or later");

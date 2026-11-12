@@ -32,7 +32,9 @@ export interface CommandDeps {
   // minutes, and the main loop must keep reading commands). The worker calls finishAfternoonLoad in a later pass, after that pass has
   // read commands, so a `stop` or `go` sent meanwhile is seen first (group 1 review, round 1). False if one is already running.
   // Returns "finishing" when an earlier screen was cancelled and is still running (fix of 2026-11-12).
-  afternoonScreen?: (date: string) => boolean | "finishing";
+  // `route`: how the command was accepted, the mid-day pause ("pause") or Michael's own stop ("stop", ruling E of 2026-11-12). The
+  // screen switches the list, and the window starts, only while the same route still holds.
+  afternoonScreen?: (date: string, route: "pause" | "stop") => boolean | "finishing";
   // Michael's approval of 2026-11-11 (after round 2): a `stop`, `flatten` or `go` handled while that screen is running or done but not
   // yet decided cancels the pending window (what Michael can do next: screenCancelledLine). True if one was pending.
   cancelAfternoonScreen?: (date: string) => boolean | "switched";
@@ -137,7 +139,7 @@ function afternoonStatusLine(day: DayRecord, now: Date, pause: MiddayPause | nul
   return `Afternoon load window: ran from ${centralClock(w.start)} to ${centralClock(w.end)}; ${closeTxt}, ${state}`;
 }
 
-const LOAD_AFTERNOON_HELP = "`load afternoon` while flat, during the mid-day pause or (on a load day) after `stop` or `flatten`, which it clears, before 1:30 PM CT (or the last entry, if earlier): a load window of at most 30 minutes (1 share churn, 75 dollars a position, up to 150 orders a minute even above today's approved limit), then entries pause and a close-out sells to flat. On a normal morning the cheap-symbol screen runs first (a few minutes; `stop`, `flatten` or `go` meanwhile cancels it: after a `go` that resumes trading it cannot be started again today, after `stop` or `flatten` send `resume`, then `load afternoon`).";
+const LOAD_AFTERNOON_HELP = "`load afternoon` while flat, during the mid-day pause or after `stop` or `flatten`, which it clears, before 1:30 PM CT (or the last entry, if earlier): a load window of at most 30 minutes (1 share churn, 75 dollars a position, up to 150 orders a minute even above today's approved limit), then entries pause and a close-out sells to flat. On a normal morning the cheap-symbol screen runs first (a few minutes; `stop`, `flatten` or `go` meanwhile cancels it: after a `go` that resumes trading it cannot be started again today, after `stop` or `flatten` send `resume`, then `load afternoon`).";
 const LOAD_AFTERNOON_OFF_HELP = "`load afternoon` is switched off in this release while a fix to it is finished; it changes nothing.";
 export const LOAD_AFTERNOON_OFF = "`load afternoon` is switched off in this release while a fix to it is finished, so nothing changed. `go` still resumes a normal afternoon.";
 
@@ -413,18 +415,6 @@ export class CommandProcessor {
           await this.say(`Not started: ${why}.`);
           return;
         }
-        // Michael's ruling of 2026-11-12 (afternoon) covers a stop on a load day: the cheap list is already live. On a normal morning
-        // the screen switches the list only while paused with no stop, so this release refuses there.
-        if (plainStop(facts.stop) && !isLoadDay(facts.day)) {
-          // Group 2, round 2: the next step depends on whether the mid-day pause is still on (after `go` or a deploy it is over, and
-          // then `resume` restarts normal trading at once and the window can no longer start today).
-          await this.say(
-            facts.pause?.on
-              ? "Not started: with the stop flag on, `load afternoon` works in this release only on a load day (its cheap list is already live). Send `resume`, then `load afternoon` again (or `go` for a normal afternoon)."
-              : "Not started: with the stop flag on, `load afternoon` works in this release only on a load day, and trading already resumed after the mid-day pause today, so the window cannot start today. `resume` returns to normal trading at once.",
-          );
-          return;
-        }
         // A load day already has the cheap list live: the window starts now (the facts above were just read, Alpaca included).
         if (isLoadDay(facts.day)) {
           await this.startAfternoonWindow(date, { switched: false, list: facts.day!.liveList ?? [] }, facts, now);
@@ -434,12 +424,15 @@ export class CommandProcessor {
           await this.say("Not started: this part of the stack cannot switch the live list.");
           return;
         }
-        const started = this.d.afternoonScreen(date);
+        const started = this.d.afternoonScreen(date, plainStop(facts.stop) ? "stop" : "pause");
         await this.say(
           started === "finishing"
             ? SCREEN_STILL_FINISHING
             : started
-              ? "Running the cheap-symbol screen for the afternoon load window now; it can take a few minutes. When it is done I check again that the account is flat and paused, then start the window and resume trading. `stop`, `flatten` or `go` before then cancels the window."
+              ? plainStop(facts.stop)
+                ? // Michael's ruling E (2026-11-12): on a normal morning with his own stop on, the screen runs while the stop keeps entries off.
+                  "Running the cheap-symbol screen for the afternoon load window now; it can take a few minutes. Your stop stays on meanwhile. When it is done I check again that the account is flat and the stop is still on, then clear the stop, start the window and resume trading. `stop`, `flatten` or `go` before then cancels the window; after a `resume` it does not start."
+                : "Running the cheap-symbol screen for the afternoon load window now; it can take a few minutes. When it is done I check again that the account is flat and paused, then start the window and resume trading. `stop`, `flatten` or `go` before then cancels the window."
               : "Not started yet: the cheap-symbol screen for the afternoon load window is already running.",
         );
         return;
@@ -695,14 +688,16 @@ export class CommandProcessor {
   // `load afternoon` on a normal morning, once the screen and the feed switch are done: called by the worker in a pass that has
   // already read commands since the screen finished. Every condition is read again (Alpaca included, fail closed) just before the
   // window starts.
-  async finishAfternoonLoad(date: string, r: { switched: boolean; list: string[] }): Promise<void> {
+  async finishAfternoonLoad(date: string, r: { switched: boolean; list: string[]; route?: "pause" | "stop" }): Promise<void> {
     // A second guard (group 1's quick review of option B): nothing here runs unless `load afternoon` is switched on.
     if (!this.d.loadAfternoonEnabled) return;
     const at = this.d.now();
     if (etDate(at) !== date) return;
     const facts = await this.afternoonFacts(date);
-    // Group 1, round 2 (non-blocking, made robust): the stop route is for a load day only, here as in the command.
-    const why = loadAfternoonRefusal({ ...facts, now: at }) ?? (plainStop(facts.stop) && !isLoadDay(facts.day) ? "the stop flag is on" : null);
+    // Michael's ruling E (2026-11-12): the stop route is accepted on a normal morning too, under the same conditions. A window whose
+    // command came in by the mid-day pause never starts with a stop that appeared since (a `stop` or `flatten` cancels the screen; any
+    // other stop, for example one set by hand, is never cleared here).
+    const why = loadAfternoonRefusal({ ...facts, now: at }) ?? ((r.route ?? "pause") === "pause" && facts.stop?.on ? "the stop flag is on" : null);
     if (why) {
       this.d.log?.("load_afternoon_refused", { date, why });
       const listNote = r.switched ? " The live list was switched to the cheap names while paused." : "";

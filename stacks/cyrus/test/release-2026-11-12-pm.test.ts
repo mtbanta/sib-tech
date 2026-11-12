@@ -238,19 +238,69 @@ test("group 2, round 1: with the stop on when the afternoon close-out finishes f
   assert.match(line!, /The stop flag is on/);
 });
 
-test("group 2, round 2: on a normal morning after `go`, then `flatten`, the stop refusal says the window cannot start today (no false next step)", async () => {
+test("ruling E: on a normal morning after `go`, then `flatten`, `load afternoon` clears the stop, runs the screen with the tradable check, switches to the cheap list and starts the 30 minute window", async () => {
   const { r } = await flatAtMidday();
   r.ownerSays("go", "16:35:00");
   await r.at("16:35:05");
   r.ownerSays("flatten", "16:38:00");
   await r.at("16:38:05");
   await r.at("16:38:30");
+  const screensBefore = r.screenOpts.filter((o: any) => o?.load).length;
   r.ownerSays("load afternoon", "16:40:00");
   await r.at("16:40:05");
-  const line = r.said("commands").find((t) => t.startsWith("Not started: with the stop flag on"));
+  assert.ok(r.said("commands").some((t) => t.startsWith("Running the cheap-symbol screen") && t.includes("Your stop stays on meanwhile")), r.said("commands").join(" | "));
+  assert.equal((await r.store.getControl<StopFlag>(CONTROL_STOP))!.on, true, "the stop holds while the screen runs");
+  await r.at("16:40:10");
+  assert.equal(r.screenOpts.filter((o: any) => o?.load).length, screensBefore + 1, "the cheap-symbol screen ran");
+  const line = r.said("commands").find((t) => t.startsWith("Afternoon load window on until"));
   assert.ok(line, r.said("commands").join(" | "));
-  assert.match(line!, /trading already resumed after the mid-day pause today, so the window cannot start today\. `resume` returns to normal trading at once\.$/);
-  assert.ok(!line!.includes("`load afternoon` again"));
+  assert.match(line!, /The live list is now \d+ cheap names/);
+  assert.match(line!, /Stop cleared: trading resumed\./);
+  assert.equal((await r.store.getControl<StopFlag>(CONTROL_STOP))!.on, false);
+  const day = (await r.store.getDay(D))!;
+  assert.ok(day.phases[LOAD_AFTERNOON_PHASE]);
+  assert.deepEqual(afternoonLoadWindow(day)!.end.getTime() - afternoonLoadWindow(day)!.start.getTime(), 30 * 60_000);
+});
+
+test("ruling E: a `resume` while the screen runs (stop route) means the window does not start and the live list is not switched", async () => {
+  const { r } = await flatAtMidday();
+  r.ownerSays("go", "16:35:00");
+  await r.at("16:35:05");
+  r.ownerSays("stop", "16:38:00");
+  await r.at("16:38:05");
+  const listBefore = (await r.store.getDay(D))!.liveList;
+  let release!: () => void;
+  const gate = new Promise<void>((res) => (release = res));
+  const orig = (r.worker as any).d.buildLiveList;
+  (r.worker as any).d.buildLiveList = async (o: any) => (await gate, orig(o));
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  r.ownerSays("resume", "16:40:30");
+  await r.at("16:40:35");
+  release();
+  await until(() => !r.worker["inflight"].has("afternoon-screen"));
+  await r.at("16:40:45");
+  assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], undefined, "no window");
+  assert.deepEqual((await r.store.getDay(D))!.liveList, listBefore, "the live list was not switched");
+  assert.ok(r.said("commands").some((t) => t.startsWith("Afternoon load window not started: the stop flag was cleared, so the live list was not changed.")), r.said("commands").join(" | "));
+});
+
+test("ruling E: a window accepted by the mid-day pause never starts, or clears a stop, when a stop appears by another way while its screen runs", async () => {
+  const { r } = await flatAtMidday();
+  let release!: () => void;
+  const gate = new Promise<void>((res) => (release = res));
+  const orig = (r.worker as any).d.buildLiveList;
+  (r.worker as any).d.buildLiveList = async (o: any) => (await gate, orig(o));
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  // A stop written straight to the store (not by `stop` or `flatten`, which cancel the screen).
+  await r.store.setControl(CONTROL_STOP, { on: true, at: z("16:40:20").toISOString(), reason: "owner command (stop)" });
+  release();
+  await until(() => !r.worker["inflight"].has("afternoon-screen"));
+  await r.at("16:40:45");
+  assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], undefined);
+  assert.equal((await r.store.getControl<StopFlag>(CONTROL_STOP))!.on, true, "the stop is never cleared here");
+  assert.ok(r.said("commands").some((t) => t.startsWith("Afternoon load window not started: the stop flag is on")), r.said("commands").join(" | "));
 });
 
 test("group 2, round 2: if the afternoon close-out never finished flat, `status` after the regular close-out time says that close-out took over, in both lines", async () => {

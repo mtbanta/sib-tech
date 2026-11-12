@@ -10,6 +10,7 @@
 import type { DayRecord, OrderRecord, RefusalRecord, Store } from "./store.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP } from "./store.ts";
 import { isMiddayKey } from "./midday.ts";
+import { DayOrders, type DayOrderIndex } from "./order-index.ts";
 
 const FAST_KEYS = new Set([CONTROL_STOP, CONTROL_NOT_FLAT]);
 // The mid-day pause (one key per day) is read by the order gate before every entry, like the two flags.
@@ -28,7 +29,8 @@ export class CachingStore implements Store {
   // (Michael's own `resume` is such a write). An unsaved stop must not fade after a moment and let entries through.
   private unsavedStop: unknown = null;
   private days = new Map<string, { value: DayRecord | null; at: number }>();
-  private orders = new Map<string, Map<string, OrderRecord>>();
+  // Each day's orders, indexed by client id, symbol and "still working" (Michael's approval C of 2026-11-12).
+  private orders = new Map<string, DayOrders>();
   private gen = new Map<string, number>();
   private g(key: string): number {
     return this.gen.get(key) ?? 0;
@@ -146,11 +148,11 @@ export class CachingStore implements Store {
     return v;
   }
 
-  private loading = new Map<string, Promise<Map<string, OrderRecord>>>();
+  private loading = new Map<string, Promise<DayOrders>>();
 
   // A day's orders are loaded once, and two callers that arrive together share the one load (otherwise the slower load
   // could replace a list that already holds a newer entry). Lists for days before the last two are dropped.
-  private ordersFor(tradeDate: string): Promise<Map<string, OrderRecord>> {
+  private ordersFor(tradeDate: string): Promise<DayOrders> {
     const have = this.orders.get(tradeDate);
     if (have) return Promise.resolve(have);
     let p = this.loading.get(tradeDate);
@@ -158,7 +160,7 @@ export class CachingStore implements Store {
       p = this.inner
         .listOrders(tradeDate)
         .then((rows) => {
-          const m = new Map(rows.map((o) => [o.clientOrderId, frozen(o)] as const));
+          const m = new DayOrders(rows.map((o) => frozen(o)));
           this.orders.set(tradeDate, m);
           for (const d of [...this.orders.keys()].sort().slice(0, -2)) this.orders.delete(d);
           return m;
@@ -243,6 +245,11 @@ export class CachingStore implements Store {
   // CPU burst balance by 10:22, and the machine was throttled until 10:30 (builds/build-c2-log.md, "Fly metrics read"). Each kept
   // row is frozen and never changed in place (a write replaces it with a new frozen row), so a caller cannot change the memory, and a
   // list read earlier keeps the rows as they were when it was read, as the copies did. The array itself is new on every call.
+  // The day's index, kept up to date by every write above: the gate, the account view and the sync read it instead of the full list.
+  async orderIndex(tradeDate: string): Promise<DayOrderIndex> {
+    return this.ordersFor(tradeDate);
+  }
+
   async listOrders(tradeDate: string): Promise<OrderRecord[]> {
     return [...(await this.ordersFor(tradeDate)).values()].sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.clientOrderId.localeCompare(b.clientOrderId));
   }

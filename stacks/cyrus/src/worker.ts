@@ -11,7 +11,8 @@
 // "fail" after a tick that did not, so Healthchecks hears when the worker is unwell, not only when it is dead.
 import type { FullBroker } from "./broker.ts";
 import { BrokerView } from "./broker-view.ts";
-import { CommandProcessor, afternoonFailureTail, type CommandBot } from "./commands.ts";
+import { CommandProcessor, afternoonFailureTail, plainStop, type CommandBot } from "./commands.ts";
+import { dayOrderIndex } from "./order-index.ts";
 import { COMMAND_READ_LIMIT } from "./discord-bot.ts";
 import { DIGEST_PERIOD_MS, TradeDigest } from "./digest.ts";
 import { addToRunning, CONTROL_FEES, estimateFees, type FeesRunning } from "./fees.ts";
@@ -22,7 +23,7 @@ import type { Settings } from "./config.ts";
 import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
-import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
+import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import type { SelfMonitor } from "./self-monitor.ts";
 import { AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
 import { BusyPlaceholder } from "./strategy.ts";
@@ -129,6 +130,18 @@ export const COMMANDS_UNREAD_BLOCK_MS = 120_000;
 // A pass that has run this long is stuck (review round 5, finding 1). Every call in a pass has its own time limit now, so this
 // should never happen; if it does, the watchdog takes over the safety work that needs only the broker (see watchdog()).
 export const PASS_WATCHDOG_MS = 60_000;
+
+// The afternoon screen switches the live list only while nothing trades, by the route its command came in: the mid-day pause on with
+// no stop (as before), or (Michael's ruling E of 2026-11-12) Michael's own stop still on (`stop` or `flatten`, never the daily loss
+// stop), which keeps entries off until the window starts.
+export function switchAllowed(pause: { on: boolean } | null, stop: StopFlag | null, route: "pause" | "stop" = "pause"): boolean {
+  return route === "stop" ? plainStop(stop) : Boolean(pause?.on) && !stop?.on;
+}
+// Why it was not allowed (only called when switchAllowed is false); the pause route keeps its earlier wording.
+export function notSwitchedWhy(pause: { on: boolean } | null, stop: StopFlag | null, route: "pause" | "stop" = "pause"): string {
+  if (route === "stop") return stop?.on ? "the daily loss stop is on" : "the stop flag was cleared";
+  return stop?.on ? "the stop flag is on" : "trading is no longer paused for the mid-day cycle";
+}
 
 export class Worker {
   private readonly d: WorkerDeps;
@@ -276,7 +289,7 @@ export class Worker {
       bot: deps.bot,
       now: deps.now,
       extraStatus: async () => this.statusLines(),
-      afternoonScreen: (date) => this.startAfternoonScreen(date),
+      afternoonScreen: (date, route) => this.startAfternoonScreen(date, route),
       cancelAfternoonScreen: (date) => this.cancelAfternoonScreen(date),
       loadAfternoonEnabled: deps.loadAfternoon === true,
       log: (e, data) => deps.log?.("info", e, data),
@@ -1229,8 +1242,9 @@ export class Worker {
       // before each entry; this keeps the count current as positions close.
       const positions = this.view.cachedPositions();
       if (positions) {
-        const rows = await this.d.store.listOrders(date).catch(() => null);
-        if (rows) this.d.governor.setOpenSymbols(new Set([...positions.map((p) => p.symbol), ...rows.filter((o) => !o.closedAt && (o.status === "intent" || o.status === "submitted" || o.status === "filled")).map((o) => o.symbol)]).size);
+        // Michael's approval C of 2026-11-12: the index's still-working set (the same one the sync and the gate read), not the full list.
+        const working = await dayOrderIndex(this.d.store, date).then((i) => i.active()).catch(() => null);
+        if (working) this.d.governor.setOpenSymbols(new Set([...positions.map((p) => p.symbol), ...working.map((o) => o.symbol)]).size);
       }
       if (t - this.lastViewSlow >= 30_000) {
         this.lastViewSlow = t;
@@ -1264,22 +1278,22 @@ export class Worker {
   // `load afternoon` on a normal morning (Michael's standing requirement of 2026-11-11): the command has checked every condition and
   // starts this. The screen runs in the background (it can take minutes); the window itself is decided later (see pass). False if one
   // is already running for today.
-  private afternoonScreenState: { date: string; state: "running" | "ready" | "cancelled"; readyAt: number; switched?: boolean; result?: { switched: boolean; list: string[] } } | null = null;
+  private afternoonScreenState: { date: string; route: "pause" | "stop"; state: "running" | "ready" | "cancelled"; readyAt: number; switched?: boolean; result?: { switched: boolean; list: string[]; route: "pause" | "stop" } } | null = null;
   private lastPollStartedAt = -Infinity;
-  private startAfternoonScreen(date: string): boolean | "finishing" {
+  private startAfternoonScreen(date: string, route: "pause" | "stop" = "pause"): boolean | "finishing" {
     // Fix of 2026-11-12 (round 3, group 2): a cancelled screen still running is told apart from one that is live, so the reply can ask
     // Michael to send the command again instead of saying "already running" with nothing to follow.
     if (this.inflight.has("afternoon-screen")) return this.afternoonScreenState === null || this.afternoonScreenState.state === "cancelled" ? "finishing" : false;
     if (this.afternoonScreenState?.date === date && this.afternoonScreenState.state !== "cancelled") return false;
-    const mine = { date, state: "running" as "running" | "ready" | "cancelled", readyAt: 0 } as NonNullable<Worker["afternoonScreenState"]>;
+    const mine = { date, route, state: "running" as "running" | "ready" | "cancelled", readyAt: 0 } as NonNullable<Worker["afternoonScreenState"]>;
     this.afternoonScreenState = mine;
     this.background("afternoon-screen", async () => {
       try {
-        const result = await this.afternoonLoadList(date, () => mine.state === "cancelled", () => void (mine.switched = true));
+        const result = await this.afternoonLoadList(date, () => mine.state === "cancelled", () => void (mine.switched = true), route);
         if (result === null || mine.state === "cancelled") return; // cancelled by a command: it said so
         mine.state = "ready";
         mine.readyAt = this.d.now().getTime();
-        mine.result = result;
+        mine.result = { ...result, route };
       } catch (err) {
         if (this.afternoonScreenState === mine) this.afternoonScreenState = null;
         if (mine.state === "cancelled") return;
@@ -1312,7 +1326,7 @@ export class Worker {
   // screen runs and the price feed switches to its 30 names on the same connection. Throws if the screen fails or finds nothing.
   // Returns null (and changes nothing) if the window was cancelled while the screen ran, or if the mid-day pause is no longer on or a
   // stop is set when the screen finishes: the list and the feed switch only at the pause, while nothing trades.
-  private async afternoonLoadList(date: string, cancelled: () => boolean = () => false, onSwitched: () => void = () => undefined): Promise<{ switched: boolean; list: string[] } | null> {
+  private async afternoonLoadList(date: string, cancelled: () => boolean = () => false, onSwitched: () => void = () => undefined, route: "pause" | "stop" = "pause"): Promise<{ switched: boolean; list: string[] } | null> {
     const day = await this.d.store.getDay(date);
     if (!day) throw new Error("no day record for today");
     if (isLoadDay(day)) return { switched: false, list: day.liveList ?? [] };
@@ -1322,9 +1336,9 @@ export class Worker {
     const pauseNow = await readPause(this.d.store, date);
     const stopNow = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
     if (cancelled()) return null;
-    if (!pauseNow?.on || stopNow?.on) {
+    if (!switchAllowed(pauseNow, stopNow, route)) {
       this.d.log?.("info", "load_afternoon_not_switched", { pause: Boolean(pauseNow?.on), stop: Boolean(stopNow?.on) });
-      throw new Error(stopNow?.on ? "the stop flag is on, so the live list was not changed" : "trading is no longer paused for the mid-day cycle, so the live list was not changed");
+      throw new Error(`${notSwitchedWhy(pauseNow, stopNow, route)}, so the live list was not changed`);
     }
     // Fix of 2026-11-12 (group 1, round 3, probes G and H): a `go` or `stop` handled while these writes are in flight must still win. The
     // old list and names are kept; after the writes the cancel, the pause and the stop are read again, and if any changed the old list
@@ -1355,14 +1369,14 @@ export class Worker {
       await this.d.store.setControl(`live_names:${date}`, names).catch(() => undefined);
       const pauseAfter = await readPause(this.d.store, date);
       const stopAfter = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
-      if (cancelled() || !pauseAfter?.on || stopAfter?.on) {
-        const why = cancelled() ? "cancelled by a command" : stopAfter?.on ? "the stop flag is on" : "trading is no longer paused";
+      if (cancelled() || !switchAllowed(pauseAfter, stopAfter, route)) {
+        const why = cancelled() ? "cancelled by a command" : notSwitchedWhy(pauseAfter, stopAfter, route);
         await putBack(why);
         if (cancelled()) return null;
         // Group 2, round 1 of 2026-11-12: "the live list was not changed" only when the write-back worked; otherwise the stored list
         // may still be the cheap names (the alert says so).
         const after = restoreFailed ? "; the names trading are unchanged, but the stored live list could not be put back (see the alert in alerts)" : ", so the live list was not changed";
-        throw new Error(stopAfter?.on ? `the stop flag is on${after}` : `trading is no longer paused for the mid-day cycle${after}`);
+        throw new Error(`${why}${after}`);
       }
     } catch (err) {
       if (!restored) {
@@ -1420,8 +1434,8 @@ export class Worker {
       onFreshStopUpdate: (info) => {
         const f = [...this.syncMemory.freshStops.values()].find((x) => x.stopClientOrderId === info.clientOrderId);
         if (!f) return;
-        f.status = info.status;
-        f.lookedAt = this.d.now().getTime();
+        // Ruling B of 2026-11-12: a stop that was unclear gets its time to confirm logged here too.
+        settleFreshStop((e, data) => this.d.log?.("info", e, data), f, info.status, "live update", this.d.now().getTime());
         if (info.event === "canceled" || info.event === "expired" || info.event === "rejected") {
           this.d.log?.("info", "fresh_stop_ended", { symbol: info.symbol, event: info.event });
           if (this.closingOut || this.liquidator.isLiquidating() || this.middayOwnsSelling) return;
