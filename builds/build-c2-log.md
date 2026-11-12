@@ -3911,3 +3911,12 @@ Group 2 round 1 on part A's messages (at `b842db1`): CHANGES REQUIRED (the summa
 - First measurements due on Thursday's load morning: `lost_exit_fast` (fill to sale sent) and `lost_exit_fast_skipped` (exits kept) counts and their request cost; on the first normal afternoon, `fresh_stop` (`msFromStopCancel`) against the proposal's estimate of about 0.5 to 1.5 s; the first `self_monitor` rows against Fly's metrics.
 
 Paper only. Research input for a human decision, never an instruction to act.
+
+### Michael's requests of 2026-11-12 (about 5 AM Central), no code now
+
+Michael's words: "For the mid-day review: report how often the fast sale fired, its request cost, and whether it pushed remaining requests toward the reserve. For tonight's list: add a time limit to the held-back 5-minute "no protective stop" alert (group 2's suggestion). No code now."
+
+- **Mid-day review:** added to `builds/midday-review-brief.md` as its own section ("The fast sale for lost exits"): counts of `lost_exit_fast_start`, `lost_exit_fast`, `lost_exit_fast_skipped` by reason and `lost_exit_fast_failed`; the live request cost per fast sale against the test estimate (about 12, or 17 to 18 when Alpaca kept the exits); and the lowest remaining and governor holds in fast-sale minutes against the reserve of 80. The mid-day waits set for today (10:31 to 11:15 AM) run that brief.
+- **Tonight's list (after Thursday's close; nothing built yet):** a time limit on the held-back 5 minute "no protective stop" alert. Today `escalateIfDue` holds the alert while a remembered fresh stop is "unclear", for as long as its lookups keep failing (group 2 round 3, note 1: a probe ran 15 minutes with no stop at Alpaca and no alert). Proposed: after a limit (to be proposed with the figures, for example 5 minutes from the unclear answer), stop holding and post an honest alert, for example "I cannot confirm its fresh stop reached Alpaca", and fix the `escalateIfDue` comment that says "reported at most one sync later". Whether it touches money: the alert alone is messaging (group 2), but if the hold's end also changes what the protection view counts as live (`freshStopLive` counts "unclear" as live), it touches money and needs Michael's approval first under the standing rule of 2026-11-03 and a group 1 review. The proposal will say which.
+
+Paper only. Research input for a human decision, never an instruction to act.

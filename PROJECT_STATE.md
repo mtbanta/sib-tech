@@ -324,6 +324,8 @@ The full record of each run lives in `runs/`. This table is the index you read f
 
 ## Next Steps
 
+As of 2026-11-12 (5 AM Central): v19 runs. **Tonight's list (Michael, 2026-11-12, 5 AM):** a time limit on the held-back 5 minute "no protective stop" alert (group 2 round 3's suggestion), proposed before any code (see the C2 log, "Michael's requests of 2026-11-12"). The mid-day review reports the fast sale's count, request cost and effect on remaining requests (`builds/midday-review-brief.md`).
+
 As of 2026-11-06 (11:45 PM Central): v11 runs.
 
 000000. **Monday 2026-11-09 and after:** Monday's review at 3:15 PM (`builds/monday-review-brief.md`; release v12; Michael's pass rule with his dip ruling). Then a proposal (no code until approved) for lighter polling in the flatten command and a larger loss-stop retry budget after the stop fires (see the C2 log, "Michael's decisions after the scaled reserve's round 4"). The scaled reserve is dropped (reserve fixed at 80).
