@@ -255,7 +255,7 @@ export class CommandProcessor {
         // Wording only (the 10:31 AM note of 2026-11-03): if today's loss is still past the limit, the daily loss stop puts the stop
         // back on at its next check, so the reply says so. The resume itself is done above and is not changed by this look.
         const past = await this.lossStillPast(now);
-        await this.say(past ? `Stop cleared, but today's loss (${past.loss.toFixed(2)} dollars) is still past the ${past.limit} dollar daily limit, so the daily loss stop will put the stop back on within about 5 seconds, and it stays on until the next trading day.` : "Stop cleared. Entries still need the day's limits approved.");
+        await this.say(past ? `Stop cleared, but today's loss (${past.loss.toFixed(2)} dollars) is still past the ${past.limit} dollar daily limit, so the daily loss stop will put the stop back on within about 5 seconds, and it stays on until the next trading day.` : await this.resumeReply(now));
         return;
       }
       case "flatten": {
@@ -501,6 +501,32 @@ export class CommandProcessor {
     })().catch(() => null);
     try {
       return await Promise.race([look, new Promise<null>((r) => (timer = setTimeout(() => r(null), 3_000)))]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  // For the `resume` reply only (fix of 2026-11-11: at 1:31 PM it said "Entries still need the day's limits approved" on an approved,
+  // armed day, and entries restarted at once). Says what happens next from today's record and the mid-day pause. Wording only: it
+  // reads, never writes, never throws, and gives up after 3 seconds (then a neutral reply is used).
+  private async resumeReply(now: Date): Promise<string> {
+    const neutral = "Stop cleared. Entries go ahead only on an approved and armed day, outside the mid-day pause.";
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const look = (async (): Promise<string> => {
+      const day = await this.d.store.getDay(etDate(now));
+      const phase = sessionPhase(day, now);
+      if (!day || phase === "no_session" || phase === "after_close") return "Stop cleared. No session is running now, so nothing trades until the next one (on its approved limits).";
+      if (day.status !== "approved") return "Stop cleared. Entries still need the day's limits approved.";
+      if (phase === "before_open") return "Stop cleared. Today's limits are approved, so entries can start at the open.";
+      if (!(day.phases.armed || day.phases.rearm)) return "Stop cleared. Today's limits are approved, but the day is not armed yet, so entries wait for that.";
+      const times = middayTimes(day);
+      if (times && now >= times.lastEntryAt) return "Stop cleared. Today's last entry time has passed, so there are no more entries today.";
+      const pause = times ? await readPause(this.d.store, day.tradeDate) : null;
+      if (pause?.on) return "Stop cleared. Today's limits are approved, but entries stay paused for the mid-day cycle until you send `go`.";
+      return "Stop cleared. Entries resume now under today's approved limits.";
+    })().catch(() => neutral);
+    try {
+      return await Promise.race([look, new Promise<string>((r) => (timer = setTimeout(() => r(neutral), 3_000)))]);
     } finally {
       if (timer) clearTimeout(timer);
     }

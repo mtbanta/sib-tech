@@ -33,6 +33,7 @@ import { earlyLookAllowed } from "./early-wake.ts";
 import type { Trade } from "./stream.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
 import { computeDay, formatSummary, isSentEntry, type StopGapDay } from "./summary.ts";
+import { listDaySliced, summaryWindows } from "./summary-listing.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
 import { PAPER_ONLY } from "./discord.ts";
 import { MIDDAY_NOT_FLAT_ALERT_AFTER_MS, MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MIDDAY_RETRY_MS, MIDDAY_RETRY_REQUESTS_PER_MINUTE, MiddayBudget, blockedNext, lossPast, middayFlat, middayTimes, readHold, readPause, resumedByText, retryAllowed, retrySymbols, startupAction, updatePause } from "./midday.ts";
@@ -461,9 +462,12 @@ export class Worker {
       .catch((err) => {
         this.lastTickError = `${name}: ${(err as Error).message.slice(0, 150)}`;
         this.d.log?.("error", "background_failed", { name, error: (err as Error).message.slice(0, 200) });
-        // At most one alert per step every 5 minutes (a database outage would otherwise post one every 30 seconds).
+        // At most one alert per step every 5 minutes (a database outage would otherwise post one every 30 seconds). The summary step,
+        // which is retried every pass until midnight Eastern, alerts once a day (fix of 2026-11-11: it posted about 95 alerts that
+        // evening); every failure is still in the run log.
         const t = this.d.now().getTime();
-        if (t - (this.lastBackgroundAlert.get(name) ?? -Infinity) >= 5 * 60_000) {
+        const gap = name === "summary" ? 24 * 3_600_000 : 5 * 60_000;
+        if (t - (this.lastBackgroundAlert.get(name) ?? -Infinity) >= gap) {
           this.lastBackgroundAlert.set(name, t);
           void this.say("alerts", `Step "${name}" failed: ${(err as Error).message.slice(0, 150)}`).catch(() => undefined);
         }
@@ -1573,12 +1577,19 @@ export class Worker {
     const requestsAtClose = this.d.governor.stats();
     await this.flushDigest(true);
     const day = (await this.d.store.getDay(date))!;
-    const [account, listed, positions] = await Promise.all([this.d.broker.getAccount(), this.d.broker.listOrdersPaged("all", etInstant(date, "00:00").toISOString(), 60), this.d.broker.listPositions()]);
+    const [account, positions] = await Promise.all([this.d.broker.getAccount(), this.d.broker.listPositions()]);
     // Bring the stored entries up to date from the final fills before summarising (no sells: the day is over).
     await syncOrders(this.riskDeps(), day, { protect: false }).catch(() => undefined);
+    const stored = await this.d.store.listOrders(date);
+    // Fix of 2026-11-11: the day's orders are read in bounded windows (summary-listing.ts), not in one open-ended listing, which Alpaca
+    // answered too slowly (about 28 s) and only in part on a day of about 8,000 orders.
+    // The windows end a minute from now, and at least 10 minutes past the close (the 2:55 close-out's last sales are inside them).
+    const listUntil = new Date(Math.max(this.d.now().getTime() + 60_000, day.closeAt ? day.closeAt.getTime() + 10 * 60_000 : 0));
+    const sliced = await listDaySliced(this.d.broker, summaryWindows(etInstant(date, "00:00"), day.openAt, listUntil), stored, () => this.summaryPace());
+    const listed = { orders: sliced.orders, complete: sliced.complete };
+    this.d.log?.("info", "summary_listing", { windows: sliced.windows, requests: sliced.requests, orders: sliced.orders.length, failedWindows: sliced.failedWindows, rereadWindows: sliced.rereadWindows, complete: sliced.complete });
     // Release A, fix 4, and Michael's decision 2 of 2026-11-06: every entry Alpaca's listing left out (71 on 2026-11-06) is fetched by
     // its client id, with no cap (the cap of 50 left 21 filled entries out on 2026-11-06), so the counts and the profit match the account.
-    const stored = await this.d.store.listOrders(date);
     const listedIds = new Set(listed.orders.map((o) => o.clientOrderId));
     const missing = stored.filter((s) => !listedIds.has(s.clientOrderId) && (s.alpacaOrderId || s.status === "filled" || s.status === "submitted"));
     let lookupsFailed = 0;
@@ -1626,7 +1637,8 @@ export class Worker {
       flat: positions.length === 0,
       requests: requestsAtClose,
       feesRunning: running.total,
-      listComplete: listed.complete,
+      // Complete if every window was read, or if what a failed window hid was all found by the lookups and the fills check.
+      listComplete: listed.complete || (lookupsFailed === 0 && fillsCheck !== null && fillsCheck.complete && fillsCheck.stillMissing === 0),
       // A load day reports its morning window; a normal day with `load afternoon` reports the afternoon window.
       loadWindow: isLoadDay(day) ? loadWindow(day) : afternoonLoadWindow(day),
       loadWindowKind: isLoadDay(day) ? "morning" : "afternoon",

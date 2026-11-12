@@ -252,6 +252,34 @@ export class SimBroker implements FullBroker {
     rows = rows.filter((o) => !this.hiddenFromListing.has(o.clientOrderId));
     return rows.slice(0, 500).map((o) => structuredClone(o)); // oldest first, at most 500
   }
+  async listOrdersWindow(afterIso: string, untilIso: string, maxPages = 10) {
+    const seen = new Map<string, Order>();
+    let cursor = afterIso;
+    let pages = 0;
+    let complete = false;
+    while (pages < maxPages) {
+      this.spend();
+      const page = this.orders
+        .filter((o) => !this.hiddenFromListing.has(o.clientOrderId))
+        .filter((o) => {
+          const t = o.submittedAt ?? o.createdAt ?? "";
+          return t > cursor && t < untilIso;
+        })
+        .slice(0, 500)
+        .map((o) => structuredClone(o));
+      pages++;
+      for (const o of page) seen.set(o.id, o);
+      if (page.length < 500) {
+        complete = true;
+        break;
+      }
+      const lastOrder = page[page.length - 1]!;
+      const last = lastOrder.submittedAt ?? lastOrder.createdAt;
+      if (!last || last === cursor) break;
+      cursor = last;
+    }
+    return { orders: [...seen.values()], complete, pages };
+  }
   async listOrdersPaged(status: "open" | "closed" | "all", afterIso: string, maxPages = 20) {
     const seen = new Map<string, Order>();
     let cursor = afterIso;

@@ -147,7 +147,8 @@ test("resume while today's loss is past the limit: the flag is still cleared, an
   ok.broker.failOn.add("getAccount");
   ok.ownerSays("resume", "2026-11-01T22:20:00Z");
   await ok.at("2026-11-01T22:20:10Z");
-  assert.equal(ok.bot.last(), "Stop cleared. Entries still need the day's limits approved.", "the plain reply; a failed look never fails the resume");
+  // Fix of 2026-11-11: the plain reply now says what happens next (here no session is running: a Sunday evening).
+  assert.equal(ok.bot.last(), "Stop cleared. No session is running now, so nothing trades until the next one (on its approved limits).", "the plain reply; a failed look never fails the resume");
   assert.equal(((await ok.store.getControl("stop_flag")) as { on: boolean }).on, false);
 });
 
