@@ -3920,3 +3920,138 @@ Michael's words: "For the mid-day review: report how often the fast sale fired, 
 - **Tonight's list (after Thursday's close; nothing built yet):** a time limit on the held-back 5 minute "no protective stop" alert. Today `escalateIfDue` holds the alert while a remembered fresh stop is "unclear", for as long as its lookups keep failing (group 2 round 3, note 1: a probe ran 15 minutes with no stop at Alpaca and no alert). Proposed: after a limit (to be proposed with the figures, for example 5 minutes from the unclear answer), stop holding and post an honest alert, for example "I cannot confirm its fresh stop reached Alpaca", and fix the `escalateIfDue` comment that says "reported at most one sync later". Whether it touches money: the alert alone is messaging (group 2), but if the hold's end also changes what the protection view counts as live (`freshStopLive` counts "unclear" as live), it touches money and needs Michael's approval first under the standing rule of 2026-11-03 and a group 1 review. The proposal will say which.
 
 Paper only. Research input for a human decision, never an instruction to act.
+
+## Thursday 2026-11-12 mid-day session review (release v19, load day; written at about 11:05 AM, read only)
+
+Run from `builds/midday-review-brief.md` by the wait held in the builder's Claude session (it saw the day phase `midday` with `middayFlat: yes` at 10:47 AM; the close-out had finished at 10:30:15). Read only on Fly, Alpaca, Supabase, Discord and Healthchecks: no code changed, nothing deployed, no orders. Window: 8:30 AM to the end of the mid-day close-out (10:30:15.6). Limits (Michael, 7:12 AM): `load on`, largest position 250 dollars (75 until the pause), daily loss stop 500 dollars, 150 orders a minute (100 after the pause), cap 1. Day start 18,076.42 dollars. Fly v19 (`7c7b109`), one machine (San Jose), started 12:13 AM, no restart. Fly keeps only its last 100 log lines, so the morning is read from the run log (`events`), the `orders` and `refusals` tables, Alpaca's orders and Discord. Paper only. Research input for a human decision, never an instruction to act.
+
+**Verdict under Michael's rule: holds on every criterion that could be measured; one safety sale is inconclusive.**
+- 0 rate-limit answers all morning, including the first mid-day try.
+- The mid-day close-out was flat at 10:30:14.3 (Alpaca's last fill; recorded 10:30:15.6).
+- Remaining dipped below the reserve of 80 in 16 minutes, lowest 65 (the minute ending 9:00:54). That minute came during a 30 second hold inside Alpaca (orders accepted, then held up to 7.4 s before Alpaca submitted them). The other dips (70 to 79) came while the governor held entries at the reserve and cancels, syncs and safety sales went on below it, as designed. Reported with their size under the ruling of 2026-11-06; not a fail.
+- **Safety sales: 26 lost exits; 25 were sold by the new fast sale** (Alpaca's cancel of the exits to the sale sent: median 1.3 s, at most 3.8 s; cancel to the sale's fill: median 2.7 s, at most 5.0 s). **None went more than 10 s without exits** (Wednesday: 5, up to 17.4 s).
+- The one inconclusive case: SOFI-52 was sold by the older order sync, 6.1 s from Alpaca's cancel to the sale sent (7.5 s to the fill), inside that 9:00 hold at Alpaca. The stored records cannot split the stack's part from Alpaca's: the stack's part was at least 1.2 s (from the sync noticing to the sale) and at most 6.1 s. Fly's log, which would settle it, has rolled over.
+- **No slowdown** (Wednesday's started at 10:21). The machine never throttled, its CPU burst balance stayed above 99 percent of full, and no signal was dropped as stale (Wednesday 1,129).
+- 0 alerts mentioned Michael. The morning lost 40.86 dollars.
+
+### 1. The morning, 8:30 to 10:30 (load window 8:45:00 to the pause at 10:30:04.2)
+
+- **Highest accepted orders a minute: 132** (8:45). **Busiest 60 seconds: 132** (from 8:45:00). From 8:46 the governor, not the 150 ceiling, set the pace (it held back entries at the reserve from 8:46 to 9:18, 303 in all), then demand fell to 55 to 105 a minute.
+- **Entries:** 9,067 sent. Alpaca accepted 8,901 and refused 166, all for OMH ("asset is not tradable", HTTP 422; see section 8). Of those accepted, 3,968 filled (45 percent) and 4,933 were not filled and were cancelled after 5 seconds. Alpaca's paged day listing returned 8,644 of the 8,901 (paging gaps again); the counts rest on the stored records, which agree with the morning line and with the account.
+- **Per minute** (stored entries / filled; Alpaca requests in the 60 s before the `governor_stats` row; lowest remaining):
+
+  | Minute | Entries | Filled | Requests | Lowest remaining |
+  | :-- | --: | --: | --: | --: |
+  | 8:45 | 135 | 62 | 134 to 251 | 159 to **80** |
+  | 8:46 to 8:51 | 99 to 116 | 39 to 59 | 195 to 212 | **74 to 80** |
+  | 8:52 to 8:59 | 82 to 122 | 42 to 63 | 148 to 243 | 86 to 166 |
+  | 9:00 | 51 | 21 | **270** | **65** |
+  | 9:01 to 9:06 | 87 to 114 | 38 to 61 | 171 to 213 | 73 to 105 |
+  | 9:07 to 9:17 | 80 to 108 | 27 to 50 | 172 to 243 | **70 to 95** |
+  | 9:18 to 9:59 | 65 to 103 | 23 to 56 | 133 to 215 | 119 to 193 |
+  | 10:00 to 10:29 | 55 to 95 | 26 to 47 | 124 to 197 | 171 to 194 |
+
+  Below 80: 8:46 (80), 8:47 (79), 8:48 (74), 8:49 (77), 8:50 (76), 8:51 (79), 9:00 (65), 9:01 (73), 9:07 (78), 9:08 (79), 9:11 (70), 9:12 (74), 9:13 (77), 9:14 (74), 9:15 (78), 9:17 (76).
+- **Requests:** up to 270 in 60 seconds (the 9:00 minute; Alpaca's bucket refills continuously, so a rolling minute can pass 200 without a refusal). 18,271 in the window. **Rate-limit answers: 0** (governor statistics and the run log).
+- **The 9:00 hold at Alpaca** (from Alpaca's own times): from 9:00:04 to 9:00:37, Alpaca created each entry within about 0.1 to 0.4 s of the stack's send, as usual, but submitted it 2 to 7.4 s later (33 entries over 2 s in that minute; at other times the median is 66 ms). Alpaca's answers to the stack stayed under 1.4 s. In the same minute, three cleanups ran (APLD-100, RIOT-102, CMCSA-47; `remainder_recount` "counted 1, recounted 0, sold 0"): the take-profit was cancelled and the stop then filled, so nothing was sold. Also PBR, WULF and RIG `liquidation_result` with nothing sold, and SOFI-52's sync sale. Requests went to 270 against 54 trades. The run log does not say why those cleanups started (inferred: the order sync saw entries Alpaca had not yet submitted, or legs in an unusual state; Fly's log, which would show it, has rolled over). The first minute (8:45) had a smaller hold of the same kind (38 entries over 2 s).
+- **Refusals by reason** (the `refusals` table keeps a sample of the common reasons, so these are not full counts): the governor's "holding back for safety" 303 (the statistics' count) from 8:46:29 to 9:18:00; "Alpaca refused this symbol a moment ago" (the 3 second backoff after an OMH refusal) 32 stored; before the window 15; paused for the mid-day cycle from 10:30:07 (785 by 10:52).
+- **Unfilled window entries cancelled after 5 seconds:** 4,933. **26 filled as their cancel landed and lost both exits** (section 2). Another 25 filled after their cancel was sent, and Alpaca kept their exits.
+- **Alpaca's answer time per entry** (`accept_ms`): median 128 ms, 95th percentile 304 ms, slowest 1,430 ms (9:00). The time per entry decision is in section 6.
+- **Every entry before the pause was at most 75 dollars:** yes. All were 1 share, the largest 33.16 dollars. The last entry was stored at 10:29:59.1. **No entry reached Alpaca after 10:30:00.**
+- **Cost: -40.86 dollars** (equity 18,076.42 to 18,035.56, from Alpaca's account; the morning line says the same), about 1 cent a filled entry. From the 5 minute trade lines: 1,522 take-profits (1 cent up) and 2,406 stops (2 cents down).
+- **Verdict for the morning:** holds on rate limits and the mid-day close-out. The reserve dips are reported under the ruling. Safety sales: 25 of 26 well inside 5 s; SOFI-52 inconclusive.
+
+### 2. Safety work in the morning
+
+- **Lost exits: 26** (Wednesday 24). In each, the 1-share entry filled at about the moment its 5 second cancel reached Alpaca, and Alpaca cancelled both exits 0.02 to 1.03 s later.
+- **The fast sale (A5) sold 25 of them.** It is identified by its sale reaching Alpaca before the order sync's `unprotected_position` for that entry, or with no such event; section "The fast sale" below explains why its own events are missing.
+  - From Alpaca's cancel of the exits to the sale sent: median 1.3 s, range 0.8 to 3.8 s (22 measured from Alpaca's orders; APLD-78, DKNG-67 and PBR-82 are not in Alpaca's paged listing, and their run log and Discord times put them at about 1 to 2.4 s).
+  - From Alpaca's cancel to the sale's fill: median 2.7 s, range 1.6 to 5.0 s.
+  - Slowest three: IREN-658 (3.8 s to the sale, 5.0 s to the fill), SMCI-40 (3.0 and 3.8 s), SMCI-543 (2.9 and 4.2 s). For IREN-658 and SMCI-40 the entry filled just before the cancel was sent (4.4 to 4.7 s after it was sent), so the fast sale started only when the fill reached the stack after its cancel.
+- **The order sync sold 1:** SOFI-52 (fill 9:00:02.2, Alpaca's cancel 9:00:02.4, sync noticed 9:00:07.3, sale sent 9:00:08.5, filled 9:00:09.9). It happened inside the 9:00 hold at Alpaca. Why the fast sale did not take it is not in the stored records (inferred: the fill reached the stack before its cancel was sent, or late in Alpaca's hold).
+- **Any position without exits for more than 10 seconds: none.** The worst was SOFI-52 at 7.5 s.
+- **The order sync after a fast sale:** in most cases the sync noticed the same lost exits 0.2 to 4 s after the fast sale was sent and logged `unprotected_position`, then `unprotected_position_already_gone` (24 in all). It never sold twice: 26 sales for 26 positions (Alpaca's orders and Discord agree).
+- **Remainders: none** (1-share entries cannot partly fill). No `bare_remainder` and no fresh stops. **A4 was not exercised** (it needs multi-share entries, the normal afternoon).
+- **`remainder_recount`: 12.** None is a remainder. Each is a cleanup that found the share already gone ("counted 1, recounted 0, sold 0"):
+  - 11 of the 12 have no `unprotected_position` before them, so they come from the fast sale (inferred: the order sync logs that event before its own cleanup). Each fast sale started on an entry whose fill reached the stack after its cancel was sent, then waited in the sell path until the share was gone. In 5 of them Alpaca kept both exits and one filled: RIVN-1, IONQ-2, SMCI-29, CIFR-108, IREN-520, the take-profit each time. In the other 6 Alpaca cancelled the take-profit but kept the stop, which then filled: PFE-1, APLD-100, RIOT-102, CMCSA-47, SMCI-179, WULF-383, with the take-profit cancelled 1.1 to 15 s after the entry's fill. The fast sale cancels nothing (its `cancelIds` is empty), so the take-profit was most likely cancelled by Alpaca when the 5 second cancel landed (inferred, not established; new in the record; for tonight's list: Alpaca's history of these 6 orders and a read of the code path). The stop stayed live, so these positions were never without a stop, but each lost the chance of a 1 cent take-profit for its 2 cent stop.
+  - 1 (RIVN-98) is the order sync finding a lost-exit entry already sold by the fast sale.
+  - From the entry's fill to the recount: 2.8 to 18.9 s, including time waiting in turn behind other sales in the one-at-a-time sell path (at 9:00 four cleanups queued; the fast sale's own wait is at most 2.5 s plus reads). In the first minute the fast sales queued one at a time (RIVN-1 to 8:45:25.2, IONQ-2 to 8:45:29.3, PFE-1 to 8:45:33.4), about 4 s each (the 2.5 s wait plus reads). Group 1 estimated about 3.85 s when the exits are kept. No lost-exit sale was waiting behind them (the first came at 8:45:38).
+- **Blocked sales: none** (no `sale_blocked`), so A step 3 still has no data.
+- **`late_notice`: 5** (PBR-82 9:07:36, RIOT-198 9:16:50, SMCI-227 9:16:54, SMCI-543 10:09:09, IREN-658 10:26:14). Each was found by the order listing 6.0 to 7.9 s after Alpaca's cancel, with the stream live and not reporting the cancel (`streamReportedCancel` empty). **In all five the fast sale had already been sent** (0.3 to 4 s before the notice), so none delayed a sale.
+- **Alerts that mentioned Michael: 0.** `alerts` had 48 posts: 22 "Alpaca has not filled it yet" lines, each followed by its "has filled" closing line (fix C), and 4 "had no live protective stop, so I sold it" lines. All true; 26 sales.
+- **Total time without a stop** (separate line, not scored), from Alpaca's cancel of the exits to the sale's fill: median 2.7 s, worst 7.5 s (SOFI-52), next 5.0 s (IREN-658). Split for the fast sales: the stack's part (from the fill reaching the stack to the sale sent) cannot be read without the fast-sale events; from Alpaca's fill to Alpaca's receipt of the sale it was 0.9 to 4.0 s (median 1.3 s), and Alpaca's part (the sale to its fill) 0.5 to 2.4 s.
+
+### The fast sale for lost exits (Michael's request of 2026-11-12, 5 AM)
+
+**First, a gap in the logging.** The fast sale's own events are info-level and are not in the run log's stored list (`STORED_INFO_EVENTS` in `src/run-log.ts`): `lost_exit_fast_start`, `lost_exit_fast`, `lost_exit_fast_skipped`. The same goes for A4's events (`fresh_stop`, `fresh_stop_refused`, `fresh_stop_unclear`, `fresh_stop_gone` and the rest). They went only to Fly's log, which keeps 100 lines. So the counts below are rebuilt from Alpaca's orders, the stored events that are kept, and Discord; `msFromFill` and the "kept the exits" skips cannot be read. Only `lost_exit_fast_failed` (a warning) would have been stored, and there were none. The same gap will hide A4's `msFromStopCancel`, which the release planned to measure on the first normal afternoon. Adding these names to the stored list is a logging-only change (group 2), for tonight's list.
+
+- **How often it fired:** 25 fast sales sent (one at 8:45, the rest from 8:50 to 10:28; at most 3 in one minute, at 9:16 to 9:17), against 4,933 entries cancelled after 5 seconds. It also started on at least 11 entries whose fill reached the stack after its cancel was sent but whose stop Alpaca kept, and waited until the share was gone (the recounts above). The other late fills whose exits were kept probably ended in `lost_exit_fast_skipped` ("Alpaca kept the exits"), which is not stored (inferred). 0 failed. Every late-filled entry with lost exits was sold, 25 by the fast sale and 1 by the sync.
+- **Its request cost (an estimate, not a per-sale measurement):** over the 100 minutes from 8:47 to 10:30, a least-squares fit of each minute's requests against its entries and its fast sales gives about 63 requests a minute of base work, plus 1.3 per entry, plus **about 19 per fast sale**. The residual is 16 requests a minute and there are only 22 fast-sale minutes, so the 95 percent range is roughly 12 to 26. The 19 includes the order sync's follow-up on the same position (its `unprotected_position` and "already gone" checks). The builder's test figure was about 12, or 17 to 18 when Alpaca kept the exits. In all, about 25 x 19 = about 480 requests, about 2.6 percent of the morning's 18,271.
+- **Did it push remaining toward the reserve?** In the 18 minutes with a fast sale, the lowest remaining had a median of 166 (82 minutes without one: median 183). It was below 80 in 5 of them: 9:07 (78), 9:11 (70), 9:12 (74), 9:13 (77) and 9:17 (76; that minute had 3 fast sales, about 57 requests at the estimate, and 243 requests in all). Those minutes fall in the 9:07 to 9:17 stretch, when minutes without a fast sale also went below 80 (9:08 79, 9:14 74, 9:15 78) while the governor held entries at the reserve. So the fast sales added to dips that the entry load and the cancels were already making. They did not cause the morning's lowest point (65 at 9:00, a minute with no fast sale). No rate-limit answer, and no governor hold after 9:18. Under the ruling of 2026-11-06 a dip from safety work is reported with its size, not a fail: the largest dip in a fast-sale minute was 10 below the reserve (70 at 9:11).
+
+### 3. The mid-day close-out (flat by about 10:35? Yes, 10:30:14.3)
+
+- **Pause written 10:30:04.175** (Wednesday 10:30:09.3, Tuesday 10:30:03.5). The last entry was stored at 10:29:59.1; **no entry reached Alpaca after 10:30:00**. Paused refusals start 10:30:07.
+- **14 positions open at the pause, all 1 share** (not the 30 or so expected).
+- First try:
+  - one cancel of everything sent 10:30:05.675, answered 10:30:05.795 (one answer "order pending cancel", logged as an error and harmless); Alpaca cancelled 30 exit legs;
+  - 14 sales sent 10:30:10.546 to 10:30:12.045, all filled by 10:30:14.266;
+  - the wait for its own sales ran 3,233 ms and ended flat; `closeout_result` flat at 10:30:15.608, day phase `midday` with `middayFlat: yes` at 10:30:15.623.
+  - `trading` "Mid-day close-out done: the account is flat. Paused for the mid-day cycle." and the `commands` morning line at 10:30:15 to 10:30:17. No retry, no NOT FLAT alert, no 5 minute alert. Cap unchanged (multiplier 1).
+- **The first try's requests:** 178 in the minute ending 10:30:14 (lowest remaining 181; this minute also holds the window's last entries and their cancels) and 42 in the minute ending 10:31:14 (lowest 182), against Alpaca's 200 and the reserve of 80. The close-out's own share: 1 cancel, 14 sales and a few reads (about 20 to 25, an estimate). **Rate-limit answers 0.** It holds, at light load again (14 positions).
+
+### 4. The pause and what followed (as of about 11:00 AM)
+
+- No deploy planned or made. Fly v19, one machine, started 12:13 AM, no restart today. Paused (`resumedAt` empty). No `go` or `hold` from Michael yet; the gate refuses ("paused for the mid-day cycle"). Healthchecks up (last ping 10:57:34), no flip today. Nothing sold at a start-up (none happened). Alpaca at about 11:00: 0 positions, 0 open orders.
+- Expected by design: resumed by `go`, or not at all. If `go`: 250 dollars and at most 100 a minute. `load afternoon` (ON in v19) is accepted until 1:30 PM while flat and paused.
+
+### 5. The loss stop and the shadow book
+
+- Day start 18,076.42; lowest equity 18,035.56 (the end of the close-out); the loss stop came within 459.14 dollars (8 percent of 500 used).
+- Shadow book (shadow only): largest difference to the 5 second account check 0.17 dollars (9:00). Its `maxCheckCashGap` field reads 28.82 dollars (what it measures was not checked in this review, as on Wednesday).
+
+### 6. The Fly machine (Michael, 2026-11-11), compared with Wednesday
+
+- **Fly's metrics** (read from the Mac with `FLY_METRICS_TOKEN`; the token stayed on the Mac and was not printed), 8:30 to 10:50:
+  - **CPU burst balance lowest 49,508 of 50,000** (99 percent of full). It started to fall slowly from about 10:10, when CPU went just past the 6.25 percent baseline, and refilled at the pause. Wednesday: 0 at 10:22.
+  - **Throttling: none** in any minute. Wednesday: 83 to 91 percent from 10:22 to 10:30.
+  - CPU in use: 0.7 to 1.3 percent before the window, 3.4 percent at 8:50, 3.9 at 9:10, 4.2 at 9:20, 5.6 at 9:40, 6.1 at 9:55, 6.9 at 10:10, 6.0 at 10:20, 6.3 at 10:30, 1.5 after the pause; highest 8.1 percent.
+  - Steal 0.02 to 0.28 percent. 1 minute load average at most 0.68 (9:10). Memory available 317 to 350 MB of 512.
+- **The worker's own `self_monitor` rows** (first day of them; no `longWindow` row in the window; the first row of the day, 8:30:05, is a long window with a 105 ms event-loop delay at start):
+  - process CPU 2 to 7.2 percent, rising with the stored orders; machine steal at most 0.3 percent (no throttling seen from inside either);
+  - memory: RSS about 146 to 150 MB, available 317 to 349 MB;
+  - event-loop delay at most 61 ms (10:08), usually 10 to 40 ms;
+  - time per entry decision (with its queue wait): the 90th percentile was 107 to 171 ms all morning and **did not grow** with the stored orders (117 ms at 617 stored, 145 ms at 7,537, 132 ms at 9,005). The median swings between 1 and 70 ms. The queue's longest wait was 1.3 s in the 8:45 and 9:00 minutes, otherwise under 0.85 s. **0 decisions dropped as stale** (Wednesday 1,129).
+- **CPU per decision** (process CPU divided by the decisions that minute): about 5.5 ms at 617 stored orders (8:50), about 17 ms at 7,600 to 9,000 (10:10 to 10:29). Wednesday: 8 ms at 700 rising to about 75 ms at 7,500 (Fly's CPU against entries plus refusals after the list check; a different count, so the comparison is approximate). The no-copy fix took most of the growth out. **Some growth with the day's order count remains** (about 3 times over the morning, not about 9 times). At this morning's pace the CPU sat at the baseline by 10:10. A longer or busier load window could start to draw the balance down (an estimate; tomorrow's figures would show it).
+
+### 7. Discord, 8:30 to 10:31
+
+`alerts` 48, `trading` 22, `commands` 1 (71). 0 mentioned Michael.
+
+### 8. What did not behave as designed
+
+1. **The new fast-sale and fresh-stop events are not stored in the run log** (see "The fast sale"), so A5's per-sale timing and skips, and A4's `msFromStopCancel`, can be read only in Fly's last 100 log lines. Logging only (group 2): add the A4 and A5 event names to `STORED_INFO_EVENTS`.
+2. **OMH is on the live list but Alpaca will not trade it.** 166 entries were refused ("asset is not tradable", HTTP 422), about one every 38 seconds all morning, each a wasted request and a 3 second backoff. The cheap-name screen does not check Alpaca's `tradable` flag. Whether a fix is money-touching is Michael's call: it changes which symbols the gate trades.
+3. **A hold inside Alpaca at 9:00:04 to 9:00:37** (orders submitted up to 7.4 s after Alpaca created them). It brought the 270-request minute, the lowest remaining (65), three cleanups that sold nothing, and SOFI-52's 7.5 s without exits. Alpaca's wait, not the stack's, but why those cleanups started is not in the stored records.
+4. As before, Alpaca's paged day listing returned 8,644 of 8,901 accepted entries (paging gaps); this review's counts rest on the stored records and the account.
+5. **Alpaca sometimes cancels only the take-profit when a late 5 second cancel lands, and keeps the stop** (6 cases, section 2; inferred, since the fast sale cancels nothing). The position stays protected, but its take-profit is gone, so it ends at its stop or a cleanup.
+6. This review's own Alpaca reads (orders in 5 minute windows, then the day's fills, with 0.7 s pacing, from 10:52) shared the account's bucket while the worker was paused (lowest remaining 197).
+
+Everything else behaved as designed: the load window's start, the 75 dollar cap, the governor at the reserve, the 5 second cancels, the fast sales, the sync never selling twice, fix C's closing lines, the pause, no entry after it, the close-out and fix B's wait, the flat marker, the posts, the cap left alone, rate limits. There was no slowdown.
+
+### Recommended next steps (for Michael to decide)
+
+1. **Now: `go`, `load afternoon`, or stay paused** (until 1:30 PM; after 1:30 only `go`). The loss stop has 459.14 dollars left.
+   - **`go`**: a normal afternoon (market entries up to 250 dollars, at most 100 a minute). It would be the first live test of A4, the fresh stop after a partial take-profit. Caveat: A4's timing would not be in the run log (item 2), only in Fly's last 100 lines.
+   - **`load afternoon`**: the first live test of the afternoon load window (75 dollar cap, up to 150 a minute).
+   - Staying paused needs nothing; the 2:55 close-out and the summary run either way.
+   - Paper only, either way. If you want A4 data today, `go` is the only choice that gives it.
+2. **Tonight's list** (logging and messaging, no money-touching change without your approval):
+   - (a) store the A4 and A5 events in the run log (group 2);
+   - (b) the time limit on the held-back 5 minute "no protective stop" alert (already listed);
+   - (c) a proposal on OMH and the screen's tradable check (your call whether it is money-touching).
+   - (d) the 6 take-profits cancelled while the stop stayed live (section 2): confirm from Alpaca's order history who cancelled them, read only, before any proposal.
+3. **Keep measuring the fast sale:** about 19 requests each, an estimate. At 25 a morning that is about 2.6 percent of the requests. It deepened dips below the reserve in 5 minutes (at most 10 below) without a rate-limit answer.
+4. **Still open:** A step 3 (no `sale_blocked` again); A4 untested live; the uncapped first close-out try is tested only at light load (14 positions); the CPU still grows with the day's order count, about 3 times over the morning.
+
+Paper only. Research input for a human decision, never an instruction to act.
