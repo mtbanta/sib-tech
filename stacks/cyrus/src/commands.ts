@@ -59,14 +59,23 @@ export function loadAfternoonRefusal(o: { day: DayRecord | null; now: Date; paus
   return null;
 }
 
-// Fix of 2026-11-12 (group 2, round 3, and group 2 round 1 of 2026-11-12): a failed afternoon load window's last sentence depends on
-// why it failed, and never repeats what the line already says (`why`). Under the daily loss stop a `resume` is undone within about 5
-// seconds (goRefusal), so it never suggests one. A pause that could not be read (`undefined`) gets a neutral sentence.
-export function afternoonFailureTail(stop: StopFlag | null, pause: MiddayPause | null | undefined, why = ""): string {
+// Fix of 2026-11-12 (group 2, round 3, and group 2 rounds 1 and 2 of 2026-11-12): a failed afternoon load window's last sentence
+// depends on why it failed, and never repeats what the line already says (`why`). Every branch is true in every state that reaches
+// it (the list is in the release log):
+//  - the daily loss stop: no more trading today (a `resume` is undone within about 5 seconds, goRefusal);
+//  - the pause unknown (not readable, or no record): `status`;
+//  - past the last entry: no entries are left today;
+//  - a plain stop, still paused: `resume`, then `go`; a plain stop, the pause over: `resume` alone;
+//  - the pause over: trading has already resumed;
+//  - still paused, no stop: `go` resumes a normal afternoon (a pending screen means the account was flat).
+export function afternoonFailureTail(stop: StopFlag | null, pause: MiddayPause | null | undefined, why = "", lastEntryPassed = false): string {
   if (stop?.on && stop.reason.startsWith("daily loss stop")) return /daily loss stop/.test(why) ? "There is no more trading today." : "The daily loss stop is in force, so there is no more trading today.";
-  if (stop?.on) return /stop flag is on/.test(why) ? "Send `resume`, then `go`, for a normal afternoon." : "The stop flag is on: send `resume`, then `go`, for a normal afternoon.";
-  if (pause === undefined) return "Send `status` to see whether trading is paused.";
-  if (pause && !pause.on) return /already resumed/.test(why) ? "" : "Trading has already resumed.";
+  if (!pause) return "Send `status` to see what is allowed now.";
+  if (lastEntryPassed) return /no entries are left/i.test(why) ? "" : "No entries are left today.";
+  const named = /stop flag is on/.test(why);
+  if (stop?.on && pause.on) return named ? "Send `resume`, then `go`, for a normal afternoon." : "The stop flag is on: send `resume`, then `go`, for a normal afternoon.";
+  if (stop?.on) return named ? "Send `resume` to trade a normal afternoon." : "The stop flag is on: send `resume` to trade a normal afternoon.";
+  if (!pause.on) return /already resumed/.test(why) ? "" : "Trading has already resumed.";
   return "Still paused; `go` resumes a normal afternoon.";
 }
 
@@ -78,20 +87,27 @@ export const SCREEN_STILL_FINISHING = "The earlier screen is still finishing. Se
 // Group 1, round 1 of 2026-11-12 (wording): the same cancel once the screen had already switched the live list.
 export const SCREEN_CANCELLED_SWITCHED = "The afternoon load window is cancelled: it will not start. Its screen had already switched the live list to the cheap names, so they stay live, and any trading on them uses today's normal limits (not the window's).";
 export const SCREEN_CANCELLED = "The afternoon load window is cancelled (its cheap-symbol screen had not finished): it will not start, and the live list stays as it is.";
-// Group 2, round 1 of 2026-11-12: what Michael can do next depends on the command that cancelled the window and its result.
-//  - `go` that resumed trading: the window cannot be started again today (`load afternoon` needs the pause);
-//  - `go` that was refused: a resend is fine (unless the daily loss stop is in force);
-//  - `stop` or `flatten`: `resume`, then `load afternoon` (not under the daily loss stop, which undoes a `resume`).
-export function screenCancelledLine(switched: boolean | "switched", after: "go-resumed" | "go-refused" | "stop", lossStop: boolean): string {
+// Group 2, rounds 1 and 2 of 2026-11-12: what Michael can do next depends on the command that cancelled the window and its result.
+// A pending screen means `load afternoon` was accepted (a mid-day cycle, the pause on, flat, no stop), so a `go` can only be refused
+// because the daily loss stop came on, the pause ended meanwhile (the automatic resume after a mid-day deploy), or a stop flag was set.
+//  - `go` that resumed trading: the pause is over, so the window cannot be started again today (`load afternoon` needs the pause);
+//  - the daily loss stop (a refused `go` names it already; after `stop` or `flatten` it is said): no more trading today;
+//  - a `go` refused because the pause ended: the same "pause is over" sentence;
+//  - a `go` refused for a plain stop, or `stop` or `flatten`: `resume`, then `load afternoon`, or, once its time has passed, that it
+//    is no longer accepted today;
+//  - any other refusal: `status` (never the advice to send it again).
+export function screenCancelledLine(switched: boolean | "switched", after: "go-resumed" | "go-refused" | "stop", o: { lossStop: boolean; why?: string; tooLate?: boolean }): string {
   const base = switched === "switched" ? SCREEN_CANCELLED_SWITCHED : SCREEN_CANCELLED;
-  const next =
-    after === "go-resumed"
-      ? "Trading has resumed, so the window cannot be started again today."
-      : lossStop
-        ? "The daily loss stop is in force, so there is no more trading today."
-        : after === "go-refused"
-          ? "Send `load afternoon` again if you want it."
-          : "To try again, send `resume`, then `load afternoon`.";
+  const pauseOver = "The mid-day pause is over, so the window cannot be started again today.";
+  const tryAgain = o.tooLate ? "`load afternoon` is no longer accepted today (its time has passed)." : "To try again, send `resume`, then `load afternoon` (accepted until 1:30 PM CT, or the last entry if earlier).";
+  const why = o.why ?? "";
+  let next: string;
+  if (after === "go-resumed") next = pauseOver;
+  else if (o.lossStop) next = /daily loss stop/.test(why) ? "There is no more trading today." : "The daily loss stop is in force, so there is no more trading today.";
+  else if (after === "stop") next = tryAgain;
+  else if (/already resumed|not paused/.test(why)) next = pauseOver;
+  else if (/stop flag is on/.test(why)) next = tryAgain;
+  else next = "Send `status` to see what is allowed now.";
   return `${base} ${next}`;
 }
 
@@ -287,7 +303,7 @@ export class CommandProcessor {
         } else {
           await this.say(`Stopped. No new entries. Cancelled ${n} unfilled entr${n === 1 ? "y" : "ies"}. Open positions keep their protective stops and will be closed at the end of the day (or type \`flatten\`).`);
         }
-        if (screenCancelled) await this.say(screenCancelledLine(screenCancelled, "stop", (await this.lossStillPast(now)) !== null));
+        if (screenCancelled) await this.say(screenCancelledLine(screenCancelled, "stop", { lossStop: (await this.lossStillPast(now)) !== null, tooLate: await this.afternoonTooLate(now) }));
         return;
       }
       case "resume": {
@@ -326,7 +342,7 @@ export class CommandProcessor {
         this.pending.add(task);
         void task.finally(() => this.pending.delete(task));
         await this.say(saved ? "Stopped. Selling every position and cancelling every open order now; I will say when the account is flat." : "**The stop flag could not be saved.** Selling every position now anyway; I will say when it is done.");
-        if (screenCancelled) await this.say(screenCancelledLine(screenCancelled, "stop", (await this.lossStillPast(now)) !== null));
+        if (screenCancelled) await this.say(screenCancelledLine(screenCancelled, "stop", { lossStop: (await this.lossStillPast(now)) !== null, tooLate: await this.afternoonTooLate(now) }));
         return;
       }
       case "limits": {
@@ -354,13 +370,13 @@ export class CommandProcessor {
         const why = goRefusal({ hasCycle: Boolean(day && middayTimes(day)), pause, flat: Boolean(day && middayFlat(day)), stop });
         if (why) {
           await this.say(`Not resumed: ${why}.`);
-          if (screenCancelled) await this.say(screenCancelledLine(screenCancelled, "go-refused", Boolean(stop?.on && stop.reason.startsWith("daily loss stop"))));
+          if (screenCancelled) await this.say(screenCancelledLine(screenCancelled, "go-refused", { lossStop: Boolean(stop?.on && stop.reason.startsWith("daily loss stop")), why, tooLate: await this.afternoonTooLate(now) }));
           return;
         }
         await updatePause(this.d.store, date, { on: false, resumedAt: now.toISOString(), resumedBy: "go" });
         const lastEntryAt = middayTimes(day!)!.lastEntryAt;
         await this.say(now >= lastEntryAt ? `The mid-day pause is over, but no entries are left today (last entry ${centralClock(lastEntryAt)}).` : "Resumed: the mid-day pause is over. Same limits as this morning; the loss stop counts from the open.");
-        if (screenCancelled) await this.say(screenCancelledLine(screenCancelled, "go-resumed", false));
+        if (screenCancelled) await this.say(screenCancelledLine(screenCancelled, "go-resumed", { lossStop: false }));
         return;
       }
       case "loadAfternoon": {
@@ -548,6 +564,18 @@ export class CommandProcessor {
     }
   }
 
+  // Wording only (group 2, round 2 of 2026-11-12): is it past the time `load afternoon` is accepted today (1:30 PM CT, or the last
+  // entry if earlier)? Reads only; false if it cannot tell.
+  private async afternoonTooLate(now: Date): Promise<boolean> {
+    try {
+      const day = await this.d.store.getDay(etDate(now));
+      const times = day ? middayTimes(day) : null;
+      return times !== null && now >= times.resumeUntil;
+    } catch {
+      return false;
+    }
+  }
+
   // For the `resume` reply only (fix of 2026-11-11: at 1:31 PM it said "Entries still need the day's limits approved" on an approved,
   // armed day, and entries restarted at once). Says what happens next, following the order gate's own early checks in the same order
   // (gate.ts: armed, not flat, approved, the mid-day pause, the load window's start, the last entry). Wording only: it reads, never
@@ -640,7 +668,9 @@ export class CommandProcessor {
       this.d.log?.("load_afternoon_refused", { date, why });
       const listNote = r.switched ? " The live list was switched to the cheap names while paused." : "";
       // Fix of 2026-11-12: the closing sentence depends on the reason (a stop on, or trading already resumed).
-      const tail = facts.stop?.on || (facts.pause && !facts.pause.on) ? afternoonFailureTail(facts.stop, facts.pause, why) : r.switched ? "If you send `go`, the normal placeholder trades on them." : "";
+      const times = facts.day ? middayTimes(facts.day) : null;
+      const lastEntryPassed = times !== null && at >= times.lastEntryAt;
+      const tail = facts.stop?.on || (facts.pause && !facts.pause.on) || lastEntryPassed ? afternoonFailureTail(facts.stop, facts.pause, why, lastEntryPassed) : r.switched ? "If you send `go`, the normal placeholder trades on them." : "";
       await this.say(`Afternoon load window not started: ${why}.${listNote}${tail ? ` ${tail}` : ""}`);
       return;
     }

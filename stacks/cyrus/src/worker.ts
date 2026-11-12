@@ -1254,7 +1254,9 @@ export class Worker {
         const stopNow = await this.d.store.getControl<StopFlag>(CONTROL_STOP).catch(() => null);
         // `undefined` when the pause cannot be read: the tail is then neutral (never "Still paused" after "no longer paused").
         const pauseNow = await readPause(this.d.store, date).catch(() => undefined);
-        const tail = afternoonFailureTail(stopNow, pauseNow, why);
+        const dayNow = await this.d.store.getDay(date).catch(() => null);
+        const timesNow = dayNow ? middayTimes(dayNow) : null;
+        const tail = afternoonFailureTail(stopNow, pauseNow, why, timesNow !== null && this.d.now() >= timesNow.lastEntryAt);
         await this.say("commands", `Afternoon load window not started: ${why}.${tail ? ` ${tail}` : ""}`);
       }
     });
