@@ -7,9 +7,11 @@
 //
 // So the summary reads the day in bounded windows: one window from midnight Eastern to 30 minutes before the open (almost nothing
 // trades then), then 5 minute windows until now. Each window is paged (500 a page). A window that fails (a timeout after the
-// client's 3 tries) is split in half and read again, down to 1 minute; a 1 minute window that still fails is counted and the
+// client's 3 tries) is split in half and read again until it is 1 minute or less; one that still fails is counted and the
 // listing is marked incomplete. A partial list is caught afterwards: any window where 3 or more of the stack's stored entries are
-// missing is read again in 1 minute pieces. Whatever is still missing after that is looked up one by one by the summary, as before.
+// missing is read again in 1 minute pieces (session windows only; a failure there is counted but never fails the step). Whatever
+// is still missing after that is looked up one by one by the summary, as before. "Complete" means every window was read without a
+// failure or a page cap; a short page counts as read, which is why the re-read and the lookups follow.
 import type { Order } from "./alpaca-trading.ts";
 
 export const SUMMARY_WINDOW_MS = 5 * 60_000;
@@ -65,6 +67,8 @@ export async function listDaySliced(
   let failedWindows = 0;
   let incomplete = false;
 
+  // `reread` marks the second, best-effort pass: a failure there is counted but never makes the step fail.
+  let reread = false;
   const readWindow = async (a: Date, b: Date): Promise<void> => {
     await pace();
     try {
@@ -80,7 +84,7 @@ export async function listDaySliced(
         incomplete = true;
         // Alpaca is down or failing throughout: give up now (the summary step is tried again on the next pass) rather than spend
         // up to 30 seconds on each of a hundred windows.
-        if (failedWindows >= SUMMARY_MAX_FAILED_WINDOWS) throw new Error(`Alpaca's order listing failed in ${failedWindows} one-minute windows`);
+        if (!reread && failedWindows >= SUMMARY_MAX_FAILED_WINDOWS) throw new Error(`Alpaca's order listing failed in ${failedWindows} one-minute windows`);
         return;
       }
       const mid = new Date(a.getTime() + Math.floor(len / 2));
@@ -102,8 +106,11 @@ export async function listDaySliced(
     if (i >= 0) missingByWindow.set(i, (missingByWindow.get(i) ?? 0) + 1);
   }
   let rereadWindows = 0;
+  reread = true;
   for (const [i, n] of missingByWindow) {
     if (n < SUMMARY_REREAD_MISSING) continue;
+    // Only session windows (5 minutes) are re-read; the long window before the open is left to the one-by-one lookups.
+    if (windows[i]![1].getTime() - windows[i]![0].getTime() > SUMMARY_WINDOW_MS + 1) continue;
     rereadWindows++;
     // The stored time is when the row was written, a moment before Alpaca submitted the order: read a minute either side too.
     const [a0, b0] = windows[i]!;

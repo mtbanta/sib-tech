@@ -94,3 +94,25 @@ test("summary listing: each window waits for the summary's pacing first", async 
   await listDaySliced(b, summaryWindows(MIDNIGHT, OPEN, CLOSE_PLUS), [], async () => void paced++);
   assert.equal(paced, b.calls.length);
 });
+
+test("the summary step alerts once per trading day: a second failure that day is quiet; the next day's failure alerts even under 24 hours later", async () => {
+  const { rig } = await import("./rig.ts");
+  const { FakeBroker } = await import("./helpers.ts");
+  const { MemoryStore } = await import("../src/store.ts");
+  const r = rig<InstanceType<typeof FakeBroker>, InstanceType<typeof MemoryStore>>();
+  const w = r.worker as unknown as { background(name: string, fn: () => Promise<void>): void };
+  const fail = () => w.background("summary", async () => { throw new Error("The operation was aborted due to timeout"); });
+  const alerts = () => r.said("alerts").filter((t) => t.startsWith('Step "summary" failed')).length;
+  await r.at("2026-11-03T03:45:00Z"); // 10:45 PM Eastern on Monday 11-02
+  fail();
+  await new Promise((res) => setTimeout(res, 20));
+  assert.equal(alerts(), 1);
+  await r.at("2026-11-03T04:30:00Z"); // 11:30 PM Eastern, still 11-02
+  fail();
+  await new Promise((res) => setTimeout(res, 20));
+  assert.equal(alerts(), 1, "the same trading day: no second alert");
+  await r.at("2026-11-03T20:10:00Z"); // 3:10 PM Eastern on Tuesday 11-03, about 16 hours later
+  fail();
+  await new Promise((res) => setTimeout(res, 20));
+  assert.equal(alerts(), 2, "the next trading day's failure alerts");
+});

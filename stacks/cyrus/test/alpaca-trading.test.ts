@@ -259,3 +259,22 @@ test("a first send refused outright (a clean 403) is still a definite refusal an
   await assert.rejects(client.submitEntry(entry), (e: any) => e instanceof AlpacaError && e.status === 403);
   assert.equal(calls.length, 1);
 });
+
+test("the summary's bounded window: status all, nested, oldest first, after and until sent, paged by each page's last submitted time", async () => {
+  const at = (i: number) => new Date(Date.UTC(2026, 10, 11, 15, 0, 0, i)).toISOString();
+  const page = (from: number, n: number) => Array.from({ length: n }, (_, i) => orderJson({ id: `w${from + i}`, client_order_id: `cyrus-w-${from + i}`, created_at: at(from + i - 1), submitted_at: at(from + i) }));
+  const { client, calls } = fake([json(page(0, 500)), json(page(500, 20))]);
+  const r = await client.listOrdersWindow("2026-11-11T14:59:59.999Z", "2026-11-11T15:05:00.000Z");
+  assert.equal(r.orders.length, 520);
+  assert.equal(r.complete, true);
+  assert.equal(r.pages, 2);
+  const q = calls[0]!.url.searchParams;
+  assert.equal(calls[0]!.url.pathname, "/v2/orders");
+  assert.deepEqual([q.get("status"), q.get("nested"), q.get("direction"), q.get("limit"), q.get("after"), q.get("until")], ["all", "true", "asc", "500", "2026-11-11T14:59:59.999Z", "2026-11-11T15:05:00.000Z"]);
+  assert.equal(calls[1]!.url.searchParams.get("after"), at(499), "the cursor is the last order's submitted time, not its created time");
+  assert.equal(calls[1]!.url.searchParams.get("until"), "2026-11-11T15:05:00.000Z");
+  assert.equal(r.orders[0]!.submittedAt, at(0));
+  const stuck = fake([json(page(0, 500)), json(page(0, 500))]);
+  const s2 = await stuck.client.listOrdersWindow("a", "b", 2);
+  assert.equal(s2.complete, false, "it never claims completeness when it stopped early");
+});

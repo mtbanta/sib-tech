@@ -463,12 +463,14 @@ export class Worker {
         this.lastTickError = `${name}: ${(err as Error).message.slice(0, 150)}`;
         this.d.log?.("error", "background_failed", { name, error: (err as Error).message.slice(0, 200) });
         // At most one alert per step every 5 minutes (a database outage would otherwise post one every 30 seconds). The summary step,
-        // which is retried every pass until midnight Eastern, alerts once a day (fix of 2026-11-11: it posted about 95 alerts that
-        // evening); every failure is still in the run log.
+        // which is retried every pass until midnight Eastern, alerts once per trading day (fix of 2026-11-11: it posted about 95 alerts
+        // that evening); every failure is still in the run log.
         const t = this.d.now().getTime();
-        const gap = name === "summary" ? 24 * 3_600_000 : 5 * 60_000;
-        if (t - (this.lastBackgroundAlert.get(name) ?? -Infinity) >= gap) {
-          this.lastBackgroundAlert.set(name, t);
+        const key = name === "summary" ? `${name}:${etDate(this.d.now())}` : name;
+        const gap = name === "summary" ? Infinity : 5 * 60_000;
+        const last = this.lastBackgroundAlert.get(key);
+        if (last === undefined || t - last >= gap) {
+          this.lastBackgroundAlert.set(key, t);
           void this.say("alerts", `Step "${name}" failed: ${(err as Error).message.slice(0, 150)}`).catch(() => undefined);
         }
       })
@@ -1583,9 +1585,11 @@ export class Worker {
     const stored = await this.d.store.listOrders(date);
     // Fix of 2026-11-11: the day's orders are read in bounded windows (summary-listing.ts), not in one open-ended listing, which Alpaca
     // answered too slowly (about 28 s) and only in part on a day of about 8,000 orders.
-    // The windows end a minute from now, and at least 10 minutes past the close (the 2:55 close-out's last sales are inside them).
-    const listUntil = new Date(Math.max(this.d.now().getTime() + 60_000, day.closeAt ? day.closeAt.getTime() + 10 * 60_000 : 0));
-    const sliced = await listDaySliced(this.d.broker, summaryWindows(etInstant(date, "00:00"), day.openAt, listUntil), stored, () => this.summaryPace());
+    // The windows end 10 minutes past the close (the 2:55 close-out's last sales are inside them); without a close time, a minute from now.
+    const listUntil = day.closeAt ? new Date(day.closeAt.getTime() + 10 * 60_000) : new Date(this.d.now().getTime() + 60_000);
+    // Only entries Alpaca has (the same rule as the lookups below) count as missing; refused or never-sent rows do not.
+    const atAlpaca = stored.filter((s) => s.alpacaOrderId || s.status === "filled" || s.status === "submitted");
+    const sliced = await listDaySliced(this.d.broker, summaryWindows(etInstant(date, "00:00"), day.openAt, listUntil), atAlpaca, () => this.summaryPace());
     const listed = { orders: sliced.orders, complete: sliced.complete };
     this.d.log?.("info", "summary_listing", { windows: sliced.windows, requests: sliced.requests, orders: sliced.orders.length, failedWindows: sliced.failedWindows, rereadWindows: sliced.rereadWindows, complete: sliced.complete });
     // Release A, fix 4, and Michael's decision 2 of 2026-11-06: every entry Alpaca's listing left out (71 on 2026-11-06) is fetched by
@@ -1638,7 +1642,7 @@ export class Worker {
       requests: requestsAtClose,
       feesRunning: running.total,
       // Complete if every window was read, or if what a failed window hid was all found by the lookups and the fills check.
-      listComplete: listed.complete || (lookupsFailed === 0 && fillsCheck !== null && fillsCheck.complete && fillsCheck.stillMissing === 0),
+      listComplete: lookupsFailed === 0 && (listed.complete || (fillsCheck !== null && fillsCheck.complete && fillsCheck.stillMissing === 0)),
       // A load day reports its morning window; a normal day with `load afternoon` reports the afternoon window.
       loadWindow: isLoadDay(day) ? loadWindow(day) : afternoonLoadWindow(day),
       loadWindowKind: isLoadDay(day) ? "morning" : "afternoon",

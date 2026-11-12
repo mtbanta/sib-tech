@@ -6,11 +6,11 @@ import type { DiscordBot, DiscordMessage } from "./discord-bot.ts";
 import { isOwnerCommand } from "./discord-bot.ts";
 import type { Settings } from "./config.ts";
 import { decideLimits, decideLoad, limitLines, parseCommand, type NextSessionFinder } from "./morning.ts";
-import { LOAD_AFTERNOON_PHASE, LOAD_MAX_POSITION_USD, LOAD_PHASE, afternoonLoadStart, afternoonLoadWindow, inAfternoonLoad, isLoadDay, loadLine, loadWindowRules } from "./load-mode.ts";
+import { LOAD_AFTERNOON_PHASE, LOAD_MAX_POSITION_USD, LOAD_PHASE, afternoonLoadStart, afternoonLoadWindow, beforeLoadWindow, inAfternoonLoad, isLoadDay, loadLine, loadWindow, loadWindowRules } from "./load-mode.ts";
 import { CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import type { Liquidator, Say } from "./sells.ts";
 import { CONTROL_COMMAND_CURSOR, CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
-import { MAX_TRADES_PER_MINUTE, MAX_TRADES_PER_MINUTE_LOAD_DAY, describeLimits } from "./limits.ts";
+import { MAX_TRADES_PER_MINUTE, MAX_TRADES_PER_MINUTE_LOAD_DAY, MIN_MINUTES_BEFORE_CLOSE, describeLimits } from "./limits.ts";
 import { addMinutes, centralClock, dayWord, etDate, sessionPhase } from "./time.ts";
 import { blockedNext, goRefusal, lossPast, middayFlat, middayTimes, readHold, readPause, resumedByText, setHold, updatePause, type MiddayPause } from "./midday.ts";
 
@@ -507,8 +507,9 @@ export class CommandProcessor {
   }
 
   // For the `resume` reply only (fix of 2026-11-11: at 1:31 PM it said "Entries still need the day's limits approved" on an approved,
-  // armed day, and entries restarted at once). Says what happens next from today's record and the mid-day pause. Wording only: it
-  // reads, never writes, never throws, and gives up after 3 seconds (then a neutral reply is used).
+  // armed day, and entries restarted at once). Says what happens next, following the order gate's own early checks in the same order
+  // (gate.ts: armed, not flat, approved, the mid-day pause, the load window's start, the last entry). Wording only: it reads, never
+  // writes, never throws, and gives up after 3 seconds (then a neutral reply is used).
   private async resumeReply(now: Date): Promise<string> {
     const neutral = "Stop cleared. Entries go ahead only on an approved and armed day, outside the mid-day pause.";
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -517,12 +518,18 @@ export class CommandProcessor {
       const phase = sessionPhase(day, now);
       if (!day || phase === "no_session" || phase === "after_close") return "Stop cleared. No session is running now, so nothing trades until the next one (on its approved limits).";
       if (day.status !== "approved") return "Stop cleared. Entries still need the day's limits approved.";
-      if (phase === "before_open") return "Stop cleared. Today's limits are approved, so entries can start at the open.";
-      if (!(day.phases.armed || day.phases.rearm)) return "Stop cleared. Today's limits are approved, but the day is not armed yet, so entries wait for that.";
-      const times = middayTimes(day);
-      if (times && now >= times.lastEntryAt) return "Stop cleared. Today's last entry time has passed, so there are no more entries today.";
-      const pause = times ? await readPause(this.d.store, day.tradeDate) : null;
+      const notFlat = await this.d.store.getControl<NotFlatState>(CONTROL_NOT_FLAT);
+      if (notFlat?.on) return "Stop cleared, but the account was not flat after the last close-out, so there are no entries until those positions are sold.";
+      if (phase === "before_open") {
+        const w = isLoadDay(day) ? loadWindow(day) : null;
+        return w ? `Stop cleared. Today's limits are approved; it is a load day, so entries start at ${centralClock(w.start)}.` : "Stop cleared. Today's limits are approved, so entries can start at the open.";
+      }
+      if (!day.phases.armed) return day.phases.rearm ? "Stop cleared. The borrowing cap is being set again at Alpaca, so entries wait until that is confirmed (usually seconds)." : "Stop cleared. Today's limits are approved, but the day is not armed yet, so entries wait for that.";
+      const lastEntryAt = middayTimes(day)?.lastEntryAt ?? addMinutes(day.closeAt!, -MIN_MINUTES_BEFORE_CLOSE);
+      if (now >= lastEntryAt) return `Stop cleared. Today's last entry time (${centralClock(lastEntryAt)}) has passed, so there are no more entries today.`;
+      const pause = middayTimes(day) ? await readPause(this.d.store, day.tradeDate) : null;
       if (pause?.on) return "Stop cleared. Today's limits are approved, but entries stay paused for the mid-day cycle until you send `go`.";
+      if (beforeLoadWindow(day, now)) return `Stop cleared. It is a load day, so entries start at ${centralClock(loadWindow(day)!.start)}.`;
       return "Stop cleared. Entries resume now under today's approved limits.";
     })().catch(() => neutral);
     try {
