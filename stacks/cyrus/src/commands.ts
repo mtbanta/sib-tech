@@ -6,7 +6,7 @@ import type { DiscordBot, DiscordMessage } from "./discord-bot.ts";
 import { isOwnerCommand } from "./discord-bot.ts";
 import type { Settings } from "./config.ts";
 import { decideLimits, decideLoad, limitLines, parseCommand, type NextSessionFinder } from "./morning.ts";
-import { LOAD_AFTERNOON_PHASE, LOAD_MAX_POSITION_USD, LOAD_PHASE, afternoonLoadStart, afternoonLoadWindow, beforeLoadWindow, inAfternoonLoad, isLoadDay, loadLine, loadWindow, loadWindowRules } from "./load-mode.ts";
+import { AFTERNOON_FLAT_PHASE, LOAD_AFTERNOON_PHASE, LOAD_MAX_POSITION_USD, LOAD_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, beforeLoadWindow, inAfternoonLoad, isLoadDay, loadLine, loadWindow, loadWindowRules } from "./load-mode.ts";
 import { CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import type { Liquidator, Say } from "./sells.ts";
 import { CONTROL_COMMAND_CURSOR, CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
@@ -44,19 +44,31 @@ export interface CommandDeps {
 // Why `load afternoon` cannot start now, or null (Michael's standing requirement of 2026-11-11): today has a mid-day cycle, is approved
 // and armed, the window was not started already, it is before 1:30 PM Central (or the last entry if earlier), the mid-day pause is on
 // and its close-out finished flat, no stop is on, the not-flat flag is off, and Alpaca shows no positions and no open orders.
+// Michael's ruling of 2026-11-12 (afternoon): it is also accepted while the account is flat and a plain stop flag is on (his `stop` or
+// `flatten`, never the daily loss stop), after the mid-day close-out finished flat and before 1:30 PM, whether or not the pause is
+// still on; it then clears the stop and starts the window (startAfternoonWindow).
 export function loadAfternoonRefusal(o: { day: DayRecord | null; now: Date; pause: MiddayPause | null; stop: StopFlag | null; notFlat: NotFlatState | null; positions: number | null; openOrders: number | null }): string | null {
   const times = o.day ? middayTimes(o.day) : null;
   if (!o.day || !times) return "there is no mid-day cycle today";
   if (o.day.status !== "approved" || !o.day.phases.armed) return "today is not approved and armed";
-  if (afternoonLoadStart(o.day)) return "the afternoon load window is already on today";
+  if (afternoonLoadStart(o.day)) return "the afternoon load window was already started today";
   if (o.now >= times.resumeUntil) return `it is ${centralClock(times.resumeUntil)} or later (\`load afternoon\` is accepted only before then)`;
-  const go = goRefusal({ hasCycle: true, pause: o.pause, flat: middayFlat(o.day), stop: o.stop });
-  if (go) return go;
+  if (plainStop(o.stop)) {
+    if (!middayFlat(o.day)) return "the mid-day close-out has not finished flat yet";
+  } else {
+    const go = goRefusal({ hasCycle: true, pause: o.pause, flat: middayFlat(o.day), stop: o.stop });
+    if (go) return go;
+  }
   if (o.notFlat?.on) return "the account was not flat after the last close-out";
   if (o.positions === null || o.openOrders === null) return "I could not read Alpaca's positions and open orders";
   if (o.positions !== 0) return `Alpaca shows ${o.positions} position(s)`;
   if (o.openOrders !== 0) return `Alpaca shows ${o.openOrders} open order(s)`;
   return null;
+}
+
+// A stop flag set by Michael (`stop` or `flatten`), not the daily loss stop.
+export function plainStop(stop: StopFlag | null | undefined): boolean {
+  return Boolean(stop?.on && !stop.reason.startsWith("daily loss stop"));
 }
 
 // Fix of 2026-11-12 (group 2, round 3, and group 2 rounds 1 and 2 of 2026-11-12): a failed afternoon load window's last sentence
@@ -114,11 +126,13 @@ export function screenCancelledLine(switched: boolean | "switched", after: "go-r
 // The `status` line for the afternoon load window (group 2 review, round 1).
 function afternoonStatusLine(day: DayRecord, now: Date): string {
   const w = afternoonLoadWindow(day)!;
-  if (inAfternoonLoad(day, now)) return `Afternoon load window: on since ${centralClock(w.start)}, until ${centralClock(w.end)} (the last entry): 1 share churn, at most ${LOAD_MAX_POSITION_USD} dollars a position, up to ${MAX_TRADES_PER_MINUTE_LOAD_DAY} orders a minute`;
-  return now < w.start ? "" : `Afternoon load window: ran from ${centralClock(w.start)} to ${centralClock(w.end)}`;
+  if (inAfternoonLoad(day, now)) return `Afternoon load window: on since ${centralClock(w.start)}, until ${centralClock(w.end)} (then a close-out to flat, entries paused): 1 share churn, at most ${LOAD_MAX_POSITION_USD} dollars a position, up to ${MAX_TRADES_PER_MINUTE_LOAD_DAY} orders a minute`;
+  if (now < w.start) return "";
+  const after = day.phases[AFTERNOON_FLAT_PHASE] ? "; its close-out finished flat, entries paused" : "; its close-out is still selling, entries paused";
+  return `Afternoon load window: ran from ${centralClock(w.start)} to ${centralClock(w.end)}${after}`;
 }
 
-const LOAD_AFTERNOON_HELP = "`load afternoon` during the mid-day pause, while flat, before 1:30 PM CT (or the last entry, if earlier): the rest of today until the last entry (2:00 PM CT on a full day) is a load window (1 share churn, at most 75 dollars a position, up to 150 orders a minute even above today's approved limit), and trading resumes. If the morning was not a load day, the live list switches to the 30 cheap names first (the screen takes a few minutes; `stop`, `flatten` or `go` meanwhile cancels the window: after a `go` that resumes trading it cannot be started again today, after `stop` or `flatten` send `resume`, then `load afternoon`).";
+const LOAD_AFTERNOON_HELP = "`load afternoon` while flat, during the mid-day pause or (on a load day) after `stop` or `flatten`, which it clears, before 1:30 PM CT: a load window of at most 30 minutes (1 share churn, 75 dollars a position, up to 150 orders a minute even above today's approved limit), then entries pause and a close-out sells to flat. On a normal morning the cheap-symbol screen runs first (a few minutes; `stop`, `flatten` or `go` meanwhile cancels it: after a `go` that resumes trading it cannot be started again today, after `stop` or `flatten` send `resume`, then `load afternoon`).";
 const LOAD_AFTERNOON_OFF_HELP = "`load afternoon` is switched off in this release while a fix to it is finished; it changes nothing.";
 export const LOAD_AFTERNOON_OFF = "`load afternoon` is switched off in this release while a fix to it is finished, so nothing changed. `go` still resumes a normal afternoon.";
 
@@ -367,7 +381,8 @@ export class CommandProcessor {
         const day = await this.d.store.getDay(date);
         const pause = await readPause(this.d.store, date);
         const stop = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
-        const why = goRefusal({ hasCycle: Boolean(day && middayTimes(day)), pause, flat: Boolean(day && middayFlat(day)), stop });
+        // Michael, 2026-11-12 (afternoon): never while the close-out after the afternoon load window is still selling.
+        const why = day && afternoonCloseoutPending(day, now) ? "the close-out after the afternoon load window has not finished flat yet" : goRefusal({ hasCycle: Boolean(day && middayTimes(day)), pause, flat: Boolean(day && middayFlat(day)), stop });
         if (why) {
           await this.say(`Not resumed: ${why}.`);
           if (screenCancelled) await this.say(screenCancelledLine(screenCancelled, "go-refused", { lossStop: Boolean(stop?.on && stop.reason.startsWith("daily loss stop")), why, tooLate: await this.afternoonTooLate(now) }));
@@ -389,6 +404,12 @@ export class CommandProcessor {
         const why = loadAfternoonRefusal({ ...facts, now });
         if (why) {
           await this.say(`Not started: ${why}.`);
+          return;
+        }
+        // Michael's ruling of 2026-11-12 (afternoon) covers a stop on a load day: the cheap list is already live. On a normal morning
+        // the screen switches the list only while paused with no stop, so this release refuses there.
+        if (plainStop(facts.stop) && !isLoadDay(facts.day)) {
+          await this.say("Not started: with the stop flag on, `load afternoon` works in this release only on a load day (its cheap list is already live). Send `resume` first if you want trading.");
           return;
         }
         // A load day already has the cheap list live: the window starts now (the facts above were just read, Alpaca included).
@@ -643,14 +664,18 @@ export class CommandProcessor {
 
   // Writes the window's start and ends the pause, then says so.
   private async startAfternoonWindow(date: string, r: { switched: boolean; list: string[] }, facts: Awaited<ReturnType<CommandProcessor["afternoonFacts"]>>, at: Date): Promise<void> {
+    // Michael's ruling of 2026-11-12 (afternoon): accepted with his own stop on (flat, checked by loadAfternoonRefusal), it clears the
+    // stop with the same write `resume` makes. The window's phase is written first, so a failed clear leaves entries stopped (safe).
+    const clearsStop = plainStop(facts.stop);
     await setPhase(this.d.store, date, LOAD_AFTERNOON_PHASE, at.toISOString());
     await updatePause(this.d.store, date, { on: false, resumedAt: at.toISOString(), resumedBy: "load afternoon" });
-    this.d.log?.("load_afternoon", { date, switched: r.switched, symbols: r.list.length });
+    if (clearsStop) await this.setStop(false, "owner command (load afternoon)", at);
+    this.d.log?.("load_afternoon", { date, switched: r.switched, symbols: r.list.length, clearedStop: clearsStop });
     const day = facts.day!;
-    const lastEntryAt = middayTimes(day)!.lastEntryAt;
+    const end = afternoonLoadWindow({ ...day, phases: { ...day.phases, [LOAD_AFTERNOON_PHASE]: at.toISOString() } })?.end ?? middayTimes(day)!.lastEntryAt;
     const closeoutAt = day.closeAt ? centralClock(addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE)) : "the usual time";
     await this.say(
-      `Afternoon load window on until ${centralClock(lastEntryAt)} (the last entry): ${loadWindowRules()}; at most ${LOAD_MAX_POSITION_USD} dollars a position and up to ${MAX_TRADES_PER_MINUTE_LOAD_DAY} orders a minute (your ruling, this window only). ${r.switched ? `The live list is now ${r.list.length} cheap names (posted in trading). ` : ""}Resumed: the mid-day pause is over. The loss stop counts from the open; the close-out runs as normal at ${closeoutAt}.`,
+      `Afternoon load window on until ${centralClock(end)}: ${loadWindowRules()}; at most ${LOAD_MAX_POSITION_USD} dollars a position and up to ${MAX_TRADES_PER_MINUTE_LOAD_DAY} orders a minute (your ruling, this window only). ${r.switched ? `The live list is now ${r.list.length} cheap names (posted in trading). ` : ""}${clearsStop ? (facts.pause?.on ? "Stop cleared, and the mid-day pause is over: trading resumed. " : "Stop cleared: trading resumed. ") : "Resumed: the mid-day pause is over. "}At ${centralClock(end)} entries pause and a close-out sells to flat; trading does not resume on its own after it. The loss stop counts from the open; the regular close-out runs at ${closeoutAt}.`,
     );
   }
 

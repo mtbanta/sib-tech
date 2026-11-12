@@ -50,6 +50,7 @@ const pg = createRequire("/Users/mtbanta/Projects/sib-tech/stacks/cyrus/package.
 const db = new pg.Client({ connectionString: process.env.SUPABASE_DB_URL, ssl: { rejectUnauthorized: false } });
 let day = null;
 let pause = null;
+let stop = null;
 try {
   await db.connect();
   await db.query("begin transaction read only");
@@ -57,6 +58,9 @@ try {
   if (d) day = { isTradingDay: d.is_trading_day, openAt: d.open_at ? new Date(d.open_at) : null, closeAt: d.close_at ? new Date(d.close_at) : null, phases: d.phases ?? {} };
   const c = (await db.query("select value from control where key = $1", [middayKey(date)])).rows[0];
   pause = c ? c.value : null;
+  // Michael's ruling of 2026-11-12 (afternoon): flat with the stop flag on is as safe as the mid-day pause.
+  const st = (await db.query("select value from control where key = $1", ["stop_flag"])).rows[0];
+  stop = st ? st.value : null;
   await db.query("rollback");
 } catch (err) {
   console.log("refused: could not read the database:", scrub(err.message).slice(0, 200));
@@ -80,8 +84,8 @@ try {
   process.exit(2);
 }
 
-const refusals = deployRefusals({ now, day, pause, positions, openOrders, afterOneThirtyAllowed: flag("--after-130"), reviewedCommit: reviewed, checkedOutCommit: checkedOut, gitStatus });
-console.log(`date ${date}; checkout ${checkedOut.slice(0, 7)}; positions ${positions}; open orders ${openOrders}; pause ${pause?.on ? "on" : "off"}; mid-day flat ${day?.phases?.middayFlat === "yes" ? "yes" : "no"}`);
+const refusals = deployRefusals({ now, day, pause, stop, positions, openOrders, afterOneThirtyAllowed: flag("--after-130"), reviewedCommit: reviewed, checkedOutCommit: checkedOut, gitStatus });
+console.log(`date ${date}; checkout ${checkedOut.slice(0, 7)}; positions ${positions}; open orders ${openOrders}; pause ${pause?.on ? "on" : "off"}; stop flag ${stop?.on ? "on" : "off"}; mid-day flat ${day?.phases?.middayFlat === "yes" ? "yes" : "no"}`);
 if (refusals.length > 0) {
   console.log("refused:");
   for (const r of refusals) console.log(`  - ${r}`);

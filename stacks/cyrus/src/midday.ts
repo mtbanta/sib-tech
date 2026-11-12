@@ -176,6 +176,8 @@ export interface DeployFacts {
   now: Date;
   day: Pick<DayRecord, "isTradingDay" | "openAt" | "closeAt" | "phases"> | null;
   pause: MiddayPause | null;
+  // Michael's ruling of 2026-11-12 (afternoon): a deploy is also allowed while flat with the stop flag on.
+  stop?: { on: boolean; reason: string } | null;
   positions: number;
   openOrders: number;
   afterOneThirtyAllowed: boolean;
@@ -194,7 +196,7 @@ export function deployRefusals(f: DeployFacts): string[] {
     if (f.now >= times.resumeUntil && !f.afterOneThirtyAllowed) out.push(`it is ${centralClock(times.resumeUntil)} or later (pass --after-130 only if Michael asked)`);
     if (f.day.closeAt && f.now >= f.day.closeAt) out.push("the market is closed: use a normal deploy");
   }
-  if (!f.pause?.on) out.push("the mid-day pause is not on");
+  if (!f.pause?.on && !f.stop?.on) out.push("neither the mid-day pause nor the stop flag is on");
   if (f.positions !== 0) out.push(`Alpaca shows ${f.positions} position(s)`);
   if (f.openOrders !== 0) out.push(`Alpaca shows ${f.openOrders} open order(s)`);
   if (!f.reviewedCommit) out.push("--reviewed <commit> is required (the commit that passed group 1)");

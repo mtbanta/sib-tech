@@ -24,7 +24,7 @@ import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
 import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import type { SelfMonitor } from "./self-monitor.ts";
-import { LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
+import { AFTERNOON_FLAT_PHASE, LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
 import { BusyPlaceholder } from "./strategy.ts";
 import { OrderUpdateHandler, type TradeUpdate } from "./order-stream.ts";
 import { EntryExpiry } from "./entry-expiry.ts";
@@ -252,6 +252,13 @@ export class Worker {
   private middayFiveMinAlertDate: string | null = null;
   // True from 10:30 until the mid-day close-out has finished flat (set on every pass): the mid-day close-out alone sells then.
   private middayOwnsSelling = false;
+  // The close-out after the afternoon load window (Michael, 2026-11-12).
+  private lastAfternoonAttempt = 0;
+  private afternoonAttemptDate: string | null = null;
+  private afternoonAttempts = 0;
+  private afternoonLastCost: number | null = null;
+  private afternoonLastRemaining: string[] = [];
+  private afternoonAlertDate: string | null = null;
 
   constructor(deps: WorkerDeps) {
     this.d = deps;
@@ -924,7 +931,9 @@ export class Worker {
     // time on), so the order sync's missing-exit check stands aside and its sales cannot spend Alpaca's requests outside the mid-day
     // close-out's 60 a minute (group 1 review, round 1: 40 positions with refused sales made 80 such sales in 10 minutes).
     const middayToday = this.d.middayCycle === false ? null : middayTimes(current);
-    this.middayOwnsSelling = Boolean(inSession && middayToday && current.phases.armed && now >= middayToday.pauseAt && !current.phases[MIDDAY_PHASE] && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE));
+    // The close-out after the afternoon load window (Michael, 2026-11-12) owns selling the same way until it has finished flat.
+    const afternoonCloseoutDue = Boolean(inSession && current.phases.armed && afternoonCloseoutPending(current, now) && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE));
+    this.middayOwnsSelling = Boolean(inSession && middayToday && current.phases.armed && now >= middayToday.pauseAt && !current.phases[MIDDAY_PHASE] && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE)) || afternoonCloseoutDue;
     // The loss stop is scheduled first, before anything else in the session that waits on the broker.
     if (inSession) this.scheduleLossStop(current, now);
     // Closes the live updates wrote to memory but could not write to the database yet are tried again (item 1). Never waited on.
@@ -985,6 +994,26 @@ export class Worker {
         const only = retry ? retrySymbols(this.middayLastRemaining, this.middayAttempts - 1) : null;
         this.middayAttempts++;
         this.background("midday", () => this.middayPhase(date, current, mt.pauseAt, retry, only));
+      }
+    }
+    // The close-out after the afternoon load window (Michael, 2026-11-12): when the window's 30 minutes are up (or the last entry comes
+    // first), entries pause again and the mid-day close-out code sells everything, retried every 20 seconds within the same 60 requests
+    // a minute and above the reserve, until flat. Never from the regular close-out time on (that close-out takes over). Its own phase.
+    if (afternoonCloseoutDue && !this.closingOut && !this.inflight.has("carried") && !this.inflight.has("midday") && now.getTime() - this.lastAfternoonAttempt >= MIDDAY_RETRY_MS) {
+      if (this.afternoonAttemptDate !== date) {
+        this.afternoonAttemptDate = date;
+        this.afternoonAttempts = 0;
+        this.afternoonLastCost = null;
+        this.afternoonLastRemaining = [];
+      }
+      const retry = this.afternoonAttempts > 0;
+      const estimate = Math.min(MIDDAY_RETRY_REQUESTS_PER_MINUTE, this.afternoonLastCost ?? MIDDAY_RETRY_REQUESTS_PER_MINUTE);
+      if (!retry || retryAllowed({ room: this.middayBudget.room(now.getTime()), estimate, governorBudget: this.d.governor.budget(), reserve: this.d.governor.reserve() })) {
+        this.lastAfternoonAttempt = now.getTime();
+        const only = retry ? retrySymbols(this.afternoonLastRemaining, this.afternoonAttempts - 1) : null;
+        this.afternoonAttempts++;
+        // The same background name as the mid-day close-out, so every guard that stands aside for it stands aside for this too.
+        this.background("midday", () => this.afternoonCloseoutPhase(date, retry, only));
       }
     }
     // The second alert: still not flat 5 minutes after a try first ended not flat (once a day).
@@ -1572,6 +1601,43 @@ export class Worker {
     }
   }
 
+  // The close-out after the afternoon load window (Michael, 2026-11-12): the pause back on first (the gate refuses every entry from
+  // then on), then the mid-day close-out code (path "midday": no `closeout` phase, no not-flat flag, the borrowing cap untouched, the
+  // price stream kept). A retry is one round without the wait for its own sells, as for the mid-day close-out. When flat it writes its
+  // own phase and says so; entries stay paused (no automatic return to normal trading).
+  private async afternoonCloseoutPhase(date: string, retry: boolean, only: string[] | null): Promise<void> {
+    const pause = await readPause(this.d.store, date);
+    if (!pause?.on) {
+      // The pause's start time stays the mid-day one (the summary and `status` name it); only the flag and the reason change.
+      await updatePause(this.d.store, date, { on: true, since: pause?.since ?? this.d.now().toISOString(), reason: "afternoon load window ended" });
+      this.d.log?.("info", "afternoon_closeout", { date, step: "paused" });
+    }
+    const before = this.d.governor.stats().requestsLastMinute;
+    let result;
+    try {
+      result = await closeOut(this.closeoutDeps(), date, retry ? { alert: false, path: "midday", maxRounds: 1, waitForOwnSells: false, ...(only ? { onlySymbols: only } : {}) } : { alert: false, path: "midday" });
+    } finally {
+      const cost = Math.max(0, this.d.governor.stats().requestsLastMinute - before);
+      this.middayBudget.spend(this.d.now().getTime(), cost);
+      this.afternoonLastCost = cost;
+    }
+    this.d.log?.("info", "afternoon_closeout", { date, step: retry ? "retry" : "first", flat: result.flat, remaining: result.remaining.length });
+    if (result.flat) {
+      await setPhase(this.d.store, date, AFTERNOON_FLAT_PHASE, this.d.now().toISOString());
+      await this.say("trading", "Afternoon load window over: the close-out after it is done and the account is flat. Entries stay paused.");
+      const dayNow = await this.d.store.getDay(date).catch(() => null);
+      const lastEntryAt = dayNow ? (middayTimes(dayNow)?.lastEntryAt ?? null) : null;
+      const goText = lastEntryAt && this.d.now() < lastEntryAt ? ` \`go\` resumes a normal afternoon until ${centralClock(lastEntryAt)} (the last entry).` : "";
+      await this.say("commands", `Afternoon load window over: entries paused and the account is flat. Trading does not resume on its own.${goText} The regular close-out and the daily summary run as usual.`);
+      return;
+    }
+    this.afternoonLastRemaining = result.remaining;
+    if (this.afternoonAlertDate !== date) {
+      this.afternoonAlertDate = date;
+      await this.say("alerts", `**Michael: the close-out after the afternoon load window is NOT FLAT yet: ${result.remaining.length > 0 ? result.remaining.join(", ") : "the positions could not be listed"}.** New entries stay paused. I keep trying every 20 seconds within 60 Alpaca requests a minute; the regular close-out takes over at its time.`, { mentionOwner: true });
+    }
+  }
+
   // What to tell Michael comes next while paused and flat: what really blocks trading (the stop flag, the daily loss stop, no entries
   // left today), or else what `go` does.
   private async middayBlocked(day: DayRecord, now: Date, lastEntryAt: Date): Promise<{ blocked: string | null; stop: StopFlag | null; lossStop: boolean; goLine: string }> {
@@ -1621,7 +1687,9 @@ export class Worker {
       const release = this.startInfo?.release ?? "unknown";
       // Only a start after the pause began is a mid-day start (a start before it, such as an evening deploy, is not).
       const startedAfterPause = Boolean(pause?.since) && this.startedAtMs !== null && this.startedAtMs > Date.parse(pause!.since!);
-      const action = startupAction({ pause, hold, flat: middayFlat(day), deploy, now, resumeUntil: mt.resumeUntil, stop, startedAfterPause });
+      // Michael, 2026-11-12 (afternoon): once the afternoon load window has started, a start never resumes on its own (the pause after
+      // that window has no automatic return to normal trading).
+      const action = afternoonLoadStart(day) ? "none" : startupAction({ pause, hold, flat: middayFlat(day), deploy, now, resumeUntil: mt.resumeUntil, stop, startedAfterPause });
       if (action !== "none") this.d.log?.("info", "midday_startup", { action, deploy, release });
       const late = now >= mt.lastEntryAt;
       if (action === "resume") {
@@ -1643,7 +1711,7 @@ export class Worker {
     // The 1:30 note: only after this start's decision (so it can never contradict it), and only while there is still time to trade.
     if (this.middayStartupDone && now >= mt.resumeUntil && middayFlat(day) && !day.phases[MIDDAY_NOTE_PHASE]) {
       const pause = await readPause(this.d.store, date);
-      if (pause?.on && !pause.deployedAt && now < mt.lastEntryAt) {
+      if (pause?.on && !pause.deployedAt && now < mt.lastEntryAt && !afternoonLoadStart(day)) {
         const { blocked } = await this.middayBlocked(day, now, mt.lastEntryAt);
         await this.say("commands", `${centralClock(mt.resumeUntil)}: nothing was deployed, so I stay paused. ${blocked ?? `Send \`go\` to trade until ${centralClock(mt.lastEntryAt)} (the last entry), or nothing.`}`);
       }

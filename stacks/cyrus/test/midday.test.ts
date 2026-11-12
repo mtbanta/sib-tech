@@ -437,7 +437,12 @@ test("the deploy check refuses unless flat, paused, no positions or open orders,
   assert.deepEqual(deployRefusals(ok), []);
   const has = (o: Partial<DeployFacts>, text: string) => assert.ok(deployRefusals({ ...ok, ...o }).some((r) => r.includes(text)), `${text}: ${deployRefusals({ ...ok, ...o }).join("; ")}`);
   has({ day: { ...day, phases: {} } }, "has not finished flat");
-  has({ pause: { ...emptyPause(), on: false } }, "pause is not on");
+  has({ pause: { ...emptyPause(), on: false } }, "neither the mid-day pause nor the stop flag is on");
+  // Michael's ruling of 2026-11-12 (afternoon): flat with the stop flag on is as safe as the pause (after a `go`, then `stop`, `flatten`).
+  const resumed = { ...emptyPause(), on: false, resumedAt: z("16:35:00").toISOString(), resumedBy: "go" };
+  assert.deepEqual(deployRefusals({ ...ok, pause: resumed, stop: { on: true, reason: "owner command (flatten)" } }), [], "the stop flag on stands in for the pause");
+  has({ pause: resumed, stop: { on: false, reason: "owner command (resume)" } }, "neither the mid-day pause nor the stop flag is on");
+  has({ pause: resumed, stop: { on: true, reason: "owner command (stop)" }, positions: 1 }, "1 position");
   has({ positions: 1 }, "1 position");
   has({ openOrders: 2 }, "2 open order");
   has({ now: z("19:30:00") }, "1:30 PM CT or later");

@@ -31,6 +31,24 @@ export const STORED_INFO_EVENTS = new Set([
   "remainder_recount",
   // Group 2 review, round 1: a "not filled yet" sale whose closing line was dropped (ended unfilled, or not seen filled in 2 minutes).
   "awaiting_fill_dropped",
+  // Michael, 2026-11-12 (afternoon, logging only): the fast sale for lost exits (A5) and the fresh stop for remainders (A4), so their
+  // timing is kept in the run log and not only in Fly's short log.
+  "lost_exit_fast_start",
+  "lost_exit_fast",
+  "lost_exit_fast_skipped",
+  "lost_exit_fast_failed",
+  "cleanup_covered_by_own_sale",
+  "fresh_stop",
+  "fresh_stop_gone",
+  "fresh_stop_ended",
+  "fresh_stop_recovered",
+  "fresh_stop_unclear",
+  "fresh_stop_refused",
+  "fresh_stop_lookup_failed",
+  // The same release: the afternoon load window's start and its 30 minute close-out, and symbols the screen dropped as not tradable.
+  "load_afternoon",
+  "afternoon_closeout",
+  "screen_not_tradable",
 ]);
 
 export function shouldStoreEvent(level: "info" | "warn" | "error", event: string): boolean {

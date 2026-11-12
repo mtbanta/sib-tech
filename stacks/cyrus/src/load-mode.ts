@@ -75,12 +75,28 @@ export function afternoonLoadStart(day: Pick<DayRecord, "phases"> | null | undef
   return Number.isNaN(t.getTime()) ? null : t;
 }
 
-// The afternoon window's span: from `load afternoon` to the day's last entry. Null if it was not started or the times are unknown.
+// Michael, 2026-11-12 (afternoon): the afternoon load window runs for at most 30 minutes, then a close-out to flat (the mid-day
+// close-out code) with entries paused again. No automatic return to normal trading after it.
+export const AFTERNOON_LOAD_MAX_MINUTES = 30;
+// Day phase: the close-out after the afternoon load window finished flat (its time).
+export const AFTERNOON_FLAT_PHASE = "afternoonFlat";
+
+// The afternoon window's span: from `load afternoon` to the earlier of 30 minutes later and the day's last entry. Null if it was not
+// started or the times are unknown.
 export function afternoonLoadWindow(day: AfternoonDay | null | undefined): { start: Date; end: Date } | null {
   const start = afternoonLoadStart(day);
   if (!day || !start || !day.openAt || !day.closeAt) return null;
   const times = middayTimes({ isTradingDay: day.isTradingDay ?? true, openAt: day.openAt, closeAt: day.closeAt });
-  return times && start < times.lastEntryAt ? { start, end: times.lastEntryAt } : null;
+  if (!times || start >= times.lastEntryAt) return null;
+  const cap = new Date(start.getTime() + AFTERNOON_LOAD_MAX_MINUTES * 60_000);
+  return { start, end: cap < times.lastEntryAt ? cap : times.lastEntryAt };
+}
+
+// The close-out after the afternoon load window is due or still running: the window has ended and its close-out has not finished
+// flat yet. Until then `go` and `load afternoon` are refused, and the close-out alone sells.
+export function afternoonCloseoutPending(day: (AfternoonDay & Pick<DayRecord, "phases">) | null | undefined, t: Date): boolean {
+  const w = afternoonLoadWindow(day);
+  return !!w && t >= w.end && !day!.phases[AFTERNOON_FLAT_PHASE];
 }
 
 // The afternoon load window is on at time t.

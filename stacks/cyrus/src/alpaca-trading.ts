@@ -301,6 +301,18 @@ export class AlpacaTrading {
     return rows.map((r) => ({ date: String(r.date), open: String(r.open), close: String(r.close) }));
   }
 
+  // Michael, 2026-11-12 (afternoon): is this symbol tradable at Alpaca (active and tradable)? False when Alpaca does not know it (404).
+  // Throws on any other failure (the caller decides).
+  async assetTradable(symbol: string): Promise<boolean> {
+    try {
+      const a = (await this.read(`/v2/assets/${encodeURIComponent(symbol)}`)) as Json;
+      return a?.tradable === true && a?.status === "active";
+    } catch (err) {
+      if (err instanceof AlpacaError && err.status === 404) return false;
+      throw err;
+    }
+  }
+
   async listPositions(): Promise<Position[]> {
     const rows = (await this.read("/v2/positions")) as Json[];
     return rows.map((p) => ({

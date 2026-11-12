@@ -63,16 +63,17 @@ test("the afternoon window's rules: from `load afternoon` to the last entry, the
   assert.equal(afternoonLoadWindow(normal), null);
 
   const afternoon = dayWith({ [LOAD_AFTERNOON_PHASE]: z("16:40:00").toISOString() });
-  assert.deepEqual(afternoonLoadWindow(afternoon), { start: z("16:40:00"), end: z("20:00:00") }, "it ends at the last entry, 2:00 PM CT");
+  assert.deepEqual(afternoonLoadWindow(afternoon), { start: z("16:40:00"), end: z("17:10:00") }, "30 minutes at most (Michael, 2026-11-12)");
+  assert.deepEqual(afternoonLoadWindow(dayWith({ [LOAD_AFTERNOON_PHASE]: z("19:45:00").toISOString() })), { start: z("19:45:00"), end: z("20:00:00") }, "never past the last entry, 2:00 PM CT");
   assert.equal(hasLoadEntries(afternoon), true);
   assert.equal(inAfternoonLoad(afternoon, z("16:39:59")), false, "not before the command");
-  for (const t of ["16:40:00", "18:00:00", "19:59:59"]) {
+  for (const t of ["16:40:00", "17:00:00", "17:09:59"]) {
     assert.equal(inAfternoonLoad(afternoon, z(t)), true, t);
     assert.equal(loadRulesApply(afternoon, z(t), true), true, "the 75 dollar cap and the short backoff, although the pause has started");
     assert.equal(loadCeilingOn(afternoon, z(t)), true, "the 150 ceiling");
     assert.equal(inLoadWindow(afternoon, z(t)), true, "the churn");
   }
-  for (const t of ["20:00:00", "20:55:00"]) {
+  for (const t of ["17:10:00", "18:00:00", "20:00:00", "20:55:00"]) {
     assert.equal(inAfternoonLoad(afternoon, z(t)), false, t);
     assert.equal(loadCeilingOn(afternoon, z(t)), false);
   }
@@ -103,11 +104,19 @@ test("every refusal of `load afternoon`: no cycle, not armed, already on, 1:30 P
   assert.equal(loadAfternoonRefusal({ ...ok, day: null }), "there is no mid-day cycle today");
   assert.equal(loadAfternoonRefusal({ ...ok, day: { ...flatDay, status: "pending" } as DayRecord }), "today is not approved and armed");
   assert.equal(loadAfternoonRefusal({ ...ok, day: { ...flatDay, phases: { ...flatDay.phases, armed: undefined } } as unknown as DayRecord }), "today is not approved and armed");
-  assert.equal(loadAfternoonRefusal({ ...ok, day: dayWith({ [MIDDAY_PHASE]: "x", middayFlat: "yes", [LOAD_AFTERNOON_PHASE]: z("16:35:00").toISOString() }) }), "the afternoon load window is already on today");
+  assert.equal(loadAfternoonRefusal({ ...ok, day: dayWith({ [MIDDAY_PHASE]: "x", middayFlat: "yes", [LOAD_AFTERNOON_PHASE]: z("16:35:00").toISOString() }) }), "the afternoon load window was already started today");
   assert.equal(loadAfternoonRefusal({ ...ok, pause: null }), "trading is not paused for the mid-day cycle");
   assert.equal(loadAfternoonRefusal({ ...ok, pause: { ...paused, on: false, resumedAt: z("16:35:00").toISOString(), resumedBy: "go" } }), "trading has already resumed today");
   assert.equal(loadAfternoonRefusal({ ...ok, day: dayWith({}) }), "the mid-day close-out has not finished flat yet");
-  assert.match(loadAfternoonRefusal({ ...ok, stop: { on: true, reason: "owner command (stop)", at: "x" } as any })!, /the stop flag is on/);
+  // Michael's ruling of 2026-11-12 (afternoon): with his own stop on and the account flat it is accepted, paused or not.
+  const ownStop = { on: true, reason: "owner command (flatten)", at: "x" } as any;
+  assert.equal(loadAfternoonRefusal({ ...ok, stop: ownStop }), null);
+  assert.equal(loadAfternoonRefusal({ ...ok, stop: ownStop, pause: { ...paused, on: false, resumedAt: z("16:35:00").toISOString(), resumedBy: "go" } }), null, "after a `go`, then `stop` or `flatten`");
+  assert.equal(loadAfternoonRefusal({ ...ok, stop: ownStop, day: dayWith({}) }), "the mid-day close-out has not finished flat yet");
+  assert.equal(loadAfternoonRefusal({ ...ok, stop: ownStop, positions: 1 }), "Alpaca shows 1 position(s)");
+  assert.equal(loadAfternoonRefusal({ ...ok, stop: ownStop, openOrders: 1 }), "Alpaca shows 1 open order(s)");
+  assert.equal(loadAfternoonRefusal({ ...ok, stop: ownStop, notFlat: { on: true, since: "x", remaining: ["AAA"] } as any }), "the account was not flat after the last close-out");
+  assert.match(loadAfternoonRefusal({ ...ok, stop: ownStop, now: z("19:30:00") })!, /^it is 1:30 PM CT or later/);
   assert.equal(loadAfternoonRefusal({ ...ok, stop: { on: true, reason: "daily loss stop", at: "x" } as any }), "the daily loss stop is in force");
   assert.equal(loadAfternoonRefusal({ ...ok, notFlat: { on: true, since: "x", remaining: ["AAA"] } as any }), "the account was not flat after the last close-out");
   assert.equal(loadAfternoonRefusal({ ...ok, positions: null }), "I could not read Alpaca's positions and open orders");
@@ -135,15 +144,15 @@ test("on a normal morning, `load afternoon` while flat and paused runs the cheap
   assert.equal(r.screenOpts.filter((o) => o?.load).length, 1, "the cheap-symbol screen ran once");
   assert.equal(r.counts().streamStops, before.streamStops + 1, "the price feed was switched (this stream has no setSymbols: stopped and started again)");
   assert.equal(r.counts().streamStarts, before.streamStarts + 1);
-  const reply = r.said("commands").find((t) => t.startsWith("Afternoon load window on until 2:00 PM"));
+  const reply = r.said("commands").find((t) => t.startsWith("Afternoon load window on until 11:10 AM CT"));
   assert.ok(reply, r.said("commands").join(" | "));
   assert.match(reply!, /at most 75 dollars a position and up to 150 orders a minute \(your ruling, this window only\)/);
   assert.match(reply!, /Resumed: the mid-day pause is over/);
-  assert.match(reply!, /the close-out runs as normal at 2:55 PM CT/);
+  assert.match(reply!, /the regular close-out runs at 2:55 PM CT/);
   assert.ok(r.said("trading").some((t) => t.startsWith("Live list switched to 2 cheap, heavily traded names for the afternoon load window.")));
   r.ownerSays("load afternoon", "16:41:00");
   await r.at("16:41:05");
-  assert.ok(r.said("commands").some((t) => t === "Not started: the afternoon load window is already on today."));
+  assert.ok(r.said("commands").some((t) => t === "Not started: the afternoon load window was already started today."));
   assert.equal(r.screenOpts.filter((o) => o?.load).length, 1, "no second screen");
 });
 
@@ -182,7 +191,7 @@ test("on a load day `load afternoon` keeps the cheap list (no second screen, no 
   await r.at("16:40:05");
   assert.equal(r.screenOpts.length, screens, "no screen");
   assert.equal(r.counts().streamStops, before.streamStops, "no feed switch");
-  assert.ok(r.said("commands").some((t) => t.startsWith("Afternoon load window on until 2:00 PM") && !t.includes("live list is now")));
+  assert.ok(r.said("commands").some((t) => t.startsWith("Afternoon load window on until 11:10 AM CT") && !t.includes("live list is now")));
 
   const late = await flatAtMidday();
   late.r.ownerSays("load afternoon", "19:30:00");
@@ -198,12 +207,21 @@ test("on a load day `load afternoon` keeps the cheap list (no second screen, no 
   assert.ok(held.r.said("commands").some((t) => t === "Not started: Alpaca shows 1 position(s)."), held.r.said("commands").join(" | "));
   assert.equal((await held.r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], undefined);
 
-  const stopped = await flatAtMidday();
+  const normalStop = await flatAtMidday();
+  normalStop.r.ownerSays("stop", "16:39:00");
+  await normalStop.r.at("16:39:05");
+  normalStop.r.ownerSays("load afternoon", "16:40:00");
+  await normalStop.r.at("16:40:05");
+  assert.ok(normalStop.r.said("commands").some((t) => t.startsWith("Not started: with the stop flag on, `load afternoon` works in this release only on a load day")), normalStop.r.said("commands").join(" | "));
+  assert.equal((await normalStop.r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], undefined);
+
+  const stopped = await flatAtMidday({ load: true });
   stopped.r.ownerSays("stop", "16:39:00");
   await stopped.r.at("16:39:05");
   stopped.r.ownerSays("load afternoon", "16:40:00");
   await stopped.r.at("16:40:05");
-  assert.ok(stopped.r.said("commands").some((t) => t.startsWith("Not started: the stop flag is on")));
+  // Michael's ruling of 2026-11-12 (afternoon): on a load day with his stop on and the account flat, it clears the stop and starts.
+  assert.ok(stopped.r.said("commands").some((t) => t.startsWith("Afternoon load window on until 11:10 AM CT") && t.includes("Stop cleared")), stopped.r.said("commands").join(" | "));
 });
 
 test("a failed cheap-symbol screen does not start the window or resume trading", async () => {
@@ -557,12 +575,12 @@ test("group 2, round 1: on a half day the reply names the real close-out time; `
   await r.at("16:40:05");
   const reply = r.said("commands").find((t) => t.startsWith("Afternoon load window on until"));
   assert.ok(reply, r.said("commands").join(" | "));
-  assert.match(reply!, /^Afternoon load window on until 11:00 AM CT \(the last entry\)/);
-  assert.match(reply!, /the close-out runs as normal at 11:55 AM CT/);
+  assert.match(reply!, /^Afternoon load window on until 11:00 AM CT:/);
+  assert.match(reply!, /the regular close-out runs at 11:55 AM CT/);
   r.ownerSays("status", "16:41:00");
   await r.at("16:41:05");
   const st = r.said("commands").find((t) => t.startsWith("**Status**"))!;
-  assert.match(st, /Afternoon load window: on since 10:40 AM CT, until 11:00 AM CT \(the last entry\)/);
+  assert.match(st, /Afternoon load window: on since 10:40 AM CT, until 11:00 AM CT \(then a close-out to flat, entries paused\)/);
   assert.match(st, /Mid-day cycle: resumed at 10:40 AM CT \(by `load afternoon`\)/);
 });
 
@@ -694,7 +712,7 @@ test("round 3: on a load day with `load afternoon`, the summary keeps its mornin
   await until(async () => Boolean((await r.store.getDay(D))!.phases.summary));
   const summary = r.said("trading").find((t) => t.includes("**Load day**"));
   assert.ok(summary);
-  assert.ok(summary!.includes("- afternoon load window 10:40 AM CT to 2:00 PM CT (by `load afternoon`): its entries are counted in the rest of the day"), summary);
+  assert.ok(summary!.includes("- afternoon load window 10:40 AM CT to 11:10 AM CT (by `load afternoon`): its entries are counted in the rest of the day"), summary);
 });
 
 // ---------------- option B (Michael's fallback after group 1's round 3) ----------------
