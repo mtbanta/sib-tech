@@ -40,7 +40,8 @@ export interface RiskDeps {
 }
 
 // Logging only (Michael's approval of 2026-11-10): a shares-without-a-stop case noticed this long after Alpaca's cancel is logged as
-// `late_notice`, with what the order sync was doing. By design it is noticed about 3 seconds after (BARE_GRACE_MS); on 2026-11-10
+// `late_notice`, with what the order sync was doing. By design it is noticed at once since A4 of 2026-11-12 (BARE_GRACE_MS is 0; it was
+// about 3 seconds before); on 2026-11-10
 // HIMS-38 was noticed 14.7 seconds after, with no cause in the records.
 export const LATE_NOTICE_MS = 6_000;
 // Fix C (Michael's approval of 2026-11-10): a sale reported as "not filled yet" gets its closing line when it fills; after this long
@@ -137,6 +138,9 @@ export class SyncMemory {
   readonly lateLogged = new Set<string>();
   // A4 of the proposal of 2026-11-12: entries (client ids) whose remainder is protected by a fresh stop the stack placed.
   readonly freshStops = new Map<string, FreshStop>();
+  // A4 (group 1 review, round 1): true once this worker has read Alpaca's open orders for resting fresh stops (cyrus-p-) after its start,
+  // so a restart never forgets them.
+  freshStopsRebuilt = false;
 }
 
 // A4 of the proposal of 2026-11-12 (Michael's approval): after a partial take-profit, Alpaca cancels the bracket's stop on the first share
@@ -355,6 +359,24 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     const prev = latestPerSymbol.get(s.symbol);
     if (!prev || (s.createdAt ?? "") > (prev.createdAt ?? "") || ((s.createdAt ?? "") === (prev.createdAt ?? "") && s.clientOrderId > prev.clientOrderId)) latestPerSymbol.set(s.symbol, s);
   }
+  // A4 (group 1 review, round 1): on the first sync after a start, the resting fresh stops (cyrus-p-) are read back from Alpaca's open
+  // orders (one request, once) and tied to the newest open entry of their symbol, so a restart does not make a protected remainder look
+  // unprotected. If the read fails it is tried again at the next sync (and the sale path also recognises a resting fresh stop).
+  if (!mem.freshStopsRebuilt) {
+    try {
+      const open = await d.broker.listOrdersPaged("open", "2000-01-01T00:00:00Z", 5);
+      for (const x of open.orders) {
+        if (x.side !== "sell" || !x.clientOrderId.startsWith("cyrus-p-") || !OPEN_STATUSES.has(x.status)) continue;
+        const e = latestPerSymbol.get(x.symbol);
+        if (!e || mem.freshStops.has(e.clientOrderId)) continue;
+        mem.freshStops.set(e.clientOrderId, { symbol: x.symbol, entryClientOrderId: e.clientOrderId, stopClientOrderId: x.clientOrderId, orderId: x.id, qty: Math.max(0, x.qty - x.filledQty), stopPrice: x.stopPrice ?? 0, placedAt: nowMs, status: x.status, lookedAt: nowMs });
+        d.log?.("fresh_stop_recovered", { symbol: x.symbol, clientOrderId: e.clientOrderId });
+      }
+      if (open.complete) mem.freshStopsRebuilt = true;
+    } catch (err) {
+      d.log?.("fresh_stop_recover_failed", { error: (err as Error).message.slice(0, 120) });
+    }
+  }
   // A sell already working on a symbol (a liquidation in progress) explains a missing exit: no false alarm.
   const sellingSymbols = new Set(listed.orders.filter((x) => x.side === "sell" && OPEN_STATUSES.has(x.status)).map((x) => x.symbol));
   const unprotected: string[] = [];
@@ -554,7 +576,8 @@ async function resolveStuck(d: RiskDeps, mem: SyncMemory, clientOrderId: string,
 // Alpaca's cancel of its exits to show; the sale waits in sells.ts until that cancel frees the share, and nothing happens if Alpaca kept them.
 async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, listedCopy: Order, kind: "missing" | "bare", onSellSent?: (x: { symbol: string; qty: number; clientOrderId: string; atMs: number }) => void, extra: { stopPrice?: number | null; stopCancelledAt?: string | null; fast?: { fillAtMs: number } } = {}): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }> {
   let o = listedCopy;
-  try {
+  // A5: the fast sale has just looked the entry up itself, so it is not looked up a second time here.
+  if (!extra.fast) try {
     const fresh = await d.broker.findOrderByClientId(s.clientOrderId);
     if (fresh) o = fresh;
     else d.log?.("cleanup_lookup_empty", { symbol: s.symbol, clientOrderId: s.clientOrderId, kind });
@@ -617,6 +640,18 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     const f = r.freshStopUnclear;
     mem.freshStops.set(s.clientOrderId, { symbol: s.symbol, entryClientOrderId: s.clientOrderId, stopClientOrderId: f.clientOrderId, orderId: null, qty: f.qty, stopPrice: f.stopPrice, placedAt: now, status: "unclear", lookedAt: 0 });
     return { attempted: true, stuck: false, recheckAt: now + 2_000 };
+  }
+  const heldBy = r.heldByFreshStop?.find((x) => x.symbol === s.symbol);
+  if (heldBy && soldQty === 0) {
+    // A4 (group 1 review, round 1): a resting fresh stop of ours protects the shares: remember it, say nothing, not stuck.
+    mem.freshStops.set(s.clientOrderId, { symbol: s.symbol, entryClientOrderId: s.clientOrderId, stopClientOrderId: heldBy.clientOrderId, orderId: heldBy.orderId, qty: heldBy.qty, stopPrice: heldBy.stopPrice ?? 0, placedAt: now, status: heldBy.status, lookedAt: now });
+    d.log?.("fresh_stop_recovered", { symbol: s.symbol, clientOrderId: s.clientOrderId, by: "sale" });
+    await resolveStuck(d, mem, s.clientOrderId, "it has a fresh protective stop");
+    return { attempted: false, stuck: false };
+  }
+  if (extra.fast && soldQty === 0 && r.coveredByOwnSale?.includes(s.symbol)) {
+    d.log?.("lost_exit_fast_skipped", { symbol: s.symbol, clientOrderId: s.clientOrderId, reason: "a sale of ours already covers it" });
+    return { attempted: false, stuck: false };
   }
   if (extra.fast && soldQty === 0 && r.exitsKept?.includes(s.symbol)) {
     d.log?.("lost_exit_fast_skipped", { symbol: s.symbol, clientOrderId: s.clientOrderId, reason: "Alpaca kept the exits" });

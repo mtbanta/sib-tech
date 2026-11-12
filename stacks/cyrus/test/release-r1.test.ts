@@ -130,7 +130,8 @@ test("part A and C, Monday's IONQ case: shares held with no open order visible; 
   const req0 = w.sim.requests;
   let r = await syncOrders(w.risk, day, { protect: true });
   assert.ok(w.sim.simMs - t0 < 2_000, `one short round, ${w.sim.simMs - t0} ms`);
-  assert.ok(w.sim.requests - req0 <= 10, `${w.sim.requests - req0} requests`);
+  // 11 since A4 of 2026-11-12: the first sync after a start reads Alpaca's open orders once for resting fresh stops.
+  assert.ok(w.sim.requests - req0 <= 11, `${w.sim.requests - req0} requests`);
   assert.equal(w.sim.sellLog.length, 0);
   assert.equal(mentions(w).length, 1, "one alert");
   assert.match(mentions(w)[0]!.text, /IONQ has 2 shares with no protective stop since \d{1,2}:\d{2} [AP]M CT, and I could not sell them yet.*will post again when they are sold or gone\./);

@@ -255,6 +255,11 @@ export interface LiquidateResult {
   freshStopUnclear?: { symbol: string; qty: number; stopPrice: number; clientOrderId: string };
   // A5: the symbols whose shares never came free because Alpaca kept the exits (nothing was sold for them).
   exitsKept?: string[];
+  // A5: the symbols whose shares a sale of ours (cyrus-x-) already covers, so the fast sale had nothing to do.
+  coveredByOwnSale?: string[];
+  // A4 (group 1 review, round 1): the symbols whose shares a resting fresh stop of ours (cyrus-p-) holds, so nothing was sold: the
+  // position is protected. With the open fresh stop that covers them, so the caller can remember it.
+  heldByFreshStop?: Array<{ symbol: string; clientOrderId: string; orderId: string; qty: number; stopPrice: number | null; status: string }>;
 }
 
 // Shares that sells this stack sent (client id cyrus-x-) could still sell, for one symbol.
@@ -563,8 +568,20 @@ export class Liquidator {
           if (yieldNow()) return yielded();
           const cap = ownLeft(p.symbol, p.qty, openOrders);
           capThisRound.set(p.symbol, cap);
-          if (own && !(cap > EPS)) continue; // that entry's own shares are sold, or gone at its own exits (part B, fix A)
+          if (own && !(cap > EPS)) {
+            // A5 (group 1 review, round 1): a sale of ours already covers the entry's shares (the order sync's own missing-exit sale got
+            // there first): nothing to do, and not "stuck".
+            if (o.waitForAlpacaCancel && ownOpenSellQty(openOrders, p.symbol) > EPS) (result.coveredByOwnSale ??= []).push(p.symbol);
+            continue; // that entry's own shares are sold, or gone at its own exits (part B, fix A)
+          }
           const free = Math.min(p.qty - openSellQty(openOrders, p.symbol), p.qtyAvailable ?? Infinity, cap);
+          // A4 (group 1 review, round 1): a resting fresh stop of ours (cyrus-p-) holds the entry's shares (for example after a restart, when
+          // the worker's memory of it is gone): the position is protected, so nothing is sold, nothing is cancelled, and it is not stuck.
+          const freshHolding = own && !(free > EPS) ? openOrders.find((x) => x.symbol === p.symbol && x.side === "sell" && x.clientOrderId.startsWith("cyrus-p-") && OPEN_STATUSES.has(x.status) && x.status !== "pending_cancel" && remaining(x) >= cap - EPS) : undefined;
+          if (freshHolding) {
+            (result.heldByFreshStop ??= []).push({ symbol: p.symbol, clientOrderId: freshHolding.clientOrderId, orderId: freshHolding.id, qty: remaining(freshHolding), stopPrice: freshHolding.stopPrice, status: freshHolding.status });
+            continue;
+          }
           if (o.waitForAlpacaCancel && own && !(free > EPS)) {
             // A5: Alpaca kept the exits (it refused the cancel because the entry had filled): the position is protected, nothing to do.
             (result.exitsKept ??= []).push(p.symbol);

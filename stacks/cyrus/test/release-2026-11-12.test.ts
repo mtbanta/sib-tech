@@ -434,3 +434,212 @@ test("A5, worker level: a live fill of an entry whose 5 second cancel was alread
   assert.equal(sim.sellLog.filter((x) => x.symbol === "RKT").length, 0);
   assert.equal(sim.oversellAttempts, 0);
 });
+
+// ------------------------------------------- group 1 review, round 1 (2026-11-12, night) ----------------------------------------------
+
+// Places a fresh stop for IREN's remainder (5 shares) and returns the world, the day and the entry.
+async function freshStopped() {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "IREN", 8, 20, 30);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 3, 20.08);
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.ok(freshStopOrder(w, "IREN"), "a fresh stop rests");
+  return { w, dd, id };
+}
+
+test("finding 1, restart: a fresh-stopped remainder 11 minutes old, a new worker memory, syncs every 10 seconds with the live updates for 5 minutes: no sale, no alert, few requests", async () => {
+  const { w, dd, id } = await freshStopped();
+  w.sim.advance(11 * 60_000);
+  w.risk.syncMemory = new SyncMemory(); // a restart: the memory of the fresh stop is gone
+  const req0 = w.sim.requests;
+  for (let i = 0; i < 30; i++) {
+    w.sim.advance(10_000);
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  }
+  const used = w.sim.requests - req0;
+  assert.equal(w.sim.sellLog.length, 0);
+  assert.equal(mentions(w).length, 0);
+  assert.ok(!w.said.some((m) => /no protective stop/.test(m.text)), "no 'no protective stop' alert");
+  assert.equal(freshStopOrder(w, "IREN")!.status, "accepted", "the fresh stop is left resting");
+  assert.ok(w.risk.syncMemory.freshStops.has(id), "remembered again");
+  assert.ok(w.events.some((e) => e.event === "fresh_stop_recovered"));
+  assert.ok(used <= 110, `${used} requests in 5 minutes (the reviewer's probe found 266)`);
+});
+
+test("finding 1, restart when the first read of open orders fails: the sale path finds the resting fresh stop, sells nothing, cancels nothing, says nothing, and remembers it", async () => {
+  const { w, dd, id } = await freshStopped();
+  w.sim.advance(11 * 60_000);
+  w.risk.syncMemory = new SyncMemory();
+  const realList = w.sim.listOrdersPaged.bind(w.sim);
+  let failOnce = true;
+  w.sim.listOrdersPaged = (async (status: "open" | "closed" | "all", after: string, pages: number) => {
+    if (status === "open" && failOnce) {
+      failOnce = false;
+      throw new Error("open orders unreadable (test)");
+    }
+    return realList(status, after, pages);
+  }) as typeof w.sim.listOrdersPaged;
+  for (let i = 0; i < 9; i++) {
+    w.sim.advance(10_000);
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  }
+  assert.equal(w.sim.sellLog.length, 0);
+  assert.equal(freshStopOrder(w, "IREN")!.status, "accepted");
+  assert.equal(mentions(w).length, 0);
+  assert.equal(w.said.length, 0);
+  assert.ok(w.risk.syncMemory.freshStops.has(id));
+});
+
+test("finding 2 (M10): Alpaca shows only part of the remainder free (the take-profit's cancel still landing): no stop for part of it; once all is free, one stop for all of it", async () => {
+  const w = world();
+  w.sim.reportQtyAvailable = true;
+  const dd = await day(w);
+  const id = await hold(w, "SOFI", 10, 15, 31);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 4, 15.08); // 6 left
+  w.sim.staleHeld.set("SOFI", 2); // Alpaca reports only 4 of the 6 free for a moment
+  const realSleep = w.sim.sleep;
+  let slept = 0;
+  w.sim.sleep = async (ms: number) => {
+    slept += ms;
+    if (slept >= 7_000) w.sim.staleHeld.delete("SOFI"); // then all 6 are free (after the first round's 6 second wait)
+    return realSleep(ms);
+  };
+  (w.liquidator as any).sleep = w.sim.sleep;
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.deepEqual(w.sim.stopLog.map((x) => [x.symbol, x.qty]), [["SOFI", 6]], "one stop, for all 6 shares");
+  assert.ok(w.events.some((e) => e.event === "sale_blocked" && e.data.symbol === "SOFI" && e.data.freshStopWaitsFor === 6), "it waited while only part was free");
+  assert.equal(w.sim.sellLog.length, 0);
+  assert.equal(w.sim.oversellAttempts, 0);
+});
+
+test("finding 2 (probe 1): the loss stop's retry cancels a resting fresh stop and sells the remainder to flat", async () => {
+  const { w } = await freshStopped();
+  const { LossStopMemory, enforceDailyLoss } = await import("../src/risk.ts");
+  const { CONTROL_STOP } = await import("../src/store.ts");
+  const { SUGGESTED_LIMITS } = await import("../src/limits.ts");
+  await w.store.updateDay(D, { status: "approved", dayStartEquity: w.sim.cash + 10_000, limits: { ...SUGGESTED_LIMITS, dailyLossStopUsd: 200 }, decided: { position: true, loss: true, trades: true, cap: true }, phases: { request: "x", armed: "x" } });
+  await w.store.setControl(CONTROL_STOP, { on: true, at: w.now().toISOString(), reason: "daily loss stop reached (500.00 dollars)" });
+  const deps = { ...w.risk, lossMemory: new LossStopMemory() };
+  for (let i = 0; i < 6 && w.sim.heldQty("IREN") > 0; i++) {
+    await enforceDailyLoss(deps, (await w.store.getDay(D))!);
+    w.sim.advance(5_000);
+  }
+  assert.equal(w.sim.heldQty("IREN"), 0, "flat");
+  assert.equal(freshStopOrder(w, "IREN")!.status, "canceled", "the fresh stop was cancelled by the retry");
+  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["IREN", 5]]);
+  assert.equal(w.sim.oversellAttempts, 0);
+});
+
+test("finding 3: the order sync's own missing-exit sale got in first and has not filled; the fast sale finds it covered, sells nothing more, and does not alert Michael", async () => {
+  const w = world();
+  w.sim.sellFillDelayMs = 20_000;
+  const dd = await day(w);
+  const id = await loadEntry(w, "APLD", 16.46, 82);
+  const fillAt = w.sim.simMs;
+  w.sim.cancelExitsAtFill(id);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["APLD", 1]], "the sync's own sale");
+  const before = w.said.length;
+  const row = (await w.store.listOrders(D)).find((r) => r.clientOrderId === id)!;
+  await fastLostExitSale(w.risk, dd, w.memory, row, fillAt);
+  assert.equal(w.sim.sellLog.length, 1, "no second sale");
+  assert.equal(w.said.length, before, "nothing more said");
+  assert.equal(mentions(w).length, 0);
+  assert.ok(!w.memory.stuck.has(id), "not marked stuck");
+  assert.ok(w.events.some((e) => e.event === "lost_exit_fast_skipped" && e.data.reason === "a sale of ours already covers it"));
+  assert.equal(w.sim.oversellAttempts, 0);
+});
+
+test("A5 cost: requests used by an ordinary fast sale and by one where Alpaca kept the exits", async () => {
+  const a = world();
+  const ad = await day(a);
+  const ida = await loadEntry(a, "APLD", 16.46, 83);
+  for (const l of entryOf(a, ida).legs) await a.sim.cancelOrder(l.id);
+  const ra = a.sim.requests;
+  await fastLostExitSale(a.risk, ad, a.memory, (await a.store.listOrders(D)).find((r) => r.clientOrderId === ida)!, a.sim.simMs);
+  const sold = a.sim.requests - ra;
+  const k = world();
+  const kd = await day(k);
+  const idk = await loadEntry(k, "RKT", 18.2, 84);
+  const rk = k.sim.requests;
+  await fastLostExitSale(k.risk, kd, k.memory, (await k.store.listOrders(D)).find((r) => r.clientOrderId === idk)!, k.sim.simMs);
+  const kept = k.sim.requests - rk;
+  console.log(`A5 requests: ordinary fast sale ${sold}, exits kept ${kept}`);
+  assert.equal(a.sim.sellLog.length, 1);
+  assert.equal(k.sim.sellLog.length, 0);
+  // The clock read counts here but has its own bucket at Alpaca (not the 200 a minute).
+  assert.ok(sold <= 13 && kept <= 18, `ordinary ${sold}, kept ${kept}`);
+});
+
+// Group 1 review, round 1 (M5, M9): the worker's guards on the fast sale. Each case would sell APLD's share without its guard.
+async function fastSaleWorld() {
+  const { rig, settle, z } = await import("./rig.ts");
+  const { order } = await import("./helpers.ts");
+  const upd = (event: string, o: Parameters<typeof order>[0], positionQty: number | null, atMs: number | null = null) => ({ event, order: order(o), positionQty, atMs });
+  const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
+  sim.hideFilledParents = true;
+  const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, orderStream: true });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("approve", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:25:00");
+  sim.advanceTo(z("15:00:00").getTime());
+  await r.at("15:00:00");
+  const id = clientOrderIdFor(D, "APLD", 85);
+  await sim.submitEntry({ symbol: "APLD", qty: 1, stopPrice: 16.44, takeProfitPrice: 16.47, limitPrice: 16.46, referencePrice: 16.46, clientOrderId: id });
+  await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "APLD", qty: 1, referencePrice: 16.46, stopPrice: 16.44, takeProfitPrice: 16.47, status: "submitted", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: null, createdAt: new Date(sim.simMs - 5000).toISOString() });
+  const fire = async () => {
+    (r.worker as any).entryExpiry.cancelSent.set(id, sim.simMs);
+    sim.fillEntry(id, 16.46);
+    const o = sim.orders.find((x) => x.clientOrderId === id)!;
+    for (const l of o.legs) await sim.cancelOrder(l.id);
+    await r.orderUpdate(upd("fill", { id: o.id, clientOrderId: id, symbol: "APLD", side: "buy", status: "filled", qty: 1, filledQty: 1, filledAvgPrice: 16.46, groupId: o.groupId }, 1, sim.simMs) as any);
+    for (let i = 0; i < 30; i++) await settle();
+  };
+  return { sim, r, fire, z };
+}
+
+test("finding 2 (M5, M9): no fast sale while the mid-day close-out owns selling, while a close-out runs, at or after the close-out time, or while the daily loss stop is in force", async () => {
+  {
+    const f = await fastSaleWorld();
+    (f.r.worker as any).middayOwnsSelling = true;
+    await f.fire();
+    assert.equal(f.sim.sellLog.length, 0, "mid-day close-out owns selling");
+  }
+  {
+    const f = await fastSaleWorld();
+    (f.r.worker as any).closingOut = true;
+    await f.fire();
+    assert.equal(f.sim.sellLog.length, 0, "a close-out is running");
+  }
+  {
+    const f = await fastSaleWorld();
+    (f.r.worker as any).inflight.add("carried");
+    await f.fire();
+    assert.equal(f.sim.sellLog.length, 0, "a carried-position sale is running");
+  }
+  {
+    const f = await fastSaleWorld();
+    f.r.setNow("20:55:00"); // the close-out time (5 minutes before the 3:00 PM Central close)
+    f.sim.advanceTo(f.z("20:55:00").getTime());
+    await f.fire();
+    assert.equal(f.sim.sellLog.length, 0, "at the close-out time");
+  }
+  {
+    const f = await fastSaleWorld();
+    const { CONTROL_STOP } = await import("../src/store.ts");
+    await f.r.store.setControl(CONTROL_STOP, { on: true, at: new Date(f.sim.simMs).toISOString(), reason: "daily loss stop reached (250.00 dollars)" });
+    await f.fire();
+    assert.equal(f.sim.sellLog.length, 0, "the daily loss stop is in force");
+  }
+  {
+    const f = await fastSaleWorld();
+    await f.fire();
+    assert.deepEqual(f.sim.sellLog.map((x) => [x.symbol, x.qty]), [["APLD", 1]], "and with none of these, it sells");
+  }
+});
