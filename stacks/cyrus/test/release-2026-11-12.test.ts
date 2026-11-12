@@ -306,22 +306,91 @@ test("A4: the summary's stop-gap line counts the fresh stops beside the sales; a
   m.onFreshStop({ shares: 3 });
   assert.equal(m.settle(MID), true, "a fresh stop counts as a change to save");
   const line = stopGapLine(m.totals());
-  assert.equal(line, "Remainders after a partial take-profit: 2 given a fresh stop (12 shares); none sold at market.");
+  assert.equal(line, "Fresh stops after a partial take-profit: 2 placed (12 shares); no remainder sold at market at that step.");
   const old = stopGapLine({ sales: 1, shares: 7, wouldHaveFilled: 0, unmeasured: 0, dollarsVsWaiting: 0.5 });
-  assert.ok(old.startsWith("Remainders after a partial take-profit: 1 sold at market (7 shares; "), old);
+  assert.ok(old.startsWith("Fresh stops after a partial take-profit: none placed; 1 remainder sold at market at that step instead (7 shares; "), old);
 });
 
-// ------------------------------------------- group 2 review, round 1 (messaging only) -------------------------------------------------
+// ------------------------------------------- group 2 review, rounds 1 and 2 (messaging only) ------------------------------------------
 
-test("group 2, finding 1: the stop-gap line names the remainders it counts; none today; no dangling 'instead'; singular and plural right", () => {
-  assert.equal(stopGapLine({ sales: 0, shares: 0, wouldHaveFilled: 0, unmeasured: 0, dollarsVsWaiting: 0 }), "Remainders after a partial take-profit: none today.");
+test("group 2, finding 1 (round 2 wording): the stop-gap line names only the fresh-stop step and its own market sales; zero case; singular and plural right", () => {
+  assert.equal(stopGapLine({ sales: 0, shares: 0, wouldHaveFilled: 0, unmeasured: 0, dollarsVsWaiting: 0 }), "Fresh stops after a partial take-profit: none placed today, and no remainder sold at market at that step.");
   const one = stopGapLine({ sales: 1, shares: 1, wouldHaveFilled: 0, unmeasured: 0, dollarsVsWaiting: -0.01, freshStops: 1, freshStopShares: 1 });
-  assert.ok(one.startsWith("Remainders after a partial take-profit: 1 given a fresh stop (1 share); 1 sold at market instead (1 share; Alpaca refused the fresh stop, or another position shared the symbol). Of the sales, 0 would have filled"), one);
+  assert.ok(one.startsWith("Fresh stops after a partial take-profit: 1 placed (1 share); 1 remainder sold at market at that step instead (1 share; Alpaca refused the fresh stop, or another position shared the symbol). Of the sales, 0 would have filled"), one);
   const salesOnly = stopGapLine({ sales: 2, shares: 9, wouldHaveFilled: 1, unmeasured: 0, dollarsVsWaiting: 0.12 });
-  assert.ok(salesOnly.startsWith("Remainders after a partial take-profit: 2 sold at market (9 shares;"), salesOnly);
-  assert.ok(!salesOnly.includes("instead"), "no 'instead' without fresh stops");
-  for (const l of [one, salesOnly]) assert.ok(!/\b1 shares\b|\b1 sales\b|at once/.test(l), l);
+  assert.ok(salesOnly.startsWith("Fresh stops after a partial take-profit: none placed; 2 remainders sold at market at that step instead (9 shares;"), salesOnly);
+  for (const l of [one, salesOnly]) assert.ok(!/\b1 shares\b|\b1 remainders\b|\b1 sales\b|at once|none today/.test(l), l);
 });
+
+// Group 2 review, round 2, probe 2: a remainder sold outside the fresh-stop step (by the missing-exit check after a stuck cleanup, or after
+// its fresh stop ended) is not counted by the line, and the line must not claim anything false about it.
+test("group 2, round 2 (probe 2): a stuck remainder later sold by the missing-exit check, and a fresh stop cancelled in the dashboard then sold: the line claims nothing false", async () => {
+  for (const shape of ["stuck", "fresh-ended"] as const) {
+    const w = world();
+    const meter = new StopGapMeter();
+    meter.startDay(D, null);
+    w.risk.onBareSale = (x: any) => meter.onSale(x);
+    w.risk.onFreshStop = (x: any) => meter.onFreshStop(x);
+    const dd = await day(w);
+    const id = await hold(w, "LUNR", 5, 12, 51);
+    w.sim.advance(5_000);
+    w.sim.partialTakeProfit(id, 2, 12.08);
+    if (shape === "stuck") w.sim.cancelMs = 40_000;
+    w.sim.advance(300);
+    await syncOrders(w.risk, dd, { protect: true });
+    if (shape === "fresh-ended") await w.sim.cancelOrder(freshStopOrder(w, "LUNR")!.id);
+    w.sim.advance(41_000);
+    await syncOrders(w.risk, dd, { protect: true });
+    w.sim.advance(10_000);
+    await syncOrders(w.risk, dd, { protect: true });
+    meter.settle(w.sim.simMs + 70_000);
+    const line = stopGapLine(meter.totals());
+    assert.ok(w.sim.sellLog.some((x) => x.symbol === "LUNR"), `${shape}: the remainder was sold (outside the fresh-stop step)`);
+    assert.ok(!/none today|no remainder(s)? (was )?sold\b(?! at market at that step)/.test(line), `${shape}: no general claim: ${line}`);
+    if (shape === "stuck") assert.equal(line, "Fresh stops after a partial take-profit: none placed today, and no remainder sold at market at that step.");
+    else assert.equal(line, "Fresh stops after a partial take-profit: 1 placed (3 shares); no remainder sold at market at that step.");
+  }
+});
+
+// Group 2 review, round 2, the reviewer's probe: the take-profit's cancel outlasts the cleanup (reported stuck), the retry places the fresh
+// stop but its answer is unclear (it exists at Alpaca). No 5 minute alert while that stop rests, also after it leaves the sync's 10 minute
+// list; nothing is sold.
+for (const [CMS, GAP] of [[25_000, 0], [30_000, 0], [28_000, 1_000], [35_000, 5_000]] as const) {
+  test(`group 2, round 2 (probe, cancel ${CMS / 1000} s, gap ${GAP / 1000} s): a stuck remainder whose fresh stop answered unclearly but rests at Alpaca gets no 5 minute alert over 15 minutes`, async () => {
+    const w = world();
+    const dd = await day(w);
+    const id = await hold(w, "LUNR", 5, 12, 51);
+    w.sim.advance(5_000);
+    w.sim.partialTakeProfit(id, 2, 12.08);
+    w.sim.cancelMs = CMS;
+    w.sim.advance(300);
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    assert.ok(w.memory.stuck.get(id)?.alerted, "reported stuck first");
+    w.sim.advance(GAP);
+    const realSubmit = w.sim.submitSell.bind(w.sim);
+    w.sim.submitSell = async (s) => {
+      const o = await realSubmit(s);
+      if (s.stopPrice !== undefined) {
+        const { AlpacaError } = await import("../src/alpaca-trading.ts");
+        throw new AlpacaError("unclear (test)", 502);
+      }
+      return o;
+    };
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    w.sim.submitSell = realSubmit;
+    assert.equal(w.memory.freshStops.get(id)?.status, "unclear");
+    const before = mentions(w).length;
+    for (let i = 0; i < 90; i++) {
+      w.sim.advance(10_000);
+      await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    }
+    const late = mentions(w).slice(before).map((m) => m.text);
+    assert.ok(!late.some((t) => t.includes("still has no protective stop")), late.join(" | "));
+    assert.equal(freshStopOrder(w, "LUNR")!.status, "accepted", "the fresh stop rests");
+    assert.equal(w.sim.heldQty("LUNR"), 3);
+    assert.equal(w.sim.sellLog.length, 0, "nothing sold");
+  });
+}
 
 test("group 2, finding 3: a remainder waiting for its fresh stop (the take-profit's cancel outlasting the cleanup) is reported as 'could not protect or sell', and the 5 minute alert says the same", async () => {
   const w = world();

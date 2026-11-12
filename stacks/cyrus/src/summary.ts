@@ -76,16 +76,16 @@ export interface StopGapDay {
   freshStopShares?: number;
 }
 
-// Group 2 review of 2026-11-12: the line names what it counts (remainders after a partial take-profit only; lost-exit sales are not in it).
+// Group 2 review of 2026-11-12, rounds 1 and 2: the line names only what it counts, the fresh-stop step after a partial take-profit and that
+// step's own market sales (a remainder sold later by the missing-exit check, or after its fresh stop ended, is not counted here), so it
+// never claims "none" about remainders in general.
 export function stopGapLine(g: StopGapDay): string {
   const n = (k: number, one: string, many = `${one}s`) => `${k} ${k === 1 ? one : many}`;
   const fresh = g.freshStops ?? 0;
-  if (fresh === 0 && g.sales === 0) return "Remainders after a partial take-profit: none today.";
-  const parts: string[] = [];
-  if (fresh > 0) parts.push(`${fresh} given a fresh stop (${n(g.freshStopShares ?? 0, "share")})`);
-  if (g.sales > 0) parts.push(`${g.sales} sold at market${fresh > 0 ? " instead" : ""} (${n(g.shares, "share")}; Alpaca refused the fresh stop, or another position shared the symbol)`);
-  else parts.push("none sold at market");
-  let line = `Remainders after a partial take-profit: ${parts.join("; ")}.`;
+  if (fresh === 0 && g.sales === 0) return "Fresh stops after a partial take-profit: none placed today, and no remainder sold at market at that step.";
+  const placed = fresh > 0 ? `${fresh} placed (${n(g.freshStopShares ?? 0, "share")})` : "none placed";
+  const sold = g.sales > 0 ? `${n(g.sales, "remainder")} sold at market at that step instead (${n(g.shares, "share")}; Alpaca refused the fresh stop, or another position shared the symbol)` : "no remainder sold at market at that step";
+  let line = `Fresh stops after a partial take-profit: ${placed}; ${sold}.`;
   if (g.sales > 0) {
     const sign = g.dollarsVsWaiting >= 0 ? "+" : "-";
     line += ` Of the sales, ${g.wouldHaveFilled} would have filled at their take-profit within the next 5 seconds; selling came out ${sign}${Math.abs(g.dollarsVsWaiting).toFixed(2)} dollars against waiting 5 seconds${g.unmeasured ? ` (${g.unmeasured} not measured)` : ""}. Estimate from the free feed's prints.`;
