@@ -1434,11 +1434,22 @@ export class Worker {
       // remainder is unprotected again: the order sync runs at once and its missing-exit check sells it, as before A4.
       onFreshStopUpdate: (info) => {
         const f = [...this.syncMemory.freshStops.values()].find((x) => x.stopClientOrderId === info.clientOrderId);
-        if (!f) return;
+        if (!f) {
+          // Ruling B (group 1, round 2 of the night release): a fresh stop that hit the 15 second limit has ended at Alpaca: its entry's
+          // sale is due now (no new request; a pending retry time for that entry is cleared), so the order sync runs at once.
+          const entry = this.syncMemory.timedOutStops.get(info.clientOrderId);
+          if (entry && (info.event === "canceled" || info.event === "expired" || info.event === "rejected")) {
+            const st = this.syncMemory.stuck.get(entry);
+            if (st) st.nextAt = 0;
+            if (this.closingOut || this.liquidator.isLiquidating() || this.middayOwnsSelling) return;
+            this.syncAt(this.d.now().getTime(), 0);
+          }
+          return;
+        }
         // Ruling B of 2026-11-12: a stop that was unclear gets its time to confirm logged here too.
         settleFreshStop((e, data) => this.d.log?.("info", e, data), f, info.status, "live update", this.d.now().getTime());
         if (info.event === "canceled" || info.event === "expired" || info.event === "rejected") {
-          this.d.log?.("info", "fresh_stop_ended", { symbol: info.symbol, event: info.event });
+          this.d.log?.("info", "fresh_stop_ended", { symbol: info.symbol, stopClientOrderId: info.clientOrderId, event: info.event });
           if (this.closingOut || this.liquidator.isLiquidating() || this.middayOwnsSelling) return;
           this.syncAt(this.d.now().getTime(), 0);
         }

@@ -142,9 +142,9 @@ export class SyncMemory {
   readonly lateLogged = new Set<string>();
   // A4 of the proposal of 2026-11-12: entries (client ids) whose remainder is protected by a fresh stop the stack placed.
   readonly freshStops = new Map<string, FreshStop>();
-  // Ruling B of 2026-11-12: fresh stops (their client ids) that were not confirmed within 15 seconds. They are never taken as protection
-  // again: if one shows up working later, it is cancelled.
-  readonly timedOutStops = new Set<string>();
+  // Ruling B of 2026-11-12: fresh stops that were not confirmed within 15 seconds (the stop's client id to its entry's). They are never
+  // taken as protection again: if one shows up working later, its entry's missing-exit sale cancels it, waits for Alpaca's cancel, sells.
+  readonly timedOutStops = new Map<string, string>();
 }
 
 // A4 of the proposal of 2026-11-12 (Michael's approval): after a partial take-profit, Alpaca cancels the bracket's stop on the first share
@@ -392,7 +392,9 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   // when its entry holds the whole symbol). With another position on the symbol it protects only its own shares, so it must not keep the
   // check away from the other position.
   const heldQty = new Map(positions.map((p) => [p.symbol, p.qty]));
-  const sellingSymbols = new Set(listed.orders.filter((x) => x.side === "sell" && OPEN_STATUSES.has(x.status) && (!x.clientOrderId.startsWith("cyrus-p-") || x.qty - x.filledQty >= (heldQty.get(x.symbol) ?? 0) - 1e-9)).map((x) => x.symbol));
+  // Ruling B (group 1, round 2 of the night release): a fresh stop that hit the 15 second limit never counts here (it is not protection and
+  // not a sale of ours): the walk reaches its entry, whose missing-exit sale cancels it, waits for Alpaca's cancel and sells.
+  const sellingSymbols = new Set(listed.orders.filter((x) => x.side === "sell" && OPEN_STATUSES.has(x.status) && !mem.timedOutStops.has(x.clientOrderId) && (!x.clientOrderId.startsWith("cyrus-p-") || x.qty - x.filledQty >= (heldQty.get(x.symbol) ?? 0) - 1e-9)).map((x) => x.symbol));
   const unprotected: string[] = [];
   // Michael's decision of 2026-11-09: the 5 minute alert goes by the clock, for every entry reported stuck, whether or not its retry
   // has had room yet.
@@ -410,21 +412,6 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     if (shown) {
       f.orderId = shown.id;
       settleFreshStop(d.log, f, shown.status, "order list", nowMs);
-    }
-  }
-  // Ruling B (group 1, round 1 of the night release): a stop that hit the limit and now shows working in the sync's own list is cancelled
-  // here (the walk would skip its symbol as having a working sell, which would in effect take it as protection again). The next sync
-  // then sees it ended and sells the shares.
-  if (mem.timedOutStops.size > 0 && (typeof opts.protect === "function" ? opts.protect() : opts.protect)) {
-    for (const x of listed.orders) {
-      if (!mem.timedOutStops.has(x.clientOrderId) || !OPEN_STATUSES.has(x.status) || x.status === "pending_cancel") continue;
-      try {
-        await d.broker.cancelOrder(x.id);
-        d.log?.("fresh_stop_timeout_cancel", { symbol: x.symbol, stopClientOrderId: x.clientOrderId, by: "order list" });
-      } catch (err) {
-        d.log?.("fresh_stop_timeout_cancel_failed", { symbol: x.symbol, error: (err as Error).message.slice(0, 120) });
-      }
-      recheckAt = recheckAt === undefined ? nowMs + 1_000 : Math.min(recheckAt, nowMs + 1_000);
     }
   }
   const walk = [...active.filter((s) => !shortRetry(s)), ...active.filter(shortRetry).sort((a, b) => mem.stuck.get(a.clientOrderId)!.lastTriedAt - mem.stuck.get(b.clientOrderId)!.lastTriedAt)];
@@ -509,7 +496,11 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       d.log?.("unprotected_position", { symbol: s.symbol, clientOrderId: s.clientOrderId, listAgeMs: listAgeMs() });
       const endedAt = flattenLegs(o).filter((l) => l.side === "sell" && !OPEN_STATUSES.has(l.status)).map((l) => l.canceledAt ?? l.updatedAt ?? "").filter((x) => Number.isFinite(Date.parse(x))).sort().at(-1) ?? null;
       lateNotice(s, "missing", endedAt);
-      const c = await timedCleanup(d, day, mem, s, o, "missing");
+      // Ruling B: a timed-out fresh stop of this entry still shown working is cancelled by this sale (which waits for Alpaca's cancel).
+      const timedOutShown = listed.orders.filter((x) => mem.timedOutStops.get(x.clientOrderId) === s.clientOrderId && OPEN_STATUSES.has(x.status));
+      const timedOutIds = timedOutShown.map((x) => x.id);
+      for (const x of timedOutShown) d.log?.("fresh_stop_timeout_cancel", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: x.clientOrderId, by: "missing-exit sale" });
+      const c = await timedCleanup(d, day, mem, s, o, "missing", undefined, timedOutIds.length > 0 ? { alsoCancel: timedOutIds } : {});
       if (c.attempted) unprotected.push(s.symbol);
       if (c.recheckAt !== undefined) recheckAt = recheckAt === undefined ? c.recheckAt : Math.min(recheckAt, c.recheckAt);
       continue;
@@ -568,6 +559,17 @@ const EPS_QTY = 1e-9;
 
 // Part A, step 1, with Michael's retry allowance: null when the entry may be tried now (a first sale, a retry held by visible orders,
 // or a short retry that is due and fits the allowance, which is then charged); otherwise the moment to look again.
+// The stuck record on the hidden-hold backoff (5, 10, 20, then every 30 seconds; retryDue charges the retry allowance when it is due).
+function backoffStuck(mem: SyncMemory, symbol: string, clientOrderId: string, nowMs: number, why: string): StuckEntry {
+  const st = mem.stuck.get(clientOrderId) ?? { symbol, since: nowMs, nextAt: 0, delayMs: 0, alerted: false, escalated: false, lastTriedAt: nowMs, why: "" };
+  st.lastTriedAt = nowMs;
+  st.delayMs = st.delayMs > 0 ? Math.min(st.delayMs * 2, STUCK_RETRY_MAX_MS) : STUCK_RETRY_FIRST_MS;
+  st.nextAt = nowMs + st.delayMs;
+  if (!st.why) st.why = why;
+  mem.stuck.set(clientOrderId, st);
+  return st;
+}
+
 function retryDue(mem: SyncMemory, clientOrderId: string, nowMs: number): number | null {
   const st = mem.stuck.get(clientOrderId);
   if (!st || st.nextAt === 0) return null;
@@ -638,7 +640,7 @@ async function settleAwaiting(d: RiskDeps, mem: SyncMemory, orders: Order[] | nu
 // stuck record (already "alerted") gives the one line when it resolves (sold, or gone).
 async function freshStopTimeout(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, o: Order, f: FreshStop, nowMs: number): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }> {
   mem.freshStops.delete(s.clientOrderId);
-  mem.timedOutStops.add(f.stopClientOrderId);
+  mem.timedOutStops.set(f.stopClientOrderId, s.clientOrderId);
   let cancelId: string | null = f.orderId;
   let found: string = "lookup failed";
   try {
@@ -738,6 +740,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     endWhenHiddenHold: !extra.fast,
     onSellSent: sent,
     ...(protectAt !== null ? { protectWithStop: { [s.symbol]: protectAt } } : {}),
+    ...((extra.alsoCancel?.length ?? 0) > 0 ? { endOnCancelFail: true } : {}),
     ...(extra.fast ? { waitForAlpacaCancel: true, waitCancelMs: FAST_LOST_EXIT_WAIT_MS } : {}),
   });
   const soldQty = r.sold.filter((x) => x.symbol === s.symbol).reduce((n, x) => n + x.qty, 0);
@@ -772,16 +775,21 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     // sync looks again in a second (the sale then waits for Alpaca's cancel and sells).
     try {
       await d.broker.cancelOrder(heldBy.orderId);
-      d.log?.("fresh_stop_timeout_cancel", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: heldBy.clientOrderId });
+      d.log?.("fresh_stop_timeout_cancel", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: heldBy.clientOrderId, by: "sale" });
+      // Accepted: the next look in a second (Alpaca's cancel then shows, and the sale waits for it if still pending).
+      return { attempted: true, stuck: false, recheckAt: now + 1_000 };
     } catch (err) {
-      d.log?.("fresh_stop_timeout_cancel_failed", { symbol: s.symbol, error: (err as Error).message.slice(0, 120) });
+      d.log?.("fresh_stop_timeout_cancel_failed", { symbol: s.symbol, stopClientOrderId: heldBy.clientOrderId, by: "sale", error: (err as Error).message.slice(0, 120) });
+      // Group 1, round 2 of the night release: refused or unanswered: tried again on the stuck backoff (5, 10, 20, then every 30 seconds)
+      // within the retry allowance, never every second.
+      const st = backoffStuck(mem, s.symbol, s.clientOrderId, now, "Alpaca did not accept the cancel of the unconfirmed fresh stop");
+      return { attempted: true, stuck: true, recheckAt: st.nextAt };
     }
-    return { attempted: true, stuck: false, recheckAt: now + 1_000 };
   }
   if (heldBy && soldQty === 0) {
     // A4 (group 1 review, round 1): a resting fresh stop of ours protects the shares: remember it, say nothing, not stuck.
     mem.freshStops.set(s.clientOrderId, { symbol: s.symbol, entryClientOrderId: s.clientOrderId, stopClientOrderId: heldBy.clientOrderId, orderId: heldBy.orderId, qty: heldBy.qty, stopPrice: heldBy.stopPrice ?? 0, placedAt: now, status: heldBy.status, lookedAt: now });
-    d.log?.("fresh_stop_recovered", { symbol: s.symbol, clientOrderId: s.clientOrderId, by: "sale" });
+    d.log?.("fresh_stop_recovered", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: heldBy.clientOrderId, by: "sale" });
     await resolveStuck(d, mem, s.clientOrderId, "it has a fresh protective stop");
     return { attempted: false, stuck: false };
   }
@@ -860,7 +868,10 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   const st = mem.stuck.get(s.clientOrderId) ?? { symbol: s.symbol, since: now, nextAt: 0, delayMs: 0, alerted: false, escalated: false, lastTriedAt: now, why: "" };
   st.lastTriedAt = now;
   const hidden = r.hiddenHold?.includes(s.symbol) === true;
-  if (hidden) {
+  // Ruling B (group 1, round 2 of the night release): a cancel of a timed-out fresh stop that Alpaca did not accept is retried on the same
+  // backoff and allowance as a hidden hold; one it accepted (still pending) is tried again at the next sync, as before.
+  const cancelRefused = (extra.alsoCancel?.length ?? 0) > 0 && r.cancelFailed === true;
+  if (hidden || cancelRefused) {
     st.delayMs = st.delayMs > 0 ? Math.min(st.delayMs * 2, STUCK_RETRY_MAX_MS) : STUCK_RETRY_FIRST_MS;
     st.nextAt = now + st.delayMs;
   } else {

@@ -114,20 +114,23 @@ export const SCREEN_CANCELLED = "The afternoon load window is cancelled (its che
 //  - a `go` refused for a plain stop, or `stop` or `flatten`: send `load afternoon` again once flat;
 //  - once its time has passed: that it is no longer accepted today;
 //  - any other refusal: `status` (never the advice to send it again).
-export function screenCancelledLine(switched: boolean | "switched", after: "go-resumed" | "go-refused" | "stop", o: { lossStop: boolean; why?: string; tooLate?: boolean }): string {
+// `ownStop`: Michael's own stop is on (a refused `go` then checks the pause first, so its reason may say trading resumed); `lastEntryPassed`:
+// no entries are left today (the `go` reply already said so) (group 2, round 2 of the night release).
+export function screenCancelledLine(switched: boolean | "switched", after: "go-resumed" | "go-refused" | "stop", o: { lossStop: boolean; why?: string; tooLate?: boolean; ownStop?: boolean; lastEntryPassed?: boolean }): string {
   const base = switched === "switched" ? SCREEN_CANCELLED_SWITCHED : SCREEN_CANCELLED;
   const tooLate = "`load afternoon` is no longer accepted today (its time has passed).";
   const pauseOver = o.tooLate ? `Trading has resumed normally; ${tooLate}` : "Trading has resumed normally. To start the window instead, send `stop` (or `flatten`), then `load afternoon` once flat (accepted until 1:30 PM CT, or the last entry if earlier).";
   const tryAgain = o.tooLate ? tooLate : "To try again, send `load afternoon` again once the account is flat (accepted until 1:30 PM CT, or the last entry if earlier).";
   const why = o.why ?? "";
   let next: string;
-  if (after === "go-resumed") next = pauseOver;
+  if (after === "go-resumed") next = o.lastEntryPassed ? "" : pauseOver;
+  else if (o.ownStop && !o.lossStop) next = tryAgain;
   else if (o.lossStop) next = /daily loss stop/.test(why) ? "There is no more trading today." : "The daily loss stop is in force, so there is no more trading today.";
   else if (after === "stop") next = tryAgain;
   else if (/already resumed|not paused/.test(why)) next = pauseOver;
   else if (/stop flag is on/.test(why)) next = tryAgain;
   else next = "Send `status` to see what is allowed now.";
-  return `${base} ${next}`;
+  return next ? `${base} ${next}` : base;
 }
 
 // The `status` line for the afternoon load window (group 2 review, round 1).
@@ -399,13 +402,13 @@ export class CommandProcessor {
         const why = day && afternoonCloseoutPending(day, now) ? pendingWhy : goRefusal({ hasCycle: Boolean(day && middayTimes(day)), pause, flat: Boolean(day && middayFlat(day)), stop });
         if (why) {
           await this.say(`Not resumed: ${why}.`);
-          if (screenCancelled) await this.say(screenCancelledLine(screenCancelled, "go-refused", { lossStop: Boolean(stop?.on && stop.reason.startsWith("daily loss stop")), why, tooLate: await this.afternoonTooLate(now) }));
+          if (screenCancelled) await this.say(screenCancelledLine(screenCancelled, "go-refused", { lossStop: Boolean(stop?.on && stop.reason.startsWith("daily loss stop")), why, tooLate: await this.afternoonTooLate(now), ownStop: plainStop(stop) }));
           return;
         }
         await updatePause(this.d.store, date, { on: false, resumedAt: now.toISOString(), resumedBy: "go" });
         const lastEntryAt = middayTimes(day!)!.lastEntryAt;
         await this.say(now >= lastEntryAt ? `The mid-day pause is over, but no entries are left today (last entry ${centralClock(lastEntryAt)}).` : "Resumed: the mid-day pause is over. Same limits as this morning; the loss stop counts from the open.");
-        if (screenCancelled) await this.say(screenCancelledLine(screenCancelled, "go-resumed", { lossStop: false }));
+        if (screenCancelled) await this.say(screenCancelledLine(screenCancelled, "go-resumed", { lossStop: false, tooLate: await this.afternoonTooLate(now), lastEntryPassed: now >= lastEntryAt }));
         return;
       }
       case "loadAfternoon": {

@@ -353,6 +353,143 @@ test("group 1, round 1 (night): a stop that hit the limit and later shows workin
   assert.equal(w.sim.oversellAttempts, 0);
 });
 
+test("group 2, round 2 (night): a fresh stop our own sell gate stopped before any request is logged with sentToAlpaca false", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "NIO", 5, 5, 1);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 1, 5.08);
+  // The sell gate reads the position before sending; that read fails only for the fresh stop's check.
+  const realPositions = w.sim.listPositions.bind(w.sim);
+  let failNext = false;
+  const realSubmit = w.sim.submitSell.bind(w.sim);
+  (w.risk.liquidator as any).d.gate.d.broker = new Proxy(w.sim, { get: (t: any, k) => (k === "listPositions" && failNext ? async () => { failNext = false; throw new Error("read timed out (test)"); } : typeof t[k] === "function" ? t[k].bind(t) : t[k]) });
+  w.sim.submitSell = async (s: any) => realSubmit(s);
+  const realStop = (w.risk.liquidator as any).d.gate.sell.bind((w.risk.liquidator as any).d.gate);
+  (w.risk.liquidator as any).d.gate.sell = async (req: any) => {
+    if (req.stopPrice !== undefined) failNext = true;
+    return realStop(req);
+  };
+  void realPositions;
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  const ev = w.events.find((e) => e.event === "fresh_stop_unclear");
+  assert.ok(ev, JSON.stringify(w.events.map((e) => e.event)));
+  assert.equal(ev!.data.sentToAlpaca, false);
+  assert.equal(freshStops(w, "NIO").length, 0, "nothing reached Alpaca");
+});
+
+// ---------------- group 1, round 2 (night): a timed-out stop that shows up working later ----------------
+
+// The stop timed out while hidden from every read; then it shows working in the sync's own list.
+async function timedOutThenVisible(w: World, symbol = "RKLB", n = 1, price = 20) {
+  const dd = await day(w);
+  const id = await hold(w, symbol, 5, price, n);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 1, price + 0.08);
+  return { dd, id };
+}
+function hideAndFail(w: World) {
+  unclearStops(w, true);
+  const realPaged = w.sim.listOrdersPaged.bind(w.sim);
+  const ctl = { hide: true, openFails: false };
+  w.sim.listOrdersPaged = async (...a: any[]) => {
+    const r: any = await (realPaged as any)(...a);
+    return ctl.hide && a[0] === "all" ? { ...r, orders: r.orders.filter((o: any) => !o.clientOrderId.startsWith("cyrus-p-")) } : r;
+  };
+  const realList = w.sim.listOrders.bind(w.sim);
+  w.sim.listOrders = async (status: any, after?: string) => {
+    if (status === "open" && ctl.openFails) throw new Error("timeout (test)");
+    return realList(status, after);
+  };
+  return ctl;
+}
+// The worker's scheduling, roughly: the 10 second sync, or the recheck it asks for (250 ms slack, at least 100 ms on).
+async function runWorker(w: World, dd: any, ms: number) {
+  const end = w.sim.simMs + ms;
+  while (w.sim.simMs < end) {
+    const r = await syncOrders(w.risk, dd, { protect: true });
+    const next = r.recheckAt !== undefined ? Math.max(w.sim.simMs + 100, Math.min(r.recheckAt + 250, w.sim.simMs + 10_000)) : w.sim.simMs + 10_000;
+    w.sim.advanceTo(Math.min(next, end));
+  }
+}
+
+for (const cancelMs of [200, 1_400, 3_000, 8_700, 11_000]) {
+  test(`group 1, round 2 (night): a timed-out stop seen working later is cancelled by its entry's sale, which waits for Alpaca's cancel (pending ${cancelMs / 1000} s) and sells soon after it lands`, async () => {
+    const w = world();
+    const { dd } = await timedOutThenVisible(w);
+    const ctl = hideAndFail(w);
+    w.sim.advance(300);
+    await syncOrders(w.risk, dd, { protect: true });
+    ctl.openFails = true;
+    w.sim.advance(FRESH_STOP_CONFIRM_MS);
+    await syncOrders(w.risk, dd, { protect: true });
+    assert.ok(w.events.some((e) => e.event === "fresh_stop_timeout"));
+    ctl.openFails = false;
+    ctl.hide = false;
+    w.sim.cancelMs = cancelMs;
+    const stopId = freshStops(w, "RKLB")[0]!.id;
+    let cancelAt: number | null = null;
+    const realCancel = w.sim.cancelOrder.bind(w.sim);
+    w.sim.cancelOrder = async (id: string) => {
+      if (id === stopId && cancelAt === null) cancelAt = w.sim.simMs;
+      return realCancel(id);
+    };
+    await runWorker(w, dd, 60_000);
+    const sale = w.sim.sellLog.find((x) => x.symbol === "RKLB");
+    assert.ok(cancelAt !== null && sale, "cancelled, then sold");
+    const gap = sale!.at - (cancelAt! + cancelMs);
+    console.log(`MEASURE pending ${cancelMs} ms: sale ${gap} ms after Alpaca's cancel landed`);
+    assert.ok(gap <= 2_000, `sale ${gap} ms after Alpaca's cancel landed`);
+    assert.equal(await heldQty(w, "RKLB"), 0);
+    assert.equal(w.sim.oversellAttempts, 0);
+  });
+}
+
+test("group 1, round 2 (night): cancels Alpaca keeps refusing for 3 timed-out stops are retried on the backoff within the allowance, never every second, and never a sale on top", async () => {
+  const w = world();
+  const dd = await day(w);
+  const ids: string[] = [];
+  for (const [i, sym] of ["AAA", "BBB", "CCC"].entries()) {
+    const id = await hold(w, sym, 5, 20 + i, 1);
+    ids.push(id);
+  }
+  w.sim.advance(5_000);
+  for (const [i, id] of ids.entries()) w.sim.partialTakeProfit(id, 1, 20 + i + 0.08);
+  const ctl = hideAndFail(w);
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  ctl.openFails = true;
+  w.sim.advance(FRESH_STOP_CONFIRM_MS);
+  await syncOrders(w.risk, dd, { protect: true });
+  ctl.openFails = false;
+  ctl.hide = false;
+  const stopIds = new Set(w.sim.orders.filter((o) => o.clientOrderId.startsWith("cyrus-p-")).map((o) => o.id));
+  assert.equal(stopIds.size, 3);
+  const cancelTimes: number[] = [];
+  const realCancel = w.sim.cancelOrder.bind(w.sim);
+  w.sim.cancelOrder = async (id: string) => {
+    if (stopIds.has(id)) {
+      cancelTimes.push(w.sim.simMs);
+      throw new AlpacaError("internal error (test)", 500);
+    }
+    return realCancel(id);
+  };
+  const t0 = w.sim.simMs;
+  await runWorker(w, dd, 5 * 60_000);
+  const reqs = w.sim.bucketTimes.filter((t) => t >= t0);
+  const maxIn = (arr: number[], win: number) => Math.max(0, ...arr.map((t) => arr.filter((x) => x >= t && x < t + win).length));
+  console.log(`MEASURE refused cancels, 3 stops, 5 minutes: ${cancelTimes.length} cancels (most in a minute ${maxIn(cancelTimes, 60_000)}, in 5 s ${maxIn(cancelTimes, 5_000)}); requests ${reqs.length} (most in a minute ${maxIn(reqs, 60_000)})`);
+  assert.ok(maxIn(cancelTimes, 60_000) <= 3 + 4, `cancels in a minute ${maxIn(cancelTimes, 60_000)}: the first try each, then at most 4 a minute (40 requests at 10 each)`);
+  assert.ok(maxIn(reqs, 60_000) <= 120, `requests in a minute ${maxIn(reqs, 60_000)}: Alpaca's 200 minus the reserve of 80`);
+  assert.equal(w.sim.oversellAttempts, 0);
+  // The stops then trigger: still never a sale on top of them.
+  for (const sym of ["AAA", "BBB", "CCC"]) w.sim.triggerStop(sym);
+  await runWorker(w, dd, 30_000);
+  assert.equal(w.sim.oversellAttempts, 0);
+  for (const sym of ["AAA", "BBB", "CCC"]) assert.equal(await heldQty(w, sym), 0);
+});
+
 // ---------------- ruling C: the order index ----------------
 import { CachingStore } from "../src/caching-store.ts";
 import { DayOrders, dayOrderIndex, isActiveOrder, activeOrdersOldestFirst } from "../src/order-index.ts";

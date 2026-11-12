@@ -70,7 +70,8 @@ export function openOrderIds(orders: Order[], symbols: ReadonlySet<string>): str
 }
 
 // `httpStatus` is Alpaca's answer code when Alpaca refused the sell (429 means its request limit was hit).
-export type SellResult = { status: "sent"; order: Order } | { status: "refused"; reason: string } | { status: "error"; reason: string; httpStatus?: number };
+// `notSent` (logging only, group 2 round 2 of the night release): the error came before any request was sent.
+export type SellResult = { status: "sent"; order: Order } | { status: "refused"; reason: string } | { status: "error"; reason: string; httpStatus?: number; notSent?: true };
 
 export interface SellGateDeps {
   broker: SellBroker;
@@ -147,7 +148,7 @@ export class SellGate {
       v = await this.read();
     } catch (err) {
       this.view = null;
-      return { status: "error", reason: `could not read the position to check the sell: ${(err as Error).message.slice(0, 120)}` };
+      return { status: "error", reason: `could not read the position to check the sell: ${(err as Error).message.slice(0, 120)}`, notSent: true };
     }
     const pos = v.positions.find((p) => p.symbol === req.symbol);
     const held = pos?.qty ?? 0;
@@ -186,6 +187,10 @@ export interface LiquidateOptions {
   // Release A, fix 1: order ids to cancel first in an `only` sale (a filled bracket's exit legs, which Alpaca's open list may
   // not show). An answer that the order is already filled or cancelled is not a failure.
   cancelIds?: string[];
+  // Ruling B (group 1, round 2 of the night release), set only for a fresh stop that hit the 15 second limit: if a cancel this round is
+  // not accepted, the attempt ends at once (no waiting and polling for a cancel that was not made); the order sync tries again on the
+  // stuck backoff within the retry allowance.
+  endOnCancelFail?: boolean;
   // Release A, fix 2, set only by the close-out: from round 2 on, if every share still held is covered by a sell this stack
   // sent (client id cyrus-x-), stop and return those symbols as `working` instead of waiting out the remaining rounds.
   returnWhenOnlyOwnSells?: boolean;
@@ -238,6 +243,8 @@ export interface LiquidateResult {
   yielded?: boolean;
   // Only with endWhenHiddenHold: the symbols held with no open order visible when the attempt ended early (part A, step 1).
   hiddenHold?: string[];
+  // Ruling B (group 1, round 2 of the night release): a cancel this sale sent was not accepted (an error from Alpaca or no answer).
+  cancelFailed?: boolean;
   // Shares held per symbol at the first look and at the last look of this liquidation (release 1 of 2026-11-09: a cleanup sale of
   // one entry judges its own shares by the change, since a newer position on the same symbol may still be held).
   heldBefore?: Record<string, number>;
@@ -497,6 +504,11 @@ export class Liquidator {
         }
       } catch (err) {
         result.errors.push(`round ${round}: cancel failed: ${(err as Error).message.slice(0, 120)}`);
+        result.cancelFailed = true;
+        if (o.endOnCancelFail) {
+          result.remaining = positions.map((p) => p.symbol);
+          return done();
+        }
       }
       if (onlyOwn) {
         result.working = positions.map((p) => p.symbol);
@@ -621,7 +633,8 @@ export class Liquidator {
               // Unclear (a network error, a timeout, a 5xx) or refused by our own sell gate: the stop may exist, so no market sale on top
               // of it; the next order sync looks again.
               result.errors.push(`round ${round}: ${p.symbol}: fresh stop not confirmed: ${st.reason}`);
-              this.d.log?.("fresh_stop_unclear", { symbol: p.symbol, stopClientOrderId: sid, qty: free, stopPrice, reason: st.reason.slice(0, 160) });
+              // `sentToAlpaca: false`: our own sell gate stopped it before any request (the briefs leave it out of the stops sent).
+              this.d.log?.("fresh_stop_unclear", { symbol: p.symbol, stopClientOrderId: sid, qty: free, stopPrice, reason: st.reason.slice(0, 160), sentToAlpaca: !(st.status === "refused" || (st.status === "error" && st.notSent === true)) });
               result.freshStopUnclear = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, sentAtMs };
               result.remaining = [p.symbol];
               return done();

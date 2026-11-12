@@ -239,6 +239,11 @@ test("group 2 rounds 1 and 2: every branch of the cancel line's next step, chose
   // `go` refused: the loss stop (named once), the pause over (both refusal texts), a plain stop (in time and too late), anything else.
   assert.equal(screenCancelledLine(true, "go-refused", { lossStop: true, why: "the daily loss stop is in force" }), `${SCREEN_CANCELLED} There is no more trading today.`);
   assert.equal(screenCancelledLine(true, "go-refused", { lossStop: false, why: "trading has already resumed today" }), `${SCREEN_CANCELLED} ${PAUSE_OVER}`);
+  // Group 2, round 2 of the night release: with Michael's own stop on (a refused `go` names the pause first), the next step is `load afternoon` again.
+  assert.equal(screenCancelledLine(true, "go-refused", { lossStop: false, why: "trading has already resumed today", ownStop: true }), `${SCREEN_CANCELLED} ${TRY_AGAIN}`);
+  // A `go` after 1:30 PM: no offer to start the window; after the last entry, nothing more (the `go` reply said no entries are left).
+  assert.equal(screenCancelledLine(true, "go-resumed", { lossStop: false, tooLate: true }), `${SCREEN_CANCELLED} Trading has resumed normally; ${TOO_LATE}`);
+  assert.equal(screenCancelledLine(true, "go-resumed", { lossStop: false, tooLate: true, lastEntryPassed: true }), SCREEN_CANCELLED);
   assert.equal(screenCancelledLine(true, "go-refused", { lossStop: false, why: "trading is not paused for the mid-day cycle" }), `${SCREEN_CANCELLED} ${PAUSE_OVER}`);
   assert.equal(screenCancelledLine("switched", "go-refused", { lossStop: false, why: "the stop flag is on (send `resume` first if you want trading)" }), `${SCREEN_CANCELLED_SWITCHED} ${TRY_AGAIN}`);
   assert.equal(screenCancelledLine(true, "go-refused", { lossStop: false, why: "the stop flag is on (send `resume` first if you want trading)", tooLate: true }), `${SCREEN_CANCELLED} ${TOO_LATE}`);

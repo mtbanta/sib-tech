@@ -353,3 +353,26 @@ test("group 1, round 1 (night): the stop route is refused while today's loss is 
   assert.ok(r.said("commands").some((t) => t === "Not started: today's loss is past the daily loss stop."), r.said("commands").join(" | "));
   assert.equal((await r.store.getControl<StopFlag>(CONTROL_STOP))!.on, true, "the stop stays on");
 });
+
+test("group 2, round 2 (night): `go` while a stop-route screen runs: the cancel line says to send `load afternoon` again, never that trading resumed", async () => {
+  const { r } = await flatAtMidday();
+  r.ownerSays("go", "16:35:00");
+  await r.at("16:35:05");
+  r.ownerSays("stop", "16:38:00");
+  await r.at("16:38:05");
+  let release!: () => void;
+  const gate = new Promise<void>((res) => (release = res));
+  const orig = (r.worker as any).d.buildLiveList;
+  (r.worker as any).d.buildLiveList = async (o: any) => (await gate, orig(o));
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  r.ownerSays("go", "16:40:30");
+  await r.at("16:40:35");
+  release();
+  await until(() => !r.worker["inflight"].has("afternoon-screen"));
+  await r.at("16:40:40");
+  const line = r.said("commands").find((t) => t.includes("The afternoon load window is cancelled"));
+  assert.ok(line, r.said("commands").join(" | "));
+  assert.ok(!line!.includes("Trading has resumed normally"), line);
+  assert.match(line!, /To try again, send `load afternoon` again once the account is flat/);
+});
