@@ -237,3 +237,39 @@ test("group 2, round 1: with the stop on when the afternoon close-out finishes f
   assert.ok(!line!.includes("`go` resumes"), line);
   assert.match(line!, /The stop flag is on/);
 });
+
+test("group 2, round 2: on a normal morning after `go`, then `flatten`, the stop refusal says the window cannot start today (no false next step)", async () => {
+  const { r } = await flatAtMidday();
+  r.ownerSays("go", "16:35:00");
+  await r.at("16:35:05");
+  r.ownerSays("flatten", "16:38:00");
+  await r.at("16:38:05");
+  await r.at("16:38:30");
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  const line = r.said("commands").find((t) => t.startsWith("Not started: with the stop flag on"));
+  assert.ok(line, r.said("commands").join(" | "));
+  assert.match(line!, /trading already resumed after the mid-day pause today, so the window cannot start today\. `resume` returns to normal trading at once\.$/);
+  assert.ok(!line!.includes("`load afternoon` again"));
+});
+
+test("group 2, round 2: if the afternoon close-out never finished flat, `status` after the regular close-out time says that close-out took over, in both lines", async () => {
+  const { sim, r } = await flatAtMidday({ load: true });
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  await r.at("16:50:00");
+  await hold(sim, r.store, "AAA", 1, 10, 1);
+  sim.refuseSellsTimes = 1_000_000;
+  await r.at("17:10:06");
+  await until(() => !r.worker["inflight"].has("midday"));
+  sim.refuseSellsTimes = 0;
+  await r.at("20:56:00"); // after the regular close-out time (2:55 PM CT)
+  await until(() => !r.worker["inflight"].has("closeout") && !r.worker["inflight"].has("midday"));
+  r.ownerSays("status", "20:57:00");
+  await r.at("20:57:05");
+  const st = r.said("commands").filter((t) => t.startsWith("**Status**")).at(-1)!;
+  assert.ok((await r.store.getDay(D))!.phases[AFTERNOON_FLAT_PHASE] === undefined, "the afternoon close-out never wrote its phase");
+  assert.match(st, /its close-out did not finish flat before the regular close-out took over/);
+  assert.match(st, /entries paused again at 11:10 AM CT, when the afternoon load window ended \(the regular close-out took over\)/);
+  assert.ok(!st.includes("its close-out still selling"), st);
+});

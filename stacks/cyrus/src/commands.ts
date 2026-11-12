@@ -416,7 +416,13 @@ export class CommandProcessor {
         // Michael's ruling of 2026-11-12 (afternoon) covers a stop on a load day: the cheap list is already live. On a normal morning
         // the screen switches the list only while paused with no stop, so this release refuses there.
         if (plainStop(facts.stop) && !isLoadDay(facts.day)) {
-          await this.say("Not started: with the stop flag on, `load afternoon` works in this release only on a load day (its cheap list is already live). Send `resume`, then `load afternoon` again (or `go` for a normal afternoon).");
+          // Group 2, round 2: the next step depends on whether the mid-day pause is still on (after `go` or a deploy it is over, and
+          // then `resume` restarts normal trading at once and the window can no longer start today).
+          await this.say(
+            facts.pause?.on
+              ? "Not started: with the stop flag on, `load afternoon` works in this release only on a load day (its cheap list is already live). Send `resume`, then `load afternoon` again (or `go` for a normal afternoon)."
+              : "Not started: with the stop flag on, `load afternoon` works in this release only on a load day, and trading already resumed after the mid-day pause today, so the window cannot start today. `resume` returns to normal trading at once.",
+          );
           return;
         }
         // A load day already has the cheap list live: the window starts now (the facts above were just read, Alpaca included).
@@ -717,7 +723,12 @@ export class CommandProcessor {
     const hold = (await readHold(this.d.store, day.tradeDate).catch(() => false)) ? "; `hold` is set" : "";
     // Group 2, round 1: the pause after the afternoon load window names that window's end and its own close-out.
     const w = afternoonLoadWindow(day);
-    if (pause?.on && pause.reason === AFTERNOON_PAUSE_REASON && w) return `Mid-day cycle: entries paused again at ${centralClock(w.end)}, when the afternoon load window ended (${day.phases[AFTERNOON_FLAT_PHASE] ? "flat" : "its close-out still selling"})${hold}`;
+    if (pause?.on && pause.reason === AFTERNOON_PAUSE_REASON && w) {
+      // Group 2, round 2: from the regular close-out time on, that close-out has taken over (the afternoon one stops trying).
+      const closeoutAt = day.closeAt ? addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) : null;
+      const state = day.phases[AFTERNOON_FLAT_PHASE] ? "flat" : closeoutAt && this.d.now() >= closeoutAt ? "the regular close-out took over" : "its close-out still selling";
+      return `Mid-day cycle: entries paused again at ${centralClock(w.end)}, when the afternoon load window ended (${state})${hold}`;
+    }
     if (pause?.on) return `Mid-day cycle: entries paused since ${pause.since ? centralClock(new Date(pause.since)) : "?"} (${middayFlat(day) ? "flat" : "mid-day close-out still selling"})${hold}`;
     if (pause?.resumedAt) return `Mid-day cycle: resumed at ${centralClock(new Date(pause.resumedAt))} (${resumedByText(pause.resumedBy)})`;
     return `Mid-day cycle: pause at ${centralClock(middayTimes(day)!.pauseAt)}${hold}`;
