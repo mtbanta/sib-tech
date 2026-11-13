@@ -6,7 +6,16 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**BUILD C2: FLY RELEASE V21 RUNS, THE NIGHT RELEASE OF 2026-11-12 WITH RULING B OFF (MICHAEL'S PRE-APPROVED SPLIT). A, C, D AND E ARE ON. DEPLOYED 2:04 AM CENTRAL, 2026-11-13, BEFORE THE OPEN.** As of November 13, 2026 (about 2:10 AM Central).
+**BUILD C2: FLY KEEPS RELEASE V21 (RULING B OFF). RULING B'S FIX DID NOT PASS: GROUP 1 PASSED ROUND 9, GROUP 2 STOPPED IT IN ROUND 9 (THE LAST ALLOWED), SO NO MID-DAY DEPLOY AND NONE AFTER THE CLOSE WITHOUT MICHAEL. TONIGHT'S BUILD (MICHAEL'S ITEMS 2 TO 4) IS NEXT, FOR A DEPLOY BEFORE 7:30 AM MONDAY.** As of November 13, 2026 (about 10:10 AM Central).
+- **Branch `release-2026-11-13-b` (09eef3b, unmerged).** B switched on, plus four rounds of fixes to the alert wording. Group 1 passed rounds 8 and 9 (broker calls identical in 288 random-fault runs).
+- **Group 2's last finding:** a mark meaning "a look found the stop absent" can be wrong or go stale. This needs Alpaca to report shares held that no visible order explains (as on 2026-11-09). The 5 minute alert then says "no protective stop" while the stop still rests. The suggested fix is messaging only.
+- **Michael's items for tonight** (saved verbatim in the C2 log, "Michael's decisions of 2026-11-13 (morning, after v21)"):
+  - 2, the leftovers: a 10 second recheck while the live updates are down; timed-out stop state stored in the database, with a start-up protection check; timed-out stop cancel retries under the stuck-retry request allowance;
+  - 3, bring the older retry loops into line with the retry rule (Michael confirmed it: a maximum number of tries or a maximum rate, always with backoff);
+  - 4, `load on` accepted until 8:15 AM, the screen at 8:15 and Armed at 8:25. Load-day screens since 2026-11-02 took 1.0 to 2.7 minutes (from the day records), so 10 minutes looks ample; to be confirmed.
+- Up to 3 rounds per group. Details: `builds/build-c2-log.md` (on the branch), from "Michael's decisions of 2026-11-13 (morning, after v21)". Paper only. Research input for a human decision.
+
+Earlier entry, superseded by the paragraph above: **BUILD C2: FLY RELEASE V21 RUNS, THE NIGHT RELEASE OF 2026-11-12 WITH RULING B OFF (MICHAEL'S PRE-APPROVED SPLIT). A, C, D AND E ARE ON. DEPLOYED 2:04 AM CENTRAL, 2026-11-13, BEFORE THE OPEN.** As of November 13, 2026 (about 2:10 AM Central).
 - **v21:** `main` `a6b9fe9`, code of `01f8337`. It is release `cf5e3ba` with `FRESH_STOP_LIMIT = { on: false }` in `src/risk.ts`. Both review groups passed it in round 6, the last round allowed (Michael's decisions of 2026-11-13, saved verbatim in the C2 log).
   - **A:** the review briefs count "take-profit cancelled, then stop filled" as a stop exit.
   - **C:** the order index. Gate CPU per decision went from 0.874 ms to 0.073 ms at 9,000 orders (measured on the Mac).
