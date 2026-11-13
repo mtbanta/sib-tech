@@ -5251,3 +5251,37 @@ The residual is corrected above. The correction itself has not been reviewed: no
 - The sweep harness fires timers only on its clock steps (the counts are unaffected).
 
 **For group 1 and Michael:** the uncharged leftover sync can still go over the stuck-retry allowance, by 2 to 3 requests, when room runs out. Closing it, for example by the pass clearing the timer for the recheck it runs, changes sync scheduling and is Michael's call under his rule of 2026-11-03.
+
+### Weekend build: group 1, round 8 (c27346b): STOP AND FLAG MICHAEL
+
+The verdict is STOP AND FLAG MICHAEL for two reasons: a blocking finding in the last allowed round, and the same family as rounds 6 and 7 (charges not matching the rechecks that ran) still blocking after two fixes. Nothing under checks 2, 7 or 10. The round 7 fix is correct for its own case: at a prefill of 34 the allowance now reads 36, 38, 40, and real requests stay at or under 40.
+
+**B1. A leftover sync runs uncharged whenever the pass's sync charges no next recheck, and its cost grows with the number of lagging remainders.** It fires in three cases: the list cleared, no room, and the 30 s window over. It costs one sync's reads (pages, positions, and one lookup per lagging remainder older than the 10 minute window; those lookups are forced through `mustLook` even with no room). It happens once per chain end, shared by all the lagging remainders. It can repeat within an episode, and it is far more frequent than 5 of 100 when syncs take real time, because a chain started by the pass rechecks about every 2.5 s, half the pass's period.
+
+Measured through the worker's real pass, with syncs taking no time:
+
+| Remainders lagging | Already charged | Real requests | Limit |
+| --- | --- | --- | --- |
+| 1 recent | 38 | 42 a minute | 40 |
+| 1 older than 10 min | 37 | 43 a minute | 40 |
+| 5 older | 33 | 47 a minute | 40 |
+| 10 older | 28 | 52 a minute | 40 |
+| 10 older | 0 | 24 within 160 ms | 15 in 5 s |
+
+The same numbers come out on 2401f0b, so the residual predates the round 7 fix.
+
+**Simulator estimates (they depend on how long a sync takes):** with 5 older remainders lagging and nothing else charged, at 40 ms per read, the minute went over 40 in 41 of 100 pass timings (worst 42), and the 5 seconds went over 15 in 100 of 100 (worst 21). Real sync durations (`sync_slow`) would turn these into measurements.
+
+**By code reading, not measured:** at most one uncharged leftover per 5 s pass.
+
+**Fixes group 1 suggests, both as questions for Michael (neither built; both change sync scheduling, so the rule of 2026-11-03 applies):**
+- (a) the pass, on its recheck-due branch, clears the pending timer when it is that recheck's own timer;
+- (b) a leftover sync checks for room before it runs, and gives way to the regular sync when there is none.
+
+**Notes:**
+- Mutant K5 (marking only on the recheck-due branch) survives and could under-charge: no test covers marking on the regular 10 s branch.
+- K6, K8, K9 and R8 survive, but can only over-charge.
+- The worker's existing put-off in `syncFromTimer` re-arms every 250 ms, bounded only by how long the sync runs. It predates this build.
+- Scope is accounting only, nothing beyond Michael's request, no secrets.
+
+**State:** no version of the weekend build has passed both groups. Fly stays on release v21 (`a6b9fe9`). Nothing is deployed until Michael decides.
