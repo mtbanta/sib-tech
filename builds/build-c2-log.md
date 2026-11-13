@@ -4404,3 +4404,21 @@ Work on decision 1 started 9:13 AM Central on branch `release-2026-11-13-b` (fro
     | hedged | 2 | 0 |
 
   - No oversell.
+
+### Round 9 (09eef3b, the last allowed): results
+
+- **Group 1, round 9: PASS.**
+  - `timedOutSeenAbsent` is read only by the 5 minute alert, and the marking has no effect on money state.
+  - Broker calls and events were identical to cf5e3ba and 3bc494e in all 288 runs. "No protective stop" while a stop was open: 0.
+  - An extra probe with the lookup answering at the limit (12 cases) found no false alert.
+  - B on is safe for a mid-day deploy.
+- **Group 2, round 9: STOP AND FLAG MICHAEL.** Round 8's case is fixed (probe11 H1: 0 hedged alerts with the stop gone; probe10 and probe8: 0 bad). But the new absent mark can be wrong or go stale. The false "no protective stop" then comes while the stop still rests, where 3bc494e gave the true hedge.
+  - **First route:** the try at the limit cancels the stop. `hiddenHold` is computed only in a try that cancelled nothing, so the mark is set although an unexplained hold was there. Later tries report the unexplained hold but never clear the mark.
+  - **Second route:** Alpaca says at the limit that the stop is unknown, then the stop appears where the sale's open-orders read cannot see it.
+  - **Both routes need** Alpaca to report shares held that no visible order explains, which happened on 2026-11-09.
+  - **Measured** (1500 runs with random faults, where the sale's open-orders read leaves out the stop): "no protective stop" while the stop was open came 20 times on 09eef3b, against 15 on 3bc494e and 36 on b25de18. Five runs trace to the mark.
+  - **Suggested fix** (messaging only, with a reported-only field from `sells.ts`):
+    - mark a stop absent only when a complete look found the entry's shares free or sold;
+    - clear the mark on any later unexplained hold.
+  - **Non-blocking, outside ruling B and probably on v21 too:** a fresh stop that Alpaca first reports unknown, then shows later (including after a restart), can get the false "no protective stop". This happened in 13 of 1500 standard runs, identically on b25de18, 3bc494e and 09eef3b.
+- **Outcome under Michael's decision 1 of 2026-11-13 (morning):** B failed group 2's last allowed round, so it does not deploy, neither at mid-day nor after the close. Fly keeps v21 (B off). Branch `release-2026-11-13-b` at 09eef3b stays unmerged. A further fix and rounds need Michael's approval.
