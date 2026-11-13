@@ -596,7 +596,7 @@ test("fix (a), round 2 (group 1): the time put back after a failed pass sync is 
 // Group 2, fix (a) round 3: the restore after a failed pass sync is bounded. With Alpaca's order list failing for 30 s and a recheck
 // pending, the real code makes one more failing sync than before the restore (group 2 measured 4 failed syncs against 3); a variant whose
 // restored timer restores itself again failed every 100 ms (263 to 286 failed reads). Group 2's outage probe, kept as a test.
-test("fix (a), round 3 (group 2): with Alpaca's order list failing for 30 s, the restore adds at most one failing sync per pass (no retry every 100 ms)", async () => {
+test("fix (a), round 3 (group 2) and round 4 (group 1): with Alpaca's order list failing for 30 s and a recheck pending, the restore adds at most one failing sync per outage: at most 4 failed reads (3 before the restore), and never more than 2 sync starts in 5 s", async () => {
   const rows: string[] = [];
   for (const kind of ["stuck", "lag"] as const) {
     for (const off of [-4_000, -300, 100]) {
@@ -636,11 +636,68 @@ test("fix (a), round 3 (group 2): with Alpaca's order list failing for 30 s, the
         }
         return realList(...a);
       };
+      const starts: number[] = [];
+      const realStart = wk.startSync.bind(wk);
+      wk.startSync = (d: any, c: any, how: any = {}) => {
+        if (!wk.inflight.has("risk")) starts.push(sim.simMs);
+        return realStart(d, c, how);
+      };
       await driveTo(r, sim, P, P + 45_000);
       wk.stop?.();
-      rows.push(`${kind}, pass ${off} ms from due: ${fails} failed order list reads in the 30 s outage`);
-      assert.ok(fails >= 1 && fails <= 12, rows[rows.length - 1]!);
+      const most5s = Math.max(0, ...starts.map((a) => starts.filter((b) => b >= a && b < a + 5_000).length));
+      rows.push(`${kind}, pass ${off} ms from due: ${fails} failed order list reads in the 30 s outage, at most ${most5s} sync starts in 5 s`);
+      assert.ok(fails >= 1 && fails <= 4, rows[rows.length - 1]!);
+      assert.ok(most5s <= 2, rows[rows.length - 1]!);
     }
   }
   console.log("MEASURE 30 s outage\n" + rows.join("\n"));
+});
+
+// Group 1, fix (a) round 4: a loop that keeps restoring for a whole outage (even with a growing wait) must not pass. Every Alpaca read
+// inside the sync fails for 120 s while a stuck sale's retry is pending; the real code made 13 syncs, at most 7 in a minute and 2 in 5 s
+// (group 1's measurement). Bounds: at most 8 a minute and 2 in 5 s.
+test("fix (a), round 4 (group 1): with every Alpaca read in the sync failing for 120 s, syncs stay at most 8 a minute and 2 in 5 s (no restore loop for the length of the outage)", async () => {
+  const rows: string[] = [];
+  for (const off of [-4_000, -300, 100]) {
+    const { sim, r } = await armedDay(true);
+    const wk: any = r.worker;
+    const mem = wk.syncMemory;
+    const id = clientOrderIdFor(D, "GE", 1);
+    await sim.submitEntry({ symbol: "GE", qty: 5, stopPrice: 11.87, takeProfitPrice: 12.08, referencePrice: 12, clientOrderId: id });
+    sim.fillEntry(id, 12);
+    await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "GE", qty: 5, referencePrice: 12, stopPrice: 11.87, takeProfitPrice: 12.08, status: "filled", alpacaOrderId: null, filledQty: 5, filledAvgPrice: 12, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+    await r.at("14:30:10");
+    const t0 = sim.simMs + 100;
+    r.setNow(iso(t0));
+    sim.refuseStops = true;
+    sim.refuseSellIf = (s: any) => s.symbol === "GE";
+    sim.partialTakeProfit(id, 1, 12.08);
+    wk.syncAt(t0, 0);
+    r.setNow(iso(t0 + 1));
+    await settle();
+    await settle();
+    await settle();
+    const due = mem.stuck.get(id)?.nextAt ?? wk.syncRecheckAt;
+    const P = due + off;
+    if (off < 0) wk.lastSync = P - 10_000;
+    for (const m of ["listOrdersPaged", "listPositions", "findOrderByClientId"]) {
+      const f = (sim as any)[m].bind(sim);
+      (sim as any)[m] = async (...a: any[]) => {
+        if (wk.inflight.has("risk") && (new Error().stack ?? "").includes("syncOrders") && sim.simMs >= P) throw new Error(`${m} failed (test)`);
+        return f(...a);
+      };
+    }
+    const starts: number[] = [];
+    const realStart = wk.startSync.bind(wk);
+    wk.startSync = (d: any, c: any, how: any = {}) => {
+      if (!wk.inflight.has("risk")) starts.push(sim.simMs);
+      return realStart(d, c, how);
+    };
+    await driveTo(r, sim, P, P + 120_000);
+    wk.stop?.();
+    const most = (w: number) => Math.max(0, ...starts.map((a) => starts.filter((b) => b >= a && b < a + w).length));
+    rows.push(`pass ${off} ms from due: ${starts.length} syncs in 120 s, at most ${most(60_000)} a minute and ${most(5_000)} in 5 s`);
+    assert.ok(most(60_000) <= 8 && most(5_000) <= 2, rows[rows.length - 1]!);
+  }
+  console.log("MEASURE 120 s outage\n" + rows.join("\n"));
 });

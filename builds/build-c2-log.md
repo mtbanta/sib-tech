@@ -5413,7 +5413,7 @@ Measured by group 1 in the simulator: a stuck sale's retry came 5.75 s late (pas
 **Fix (`src/worker.ts`):**
 - The pass passes the time it cancelled to its sync (`restoreAt`).
 - If that sync throws before `syncOrders` returns (including the loss stop's read before it), the time is put back once as the recheck's own timer: `syncRecheckAt` if empty, `syncAt(restoreAt)`, and the mark. `syncAt` keeps its 250 ms slack (at least 100 ms from now), so the retry in the tests ran at due + 250.
-- A sync started by that timer carries no `restoreAt`, so a failure there puts nothing back. **Measured (group 2, fix (a) round 3; now a test):** with Alpaca's order list failing for 30 s and a recheck pending, the real code made 4 failing syncs against 3 at `53e367c` (one more per outage), and 3 against 3 with no recheck pending. A variant whose restored timer restored itself again failed every 100 ms (263 to 286 failed reads), which is why the test exists. Rule 6 holds: at most one restore per pass cancel.
+- A sync started by that timer carries no `restoreAt`, so a failure there puts nothing back. **Measured (group 2, fix (a) round 3; now a test):** with Alpaca's order list failing for 30 s and a recheck pending, the real code made 4 failing syncs against 3 at `53e367c` (one more per outage), and 3 against 3 with no recheck pending. A variant whose restored timer restored itself again failed every 100 ms (263 to 286 failed reads), which is why the test exists. Rule 6 holds: at most one restore per pass cancel. The tests enforce it since fix (a) round 4: at most 4 failed reads in a 30 s outage, at most 2 sync starts in 5 s, and over a 120 s outage at most 8 syncs a minute.
 - So a failed pass sync now leads to at most one more failing sync and one more `background_failed` log row per outage (group 2, round 4: none more with a stuck sale and the pass 6 to 16 s before due). In the lag cases that row comes 150 to 750 ms after the first, a near-duplicate. The Discord alert is not doubled, because `Worker.background` sends at most one per step every 5 minutes.
 - **Measured (group 2):** the restored timer's sync sets `lastSync` even when it fails, so after a 30 s outage the regular rhythm can shift one pass later. In the three pass timings measured, the first good sync and the stuck sale's next retry came 5 s later than at `53e367c` (for example +44 501 against +39 501), within one regular gap. At other timings group 2 measured no shift (round 4), so: 0 to 5 s later.
 - The follow-ups are unchanged: the restored timer's sync runs them when it succeeds.
@@ -5486,3 +5486,23 @@ Full suite 737 of 737. Type check clean.
 - `src/` and the briefs byte-identical to `7051f5e`.
 
 **For group 1 (informational):** in the live-update case, the real code runs the live update's sync 30 ms after the pass's sync. The design and the test intend this (a live update's timer is never cancelled), but it is a repeat sync.
+
+### Fix (a), round 4 (5edb9e5): group 1 CHANGES REQUIRED (the rule 6 test too loose), and fix
+
+**Group 1, fix (a) round 4.** This is round 3's B1, back once after one fix. The 30 s outage test caught the 100 ms loop, but its limit of 12 failed reads let through loops that rule 6 forbids. All three passed all 738 tests:
+- **X3b:** the restored timer restores itself with a doubling wait and no limit on tries. 10 to 11 failed reads in the 30 s test. With every read failing for 120 s: 29 to 30 syncs, against the real code's 13. Worst minute 16 to 17 (real 7); worst 5 s 5 to 6 (real 2).
+- **X1:** one extra restore (5 failed reads, 3 syncs in 5 s).
+- **X2:** three extra restores (7 failed reads, 5 syncs in 5 s).
+
+**Fix (tests only; `src/` unchanged since `7051f5e`):**
+- The 30 s outage test now asserts the measured values: at most 4 failed reads with a recheck pending (3 before the restore, plus one), and at most 2 sync starts in any 5 s. Measured: 4 reads and 2 starts in all six cases.
+- **A new 120 s outage test:** every Alpaca read inside the sync fails while a stuck sale's retry is pending, at three pass timings. It asserts at most 8 syncs a minute and 2 in 5 s. Measured: 13 syncs, at most 7 a minute and 2 in 5 s, the same as group 1's figure for `c27346b`.
+- **Group 1's variants against the full suite:** X1 fails 2 tests, X2 fails 2, X3 fails 3, X3b fails 2.
+- The test title and the rule 6 statement above say what is asserted.
+
+**Confirmed by group 1:**
+- the log's outage figures (4 against 3, the 5 s shift at the three offsets, the extra log row's timing);
+- the round 3 rate figures on this commit;
+- the round 3 mutants as listed (R7 now caught).
+
+If this finding returns after this fix, it will have survived two fixes, which is a STOP AND FLAG MICHAEL case.
