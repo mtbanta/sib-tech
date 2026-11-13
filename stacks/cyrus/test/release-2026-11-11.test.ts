@@ -212,8 +212,10 @@ test("on a load day `load afternoon` keeps the cheap list (no second screen, no 
   await normalStop.r.at("16:39:05");
   normalStop.r.ownerSays("load afternoon", "16:40:00");
   await normalStop.r.at("16:40:05");
-  assert.ok(normalStop.r.said("commands").some((t) => t.startsWith("Not started: with the stop flag on, `load afternoon` works in this release only on a load day")), normalStop.r.said("commands").join(" | "));
-  assert.equal((await normalStop.r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], undefined);
+  // Michael's ruling E (2026-11-12): on a normal morning too, with his own stop on and flat; the screen runs while the stop holds.
+  assert.ok(normalStop.r.said("commands").some((t) => t.startsWith("Running the cheap-symbol screen") && t.includes("Your stop stays on meanwhile")), normalStop.r.said("commands").join(" | "));
+  await normalStop.r.at("16:40:10");
+  assert.ok(normalStop.r.said("commands").some((t) => t.startsWith("Afternoon load window on until") && t.includes("Stop cleared")), normalStop.r.said("commands").join(" | "));
 
   const stopped = await flatAtMidday({ load: true });
   stopped.r.ownerSays("stop", "16:39:00");

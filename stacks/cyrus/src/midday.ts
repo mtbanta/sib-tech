@@ -170,23 +170,43 @@ export function retryAllowed(o: { room: number; estimate: number; governorBudget
   return o.estimate <= o.room && o.governorBudget - o.estimate >= o.reserve;
 }
 
-// The deploy check (tools/midday-deploy.mjs): every reason a mid-day deploy must not go ahead, from facts read beforehand. Empty
-// means it may go ahead. Pure, so it is tested without the network.
+// The deploy check (tools/midday-deploy.mjs): every reason a market-hours deploy must not go ahead, from facts read beforehand. Empty
+// means it may go ahead. Pure, so it is tested without the network. Two routes; it may go ahead when either passes in full:
+//  - the mid-day pause (Michael's ruling of 2026-11-09): today's mid-day close-out finished flat, after it and before 1:30 PM (later only
+//    with --after-130), the pause on, before the close; since Michael's decision 5 of 2026-11-13, also his written yes for this deploy
+//    (`michaelYes`), as on the own stop route (this route is always in market hours). His written approval of a mid-day fix counts as
+//    that yes for the deploy of that fix;
+//  - Michael's own stop (his rulings D of 2026-11-12, afternoon): the stop flag on from his `stop` or `flatten` (never the daily loss
+//    stop), at any time of day; during market hours only with his explicit yes for this deploy (`michaelYes`, where and when he wrote
+//    it), which is never inferred from `stop`, `flatten`, an earlier approval or a standing rule.
+// Both routes need: Alpaca flat (no positions) with no open orders, the reviewed commit, and a clean checkout.
 export interface DeployFacts {
   now: Date;
   day: Pick<DayRecord, "isTradingDay" | "openAt" | "closeAt" | "phases"> | null;
   pause: MiddayPause | null;
-  // Michael's ruling of 2026-11-12 (afternoon): a deploy is also allowed while flat with the stop flag on.
   stop?: { on: boolean; reason: string } | null;
   positions: number;
   openOrders: number;
   afterOneThirtyAllowed: boolean;
+  // Michael's ruling D (2026-11-12): where and when Michael wrote his explicit yes for THIS deploy (set only after he has written it).
+  michaelYes?: string | null;
+  // Alpaca's own clock (the tool reads it): true while it says the market is open, null if it could not be read.
+  alpacaOpen?: boolean | null;
   reviewedCommit: string | null;
   checkedOutCommit: string;
   // What `git status --porcelain` printed for the checkout (fly deploy ships the working files, so they must be exactly the commit).
   gitStatus: string;
 }
-export function deployRefusals(f: DeployFacts): string[] {
+
+// The shortest note accepted as the record of Michael's yes (where and when he wrote it).
+export const MICHAEL_YES_MIN_CHARS = 10;
+
+// During market hours on a trading day (the day's open to its close).
+export function inMarketHours(day: DeployFacts["day"], now: Date): boolean {
+  return Boolean(day?.isTradingDay && day.openAt && day.closeAt && now >= day.openAt && now < day.closeAt);
+}
+
+function pauseRouteRefusals(f: DeployFacts): string[] {
   const out: string[] = [];
   const times = f.day ? middayTimes(f.day) : null;
   if (!f.day || !times) out.push("today has no mid-day cycle");
@@ -196,11 +216,50 @@ export function deployRefusals(f: DeployFacts): string[] {
     if (f.now >= times.resumeUntil && !f.afterOneThirtyAllowed) out.push(`it is ${centralClock(times.resumeUntil)} or later (pass --after-130 only if Michael asked)`);
     if (f.day.closeAt && f.now >= f.day.closeAt) out.push("the market is closed: use a normal deploy");
   }
-  if (!f.pause?.on && !f.stop?.on) out.push("neither the mid-day pause nor the stop flag is on");
-  if (f.positions !== 0) out.push(`Alpaca shows ${f.positions} position(s)`);
-  if (f.openOrders !== 0) out.push(`Alpaca shows ${f.openOrders} open order(s)`);
-  if (!f.reviewedCommit) out.push("--reviewed <commit> is required (the commit that passed group 1)");
-  else if (!f.checkedOutCommit.startsWith(f.reviewedCommit) || f.reviewedCommit.length < 7) out.push(`the checkout is ${f.checkedOutCommit.slice(0, 7)}, not the reviewed commit ${f.reviewedCommit}`);
-  if (f.gitStatus.trim() !== "") out.push("the checkout has changed or untracked files (git status is not clean), and fly deploy would ship them");
+  if (!f.pause?.on) out.push("the mid-day pause is not on");
+  // Michael's decision 5 of 2026-11-13: in market hours this route also needs his written yes for this deploy.
+  if (mayBeMarketHours(f) && !hasMichaelYes(f)) out.push(MICHAEL_YES_REFUSAL);
   return out;
+}
+
+// Michael's rulings D of 2026-11-12 and 5 of 2026-11-13: the record of his written yes (where and when he wrote it) for this deploy.
+const hasMichaelYes = (f: DeployFacts): boolean => (f.michaelYes ?? "").trim().length >= MICHAEL_YES_MIN_CHARS;
+const MICHAEL_YES_REFUSAL = "it is or may be market hours: --michael-yes \"<where and when Michael wrote his yes for this deploy>\" is required, only after he has written it";
+
+// Group 1, round 1 of the night release: fail closed. The yes is required in market hours by the day record, while Alpaca's clock says
+// open, and whenever it cannot be told (no day record, a trading day without its open and close times, or Alpaca's clock unread).
+function mayBeMarketHours(f: DeployFacts): boolean {
+  if (f.alpacaOpen === true || f.alpacaOpen === null) return true;
+  if (!f.day) return true;
+  if (!f.day.isTradingDay) return false;
+  if (!f.day.openAt || !f.day.closeAt) return true;
+  return inMarketHours(f.day, f.now);
+}
+
+function stopRouteRefusals(f: DeployFacts): string[] {
+  const out: string[] = [];
+  if (!f.stop?.on) out.push("the stop flag is not on");
+  else if (f.stop.reason.startsWith("daily loss stop")) out.push("the stop flag is the daily loss stop, not Michael's own `stop` or `flatten`");
+  if (mayBeMarketHours(f) && !hasMichaelYes(f)) out.push(MICHAEL_YES_REFUSAL);
+  return out;
+}
+
+export function deployRefusals(f: DeployFacts): string[] {
+  const common: string[] = [];
+  if (f.positions !== 0) common.push(`Alpaca shows ${f.positions} position(s)`);
+  if (f.openOrders !== 0) common.push(`Alpaca shows ${f.openOrders} open order(s)`);
+  if (!f.reviewedCommit) common.push("--reviewed <commit> is required (the commit that passed group 1)");
+  else if (!f.checkedOutCommit.startsWith(f.reviewedCommit) || f.reviewedCommit.length < 7) common.push(`the checkout is ${f.checkedOutCommit.slice(0, 7)}, not the reviewed commit ${f.reviewedCommit}`);
+  if (f.gitStatus.trim() !== "") common.push("the checkout has changed or untracked files (git status is not clean), and fly deploy would ship them");
+  const viaPause = pauseRouteRefusals(f);
+  const viaStop = stopRouteRefusals(f);
+  if (viaPause.length === 0 || viaStop.length === 0) return common;
+  return [...common, ...viaPause.map((r) => `mid-day pause route: ${r}`), ...viaStop.map((r) => `own stop route: ${r}`)];
+}
+
+// Which route a deploy that passed went by (for the tool's output).
+export function deployRoute(f: DeployFacts): "mid-day pause" | "own stop" | null {
+  if (pauseRouteRefusals(f).length === 0) return "mid-day pause";
+  if (stopRouteRefusals(f).length === 0) return "own stop";
+  return null;
 }

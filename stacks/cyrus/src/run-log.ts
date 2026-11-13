@@ -54,6 +54,15 @@ export const STORED_INFO_EVENTS = new Set([
   "load_afternoon_refused",
   "load_afternoon_cancelled",
   "load_afternoon_not_switched",
+  // Michael's ruling B of 2026-11-12: every fresh stop's time to confirm, and the 15 second limit.
+  "fresh_stop_confirmed",
+  "fresh_stop_timeout",
+  "fresh_stop_timeout_cancel",
+  "fresh_stop_timeout_cancel_failed",
+  // Group 2, round 4 of the night release: a cancel of a timed-out stop the sale never sent, and a try that found that stop still open.
+  "fresh_stop_timeout_cancel_not_sent",
+  "fresh_stop_timeout_still_open",
+  "fresh_stop_unclear_end",
 ]);
 
 export function shouldStoreEvent(level: "info" | "warn" | "error", event: string): boolean {

@@ -225,12 +225,13 @@ test("group 2 round 1: the refusal does not say 'trading has already resumed' tw
   await updatePause(r.store, D, { on: false, resumedAt: z("16:40:07").toISOString(), resumedBy: "deploy" });
   await r.at("16:40:10");
   const line = r.said("commands").find((t) => t.startsWith("Afternoon load window not started"))!;
-  assert.equal(line, "Afternoon load window not started: trading has already resumed today. The live list was switched to the cheap names while paused.");
+  assert.equal(line, "Afternoon load window not started: trading has already resumed today. The live list was switched to the cheap names while paused; any trading on them uses today's normal limits (not the window's).");
 });
 
 test("group 2 rounds 1 and 2: every branch of the cancel line's next step, chosen by the command and its result", async () => {
-  const PAUSE_OVER = "The mid-day pause is over, so the window cannot be started again today.";
-  const TRY_AGAIN = "To try again, send `resume`, then `load afternoon` (accepted until 1:30 PM CT, or the last entry if earlier).";
+  // Night release (ruling E): `load afternoon` is accepted with Michael's own stop on, so the advice changed.
+  const PAUSE_OVER = "Trading has resumed normally. To start the window instead, send `stop` (or `flatten`), then `load afternoon` once flat (accepted until 1:30 PM CT, or the last entry if earlier).";
+  const TRY_AGAIN = "To try again, send `load afternoon` again once the account is flat (accepted until 1:30 PM CT, or the last entry if earlier).";
   const TOO_LATE = "`load afternoon` is no longer accepted today (its time has passed).";
   const LOSS = "The daily loss stop is in force, so there is no more trading today.";
   // `go` that resumed (also after the last entry: still true).
@@ -238,6 +239,11 @@ test("group 2 rounds 1 and 2: every branch of the cancel line's next step, chose
   // `go` refused: the loss stop (named once), the pause over (both refusal texts), a plain stop (in time and too late), anything else.
   assert.equal(screenCancelledLine(true, "go-refused", { lossStop: true, why: "the daily loss stop is in force" }), `${SCREEN_CANCELLED} There is no more trading today.`);
   assert.equal(screenCancelledLine(true, "go-refused", { lossStop: false, why: "trading has already resumed today" }), `${SCREEN_CANCELLED} ${PAUSE_OVER}`);
+  // Group 2, round 2 of the night release: with Michael's own stop on (a refused `go` names the pause first), the next step is `load afternoon` again.
+  assert.equal(screenCancelledLine(true, "go-refused", { lossStop: false, why: "trading has already resumed today", ownStop: true }), `${SCREEN_CANCELLED} ${TRY_AGAIN}`);
+  // A `go` after 1:30 PM: no offer to start the window; after the last entry, nothing more (the `go` reply said no entries are left).
+  assert.equal(screenCancelledLine(true, "go-resumed", { lossStop: false, tooLate: true }), `${SCREEN_CANCELLED} Trading has resumed normally; ${TOO_LATE}`);
+  assert.equal(screenCancelledLine(true, "go-resumed", { lossStop: false, tooLate: true, lastEntryPassed: true }), SCREEN_CANCELLED);
   assert.equal(screenCancelledLine(true, "go-refused", { lossStop: false, why: "trading is not paused for the mid-day cycle" }), `${SCREEN_CANCELLED} ${PAUSE_OVER}`);
   assert.equal(screenCancelledLine("switched", "go-refused", { lossStop: false, why: "the stop flag is on (send `resume` first if you want trading)" }), `${SCREEN_CANCELLED_SWITCHED} ${TRY_AGAIN}`);
   assert.equal(screenCancelledLine(true, "go-refused", { lossStop: false, why: "the stop flag is on (send `resume` first if you want trading)", tooLate: true }), `${SCREEN_CANCELLED} ${TOO_LATE}`);
@@ -308,7 +314,7 @@ test("group 2 round 1: `help` no longer says the window is cancelled 'for good'"
   await r.at("16:41:05");
   const text = r.said("commands").find((t) => t.startsWith("**Commands**"))!;
   assert.ok(!text.includes("for good"));
-  assert.ok(text.includes("after a `go` that resumes trading it cannot be started again today, after `stop` or `flatten` send `resume`, then `load afternoon`"));
+  assert.ok(text.includes("after `stop` or `flatten` send `load afternoon` again, after a `go` first `stop` or `flatten`"));
 });
 
 

@@ -1,6 +1,7 @@
 // Watching what the gate set in motion: bring the stored entries up to date from Alpaca, check that every open
 // entry still has a live exit resting at Alpaca, and stop the day if the daily loss limit is reached.
 import { AlpacaError, type Order } from "./alpaca-trading.ts";
+import { activeOrdersOldestFirst } from "./order-index.ts";
 import type { Broker } from "./broker.ts";
 import { centralClock, etInstant } from "./time.ts";
 import { CONTROL_STOP, type DayRecord, type OrderRecord, type StopFlag, type Store } from "./store.ts";
@@ -116,6 +117,10 @@ export interface StuckEntry {
   // to the stuck entry that has waited longest (taking turns), and the reason given in its last alert, for the 5 minute alert.
   lastTriedAt: number;
   why: string;
+  // Messaging only (group 2, round 3 of the night release): the entry's fresh stop that hit the 15 second limit was still working at
+  // Alpaca at the last try (the sale's own read showed it holding the shares), and whether Alpaca accepted our cancel of it. Read by the
+  // 5 minute alert alone, so it tells the truth (a stop resting at Alpaca, not "no protective stop"); never by the retry or the sale.
+  restingStop?: { stopClientOrderId: string; cancel: "accepted" | "refused" | "pending" | "not sent" };
 }
 
 export class SyncMemory {
@@ -141,6 +146,30 @@ export class SyncMemory {
   readonly lateLogged = new Set<string>();
   // A4 of the proposal of 2026-11-12: entries (client ids) whose remainder is protected by a fresh stop the stack placed.
   readonly freshStops = new Map<string, FreshStop>();
+  // Ruling B of 2026-11-12: fresh stops that were not confirmed within 15 seconds (the stop's client id to its entry's). They are never
+  // taken as protection again: if one shows up working later, its entry's missing-exit sale cancels it, waits for Alpaca's cancel, sells.
+  readonly timedOutStops = new Map<string, string>();
+  // Group 1, round 3 of the night release (Michael's decision 1 of 2026-11-13): timed-out fresh stops (client ids) whose cancel Alpaca has
+  // already accepted once. If such a stop still holds the shares at a later try, the cancel is sent again only on the stuck backoff
+  // (5, 10, 20, then every 30 seconds) and charged to the retry allowance, like a refused cancel: never every second.
+  readonly timedOutCancelAccepted = new Set<string>();
+  // Group 1, round 5 of the night release: when the live update said a timed-out stop ended (the stop's client id to the time). A sale of
+  // its entry that was running then does not back off afterwards (it would undo the update's "sell now"): it is due again at once. This
+  // fires once per stop end, because only an end at or after that try's start counts.
+  readonly timedOutEndedAt = new Map<string, number>();
+}
+
+// Ruling B (the worker's live update, onFreshStopUpdate): a timed-out fresh stop ended at Alpaca. Its entry's sale is due now (no new
+// request), the resting-stop note is dropped, and a sale of that entry still running will not back off afterwards.
+export function noteTimedOutStopEnded(mem: SyncMemory, stopClientOrderId: string, nowMs: number): void {
+  const entry = mem.timedOutStops.get(stopClientOrderId);
+  if (!entry) return;
+  mem.timedOutEndedAt.set(stopClientOrderId, nowMs);
+  const st = mem.stuck.get(entry);
+  if (st) {
+    st.nextAt = 0;
+    delete st.restingStop; // messaging only: the 5 minute alert no longer says the stop rests at Alpaca
+  }
 }
 
 // A4 of the proposal of 2026-11-12 (Michael's approval): after a partial take-profit, Alpaca cancels the bracket's stop on the first share
@@ -162,21 +191,48 @@ export interface FreshStop {
 // missing-exit check away), else from the live order updates; this often it is also looked up by its client id (one request), and at
 // every such sync while the live updates are down or its first answer was unclear.
 export const FRESH_STOP_LOOKUP_MS = 30_000;
+// Michael's ruling B of 2026-11-12: a fresh stop whose first answer was unclear is looked up every 5 seconds (the sync runs again that
+// soon while one is unclear), and if it is still unclear 15 seconds after it was sent, the remainder is treated as unprotected: the stop
+// is looked up by its client id and cancelled if Alpaca has it, the sale waits for that cancel, and the shares are sold through the
+// checked sell path, with an alert to Michael at once and one line when it resolves.
+export const FRESH_STOP_UNCLEAR_LOOKUP_MS = 5_000;
+export const FRESH_STOP_CONFIRM_MS = 15_000;
+// Michael's decision 2 of 2026-11-13 (the split, pre-approved): the one switch for ruling B's 15 second limit and 5 second lookups. Off
+// (false), an unclear fresh stop is handled as on Fly release v20: looked up at each sync, never cancelled by a time limit, never sold on
+// top of. The time-to-confirm logging of a confirmed stop stays (logging only). The switch is `on` below (an object so the tests can
+// check both states; nothing in the worker changes it).
+export const FRESH_STOP_LIMIT = { on: false };
+
+// A fresh stop's status from the order list, a lookup or a live update. When it was "unclear", its time to confirm (from when it was
+// sent) is logged, so the share confirmed after 15 seconds can be reported (ruling B). "unknown_at_alpaca": Alpaca does not have it.
+export function settleFreshStop(log: ((event: string, data?: Record<string, unknown>) => void) | undefined, f: FreshStop, status: string, by: string, nowMs: number): void {
+  const was = f.status;
+  f.status = status;
+  f.lookedAt = nowMs;
+  if (was === "unclear" && status !== "unclear") log?.("fresh_stop_confirmed", { symbol: f.symbol, clientOrderId: f.entryClientOrderId, stopClientOrderId: f.stopClientOrderId, status, by, found: status !== "unknown_at_alpaca", msToConfirm: nowMs - f.placedAt, afterLimit: nowMs - f.placedAt >= FRESH_STOP_CONFIRM_MS });
+}
+
+// Forgets an entry's fresh stop. Group 2, round 1 of the night release: one that was still unclear gets its outcome logged
+// (`fresh_stop_unclear_end`), so every unclear fresh stop ends in exactly one of fresh_stop_confirmed, fresh_stop_timeout or this.
+function dropFreshStop(d: RiskDeps, mem: SyncMemory, entryClientOrderId: string, how: string, nowMs: number): void {
+  const f = mem.freshStops.get(entryClientOrderId);
+  if (!f) return;
+  mem.freshStops.delete(entryClientOrderId);
+  if (f.status === "unclear") d.log?.("fresh_stop_unclear_end", { symbol: f.symbol, clientOrderId: entryClientOrderId, stopClientOrderId: f.stopClientOrderId, how, msFromSent: nowMs - f.placedAt });
+}
 
 // True while the fresh stop can still protect its remainder. Its status is taken from the sync's own order list when it is there, else
 // from the live updates, else looked up. A failed look keeps what was known (an unclear stop counts as live, so no sale goes on top).
 async function freshStopLive(d: RiskDeps, f: FreshStop, listed: Order[], nowMs: number, streamLive: boolean): Promise<boolean> {
   const inList = listed.find((x) => x.clientOrderId === f.stopClientOrderId);
   if (inList) {
-    f.status = inList.status;
     f.orderId = inList.id;
-    f.lookedAt = nowMs;
+    settleFreshStop(d.log, f, inList.status, "order list", nowMs);
   } else if (f.status === "unclear" || !streamLive || nowMs - f.lookedAt >= FRESH_STOP_LOOKUP_MS) {
     try {
       const x = await d.broker.findOrderByClientId(f.stopClientOrderId);
-      f.lookedAt = nowMs;
-      f.status = x ? x.status : "unknown_at_alpaca";
       if (x) f.orderId = x.id;
+      settleFreshStop(d.log, f, x ? x.status : "unknown_at_alpaca", "lookup", nowMs);
     } catch (err) {
       d.log?.("fresh_stop_lookup_failed", { symbol: f.symbol, error: (err as Error).message.slice(0, 120) });
     }
@@ -248,7 +304,8 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   const lookedUp = new Set<string>();
   let cleanupsThisSync = 0;
   let cleanupMsThisSync = 0;
-  const active = (await d.store.listOrders(day.tradeDate)).filter((o) => !o.closedAt && (o.status === "intent" || o.status === "submitted" || o.status === "filled"));
+  // Michael's approval C of 2026-11-12: the index's still-working set, oldest first as before (the walk keeps that order).
+  const active = await activeOrdersOldestFirst(d.store, day.tradeDate);
   if (active.length === 0) {
     await settleAwaiting(d, mem, null, new Set());
     // Group 2 review, round 1: an entry reported stuck whose record was closed elsewhere (the live updates close a record when an exit
@@ -256,6 +313,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     for (const id of [...mem.stuck.keys()]) await resolveStuck(d, mem, id, "no longer held");
     mem.bareSeen.clear();
     mem.lastSeen.clear();
+    for (const id of [...mem.freshStops.keys()]) dropFreshStop(d, mem, id, "its entry is no longer open", syncStartMs);
     mem.lastSyncAt = d.now().getTime();
     return { unprotected: [], incomplete: false };
   }
@@ -264,7 +322,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   for (const id of [...mem.oldLookedAt.keys()]) if (!activeIds.has(id)) mem.oldLookedAt.delete(id);
   for (const id of [...mem.mustLook]) if (!activeIds.has(id)) mem.mustLook.delete(id);
   for (const id of [...mem.lateLogged]) if (!activeIds.has(id)) mem.lateLogged.delete(id);
-  for (const id of [...mem.freshStops.keys()]) if (!activeIds.has(id)) mem.freshStops.delete(id);
+  for (const id of [...mem.freshStops.keys()]) if (!activeIds.has(id)) dropFreshStop(d, mem, id, "its entry is no longer open", syncStartMs);
   for (const id of [...mem.stuck.keys()]) if (!activeIds.has(id)) await resolveStuck(d, mem, id, "no longer held");
   const midnight = etInstant(day.tradeDate, "00:00").getTime();
   const nowMs = d.now().getTime();
@@ -364,14 +422,28 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   // when its entry holds the whole symbol). With another position on the symbol it protects only its own shares, so it must not keep the
   // check away from the other position.
   const heldQty = new Map(positions.map((p) => [p.symbol, p.qty]));
-  const sellingSymbols = new Set(listed.orders.filter((x) => x.side === "sell" && OPEN_STATUSES.has(x.status) && (!x.clientOrderId.startsWith("cyrus-p-") || x.qty - x.filledQty >= (heldQty.get(x.symbol) ?? 0) - 1e-9)).map((x) => x.symbol));
+  // Ruling B (group 1, round 2 of the night release): a fresh stop that hit the 15 second limit never counts here (it is not protection and
+  // not a sale of ours): the walk reaches its entry, whose missing-exit sale cancels it, waits for Alpaca's cancel and sells.
+  const sellingSymbols = new Set(listed.orders.filter((x) => x.side === "sell" && OPEN_STATUSES.has(x.status) && !mem.timedOutStops.has(x.clientOrderId) && (!x.clientOrderId.startsWith("cyrus-p-") || x.qty - x.filledQty >= (heldQty.get(x.symbol) ?? 0) - 1e-9)).map((x) => x.symbol));
   const unprotected: string[] = [];
   // Michael's decision of 2026-11-09: the 5 minute alert goes by the clock, for every entry reported stuck, whether or not its retry
   // has had room yet.
-  if (!opts.middayOwnsSelling?.()) for (const id of [...mem.stuck.keys()]) await escalateIfDue(d, mem, id, positions.find((p) => p.symbol === mem.stuck.get(id)?.symbol)?.qty, listed.orders);
+  // Group 2, round 1 of the night release: a symbol the position list does not show is passed as 0 held (nothing left to protect).
+  if (!opts.middayOwnsSelling?.()) for (const id of [...mem.stuck.keys()]) await escalateIfDue(d, mem, id, positions.find((p) => p.symbol === mem.stuck.get(id)?.symbol)?.qty ?? 0, listed.orders);
   // Michael's decision of 2026-11-09: entries on the short retry list are walked last, longest waiting first, so the first one due
   // takes the allowance's room and the others take turns (before, the same few won every minute).
   const shortRetry = (s: OrderRecord) => (mem.stuck.get(s.clientOrderId)?.nextAt ?? 0) > 0;
+  // Ruling B of 2026-11-12: an unclear fresh stop that the sync's own order list shows is confirmed here, before the walk (the walk
+  // skips a symbol with a working sell, which is how a resting fresh stop appears), so its time to confirm is logged and the 15 second
+  // limit never cancels a stop Alpaca visibly holds.
+  if (FRESH_STOP_LIMIT.on) for (const f of mem.freshStops.values()) {
+    if (f.status !== "unclear") continue;
+    const shown = listed.orders.find((x) => x.clientOrderId === f.stopClientOrderId);
+    if (shown) {
+      f.orderId = shown.id;
+      settleFreshStop(d.log, f, shown.status, "order list", nowMs);
+    }
+  }
   const walk = [...active.filter((s) => !shortRetry(s)), ...active.filter(shortRetry).sort((a, b) => mem.stuck.get(a.clientOrderId)!.lastTriedAt - mem.stuck.get(b.clientOrderId)!.lastTriedAt)];
   for (const s of walk) {
     const o = byClientId.get(s.clientOrderId);
@@ -407,7 +479,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       await d.store.updateOrder(s.clientOrderId, { closedAt: d.now().toISOString() });
       mem.bareSeen.delete(s.clientOrderId);
       mem.lastSeen.delete(s.clientOrderId);
-      mem.freshStops.delete(s.clientOrderId);
+      dropFreshStop(d, mem, s.clientOrderId, "its entry closed (its shares are gone)", nowMs);
       await resolveStuck(d, mem, s.clientOrderId, "no longer held");
       continue;
     }
@@ -420,9 +492,27 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     const fresh = mem.freshStops.get(s.clientOrderId);
     if (fresh) {
       // Only while it covers the whole holding (group 1 review, round 2).
-      if (held.has(s.symbol) && fresh.qty >= (heldQty.get(s.symbol) ?? 0) - 1e-9 && (await freshStopLive(d, fresh, listed.orders, nowMs, opts.streamLive === true))) continue;
-      mem.freshStops.delete(s.clientOrderId);
-      if (held.has(s.symbol)) d.log?.("fresh_stop_gone", { symbol: s.symbol, clientOrderId: s.clientOrderId, status: fresh.status });
+      const covering = held.has(s.symbol) && fresh.qty >= (heldQty.get(s.symbol) ?? 0) - 1e-9;
+      // Michael's ruling B of 2026-11-12: still unclear 15 seconds after it was sent (as known before this sync's look): unprotected. The
+      // look at the limit is part of cancelling it (freshStopTimeout), not a late confirmation.
+      if (FRESH_STOP_LIMIT.on && covering && fresh.status === "unclear" && nowMs - fresh.placedAt >= FRESH_STOP_CONFIRM_MS) {
+        const t = await freshStopTimeout(d, day, mem, s, o, fresh, nowMs);
+        if (t.attempted) unprotected.push(s.symbol);
+        if (t.recheckAt !== undefined) recheckAt = recheckAt === undefined ? t.recheckAt : Math.min(recheckAt, t.recheckAt);
+        continue;
+      }
+      if (covering && (await freshStopLive(d, fresh, listed.orders, nowMs, opts.streamLive === true))) {
+        if (FRESH_STOP_LIMIT.on && fresh.status === "unclear") {
+          // Still unclear: looked up again within 5 seconds, and the sync runs at the 15 second limit (the entry is looked up at that
+          // sync too, even if it is older than the 10 minute list).
+          const due = Math.min(nowMs + FRESH_STOP_UNCLEAR_LOOKUP_MS, fresh.placedAt + FRESH_STOP_CONFIRM_MS);
+          recheckAt = recheckAt === undefined ? due : Math.min(recheckAt, due);
+          mem.mustLook.add(s.clientOrderId);
+        }
+        continue;
+      }
+      dropFreshStop(d, mem, s.clientOrderId, held.has(s.symbol) ? "it no longer covers the holding" : "the shares are no longer held", nowMs);
+      if (held.has(s.symbol)) d.log?.("fresh_stop_gone", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: fresh.stopClientOrderId, status: fresh.status, msFromSent: nowMs - fresh.placedAt });
     }
     if (!hasLiveExit(o)) {
       const due = retryDue(mem, s.clientOrderId, d.now().getTime());
@@ -436,7 +526,11 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       d.log?.("unprotected_position", { symbol: s.symbol, clientOrderId: s.clientOrderId, listAgeMs: listAgeMs() });
       const endedAt = flattenLegs(o).filter((l) => l.side === "sell" && !OPEN_STATUSES.has(l.status)).map((l) => l.canceledAt ?? l.updatedAt ?? "").filter((x) => Number.isFinite(Date.parse(x))).sort().at(-1) ?? null;
       lateNotice(s, "missing", endedAt);
-      const c = await timedCleanup(d, day, mem, s, o, "missing");
+      // Ruling B: a timed-out fresh stop of this entry still shown working is cancelled by this sale (which waits for Alpaca's cancel).
+      const timedOutShown = listed.orders.filter((x) => mem.timedOutStops.get(x.clientOrderId) === s.clientOrderId && OPEN_STATUSES.has(x.status));
+      const timedOutIds = timedOutShown.map((x) => x.id);
+      // Group 2, round 3 (logging only): the cancel's outcome is logged by the sale after it was tried (cleanupSale), not here before it.
+      const c = await timedCleanup(d, day, mem, s, o, "missing", undefined, timedOutIds.length > 0 ? { alsoCancel: timedOutIds, alsoCancelStops: timedOutShown.map((x) => x.clientOrderId) } : {});
       if (c.attempted) unprotected.push(s.symbol);
       if (c.recheckAt !== undefined) recheckAt = recheckAt === undefined ? c.recheckAt : Math.min(recheckAt, c.recheckAt);
       continue;
@@ -495,6 +589,17 @@ const EPS_QTY = 1e-9;
 
 // Part A, step 1, with Michael's retry allowance: null when the entry may be tried now (a first sale, a retry held by visible orders,
 // or a short retry that is due and fits the allowance, which is then charged); otherwise the moment to look again.
+// The stuck record on the hidden-hold backoff (5, 10, 20, then every 30 seconds; retryDue charges the retry allowance when it is due).
+function backoffStuck(mem: SyncMemory, symbol: string, clientOrderId: string, nowMs: number, why: string): StuckEntry {
+  const st = mem.stuck.get(clientOrderId) ?? { symbol, since: nowMs, nextAt: 0, delayMs: 0, alerted: false, escalated: false, lastTriedAt: nowMs, why: "" };
+  st.lastTriedAt = nowMs;
+  st.delayMs = st.delayMs > 0 ? Math.min(st.delayMs * 2, STUCK_RETRY_MAX_MS) : STUCK_RETRY_FIRST_MS;
+  st.nextAt = nowMs + st.delayMs;
+  if (!st.why) st.why = why;
+  mem.stuck.set(clientOrderId, st);
+  return st;
+}
+
 function retryDue(mem: SyncMemory, clientOrderId: string, nowMs: number): number | null {
   const st = mem.stuck.get(clientOrderId);
   if (!st || st.nextAt === 0) return null;
@@ -516,6 +621,8 @@ async function escalateIfDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string
   const st = mem.stuck.get(clientOrderId);
   const now = d.now().getTime();
   if (!st || !st.alerted || st.escalated || now - st.since < STUCK_ESCALATE_MS) return;
+  // Messaging only (group 2, round 1 of the night release): nothing held, nothing to escalate; the entry's closing line follows.
+  if (heldQty !== undefined && heldQty <= 1e-9) return;
   const fresh = mem.freshStops.get(clientOrderId);
   const covers = (q: number) => heldQty === undefined || q >= heldQty - 1e-9;
   const working = (status: string) => OPEN_STATUSES.has(status) && status !== "pending_cancel";
@@ -523,7 +630,38 @@ async function escalateIfDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string
   // A status still "unclear" holds it too: the sync's walk looks that stop up (or the list shows it) and settles it, so a real problem is
   // reported at most one sync later.
   if (fresh && (fresh.status === "unclear" || (working(fresh.status) && covers(fresh.qty)) || (shown && covers(shown.qty - shown.filledQty)))) return;
+  // Group 2, round 1 of the night release (messaging only): not posted while a sale of ours (cyrus-x-) covering the holding is working
+  // in the list the sync has already read (ruling B's sale after the 15 second limit, waiting for Alpaca to fill it).
+  const ourSale = (listed ?? []).filter((x) => x.symbol === st.symbol && x.side === "sell" && x.clientOrderId.startsWith("cyrus-x-") && working(x.status)).reduce((n, x) => n + Math.max(0, x.qty - x.filledQty), 0);
+  if (ourSale > 0 && covers(ourSale)) return;
   st.escalated = true;
+  // Group 2, round 3 of the night release (messaging only): the entry's fresh stop that hit the 15 second limit is still working at
+  // Alpaca, shown in the list the sync has already read or, when that list does not show it, held the shares at the last try (read only).
+  // Then the alert says the truth: the stop rests at Alpaca and may still protect the shares, but the stack no longer counts on it.
+  const shownStop = (listed ?? []).find((x) => mem.timedOutStops.get(x.clientOrderId) === clientOrderId && OPEN_STATUSES.has(x.status));
+  // Group 2, round 5: the note from the last try is out of date when the list the sync has just read shows that stop ended (the live
+  // updates were down, so nothing else cleared it). Then the shares have no stop at all: the note is dropped and the alert says so.
+  const noted = st.restingStop;
+  if (!shownStop && noted && (listed ?? []).some((x) => x.clientOrderId === noted.stopClientOrderId && !OPEN_STATUSES.has(x.status))) {
+    delete st.restingStop;
+    await d.say("alerts", `**Michael: ${st.symbol} has no protective stop: its fresh stop, not confirmed in time, has ended at Alpaca, and after ${minutesText(now - st.since)} I have not sold the shares yet.** Please close it in Alpaca's dashboard if it is still held. I keep trying.`, { mentionOwner: true });
+    return;
+  }
+  const restingId = shownStop?.clientOrderId ?? st.restingStop?.stopClientOrderId;
+  if (restingId) {
+    const known = st.restingStop?.stopClientOrderId === restingId ? st.restingStop.cancel : undefined;
+    const pending = shownStop?.status === "pending_cancel" || (!shownStop && known === "pending");
+    if (shownStop) {
+      // Shown in the list the sync has just read: present tense.
+      const cancel = pending ? "Alpaca shows it pending cancel but has not finished cancelling it" : known === "refused" ? "Alpaca did not accept my last cancel of it" : known === "accepted" || mem.timedOutCancelAccepted.has(restingId) ? "Alpaca accepted my cancel of it but still shows it working" : "my cancel of it has not taken effect";
+      await d.say("alerts", `**Michael: ${st.symbol}'s fresh protective stop, not confirmed in time, is still resting at Alpaca after ${minutesText(now - st.since)}; ${cancel}, so I still cannot sell the shares.** That stop may still protect them, but I no longer count on it. Please check ${st.symbol} in Alpaca's dashboard and close it there if needed. I keep trying.`, { mentionOwner: true });
+    } else {
+      // Known only from the last try (group 2, round 5): past tense, since it may have changed since.
+      const cancel = pending ? "Alpaca showed it pending cancel" : known === "refused" ? "Alpaca did not accept my last cancel of it" : known === "accepted" || mem.timedOutCancelAccepted.has(restingId) ? "Alpaca had accepted my cancel of it but still showed it working" : "my cancel of it had not taken effect";
+      await d.say("alerts", `**Michael: ${st.symbol}'s fresh protective stop, not confirmed in time, was still resting at Alpaca at my last try, ${minutesText(now - st.since)} on; ${cancel}, so I have not been able to sell the shares.** If that stop is still there it may protect them, but I no longer count on it. Please check ${st.symbol} in Alpaca's dashboard and close it there if needed. I keep trying.`, { mentionOwner: true });
+    }
+    return;
+  }
   const what = st.protecting ? "I still cannot protect or sell it" : "I still cannot sell it";
   await d.say("alerts", `**Michael: ${st.symbol} still has no protective stop after ${minutesText(now - st.since)}, and ${what}** (${st.why || "still held"}). Please close it in Alpaca's dashboard. I keep trying.`, { mentionOwner: true });
 }
@@ -552,6 +690,47 @@ async function settleAwaiting(d: RiskDeps, mem: SyncMemory, orders: Order[] | nu
 }
 
 // Part C: the one line when a position that was reported stuck resolves (no mention). Nothing is posted for an entry never reported.
+// Michael's ruling B of 2026-11-12: a fresh stop still unclear 15 seconds after it was sent. The remainder is treated as unprotected:
+// the stop is looked up by its client id and, if Alpaca has it open, cancelled through the cleanup sale (which waits for Alpaca's cancel
+// before it sells, and never counts that stop as protection); the shares are then sold through the checked sell path (it never sells more
+// than is held counting sells already open, so a stop Alpaca did take cannot be sold on top of). Michael gets an alert at once, and the
+// stuck record (already "alerted") gives the one line when it resolves (sold, or gone).
+async function freshStopTimeout(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, o: Order, f: FreshStop, nowMs: number): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }> {
+  mem.freshStops.delete(s.clientOrderId);
+  mem.timedOutStops.set(f.stopClientOrderId, s.clientOrderId);
+  let cancelId: string | null = f.orderId;
+  let found: string = "lookup failed";
+  try {
+    const x = await d.broker.findOrderByClientId(f.stopClientOrderId);
+    found = x ? x.status : "unknown_at_alpaca";
+    if (x) cancelId = OPEN_STATUSES.has(x.status) ? x.id : null;
+    else cancelId = null;
+  } catch (err) {
+    d.log?.("fresh_stop_lookup_failed", { symbol: f.symbol, error: (err as Error).message.slice(0, 120) });
+    // The lookup by client id failed: Alpaca's open orders are a second way to find it (one more request, only here).
+    try {
+      const x = (await d.broker.listOrders("open")).find((y) => y.clientOrderId === f.stopClientOrderId);
+      found = x ? x.status : "not in Alpaca's open orders";
+      cancelId = x ? x.id : null;
+    } catch {
+      /* neither read answered: the sale below still cannot sell shares a working stop holds (sells.ts) */
+    }
+  }
+  d.log?.("fresh_stop_timeout", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: f.stopClientOrderId, msFromSent: nowMs - f.placedAt, found, cancelling: cancelId !== null });
+  // The stop filled after all: its shares are sold; the next sync closes the entry. Nothing to cancel or sell.
+  if (found === "filled") return { attempted: false, stuck: false };
+  const left = f.qty;
+  const st = mem.stuck.get(s.clientOrderId) ?? { symbol: s.symbol, since: nowMs, nextAt: 0, delayMs: 0, alerted: false, escalated: false, lastTriedAt: nowMs, why: "" };
+  if (!st.alerted) {
+    st.alerted = true;
+    st.why = "its fresh protective stop was not confirmed within 15 seconds";
+    mem.stuck.set(s.clientOrderId, st);
+    const what = cancelId ? "I am cancelling that stop and selling" : found === "lookup failed" ? "Alpaca could not be asked about that stop, so I am selling" : "Alpaca does not hold that stop open, so I am selling";
+    await d.say("alerts", `**Michael: ${s.symbol}'s fresh protective stop for ${plural(left, "share")} was not confirmed within 15 seconds, so I treat ${left === 1 ? "it" : "them"} as unprotected.** ${what} ${left === 1 ? "it" : "them"} now, and will post again when ${left === 1 ? "it is" : "they are"} sold or gone.`, { mentionOwner: true });
+  }
+  return cleanupSale(d, day, mem, s, o, "missing", undefined, cancelId ? { alsoCancel: [cancelId], alsoCancelStops: [f.stopClientOrderId], alsoCancelBy: "15 second limit" } : {});
+}
+
 async function resolveStuck(d: RiskDeps, mem: SyncMemory, clientOrderId: string, how: string): Promise<boolean> {
   const st = mem.stuck.get(clientOrderId);
   mem.stuck.delete(clientOrderId);
@@ -573,8 +752,19 @@ async function resolveStuck(d: RiskDeps, mem: SyncMemory, clientOrderId: string,
 // A4: `extra.stopPrice` (a "bare" remainder): a fresh stop at that price instead of the market sale (sells.ts protectWithStop).
 // A5: `extra.fast` (a "missing" entry that filled as the stack's 5 second cancel reached Alpaca): sold at once, without waiting for
 // Alpaca's cancel of its exits to show; the sale waits in sells.ts until that cancel frees the share, and nothing happens if Alpaca kept them.
-async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, listedCopy: Order, kind: "missing" | "bare", onSellSent?: (x: { symbol: string; qty: number; clientOrderId: string; atMs: number }) => void, extra: { stopPrice?: number | null; stopCancelledAt?: string | null; fast?: { fillAtMs: number } } = {}): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }> {
+async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, listedCopy: Order, kind: "missing" | "bare", onSellSent?: (x: { symbol: string; qty: number; clientOrderId: string; atMs: number }) => void, extra: { stopPrice?: number | null; stopCancelledAt?: string | null; fast?: { fillAtMs: number }; alsoCancel?: string[]; alsoCancelStops?: string[]; alsoCancelBy?: string } = {}): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }> {
   let o = listedCopy;
+  // Group 1, round 5: a live update during this try that the entry's timed-out stop ended overrides any backoff this try would set.
+  const tryStartMs = d.now().getTime();
+  const stopEndedDuringTry = (): boolean => [...mem.timedOutStops].some(([stop, entry]) => entry === s.clientOrderId && (mem.timedOutEndedAt.get(stop) ?? -1) >= tryStartMs);
+  const dueNow = (now: number): { attempted: true; stuck: true; recheckAt: number } => {
+    const st = mem.stuck.get(s.clientOrderId);
+    if (st) {
+      st.nextAt = 0;
+      delete st.restingStop;
+    }
+    return { attempted: true, stuck: true, recheckAt: now };
+  };
   // A5: the fast sale has just looked the entry up itself, so it is not looked up a second time here.
   if (!extra.fast) try {
     const fresh = await d.broker.findOrderByClientId(s.clientOrderId);
@@ -593,7 +783,8 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     return { attempted: false, stuck: false };
   }
   // A5: nothing is cancelled by the fast sale (the exits are Alpaca's to cancel, or to keep).
-  const cancelIds = extra.fast ? [] : flattenLegs(o).filter((l) => l.side === "sell" && OPEN_STATUSES.has(l.status)).map((l) => l.id);
+  // Ruling B of 2026-11-12: `alsoCancel`, a fresh stop that was not confirmed in time (cancelled here, and never counted as protection).
+  const cancelIds = extra.fast ? [] : [...flattenLegs(o).filter((l) => l.side === "sell" && OPEN_STATUSES.has(l.status)).map((l) => l.id), ...(extra.alsoCancel ?? [])];
   const reason = kind === "missing" ? "no live protective stop" : "stop cancelled after a partial take-profit";
   // Fix C of 2026-11-10: the client ids of this entry's sales, for the closing line when a sale is not seen filled yet.
   const saleIds: string[] = [];
@@ -617,16 +808,44 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     endWhenHiddenHold: !extra.fast,
     onSellSent: sent,
     ...(protectAt !== null ? { protectWithStop: { [s.symbol]: protectAt } } : {}),
+    ...((extra.alsoCancel?.length ?? 0) > 0 ? { endOnCancelFail: true } : {}),
     ...(extra.fast ? { waitForAlpacaCancel: true, waitCancelMs: FAST_LOST_EXIT_WAIT_MS } : {}),
   });
   const soldQty = r.sold.filter((x) => x.symbol === s.symbol).reduce((n, x) => n + x.qty, 0);
   const now = d.now().getTime();
+  // Ruling B, group 2 round 3 (logging only): the outcome of the cancel of a timed-out fresh stop, logged after the sale tried it
+  // (`cancelFailed`: a cancel this sale sent was not accepted, by Alpaca's answer or for lack of one).
+  // Group 2, round 4: by what the sale really did with each such cancel (sent and answered, sent and not accepted, or never sent, for
+  // example when the sale gave way to the loss stop's sale or the market was closed). Only a cancel Alpaca answered is remembered as
+  // accepted (`timedOutCancelAccepted`, which spaces later cancels of that stop).
+  const timedOutCancel = (extra.alsoCancel?.length ?? 0) > 0;
+  const cancelOutcome = new Map<string, "accepted" | "refused" | "not sent">();
+  if (timedOutCancel) {
+    (extra.alsoCancel ?? []).forEach((orderId, i) => {
+      const stopClientOrderId = extra.alsoCancelStops?.[i];
+      if (!stopClientOrderId) return;
+      const tried = r.cancelsTried?.includes(orderId) === true;
+      const accepted = r.cancelsAccepted?.includes(orderId) === true;
+      const outcome = accepted ? "accepted" : tried ? "refused" : "not sent";
+      cancelOutcome.set(stopClientOrderId, outcome);
+      const event = outcome === "accepted" ? "fresh_stop_timeout_cancel" : outcome === "refused" ? "fresh_stop_timeout_cancel_failed" : "fresh_stop_timeout_cancel_not_sent";
+      d.log?.(event, { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId, by: extra.alsoCancelBy ?? "missing-exit sale", again: mem.timedOutCancelAccepted.has(stopClientOrderId), ...(outcome === "refused" ? { error: (r.errors.find((e) => e.includes("cancel failed")) ?? "").slice(0, 120) } : {}) });
+      if (accepted) mem.timedOutCancelAccepted.add(stopClientOrderId);
+    });
+  }
+  // Messaging only: what the last try saw of a timed-out stop the sync's list does not show is set again below (the hidden route); a stop
+  // the list shows is read from the list by the 5 minute alert itself.
+  // Group 2, round 5: only a try that read the account clears it (not one that gave way to the loss stop's sale, found the market closed,
+  // or could not read positions).
+  const stuckBefore = mem.stuck.get(s.clientOrderId);
+  if (stuckBefore && !r.yielded && r.heldBefore !== undefined) delete stuckBefore.restingStop;
   // A4: the remainder now has a fresh stop. Nothing is sold; the entry stays open until the stop fills or the close-out sells it.
   if (r.freshStop && r.freshStop.symbol === s.symbol) {
     const f = r.freshStop;
-    mem.freshStops.set(s.clientOrderId, { symbol: s.symbol, entryClientOrderId: s.clientOrderId, stopClientOrderId: f.clientOrderId, orderId: f.orderId, qty: f.qty, stopPrice: f.stopPrice, placedAt: now, status: "accepted", lookedAt: now });
+    mem.freshStops.set(s.clientOrderId, { symbol: s.symbol, entryClientOrderId: s.clientOrderId, stopClientOrderId: f.clientOrderId, orderId: f.orderId, qty: f.qty, stopPrice: f.stopPrice, placedAt: f.sentAtMs, status: "accepted", lookedAt: now });
     const cancelled = extra.stopCancelledAt ? Date.parse(extra.stopCancelledAt) : NaN;
-    d.log?.("fresh_stop", { symbol: s.symbol, clientOrderId: s.clientOrderId, qty: f.qty, stopPrice: f.stopPrice, msFromStopCancel: Number.isFinite(cancelled) ? now - cancelled : null });
+    // Ruling B: its time to confirm is Alpaca's answer to the order itself (`msToConfirm`).
+    d.log?.("fresh_stop", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: f.clientOrderId, qty: f.qty, stopPrice: f.stopPrice, msFromStopCancel: Number.isFinite(cancelled) ? now - cancelled : null, msToConfirm: f.answerMs, confirmedBy: "answer" });
     try {
       d.onFreshStop?.({ symbol: s.symbol, shares: f.qty });
     } catch {
@@ -637,14 +856,72 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   }
   if (r.freshStopUnclear && r.freshStopUnclear.symbol === s.symbol) {
     const f = r.freshStopUnclear;
-    mem.freshStops.set(s.clientOrderId, { symbol: s.symbol, entryClientOrderId: s.clientOrderId, stopClientOrderId: f.clientOrderId, orderId: null, qty: f.qty, stopPrice: f.stopPrice, placedAt: now, status: "unclear", lookedAt: 0 });
+    // Ruling B: timed from its sending; looked up at the next sync, 2 seconds on, then every 5 seconds while still unclear. The entry
+    // itself is looked up at each of those syncs too (group 1, round 1 of the night release): one older than the sync's 10 minute list
+    // would otherwise be skipped by the walk and its limit would come late.
+    if (FRESH_STOP_LIMIT.on) mem.mustLook.add(s.clientOrderId);
+    mem.freshStops.set(s.clientOrderId, { symbol: s.symbol, entryClientOrderId: s.clientOrderId, stopClientOrderId: f.clientOrderId, orderId: null, qty: f.qty, stopPrice: f.stopPrice, placedAt: f.sentAtMs, status: "unclear", lookedAt: 0 });
     return { attempted: true, stuck: false, recheckAt: now + 2_000 };
   }
+  // Group 2 round 4 and the group 1 note with it (Michael's decision 1 of 2026-11-13): at the sale's last look, the entry's timed-out
+  // stop was still open and holding the shares, either named by this sale to cancel (the sync's list showed it) or pending cancel (the
+  // sync's list may not show it). Nothing was sold. Its cancel has not cleared: the stuck backoff, charged to the retry allowance, never
+  // the next sync (before, a stop pending cancel that the sync's list did not show was retried at every sync). The 5 minute alert says the
+  // stop rests at Alpaca. A live update that the stop ended still runs the sale at once.
+  const stillOpen = soldQty === 0 ? r.freshStopStillOpen?.find((x) => x.symbol === s.symbol && mem.timedOutStops.get(x.clientOrderId) === s.clientOrderId) : undefined;
+  if (stillOpen) {
+    if (stopEndedDuringTry()) return dueNow(now);
+    const outcome = cancelOutcome.get(stillOpen.clientOrderId);
+    const cancel = stillOpen.status === "pending_cancel" ? "pending" : outcome === "accepted" || (outcome === undefined && mem.timedOutCancelAccepted.has(stillOpen.clientOrderId)) ? "accepted" : outcome === "refused" ? "refused" : "not sent";
+    const st = backoffStuck(mem, s.symbol, s.clientOrderId, now, "the cancel of the unconfirmed fresh stop has not cleared at Alpaca");
+    st.restingStop = { stopClientOrderId: stillOpen.clientOrderId, cancel };
+    d.log?.("fresh_stop_timeout_still_open", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: stillOpen.clientOrderId, status: stillOpen.status, retryInMs: st.nextAt - now });
+    return { attempted: true, stuck: true, recheckAt: st.nextAt };
+  }
   const heldBy = r.heldByFreshStop?.find((x) => x.symbol === s.symbol);
+  if (heldBy && soldQty === 0 && mem.timedOutStops.has(heldBy.clientOrderId)) {
+    // Ruling B of 2026-11-12: a fresh stop that was not confirmed in time is never taken as protection again: cancelled now.
+    // Group 1, round 3 of the night release (Michael's decision 1 of 2026-11-13, and his rule that every retry loop has a limit and a
+    // backoff): only the FIRST accepted cancel of a stop gets a look in a second, charged to the retry allowance (Alpaca's cancel then
+    // shows, and the sale waits for it if still pending). If the stop still holds the shares after a cancel Alpaca accepted, or Alpaca refused the cancel, the entry goes on
+    // the stuck backoff (5, 10, 20, then every 30 seconds), each retry charged to the retry allowance (40 requests a minute, 15 in 5
+    // seconds). A live update that the stop ended still runs the sale at once (worker.ts, onFreshStopUpdate).
+    if (stopEndedDuringTry()) return dueNow(now);
+    const acceptedBefore = mem.timedOutCancelAccepted.has(heldBy.clientOrderId);
+    d.log?.("fresh_stop_timeout_still_open", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: heldBy.clientOrderId, status: heldBy.status, by: "sale" });
+    try {
+      await d.broker.cancelOrder(heldBy.orderId);
+      d.log?.("fresh_stop_timeout_cancel", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: heldBy.clientOrderId, by: "sale", again: acceptedBefore });
+      mem.timedOutCancelAccepted.add(heldBy.clientOrderId);
+      if (stopEndedDuringTry()) return dueNow(d.now().getTime());
+      const stNow = mem.stuck.get(s.clientOrderId);
+      if (!acceptedBefore) {
+        // The look a second later is a retry like the others: due then, and charged to the retry allowance when it runs (retryDue), so
+        // several such stops at once take turns instead of bursting.
+        if (stNow) {
+          stNow.restingStop = { stopClientOrderId: heldBy.clientOrderId, cancel: "accepted" };
+          stNow.lastTriedAt = now;
+          stNow.nextAt = now + 1_000;
+        }
+        return { attempted: true, stuck: false, recheckAt: now + 1_000 };
+      }
+      const st = backoffStuck(mem, s.symbol, s.clientOrderId, now, "Alpaca accepted the cancel of the unconfirmed fresh stop but still shows it working");
+      st.restingStop = { stopClientOrderId: heldBy.clientOrderId, cancel: "accepted" };
+      return { attempted: true, stuck: true, recheckAt: st.nextAt };
+    } catch (err) {
+      d.log?.("fresh_stop_timeout_cancel_failed", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: heldBy.clientOrderId, by: "sale", again: acceptedBefore, error: (err as Error).message.slice(0, 120) });
+      if (stopEndedDuringTry()) return dueNow(d.now().getTime());
+      // Group 1, round 2 of the night release: refused or unanswered: tried again on the stuck backoff (5, 10, 20, then every 30 seconds)
+      // within the retry allowance, never every second.
+      const st = backoffStuck(mem, s.symbol, s.clientOrderId, now, "Alpaca did not accept the cancel of the unconfirmed fresh stop");
+      st.restingStop = { stopClientOrderId: heldBy.clientOrderId, cancel: "refused" };
+      return { attempted: true, stuck: true, recheckAt: st.nextAt };
+    }
+  }
   if (heldBy && soldQty === 0) {
     // A4 (group 1 review, round 1): a resting fresh stop of ours protects the shares: remember it, say nothing, not stuck.
     mem.freshStops.set(s.clientOrderId, { symbol: s.symbol, entryClientOrderId: s.clientOrderId, stopClientOrderId: heldBy.clientOrderId, orderId: heldBy.orderId, qty: heldBy.qty, stopPrice: heldBy.stopPrice ?? 0, placedAt: now, status: heldBy.status, lookedAt: now });
-    d.log?.("fresh_stop_recovered", { symbol: s.symbol, clientOrderId: s.clientOrderId, by: "sale" });
+    d.log?.("fresh_stop_recovered", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: heldBy.clientOrderId, by: "sale" });
     await resolveStuck(d, mem, s.clientOrderId, "it has a fresh protective stop");
     return { attempted: false, stuck: false };
   }
@@ -723,7 +1000,19 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   const st = mem.stuck.get(s.clientOrderId) ?? { symbol: s.symbol, since: now, nextAt: 0, delayMs: 0, alerted: false, escalated: false, lastTriedAt: now, why: "" };
   st.lastTriedAt = now;
   const hidden = r.hiddenHold?.includes(s.symbol) === true;
-  if (hidden) {
+  // Ruling B: a sale that had to cancel a timed-out fresh stop and is still stuck goes on the same backoff and allowance as a hidden hold,
+  // whether Alpaca refused that cancel (group 1, round 2 of the night release) or accepted it and the stop still holds the shares (group 1,
+  // round 3, Michael's decision 1 of 2026-11-13: before, the second case was tried again at every sync, about 165 requests a minute for
+  // one stop whose cancel stayed pending). A live update that the stop ended still runs the sale at once.
+  // Group 1, round 4: and whenever this entry has a timed-out stop at all (whatever state Alpaca shows it in), so no try of ruling B's
+  // ever falls back to the retry at every sync.
+  const hasTimedOutStop = [...mem.timedOutStops.values()].includes(s.clientOrderId);
+  const endedNow = hasTimedOutStop && stopEndedDuringTry();
+  if (endedNow) {
+    // Group 1, round 5: the live update said the timed-out stop ended during this try: due again at once, not on the backoff.
+    st.nextAt = 0;
+    delete st.restingStop;
+  } else if (hidden || timedOutCancel || hasTimedOutStop) {
     st.delayMs = st.delayMs > 0 ? Math.min(st.delayMs * 2, STUCK_RETRY_MAX_MS) : STUCK_RETRY_FIRST_MS;
     st.nextAt = now + st.delayMs;
   } else {
@@ -732,6 +1021,10 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     st.nextAt = 0;
   }
   mem.stuck.set(s.clientOrderId, st);
+  // Messaging only (group 2, round 4): the sale ended at once because Alpaca did not accept the cancel of the timed-out stop, which the
+  // sync's list showed open at the start of this try.
+  const refusedStop = [...cancelOutcome].find(([, v]) => v === "refused")?.[0];
+  if (refusedStop && !endedNow) st.restingStop = { stopClientOrderId: refusedStop, cancel: "refused" };
   const left = Math.max(0, target - soldQty) || ownShares - soldQty;
   const why = hidden ? "Alpaca reports the shares as not free to sell, and no open order explains it" : (r.errors.at(-1) ?? "still held").slice(0, 120);
   st.why = why;
@@ -748,7 +1041,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     const tail = protecting ? `I keep trying and will post again when ${left === 1 ? "it has" : "they have"} a stop, ${left === 1 ? "is" : "are"} sold, or ${left === 1 ? "is" : "are"} gone.` : `I keep trying and will post again when ${left === 1 ? "it is" : "they are"} sold or gone.`;
     await d.say("alerts", `**Michael: ${s.symbol} has ${plural(left, "share")} with no protective stop since ${centralClock(lostAt)}, and I could not ${protecting ? "protect or sell" : "sell"} ${it} yet** (${how}; ${why}). ${tail}`, { mentionOwner: true });
   } else await escalateIfDue(d, mem, s.clientOrderId, r.heldAfter?.[s.symbol]); // messaging only: the holding this sale last saw, read only
-  return { attempted: true, stuck: true, ...(st.nextAt > 0 ? { recheckAt: st.nextAt } : {}) };
+  return { attempted: true, stuck: true, ...(st.nextAt > 0 ? { recheckAt: st.nextAt } : endedNow ? { recheckAt: now } : {}) };
 }
 
 // What the loss stop remembers in this process (the worker keeps one). It lets the loss stop keep selling when the stop flag

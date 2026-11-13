@@ -21,6 +21,7 @@ import { MAX_TRADES_PER_MINUTE_LOAD_DAY, checkEntry, tradesCeiling, type EntryCo
 import { LOAD_MAX_POSITION_USD, LOAD_WINDOW_SHARES, afternoonCloseoutPending, beforeLoadWindow, hasLoadEntries, inAfternoonLoad, loadCeilingOn, loadRulesApply, loadWindow } from "./load-mode.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, type NotFlatState, type OrderRecord, type StopFlag, type Store } from "./store.ts";
 import { readPause, type MiddayPause } from "./midday.ts";
+import { dayOrderIndex, isActiveOrder } from "./order-index.ts";
 import type { Signal } from "./strategy.ts";
 import { centralTime, etDate, minutesBetween } from "./time.ts";
 
@@ -84,7 +85,7 @@ export function clientOrderIdFor(date: string, symbol: string, n: number): strin
 // as one line per reason per minute, not one row each.
 const FLOW_REASONS = [/^load day: entries start/, /^my commands /, /^trades-per-minute/, /^holding back for safety/, /^already holding/, /^an entry for this symbol is still working/, /^the signal waited/, /^Alpaca refused this symbol a moment ago/, /^too close to the close for a new entry/];
 
-const isActive = (o: OrderRecord) => !o.closedAt && (o.status === "intent" || o.status === "submitted" || o.status === "filled");
+const isActive = isActiveOrder;
 
 export class OrderGate {
   private readonly d: GateDeps;
@@ -238,18 +239,19 @@ export class OrderGate {
       if (!this.d.governor.canSpend()) return this.refuse(date, symbol, `holding back for safety: Alpaca's request budget is down to ${Math.floor(this.d.governor.budget())} and my view of the account is too old to trade on`);
       if (now.getTime() - this.lastSnapshotFailure < 3_000) return this.refuse(date, symbol, "broker or database unavailable, so no entry", undefined, false);
     }
-    let snap, rows;
+    // Michael's approval C of 2026-11-12: the day's orders through the index (by symbol, still working), never a full sorted copy.
+    let snap, idx;
     try {
       snap = await this.d.view.snapshot(VIEW);
-      rows = await this.d.store.listOrders(date);
+      idx = await dayOrderIndex(this.d.store, date);
     } catch {
       this.lastSnapshotFailure = now.getTime();
       return this.refuse(date, symbol, "broker or database unavailable, so no entry", undefined, false);
     }
-    this.storedOrders = rows.length;
+    this.storedOrders = idx.size;
     // After a restart, tell the governor about the entries sent in the last minute (once).
     if (!this.primed) {
-      this.d.governor.prime(rows.filter((o) => o.status !== "failed" && o.createdAt && now.getTime() - new Date(o.createdAt).getTime() < 60_000).map((o) => Math.min(now.getTime(), new Date(o.createdAt!).getTime())));
+      this.d.governor.prime(idx.all().filter((o) => o.status !== "failed" && o.createdAt && now.getTime() - new Date(o.createdAt).getTime() < 60_000).map((o) => Math.min(now.getTime(), new Date(o.createdAt!).getTime())));
       this.primed = true;
     }
     const { account, positions, config, clock } = snap;
@@ -257,22 +259,21 @@ export class OrderGate {
     // Fail closed on its own, whatever the worker's carried-position scan has or has not done yet: a held symbol
     // with no stored order from today is a position this worker did not enter today (every entry is written down
     // before it is sent), so no entry goes out beside it.
-    const todaysSymbols = new Set(rows.map((o) => o.symbol));
-    const carried = positions.map((p) => p.symbol).filter((sym) => !todaysSymbols.has(sym));
+    const carried = positions.map((p) => p.symbol).filter((sym) => !idx.hasSymbol(sym));
     if (carried.length > 0 && limits) {
       return this.refuse(date, symbol, `a held position has no order from today (${carried.join(", ")}), so it is carried over: no entry`);
     }
     const held = new Set(positions.map((p) => p.symbol));
-    if (rows.some((o) => o.symbol === symbol && isActive(o) && !held.has(symbol))) return this.refuse(date, symbol, "an entry for this symbol is still working");
+    const mine = idx.forSymbol(symbol);
+    if (mine.some((o) => isActive(o) && !held.has(symbol))) return this.refuse(date, symbol, "an entry for this symbol is still working");
     // Decision 5's short backoff on a load day; a normal day keeps the minute (the proposal's item 7: normal days unchanged).
     if (loadRules) {
-      if (refusalWaitMs(rows, symbol, now.getTime()) > 0) return this.refuse(date, symbol, "Alpaca refused this symbol a moment ago, so I wait a few seconds before trying again");
-    } else if (rows.some((o) => o.symbol === symbol && o.status === "failed" && o.createdAt && now.getTime() - new Date(o.createdAt).getTime() < 60_000)) return this.refuse(date, symbol, "Alpaca refused this symbol a moment ago, so I wait a minute before trying again");
+      if (refusalWaitMs(mine, symbol, now.getTime()) > 0) return this.refuse(date, symbol, "Alpaca refused this symbol a moment ago, so I wait a few seconds before trying again");
+    } else if (mine.some((o) => o.status === "failed" && o.createdAt && now.getTime() - new Date(o.createdAt).getTime() < 60_000)) return this.refuse(date, symbol, "Alpaca refused this symbol a moment ago, so I wait a minute before trying again");
     // Entries not yet in the (up to 15 seconds old) account view: sent but not filled, filled but not shown yet, or partly
     // filled. A symbol the view already shows is counted from its market value, plus any unfilled remainder.
-    const pendingExposure = rows
-      .filter((o) => isActive(o))
-      .reduce((s, o) => {
+    const working = idx.active();
+    const pendingExposure = working.reduce((s, o) => {
         const filled = o.filledQty ?? 0;
         if (held.has(o.symbol)) return s + Math.max(0, o.qty - filled) * o.referencePrice;
         return s + (filled > 0 ? filled * (o.filledAvgPrice ?? o.referencePrice) + Math.max(0, o.qty - filled) * o.referencePrice : o.qty * o.referencePrice);
@@ -322,12 +323,12 @@ export class OrderGate {
     if (!(signal.stopPrice > 0 && signal.stopPrice < base && signal.takeProfitPrice > base && signal.stopPrice < signal.price && signal.takeProfitPrice > signal.price)) return this.refuse(date, symbol, "the exits are not on the right sides of the price");
 
     // Decision 7: the governor's reserve scales with the symbols open (held, or with an entry working), counting this entry.
-    this.d.governor.setOpenSymbols(new Set([...held, ...rows.filter((o) => isActive(o)).map((o) => o.symbol), symbol]).size);
+    this.d.governor.setOpenSymbols(new Set([...held, ...working.map((o) => o.symbol), symbol]).size);
     // The governor: a slot under the per-minute cap (never above the ceiling in force) and headroom under Alpaca's limit.
     const slot = this.d.governor.admitTrade(tradesPerMinute, ceiling);
     if (!slot.ok) return this.refuse(date, symbol, slot.reason);
 
-    const n = rows.filter((o) => o.symbol === symbol).length + 1;
+    const n = mine.length + 1;
     const clientOrderId = clientOrderIdFor(date, symbol, n);
     const record: OrderRecord = { clientOrderId, tradeDate: date, symbol, qty: decision.qty, referencePrice: signal.price, stopPrice: signal.stopPrice, takeProfitPrice: signal.takeProfitPrice, status: "intent", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: null, createdAt: now.toISOString() };
     let inserted: boolean;

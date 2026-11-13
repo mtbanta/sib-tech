@@ -1,15 +1,21 @@
-// The mid-day deploy (Michael's ruling of 2026-11-09, written in CLAUDE.md): a deploy during market hours is allowed only while the
-// account is flat and entries are paused for the mid-day cycle. This script checks every condition right before the deploy and
-// refuses if any fails; only then it pauses the Healthchecks check (the worker's next ping un-pauses it) and runs the Fly deploy.
+// The market-hours deploy (written in CLAUDE.md): Michael's ruling of 2026-11-09 (flat and paused at mid-day) and his ruling D of
+// 2026-11-12 (flat with his own stop on, at any time). During market hours both routes need his explicit yes for that deploy (the
+// mid-day pause route since his decision 5 of 2026-11-13: his written approval of a mid-day fix counts as the yes for that fix). This script
+// checks every condition right before the deploy and refuses if any fails; only then it pauses the Healthchecks check (the worker's
+// next ping un-pauses it) and runs the Fly deploy.
 //
 // Usage (from any folder; the key file is read from the main checkout and never printed):
-//   node stacks/cyrus/tools/midday-deploy.mjs --dir <clean checkout>/stacks/cyrus --reviewed <commit> [--after-130] [--check-only]
+//   node stacks/cyrus/tools/midday-deploy.mjs --dir <clean checkout>/stacks/cyrus --reviewed <commit> [--after-130]
+//        [--michael-yes "<where and when Michael wrote his yes for this deploy>"] [--check-only]
+// --michael-yes is passed ONLY after Michael has written an explicit yes for this specific deploy, in the builder's session or in
+// Discord `commands`; it is never inferred from `stop`, `flatten`, an earlier approval or a standing rule (Michael, 2026-11-12). The one
+// exception (Michael, 2026-11-13): his written approval of a specific mid-day fix is the yes for deploying that fix, and no other deploy.
 //
 // Reads only (paper Alpaca, the database in a read-only transaction) until every check has passed. Paper only.
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
-import { deployRefusals, middayKey } from "../src/midday.ts";
+import { deployRefusals, deployRoute, middayKey } from "../src/midday.ts";
 
 const KEY_FILE = "/Users/mtbanta/Projects/sib-tech/stacks/cyrus/.env.local";
 const PAPER = "https://paper-api.alpaca.markets"; // paper only, never anything else
@@ -72,6 +78,7 @@ try {
 // 3. Alpaca (paper): positions and open orders.
 const H = { "APCA-API-KEY-ID": process.env.ALPACA_PAPER_API_KEY_ID, "APCA-API-SECRET-KEY": process.env.ALPACA_PAPER_API_SECRET_KEY };
 let positions = -1;
+let alpacaOpen = null;
 let openOrders = -1;
 try {
   const p = await fetch(`${PAPER}/v2/positions`, { headers: H, redirect: "error" });
@@ -79,19 +86,28 @@ try {
   if (!p.ok || !o.ok) throw new Error(`Alpaca answered ${p.status} / ${o.status}`);
   positions = (await p.json()).length;
   openOrders = (await o.json()).length;
+  // Alpaca's own clock, for the market-hours yes (it fails closed: an unread clock counts as possibly open).
+  try {
+    const c = await fetch(`${PAPER}/v2/clock`, { headers: H, redirect: "error" });
+    alpacaOpen = c.ok ? (await c.json()).is_open === true : null;
+  } catch {
+    alpacaOpen = null;
+  }
 } catch (err) {
   console.log("refused: could not read Alpaca:", scrub(err.message).slice(0, 200));
   process.exit(2);
 }
 
-const refusals = deployRefusals({ now, day, pause, stop, positions, openOrders, afterOneThirtyAllowed: flag("--after-130"), reviewedCommit: reviewed, checkedOutCommit: checkedOut, gitStatus });
-console.log(`date ${date}; checkout ${checkedOut.slice(0, 7)}; positions ${positions}; open orders ${openOrders}; pause ${pause?.on ? "on" : "off"}; stop flag ${stop?.on ? "on" : "off"}; mid-day flat ${day?.phases?.middayFlat === "yes" ? "yes" : "no"}`);
+const michaelYes = value("--michael-yes");
+const facts = { now, day, pause, stop, positions, openOrders, afterOneThirtyAllowed: flag("--after-130"), michaelYes, alpacaOpen, reviewedCommit: reviewed, checkedOutCommit: checkedOut, gitStatus };
+const refusals = deployRefusals(facts);
+console.log(`date ${date}; checkout ${checkedOut.slice(0, 7)}; positions ${positions}; open orders ${openOrders}; pause ${pause?.on ? "on" : "off"}; stop flag ${stop?.on ? "on" : "off"}; Alpaca clock ${alpacaOpen === null ? "unread" : alpacaOpen ? "open" : "closed"}; mid-day flat ${day?.phases?.middayFlat === "yes" ? "yes" : "no"}`);
 if (refusals.length > 0) {
   console.log("refused:");
   for (const r of refusals) console.log(`  - ${r}`);
   process.exit(1);
 }
-console.log("all checks passed");
+console.log(`all checks passed (route: ${deployRoute(facts)}${michaelYes ? `; Michael's yes: ${michaelYes}` : ""})`);
 if (flag("--check-only")) process.exit(0);
 
 // 4. Pause the Healthchecks check (a deploy takes 1 to 2 minutes; the worker's first ping after the start un-pauses it).
