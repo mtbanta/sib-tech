@@ -367,6 +367,9 @@ for (const [CMS, GAP] of [[25_000, 0], [30_000, 0], [28_000, 1_000], [35_000, 5_
     await syncOrders(w.risk, dd, { protect: true, streamLive: true });
     assert.ok(w.memory.stuck.get(id)?.alerted, "reported stuck first");
     w.sim.advance(GAP);
+    // Item 3 of 2026-11-13 spaces a visible hold's retries by 10 seconds; this probe is about the alert once the retry has placed an
+    // unclear fresh stop, so the retry is made due now (the probe's own timing, before item 3).
+    w.memory.stuck.get(id)!.nextAt = 0;
     const realSubmit = w.sim.submitSell.bind(w.sim);
     w.sim.submitSell = async (s) => {
       const o = await realSubmit(s);
@@ -385,7 +388,7 @@ for (const [CMS, GAP] of [[25_000, 0], [30_000, 0], [28_000, 1_000], [35_000, 5_
       await syncOrders(w.risk, dd, { protect: true, streamLive: true });
     }
     const late = mentions(w).slice(before).map((m) => m.text);
-    assert.ok(!late.some((t) => t.includes("has no protective stop")), late.join(" | "));
+    assert.ok(!late.some((t) => /has no protective stop|confirm a protective stop/.test(t)), late.join(" | "));
     assert.equal(freshStopOrder(w, "LUNR")!.status, "accepted", "the fresh stop rests");
     assert.equal(w.sim.heldQty("LUNR"), 3);
     assert.equal(w.sim.sellLog.length, 0, "nothing sold");

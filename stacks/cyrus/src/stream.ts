@@ -3,6 +3,7 @@
 import type { Settings } from "./config.ts";
 import { IEX_STREAM_CAP } from "./screen.ts";
 
+const STABLE_CONNECTION_MS = 60_000;
 export interface Trade {
   symbol: string;
   price: number;
@@ -31,6 +32,7 @@ export class TradeStream {
   lastMessageAt = 0;
   private socket: SocketLike | null = null;
   private attempts = 0;
+  private liveSince = 0;
   private readonly url: string;
   private readonly settings: Settings;
   private symbols: string[];
@@ -92,6 +94,10 @@ export class TradeStream {
     ws.onerror = () => {}; // the close event follows and drives the reconnect
     ws.onclose = () => {
       if (this.stopped || this.status === "auth_failed") return;
+      // Item 3 of 2026-11-13 (Michael's retry rule): the reconnect wait (2, 4, 8, 16, then 30 seconds) starts again only after a connection
+      // that stayed up a minute; one that drops soon after it was accepted keeps growing the wait (before, it reset on every subscribe).
+      if (this.liveSince > 0 && Date.now() - this.liveSince >= STABLE_CONNECTION_MS) this.attempts = 0;
+      this.liveSince = 0;
       this.attempts++;
       const delay = Math.min(30_000, 1000 * 2 ** Math.min(this.attempts, 5));
       this.set("reconnecting", `retry in ${delay} ms`);
@@ -117,7 +123,7 @@ export class TradeStream {
       } else if (m.T === "success" && m.msg === "authenticated") {
         ws.send(JSON.stringify({ action: "subscribe", trades: this.symbols }));
       } else if (m.T === "subscription") {
-        this.attempts = 0;
+        this.liveSince = Date.now(); // item 3 of 2026-11-13: the count resets only once it has stayed up (see onclose)
         this.set("live");
       } else if (m.T === "t" && typeof m.S === "string" && typeof m.p === "number") {
         this.onTrade({ symbol: m.S, price: m.p, size: typeof m.s === "number" ? m.s : 0, time: String(m.t) });

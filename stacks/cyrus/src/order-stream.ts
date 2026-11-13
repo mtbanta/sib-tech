@@ -17,6 +17,7 @@ import { PAPER_TRADING_HOST, ConfigError, type Settings } from "./config.ts";
 import { parseOrder, type Order } from "./alpaca-trading.ts";
 import type { OrderRecord } from "./store.ts";
 
+const STABLE_CONNECTION_MS = 60_000;
 export const ORDER_STREAM_URL = `wss://${PAPER_TRADING_HOST}/stream`;
 
 export function assertPaperStream(address: string): void {
@@ -89,6 +90,7 @@ export class OrderStream {
   reconnects = 0;
   private socket: SocketLike | null = null;
   private attempts = 0;
+  private liveSince = 0;
   private stopped = false;
   private readonly settings: Settings;
   private readonly onUpdate: (u: TradeUpdate) => void;
@@ -143,6 +145,10 @@ export class OrderStream {
     ws.onerror = () => {}; // the close event follows and drives the reconnect
     ws.onclose = () => {
       if (this.stopped || this.status === "auth_failed") return;
+      // Item 3 of 2026-11-13 (Michael's retry rule): the reconnect wait (2, 4, 8, 16, then 30 seconds) starts again only after a connection
+      // that stayed up a minute; one that drops soon after it was accepted keeps growing the wait (before, it reset on every subscribe).
+      if (this.liveSince > 0 && Date.now() - this.liveSince >= STABLE_CONNECTION_MS) this.attempts = 0;
+      this.liveSince = 0;
       this.attempts++;
       this.reconnects++;
       const delay = Math.min(30_000, 1000 * 2 ** Math.min(this.attempts, 5));
@@ -168,7 +174,7 @@ export class OrderStream {
         ws.close();
       }
     } else if (m.stream === "listening") {
-      this.attempts = 0;
+      this.liveSince = Date.now(); // item 3 of 2026-11-13: the count resets only once it has stayed up (see onclose)
       this.set("live");
     } else if (m.stream === "trade_updates") {
       const u = parseTradeUpdate(data);

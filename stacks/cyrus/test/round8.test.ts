@@ -75,11 +75,17 @@ test("a working market sell is left alone: nothing more is sent for shares it co
   assert.equal(p.broker.count("cancelOrder") + p.broker.count("cancelAllOrders"), 0);
 });
 
-test("the retry pauses only after a rate-limit answer (10 seconds, then 20); any other refusal is tried again every 5 seconds", async () => {
+test("the retry pauses after a rate-limit answer (10 seconds, then 20) and, since item 3 of 2026-11-13, after a check whose sales were all refused (5 seconds, then 10, at most 30)", async () => {
   const refused = await afterLossStop(["AAA"]);
   refused.broker.onSell = async () => { throw new AlpacaError("insufficient buying power (test)", 403); };
-  for (let i = 0; i < 4; i++) (await refused.check(), refused.step(5));
-  assert.equal(refused.sells(), 4, "a 403 is retried on every 5 second check");
+  const tries: number[] = [];
+  for (let s = 0; s <= 40; s += 5) {
+    const before = refused.sells();
+    await refused.check();
+    if (refused.sells() > before) tries.push(s);
+    refused.step(5);
+  }
+  assert.deepEqual(tries, [0, 5, 15, 35], "a 403: tried again after 5 seconds, then 10, then 20 (Michael's retry rule)");
 
   const limited = await afterLossStop(["AAA"]);
   limited.broker.onSell = async () => { throw new AlpacaError("rate limit exceeded", 429); };
@@ -108,7 +114,8 @@ test("the retry keeps inside its budget of 60 requests a minute, with 40 positio
   p.broker.onSell = async () => { throw new AlpacaError("sell refused (test)", 403); };
   const req = () => p.broker.calls.filter((c) => ["listPositions", "listOrdersPaged", "submitSell", "cancelOrder", "cancelAllOrders", "getAccount"].includes(c.fn)).length;
   const marks: number[] = [];
-  for (let s = 0; s < 180; s += 5) {
+  // Item 3 of 2026-11-13: checks whose sales were all refused back off (5, 10, 20, then 30 seconds), so the turns take longer.
+  for (let s = 0; s < 420; s += 5) {
     marks.push(req());
     await p.check();
     p.step(5);

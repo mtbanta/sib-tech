@@ -3,6 +3,7 @@
 import type { Settings } from "./config.ts";
 import type { Bar } from "./screen.ts";
 
+const DAILY_BARS_MAX_PAGES = 50;
 export class AlpacaData {
   private readonly settings: Settings;
   private readonly fetchImpl: typeof fetch;
@@ -42,6 +43,7 @@ export class AlpacaData {
     for (let i = 0; i < symbols.length; i += 400) {
       const chunk = symbols.slice(i, i + 400);
       let token: string | undefined;
+      let pages = 0;
       do {
         const query: Record<string, string> = { symbols: chunk.join(","), timeframe: "1Day", start: startIso, end: endIso, limit: "10000", adjustment: "raw" };
         if (token) query.page_token = token;
@@ -52,6 +54,8 @@ export class AlpacaData {
           out.set(sym, list);
         }
         token = body.next_page_token ?? undefined;
+        // Item 3 of 2026-11-13 (Michael's rule: every loop has a limit): at most DAILY_BARS_MAX_PAGES pages per chunk.
+        if (++pages >= DAILY_BARS_MAX_PAGES && token) throw new Error(`daily bars: more than ${DAILY_BARS_MAX_PAGES} pages for one chunk of symbols`);
       } while (token);
     }
     return out;

@@ -198,7 +198,8 @@ test("part A and C: a sale held by a cancel still landing (visible) keeps the ol
   w.sim.advance(4_000);
   const r = await syncOrders(w.risk, day, { protect: true });
   assert.equal(w.sim.sellLog.length, 0);
-  assert.equal(r.recheckAt, undefined, "no short retry for a visible hold: the next sync tries again");
+  // Item 3 of 2026-11-13: a visible hold is tried again after 10 seconds (about the next sync, as before), not at every sync.
+  assert.ok(r.recheckAt !== undefined && r.recheckAt - w.sim.simMs <= 10_000 && r.recheckAt - w.sim.simMs > 9_000, `a visible hold waits 10 s: ${r.recheckAt! - w.sim.simMs}`);
   assert.equal(mentions(w).length, 1);
   w.sim.advance(10_000);
   await syncOrders(w.risk, day, { protect: true }); // still held: no second alert

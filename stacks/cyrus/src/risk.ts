@@ -95,6 +95,8 @@ export const OLD_LOOKUP_EVERY_MS = 30_000;
 // 5 minutes (part A, step 4), and once when it resolves (part C).
 export const STUCK_RETRY_FIRST_MS = 5_000;
 export const STUCK_RETRY_MAX_MS = 30_000;
+// Item 3 of 2026-11-13: the first wait for a sale held by visible open orders (about one order sync, as before).
+export const STUCK_VISIBLE_RETRY_FIRST_MS = 10_000;
 // Michael's decision of 2026-11-13 (item 2, first point): with the live updates down, an entry with a timed-out fresh stop is tried at
 // least every 10 seconds (5, then 10), within the request allowance.
 export const STUCK_RETRY_MAX_NO_STREAM_MS = 10_000;
@@ -136,6 +138,8 @@ export interface StuckEntry {
   // Alpaca at the last try (the sale's own read showed it holding the shares), and whether Alpaca accepted our cancel of it. Read by the
   // 5 minute alert alone, so it tells the truth (a stop resting at Alpaca, not "no protective stop"); never by the retry or the sale.
   restingStop?: { stopClientOrderId: string; cancel: "accepted" | "refused" | "pending" | "not sent" };
+  // Item 3 of 2026-11-13: the wait for a sale held by visible open orders (10 s, doubling to 30), kept apart from the hidden-hold backoff.
+  visibleDelayMs?: number;
 }
 
 export class SyncMemory {
@@ -175,6 +179,8 @@ export class SyncMemory {
   // its entry that was running then does not back off afterwards (it would undo the update's "sell now"): it is due again at once. This
   // fires once per stop end, because only an end at or after that try's start counts.
   readonly timedOutEndedAt = new Map<string, number>();
+  // Item 3 of 2026-11-13: the wait after a failed lookup of an entry missing from Alpaca's listing (per entry, doubling to a minute).
+  readonly lookupFailDelay = new Map<string, number>();
   // Item 2 of 2026-11-13: per timed-out stop (client id), when its status is next checked, and when its cancel may next be sent again
   // while it is known open (on the stuck backoff's steps: 5, 10, 20, then every 30 seconds).
   // `probeFailed`: the last status check could not be read (the next one waits on the backoff).
@@ -516,9 +522,14 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
         byClientId.set(s.clientOrderId, found);
         lookedUp.add(s.clientOrderId);
       } else mem.notFoundUntil.set(s.clientOrderId, nowMs + MISSING_RETRY_MS);
+      mem.lookupFailDelay.delete(s.clientOrderId);
       d.log?.("order_missing_from_listing", { clientOrderId: s.clientOrderId, found: found !== null });
     } catch (err) {
-      d.log?.("order_lookup_failed", { clientOrderId: s.clientOrderId, error: (err as Error).message.slice(0, 120) });
+      // Item 3 of 2026-11-13 (Michael's retry rule): a lookup that failed waits 10 seconds, doubling to 60, before it is tried again.
+      const delay = Math.min((mem.lookupFailDelay.get(s.clientOrderId) ?? 5_000) * 2, MISSING_RETRY_MS);
+      mem.lookupFailDelay.set(s.clientOrderId, delay);
+      mem.notFoundUntil.set(s.clientOrderId, nowMs + delay);
+      d.log?.("order_lookup_failed", { clientOrderId: s.clientOrderId, error: (err as Error).message.slice(0, 120), retryInMs: delay });
     }
   }
   const held = new Set(positions.map((p) => p.symbol));
@@ -1325,9 +1336,13 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     st.delayMs = st.delayMs > 0 ? Math.min(st.delayMs * 2, backoffCap(mem, s.clientOrderId)) : STUCK_RETRY_FIRST_MS;
     st.nextAt = now + st.delayMs;
   } else {
-    // Held by open orders that are visible (a cancel still landing): tried again at the next sync, as before.
+    // Held by open orders that are visible (a cancel still landing). Item 3 of 2026-11-13 (Michael's retry rule): tried again after 10
+    // seconds (about the next sync, as before), then 20, then every 30, each retry charged to the retry allowance (it was every sync,
+    // uncharged). A live update that an exit ended still has the entry looked up at the next sync.
+    // Its own wait, so a later hidden hold starts the November 9 backoff (5 s) as before.
     st.delayMs = 0;
-    st.nextAt = 0;
+    st.visibleDelayMs = st.visibleDelayMs ? Math.min(st.visibleDelayMs * 2, STUCK_RETRY_MAX_MS) : STUCK_VISIBLE_RETRY_FIRST_MS;
+    st.nextAt = now + st.visibleDelayMs;
   }
   mem.stuck.set(s.clientOrderId, st);
   // Messaging only (group 2, round 4): the sale ended at once because Alpaca did not accept the cancel of the timed-out stop, which the
@@ -1405,6 +1420,8 @@ export const LOSS_STOP_RETRY_PER_CHECK = 15;
 const RETRY_QUIET_BEFORE_CLOSE_MS = 6 * 60_000;
 const RETRY_BACKOFF_FIRST_MS = 10_000;
 const RETRY_BACKOFF_MAX_MS = 60_000;
+const LOSS_REFUSED_BACKOFF_FIRST_MS = 5_000;
+const LOSS_REFUSED_BACKOFF_MAX_MS = 30_000;
 const is429 = (err: unknown) => err instanceof AlpacaError && err.status === 429;
 
 export interface LossStopOptions {
@@ -1501,8 +1518,8 @@ export async function enforceDailyLoss(d: RiskDeps, day: DayRecord, opts: LossSt
 // symbols still held, each with one sell through the sell gate, never another whole-account liquidation. Inside the loss stop's
 // request budget and never below the governor's safety reserve, so it cannot crowd out the close-out, a flatten, a stop or a
 // protective sell; it stands aside completely while any liquidation (close-out, flatten, carried position, the first sale) runs.
-// It pauses only after a rate-limit answer from Alpaca (10 seconds, doubling to 60); any other refusal is simply tried again on
-// the next check. Shares still held by an exit resting at Alpaca (an entry that filled late) have that exit cancelled first; the
+// It pauses after a rate-limit answer from Alpaca (10 seconds, doubling to 60) and, since item 3 of 2026-11-13, after a check in which
+// every sale was refused (5 seconds, doubling to 30). Shares still held by an exit resting at Alpaca (an entry that filled late) have that exit cancelled first; the
 // sale follows on the next check. A sell of ours that is still working is left alone.
 async function retryLossStopSale(d: RiskDeps, day: DayRecord): Promise<void> {
   const mem = d.lossMemory ?? fallbackMemory;
@@ -1600,7 +1617,13 @@ async function retryLossStopSale(d: RiskDeps, day: DayRecord): Promise<void> {
   }
   mem.turn = n > 0 ? (first + looked) % n : 0; // the next check starts where this one stopped
   if (hit429) rateLimited();
-  else mem.backoffMs = 0;
+  else if (failed.length > 0 && sent === 0) {
+    // Item 3 of 2026-11-13 (Michael's retry rule): every sale this check tried was refused (not a rate limit): the next check waits 5
+    // seconds, doubling to 30 (kept short: this is the loss stop's sale).
+    mem.backoffMs = Math.min(LOSS_REFUSED_BACKOFF_MAX_MS, mem.backoffMs > 0 ? mem.backoffMs * 2 : LOSS_REFUSED_BACKOFF_FIRST_MS);
+    mem.backoffUntil = d.now().getTime() + mem.backoffMs;
+    d.log?.("loss_stop_retry_backoff", { ms: mem.backoffMs, refused: failed.length });
+  } else mem.backoffMs = 0;
   d.log?.("loss_stop_sale_retried", { held: n, sent, failed: failed.length, backoffMs: mem.backoffMs });
   // At most one nudge every 5 minutes, not one on every check.
   if (failed.length > 0 && d.now().getTime() - mem.lastRetryAlert >= 5 * 60_000) {
