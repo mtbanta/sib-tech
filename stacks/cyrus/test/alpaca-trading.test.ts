@@ -278,3 +278,26 @@ test("the summary's bounded window: status all, nested, oldest first, after and 
   const s2 = await stuck.client.listOrdersWindow("a", "b", 2);
   assert.equal(s2.complete, false, "it never claims completeness when it stopped early");
 });
+
+// Item 2 of 2026-11-13 (group 1, round 1 of the weekend build): inside a timed-out stop's try, the client's own retries are charged to the
+// stuck-retry allowance and stop when it has no room; outside that scope the client retries exactly as before.
+import { inRequestScope } from "../src/request-scope.ts";
+test("item 2: the client's retries are charged inside a request scope and stop without room; outside a scope they are unchanged", async () => {
+  const down = () => json({ message: "down (test)" }, 503);
+  const outside = fake([down(), down(), down()]);
+  await assert.rejects(outside.client.findOrderByClientId("cyrus-p-x"));
+  assert.equal(outside.calls.length, 3, "outside a scope: the first try and 2 retries, as before");
+
+  let room = 1;
+  const charged: number[] = [];
+  const budget = { take: (n: number) => (room >= n ? ((room -= n), charged.push(n), true) : false) };
+  const inside = fake([down(), down(), down()]);
+  await assert.rejects(inRequestScope(budget, () => inside.client.findOrderByClientId("cyrus-p-x")));
+  assert.equal(inside.calls.length, 2, "inside a scope with room for one retry: the first try and 1 retry");
+  assert.deepEqual(charged, [1]);
+
+  const noRoom = { take: () => false };
+  const cancel = fake([down(), down(), down(), down(), down(), down()]);
+  await assert.rejects(inRequestScope(noRoom, () => cancel.client.cancelOrder("00000000-0000-0000-0000-000000000001")));
+  assert.equal(cancel.calls.length, 1, "a cancel with no room: no retry (before: up to 6 tries)");
+});

@@ -496,7 +496,9 @@ test("group 1, round 2 (night): cancels Alpaca keeps refusing for 3 timed-out st
   const reqs = w.sim.bucketTimes.filter((t) => t >= t0);
   const maxIn = (arr: number[], win: number) => Math.max(0, ...arr.map((t) => arr.filter((x) => x >= t && x < t + win).length));
   console.log(`MEASURE refused cancels, 3 stops, 5 minutes: ${cancelTimes.length} cancels (most in a minute ${maxIn(cancelTimes, 60_000)}, in 5 s ${maxIn(cancelTimes, 5_000)}); requests ${reqs.length} (most in a minute ${maxIn(reqs, 60_000)})`);
-  assert.ok(maxIn(cancelTimes, 60_000) <= 3 + 4, `cancels in a minute ${maxIn(cancelTimes, 60_000)}: the first try each, then at most 4 a minute (40 requests at 10 each)`);
+  // Item 2 of 2026-11-13: each cancel sent again is one request, charged to the allowance, on the backoff (5, 10, 20, then 30 s): at most
+  // about 4 a stop in a minute (before: whole tries of about 10 requests each, at most 4 a minute in all).
+  assert.ok(maxIn(cancelTimes, 60_000) <= 4 * 3, `cancels in a minute ${maxIn(cancelTimes, 60_000)}: at most 4 a stop`);
   assert.ok(maxIn(reqs, 60_000) <= 120, `requests in a minute ${maxIn(reqs, 60_000)}: Alpaca's 200 minus the reserve of 80`);
   assert.equal(w.sim.oversellAttempts, 0);
   // The stops then trigger: still never a sale on top of them.
@@ -675,7 +677,8 @@ test("group 1, round 3 (night, Michael's decision 1 of 2026-11-13): a timed-out 
   await runWorker(w, dd, 40_000);
   const st = w.memory.stuck.get(ids[0]!);
   assert.ok(st && st.delayMs > 0 && st.nextAt > 0, "on the backoff after a stuck try with a pending cancel (before: retried at every sync)");
-  const outcome = w.events.filter((e) => e.event === "fresh_stop_timeout_cancel" && e.data.by === "missing-exit sale");
+  // Item 2 of 2026-11-13: while the stop is shown open, its cancel is sent by the status check (no sale try).
+  const outcome = w.events.filter((e) => e.event === "fresh_stop_timeout_cancel" && (e.data.by === "missing-exit sale" || e.data.by === "status check"));
   assert.ok(outcome.length >= 1, "the cancel's outcome is logged by the sale");
   await runWorker(w, dd, 140_000);
   const reqs = w.sim.bucketTimes.filter((t) => t >= t0);
@@ -746,19 +749,35 @@ test("group 1 note of round 4 (night): a timed-out stop pending cancel that the 
 });
 
 test("group 2, round 4 (night): a cancel of a timed-out stop the sale never sent (it gave way to the loss stop's sale) is logged as not sent, never as accepted, and not remembered as accepted", async () => {
+  // Since item 2 of 2026-11-13 a stop shown open is waited on (no sale try), so the case is the 15 second limit's own try: its lookup finds
+  // the stop open, and its sale gives way to the loss stop's sale before sending anything.
   const w = world();
-  const { dd, stopIds } = await timedOutStops(w, ["RKLB"], false);
+  const dd = await day(w);
+  const id = await hold(w, "RKLB", 5, 20, 1);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 1, 20.08);
+  const u = unclearStops(w, true);
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  const stopIds = new Set(freshStops(w, "RKLB").map((o) => o.id));
   const sent: string[] = [];
   const realCancel = w.sim.cancelOrder.bind(w.sim);
-  w.sim.cancelOrder = async (id: string) => {
-    if (stopIds.has(id)) sent.push(id);
-    return realCancel(id);
+  w.sim.cancelOrder = async (oid: string) => {
+    if (stopIds.has(oid)) sent.push(oid);
+    return realCancel(oid);
   };
+  const realPaged = w.sim.listOrdersPaged.bind(w.sim);
+  w.sim.listOrdersPaged = async (...a: any[]) => {
+    const r: any = await (realPaged as any)(...a);
+    return a[0] === "all" ? { ...r, orders: r.orders.filter((o: any) => !o.clientOrderId.startsWith("cyrus-p-")) } : r;
+  };
+  u.lookupsWork();
   (w.risk.liquidator as any).priorityPending = 1;
   const before = w.events.length;
-  w.sim.advance(6_000); // past the first backoff step after the try at the limit (group 1, round 4: never the next sync)
+  w.sim.advance(FRESH_STOP_CONFIRM_MS);
   await syncOrders(w.risk, dd, { protect: true });
   const ev = w.events.slice(before).filter((e) => e.event.startsWith("fresh_stop_timeout_cancel"));
+  assert.ok(w.events.slice(before).some((e) => e.event === "fresh_stop_timeout" && e.data.cancelling === true));
   assert.equal(sent.length, 0);
   assert.deepEqual(ev.map((e) => e.event), ["fresh_stop_timeout_cancel_not_sent"]);
   assert.equal(w.memory.timedOutCancelAccepted.size, 0);
@@ -899,7 +918,7 @@ for (const hide of [false, true]) {
       for (const [i, m] of five.entries()) {
         const at = `land ${land / 1000} s, stop ${statuses[i]} at the alert: `;
         if (statuses[i] === "canceled") assert.ok(!m.text.includes("is still resting"), at + m.text);
-        if (statuses[i] === "canceled" && !hide) assert.ok(m.text.includes("now shows its fresh stop (not confirmed in time) ended"), at + m.text);
+        if (statuses[i] === "canceled" && !hide) assert.ok(m.text.includes("now shows its fresh stop (not confirmed in time) ended") || m.text.includes("has ended at Alpaca; the sale is due"), at + m.text);
         assert.ok(!OLD_WORDING.test(m.text) || statuses[i] === "canceled", at + m.text);
       }
       assert.equal(w.sim.oversellAttempts, 0);

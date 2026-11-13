@@ -4,6 +4,7 @@
 // Orders are safe to retry: each entry carries a client_order_id, and after any unclear failure the client
 // asks Alpaca whether that id already exists before it sends again.
 import { assertPaperHost, PAPER_TRADING_BASE_URL, type Settings } from "./config.ts";
+import { retryAllowedInScope } from "./request-scope.ts";
 
 export class AlpacaError extends Error {
   readonly status: number;
@@ -229,7 +230,8 @@ export class AlpacaTrading {
       } catch (err) {
         last = err;
         const retryable = !(err instanceof AlpacaError) || err.status === 429 || err.status >= 500;
-        if (!retryable || attempt === 2) break;
+        // Item 2 of 2026-11-13: inside a timed-out stop's try, a retry is charged to its allowance (no room: no retry).
+        if (!retryable || attempt === 2 || !retryAllowedInScope()) break;
         await sleep(this.retryDelayMs * 2 ** attempt);
       }
     }
@@ -449,7 +451,7 @@ export class AlpacaTrading {
         return parseOrder((await this.once("POST", "/v2/orders", undefined, body)) as Json);
       } catch (err) {
         const is429 = err instanceof AlpacaError && err.status === 429;
-        if (is429 && retry429 && sent429 < 8) {
+        if (is429 && retry429 && sent429 < 8 && retryAllowedInScope()) {
           sent429++;
           await sleep(Math.min(2000, 250 * 2 ** (sent429 - 1)));
           continue;
@@ -463,6 +465,7 @@ export class AlpacaTrading {
           throw new AlpacaError(`outcome of the first send is still unclear: ${(e as Error).message.slice(0, 160)}`, 502);
         };
         let existing: Order | null;
+        if (!retryAllowedInScope()) return stillUnclear(err); // the lookup is one more request (item 2 of 2026-11-13)
         try {
           existing = await this.findOrderByClientId(clientOrderId);
         } catch (e) {
@@ -470,7 +473,9 @@ export class AlpacaTrading {
         }
         if (existing) return existing;
         if (duplicate) throw err;
-        // Not there: the first send did not land. Sending again with the same id cannot create two orders.
+        // Not there: the first send did not land. Sending again with the same id cannot create two orders. (Inside a timed-out stop's try
+        // the second send is charged to its allowance; without room the outcome stays unclear to the caller.)
+        if (!retryAllowedInScope()) return stillUnclear(err);
         try {
           return parseOrder((await this.once("POST", "/v2/orders", undefined, body)) as Json);
         } catch (e) {
@@ -545,7 +550,7 @@ export class AlpacaTrading {
       } catch (err) {
         if (err instanceof AlpacaError && (err.status === 404 || err.status === 422)) return;
         const retryable = !(err instanceof AlpacaError) || err.status === 429 || err.status >= 500;
-        if (!retryable || attempt >= 5) throw err;
+        if (!retryable || attempt >= 5 || !retryAllowedInScope()) throw err;
         await sleep(Math.min(2000, 250 * 2 ** attempt));
       }
     }
@@ -562,7 +567,7 @@ export class AlpacaTrading {
         return { attempted: items.length, failed };
       } catch (err) {
         const retryable = !(err instanceof AlpacaError) || err.status === 429 || err.status >= 500;
-        if (!retryable || attempt >= 5) throw err;
+        if (!retryable || attempt >= 5 || !retryAllowedInScope()) throw err;
         await sleep(Math.min(2000, 250 * 2 ** attempt));
       }
     }
