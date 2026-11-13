@@ -5186,7 +5186,7 @@ Full suite 721 of 721. Type check clean.
 **Fix (accounting only; timers and syncs unchanged):**
 - `src/worker.ts`: when the 5 second pass starts a sync while a timer is still pending, that timer is marked as the leftover (`leftoverTimerAt`). When it fires (also after being put off because a sync was still running), its sync is started with `keepLagCharge`.
 - `src/risk.ts`: a sync started with `keepLagCharge` keeps the remainder recheck's charge (it runs in place of that recheck) instead of giving it back. Any other sync that starts before the recheck was due still gives it back.
-- Why that is right: the worker keeps only its earliest timer. A timer still pending after the pass's sync swallows the recheck timer that sync asks for, so its sync is the one that runs the recheck. If the pending timer is later, the recheck's own timer replaces it and the recheck runs at its time.
+- Why that is right (the builder's reasoning from the worker's code, not a measurement; the sweep below measures it): the worker keeps only its earliest timer. A timer still pending after the pass's sync swallows the recheck timer that sync asks for, so its sync is the one that runs the recheck. If the pending timer is later, the recheck's own timer replaces it and the recheck runs at its time.
 
 **New tests (each fails on its mutant):**
 - in the real worker, the pass runs a due recheck inside the slack and the leftover timer then fires: the allowance goes 2, 4, 6, with three syncs and three charges (mutants: the keep ignored; the leftover not marked; every timer treated as leftover);
@@ -5198,7 +5198,28 @@ The mutant "any sync marks the leftover" survives. It is equivalent: only the pa
 
 **Kept from round 7:**
 - Mutant R8 (the give-back decided by the sync's end time) only over-charges.
-- The log's statement that charges equal the rechecks run held only under the round 6 test's model. It holds in the worker since this fix, as the new real-worker tests show.
+- The log's statement that charges equal the rechecks run held only under the round 6 test's model. For the worker, see the sweep below.
 - **For Michael's question:** remainders back to back (one every 20 s, each lagging 20 s, with no other syncs) still left a stuck sale's longest gap at 58 s, against 31 s with no lag (group 1's probe, round 7).
 
-Full suite 725 of 725. Type check clean.
+**Before round 8 (builder's checks, with the advisor):**
+- A test through the worker's real 5 second pass (`test/weekend-r8.test.ts`): an armed day, the pass landing 100 ms after a recheck was due, then the leftover timer. Allowance +2, +4, +6, with three syncs and three charges. It fails if the pass's call stops marking its syncs (`{ fromPass: true }` removed).
+- **Sweep through the real worker** (simulator; one remainder; the pass's timing swept over 100 offsets 50 ms apart; 45 s each; script kept outside the repo). "Rechecks run" counts the syncs a recheck caused: the pass with a recheck due, a leftover timer, and any other timer that was not a live update.
+
+| List lag | Live updates | Charged below rechecks run | Charged above |
+| --- | --- | --- | --- |
+| 15 s | none | 5 of 100 (2 requests) | 0 of 100 |
+| 15 s | every 1 s | 0 of 100 | 0 of 100 |
+| 15 s | every 3 s | 0 of 100 | 5 of 100 (2) |
+| 25 s | none | 5 of 100 (2) | 0 of 100 |
+| 25 s | every 1 s | 0 of 100 | 0 of 100 |
+| 25 s | every 3 s | 5 of 100 (up to 4) | 5 of 100 (2) |
+
+**What the traces show:**
+- The "above" cases are the sweep's own labelling: a live update at the same moment as the recheck's timer, so that one sync served both.
+- In the "below" cases with 4 requests, 2 come from labelling (a fresh stop's own follow-up timer counted as a recheck).
+- **The rest is a residual, and the fix does not remove it.** The pass runs the last recheck (the one that finds the list cleared) inside the timer's slack. That sync finds no lag, so it charges nothing new. The recheck's leftover timer then fires and runs one more sync, which nothing is left to charge. That is 2 to 3 requests, uncharged, at most once per lagging remainder, and only when the pass lands inside a 250 ms window (5 of 100 timings).
+- The duplicate sync itself is the worker's behaviour since release A: the pass never clears a pending timer. The same uncharged sync happened at ae09ea6.
+- Charging it after the fact could not check for room before the requests run. Removing the duplicate (the pass clearing a timer for the recheck it runs) changes sync scheduling for every kind of recheck. Under Michael's rule of 2026-11-03 that needs his answer first, so it is a question for him, not built.
+
+Full suite 725 of 725 at `d978219`. Type check clean.
+With the real-pass test: full suite 726 of 726. Type check clean.
