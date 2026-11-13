@@ -1203,8 +1203,9 @@ export class Worker {
 
   // Michael's item 1 of 2026-11-13 (afternoon), the backup: after a sync, a remainder reported by the live update whose entry has no fresh
   // stop yet and is still open gets another sync, at most 3 more, 0.5, 1 and 2 seconds later, within 10 seconds of the report.
-  // Michael's change of 2026-11-13 (evening): an entry whose order list the sync saw still showing the stop open is left to the sync's
-  // own quick rechecks, which are charged to the stuck-retry allowance; the backup never adds uncharged syncs for it.
+  // Michael's change of 2026-11-13 (evening): an entry whose order list any sync saw still showing the stop open (`liveLagTries`) is left
+  // to the sync's own quick rechecks, which are charged to the stuck-retry allowance, or, with no room or after their 30 seconds, to the
+  // regular sync; the backup never adds uncharged syncs for it.
   private async stopCancelFollowUp(date: string): Promise<void> {
     if (this.stopCancelPending.size === 0) return;
     const rows = await this.d.store.listOrders(date).catch((err) => {

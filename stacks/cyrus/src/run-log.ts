@@ -50,7 +50,9 @@ export const STORED_INFO_EVENTS = new Set([
   "afternoon_closeout",
   "screen_not_tradable",
   // Item 2 of 2026-11-13 (group 2, round 1 of the weekend build): the timed-out stop's status checks and end, a try cut short for lack of
-  // room in the request allowance, and the start-up protection check (rare, bounded by the allowance).
+  // room in the request allowance, and the start-up protection check (rare, bounded by the allowance). Since Michael's change of
+  // 2026-11-13 (evening), `timed_out_try_out_of_room` with stage "list lag recheck" can come once per sync while a lagging remainder is
+  // inside its 30 second window and the allowance has no room: bounded by how often syncs run, not by the allowance.
   "fresh_stop_timeout_check",
   "fresh_stop_timeout_ended",
   "timed_out_try_out_of_room",

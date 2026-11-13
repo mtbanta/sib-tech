@@ -5027,11 +5027,11 @@ Full suite 709 of 709. Type check clean.
 - The quick rechecks run 0.5 s, then 1 s, then every 2 s apart (`LIVE_LAG_RECHECK_MAX_MS` 2000; it was 4000), still only for up to 30 s after the live report (`LIVE_LAG_WATCH_MS`).
 - One recheck sync serves every remainder whose list still lags. It is charged once to the stuck-retry allowance, at its real cost: the order list's pages and the positions as the sync read them, plus one lookup per lagging entry older than the list's 10 minute window. The charge is made when the recheck is scheduled, before it runs.
 - With no room in the allowance (40 a minute, 15 in any 5 seconds), no quick recheck is scheduled: the regular sync (every 10 s, or sooner on a live update) comes next, and the next sync that still sees the lag asks again. This is logged as `timed_out_try_out_of_room` with stage "list lag recheck". So many remainders at once can never take the allowance past its limits.
-- The worker's backup syncs (0.5, 1 and 2 s after a live report) stand aside for an entry the sync is already rechecking, so they never add uncharged syncs for it.
+- The worker's backup syncs (0.5, 1 and 2 s after a live report) stand aside for any entry a sync has seen still showing its stop open (`liveLagTries`): the sync's charged rechecks carry it, or, with no room or after the 30 s window, the regular sync. So the backup never adds uncharged syncs for it.
 
 **Bounds (the standing design rule):** a quick recheck is limited by the 30 s window and by the allowance (each charged before it runs). Its backoff is 0.5, 1, then 2 s.
 
-**Expected time without a stop (simulator, one remainder, the entry within the list's window):**
+**Expected time without a stop (simulator, one remainder, the entry within the list's window, the allowance with room; the test runs with ruling B on, and with B off, as shipped, each request count is one lower and the times are the same):**
 
 | List lag | Fresh stop after the live report | Requests from the report | Without the live report |
 | --- | --- | --- | --- |
@@ -5056,7 +5056,7 @@ That is the list's lag plus at most one 2 s recheck, for lags up to 30 s, while 
 - a recheck costs 2 requests for a recent entry and 3 for an older one (mutant: the lookup not costed);
 - the backup syncs stand aside (mutant: no standing aside).
 
-The item 1 test's bound is tightened from the lag plus 4.5 s to the lag plus 2.5 s. The cleared event's bounds are now within 2.5 s of each other.
+The item 1 test's bound is tightened from the lag plus 4.5 s to the lag plus 2.5 s. The cleared event's bounds are now within 2.5 s of each other inside the 30 s window while the allowance has room. With no room, or past the window, they can be up to a regular sync gap (about 10 s) apart (group 2, round 6: 10 000 and 20 000 ms at a 15 s lag with no room; 41 500 and 51 500 ms at a 45 s lag). The real lag always lies between them.
 
 **Briefs:** the expected time, the allowance's rise while a list lags, and "list lag recheck" out-of-room events to report.
 
@@ -5066,9 +5066,9 @@ Full suite 718 of 718. Type check clean.
 
 Commit `5c0d0d1` also had the rechecks give way to a stuck sale: while a stuck entry or a timed-out fresh stop was being retried, a recheck was charged only if the allowance still had room for one such try after it. Michael did not ask for that, and his rule of 2026-11-03 says to ask before any change to money-touching code beyond his request. So it was taken out before review (patch kept outside the repo), and the question goes to him.
 
-**Measured in the simulator** (one stuck sale being refused by Alpaca, one lagging remainder, over 40 s):
+**Measured in the simulator.** Setup: AAA's exits are cancelled and every market sale of AAA is refused by Alpaca; three syncs 2 s apart run first (AAA's first try and retries start); then LUNR's partial take-profit with its list lagging, and the live report; then 40 s of syncs as the worker would run them. "Sales sent" counts AAA's refused sale orders sent in those 40 s (one try can send several). Group 2's round 6 probe, with a different setup, got the same pattern with somewhat different times (with the rule, the remainder waited up to about 10.5 s longer), so the times are a guide, not exact.
 
-| List lag | Without the rule: fresh stop, stuck sale tries | With the rule: fresh stop, stuck sale tries |
+| List lag | Without the rule: fresh stop, AAA sales sent | With the rule: fresh stop, AAA sales sent |
 | --- | --- | --- |
 | 2 s | 4.0 s, 6 | 4.5 s, 6 |
 | 5 s | 6.0 s, 6 | 17.5 s, 6 |
@@ -5080,3 +5080,33 @@ Without the rule, the rechecks can take the room a stuck sale's retries need: at
 Without the rule (as built now): every quick recheck is charged before it runs; with no room, the regular sync comes next.
 
 Full suite 717 of 717 (the rule's one test went with it). Type check clean.
+
+### Weekend build: group 2, round 6 (ae09ea6) and fixes
+
+**Group 2, round 6: CHANGES REQUIRED (one sentence in this log).** "The cleared event's bounds are now within 2.5 s of each other" held only inside the 30 s window while the allowance has room. With no room, or past the window, they were 10 s apart. Fixed above, with the condition and the probe's figures.
+
+**What holds:**
+- the expected-time table matches the probe at every row;
+- the 8-remainder figures reproduce;
+- the briefs match the code;
+- there is no message during any lag, including runs with no room;
+- one alert, one 5 minute alert and one resolution line per stuck position, even while new remainders lag;
+- no mention changes, no dashes, no secrets;
+- rule 6 holds on the non-money loops.
+
+**Non-blocking notes, done:**
+- the run log's comment on `timed_out_try_out_of_room` says the "list lag recheck" stage is bounded by how often syncs run;
+- the briefs name its fields;
+- the table says it ran with ruling B on (one request fewer each with B off);
+- the stuck-sale table names its setup and counts sales sent, not tries;
+- the backup syncs' wording.
+
+**Non-blocking notes, kept:**
+- `msFromLiveCancel` is taken at the sync's start, so on a slow multi-page list the real lag can exceed it by about the list's read time;
+- at a 29.9 s lag the fresh stop came 2.1 s after the lag.
+
+**Noted for group 1:**
+- the rechecks crowd out a stuck sale (the question to Michael);
+- the charge is recorded up to 2 s before the requests run;
+- a recheck can land on a sync that was due anyway (over-charging);
+- with 45 remainders every 2 s, each lagging 15 s, the worst time to a fresh stop was 66 s (78 s at e163089), with no alert, as before.
