@@ -4317,3 +4317,22 @@ Work started 12:55 AM Central on branch `release-2026-11-12-night` (main merged 
 > Items 2 to 4: tonight's build, group 1 and group 2, up to 3 rounds each, deploy before 7:30 AM Monday. Never print any token or key.
 
 Work on decision 1 started 9:13 AM Central on branch `release-2026-11-13-b` (from `main` at v21). Items 2 to 4 follow tonight on a separate branch.
+
+### Ruling B: the fix for group 2's round 6 finding (decision 1 of 2026-11-13 morning), built 9:13 to 9:16 AM
+
+- **Finding:** the 5 minute alert said "no protective stop" while the timed-out stop still rested at Alpaca. This happened when Alpaca's open-orders read failed inside the sale near the 5 minute mark: the note was cleared after a try whose last look never saw the stop, and the end-of-sale alert had no list.
+- **Fix (messaging only; the sale's actions are unchanged):**
+  - `Liquidator.run` reports `lastLookOk`: true only when the last round's look read both the open orders and the positions.
+  - `cleanupSale` clears the resting-stop note only after such a look.
+  - The end-of-sale 5 minute check is skipped after a try whose last look failed. The next sync's own check, which has the order list, decides instead. For any stuck entry, that alert can now come up to one sync later.
+- **Switch:** `FRESH_STOP_LIMIT` is back to `{ on: true }` on this branch.
+- **Briefs (group 2's round 6 notes):**
+  - all three timed-out stop alerts are named: "is still resting", "was still resting at my last try", and "has ended at Alpaca";
+  - the B-off event list is complete;
+  - with B off, "ended first" includes stops Alpaca held;
+  - `retryInMs` is on one branch only.
+- **Tests:**
+  - New: the open-orders read failing inside the sale, in windows of 10 and 40 s starting 240 to 320 s, on both routes. The hidden route fails on the old code and passes now.
+  - The worker's hook, driven while a sale runs, still records the end (group 1's round 6 wiring note).
+  - Full suite 675 of 675. Type check clean.
+- **Measured with group 2's round 6 probe** (`scratchpad/probe/probe8.test.ts`, Q1 to Q7): 0 bad runs in every row. Before: Q7 hidden 10 of 34 per cancel state; Q7 visible 2 of 34; Q6 hidden 16 of 90.

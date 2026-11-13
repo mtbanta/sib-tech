@@ -597,7 +597,7 @@ async function timedOutStops(w: World, syms: string[], hide: boolean) {
   ctl.hide = hide;
   const stopIds = new Set(w.sim.orders.filter((o) => o.clientOrderId.startsWith("cyrus-p-")).map((o) => o.id));
   assert.equal(stopIds.size, syms.length);
-  return { dd, ids, stopIds };
+  return { dd, ids, stopIds, ctl };
 }
 const maxInWindow = (arr: number[], win: number) => Math.max(0, ...arr.map((t) => arr.filter((x) => x >= t && x < t + win).length));
 // Alpaca answers each cancel of these stops but keeps showing them working (status "new") until `untilMs`.
@@ -798,6 +798,15 @@ test("group 1, round 3 (night): the live update that a timed-out stop ended clea
   assert.equal(st.nextAt, 0, "the sale is due now");
   assert.equal(st.restingStop, undefined, "the 5 minute alert no longer says the stop rests at Alpaca");
   assert.equal(syncs.length, 1, "the order sync runs at once");
+  // Group 1, round 6 note (the wiring): while a sale is running the hook schedules no sync, but it still records the end, so that sale
+  // does not back off afterwards.
+  mem.timedOutStops.set("cyrus-p-20261102-RKLB-x-s2", "cyrus-20261102-RKLB-1");
+  st.nextAt = 9e15;
+  wk.liquidator.isLiquidating = () => true;
+  hook({ clientOrderId: "cyrus-p-20261102-RKLB-x-s2", symbol: "RKLB", event: "canceled", status: "canceled", atMs: 0 });
+  assert.ok(mem.timedOutEndedAt.has("cyrus-p-20261102-RKLB-x-s2"), "the end is recorded while a sale runs");
+  assert.equal(st.nextAt, 0);
+  assert.equal(syncs.length, 1, "no sync scheduled while a sale runs (as on v20)");
   wk.endOrderStream?.();
 });
 
@@ -891,5 +900,40 @@ for (const hide of [false, true]) {
     assert.equal(five.length, 1, five.map((m) => m.text).join(" | ") || "no 5 minute alert");
     assert.ok(five[0]!.text.includes("still resting at Alpaca"), five[0]!.text);
     assert.ok(!five[0]!.text.includes("still has no protective stop"), five[0]!.text);
+  });
+}
+
+for (const hide of [false, true]) {
+  test(`group 2, round 6 (night): when Alpaca's open-orders read fails inside the sale near the 5 minute mark, the alert never says "no protective stop" while the timed-out stop rests at Alpaca (${hide ? "hidden from" : "shown in"} the sync's list, cancel pending)`, async () => {
+    for (let y = 240_000; y <= 320_000; y += 10_000) for (const len of [10_000, 40_000]) {
+      const w = world();
+      const { dd } = await timedOutStops(w, ["RKLB"], hide);
+      w.sim.cancelMs = 10 * 60_000;
+      const t0 = w.sim.simMs;
+      let inSale = false;
+      const liq = w.risk.liquidator as any;
+      const realFlatten = liq.flatten.bind(liq);
+      liq.flatten = async (...a: any[]) => {
+        inSale = true;
+        try {
+          return await realFlatten(...a);
+        } finally {
+          inSale = false;
+        }
+      };
+      const realList = w.sim.listOrders.bind(w.sim);
+      w.sim.listOrders = async (status: any, after?: string) => {
+        const t = w.sim.simMs - t0;
+        if (inSale && status === "open" && t >= y && t < y + len) throw new Error("open orders timeout (test)");
+        return realList(status, after);
+      };
+      await runWorker(w, dd, 6 * 60_000);
+      const five = fiveMinute(w);
+      const at = `window ${y / 1000} s for ${len / 1000} s: `;
+      assert.equal(five.length, 1, at + (five.map((m) => m.text).join(" | ") || "no 5 minute alert"));
+      assert.ok(five[0]!.text.includes("still resting at Alpaca"), at + five[0]!.text);
+      assert.ok(!five[0]!.text.includes("still has no protective stop"), at + five[0]!.text);
+      assert.equal(w.sim.oversellAttempts, 0);
+    }
   });
 }

@@ -253,6 +253,10 @@ export interface LiquidateResult {
   // (cyrus-p-) still open that holds the shares of a symbol this sale could not sell, and that this sale was cancelling (named in
   // `cancelIds`) or that shows pending cancel. The caller decides (ruling B: a timed-out stop whose cancel has not cleared).
   freshStopStillOpen?: Array<{ symbol: string; clientOrderId: string; orderId: string; status: string }>;
+  // Group 2, round 6 of the night release (reported only): true when the last round's look read both the open orders and the positions,
+  // so `freshStopStillOpen` and `heldByFreshStop` describe what Alpaca showed then. False when that round ended before such a look (a
+  // failed read, a cancel that ended the try, the market closed).
+  lastLookOk?: boolean;
   // Shares held per symbol at the first look and at the last look of this liquidation (release 1 of 2026-11-09: a cleanup sale of
   // one entry judges its own shares by the change, since a newer position on the same symbol may still be held).
   heldBefore?: Record<string, number>;
@@ -419,6 +423,7 @@ export class Liquidator {
     };
 
     for (let round = 1; round <= rounds; round++) {
+      result.lastLookOk = false; // set true below only by this round's successful look (reported only)
       if (yieldNow()) return yielded();
       // Nothing is sent while the market is closed: a market sell then queues for the next open (and cancelling the
       // exits first would leave the position bare overnight). If the clock cannot be read, carry on.
@@ -576,6 +581,7 @@ export class Liquidator {
         if (this.d.now().getTime() - t0 > waitMs * 3) break; // a clock that moves much faster than the loop
       }
 
+      if (readOk) result.lastLookOk = true;
       // 3. Sell each symbol with an explicit quantity, through the sell gate (never more than is free).
       const hiddenThisRound = new Set<string>();
       let soldThisRound = 0;

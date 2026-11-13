@@ -201,7 +201,7 @@ export const FRESH_STOP_CONFIRM_MS = 15_000;
 // (false), an unclear fresh stop is handled as on Fly release v20: looked up at each sync, never cancelled by a time limit, never sold on
 // top of. The time-to-confirm logging of a confirmed stop stays (logging only). The switch is `on` below (an object so the tests can
 // check both states; nothing in the worker changes it).
-export const FRESH_STOP_LIMIT = { on: false };
+export const FRESH_STOP_LIMIT = { on: true };
 
 // A fresh stop's status from the order list, a lookup or a live update. When it was "unclear", its time to confirm (from when it was
 // sent) is logged, so the share confirmed after 15 seconds can be reported (ruling B). "unknown_at_alpaca": Alpaca does not have it.
@@ -838,7 +838,9 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   // Group 2, round 5: only a try that read the account clears it (not one that gave way to the loss stop's sale, found the market closed,
   // or could not read positions).
   const stuckBefore = mem.stuck.get(s.clientOrderId);
-  if (stuckBefore && !r.yielded && r.heldBefore !== undefined) delete stuckBefore.restingStop;
+  // Group 2, round 6: and only when that try's last look read both the open orders and the positions (`lastLookOk`); a look that failed
+  // never saw the stop, so it cannot say the stop is gone.
+  if (stuckBefore && !r.yielded && r.lastLookOk === true) delete stuckBefore.restingStop;
   // A4: the remainder now has a fresh stop. Nothing is sold; the entry stays open until the stop fills or the close-out sells it.
   if (r.freshStop && r.freshStop.symbol === s.symbol) {
     const f = r.freshStop;
@@ -1040,7 +1042,9 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     const it = left === 1 ? "it" : "them";
     const tail = protecting ? `I keep trying and will post again when ${left === 1 ? "it has" : "they have"} a stop, ${left === 1 ? "is" : "are"} sold, or ${left === 1 ? "is" : "are"} gone.` : `I keep trying and will post again when ${left === 1 ? "it is" : "they are"} sold or gone.`;
     await d.say("alerts", `**Michael: ${s.symbol} has ${plural(left, "share")} with no protective stop since ${centralClock(lostAt)}, and I could not ${protecting ? "protect or sell" : "sell"} ${it} yet** (${how}; ${why}). ${tail}`, { mentionOwner: true });
-  } else await escalateIfDue(d, mem, s.clientOrderId, r.heldAfter?.[s.symbol]); // messaging only: the holding this sale last saw, read only
+    // Group 2, round 6 (messaging only): not after a try whose last look failed (it has no view of the stop); the next sync's own
+    // escalation, which has the order list, decides then.
+  } else if (r.lastLookOk === true) await escalateIfDue(d, mem, s.clientOrderId, r.heldAfter?.[s.symbol]); // messaging only: the holding this sale last saw, read only
   return { attempted: true, stuck: true, ...(st.nextAt > 0 ? { recheckAt: st.nextAt } : endedNow ? { recheckAt: now } : {}) };
 }
 
