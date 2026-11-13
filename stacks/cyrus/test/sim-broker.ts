@@ -146,6 +146,20 @@ export class SimBroker implements FullBroker {
     if (OPEN.has(stop.status)) this.setStatus(stop.id, "canceled");
     this.removeShares(o.symbol, qty, price);
   }
+  // Michael's item 1 of 2026-11-13 (afternoon): a partial take-profit where Alpaca's own order list keeps showing the stop as pending cancel
+  // for `lagMs` (the live update already said "canceled"), as on 2026-11-13 (7 of 34 remainders noticed 11 to 16 s late).
+  partialTakeProfitListLag(clientOrderId: string, qty: number, price: number, lagMs: number): void {
+    const o = this.orders.find((x) => x.clientOrderId === clientOrderId);
+    if (!o) throw new Error("no such entry");
+    const tp = o.legs.find((l) => l.type === "limit")!;
+    const stop = o.legs.find((l) => l.type === "stop")!;
+    tp.filledQty += qty;
+    tp.filledAvgPrice = price;
+    tp.status = tp.filledQty >= tp.qty - 1e-9 ? "filled" : "partially_filled";
+    stop.status = "pending_cancel";
+    this.cancels.push({ id: stop.id, doneAt: this.simMs + lagMs });
+    this.removeShares(o.symbol, qty, price);
+  }
   // What Alpaca paper did 6 times on 2026-11-06: a cancel of the entry reached Alpaca as the entry filled; the entry stayed filled
   // and BOTH exits were cancelled, leaving the shares with no exit at all.
   cancelExitsAtFill(clientOrderId: string): void {

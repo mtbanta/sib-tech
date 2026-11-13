@@ -1265,3 +1265,97 @@ test("item 3: a failed lookup's wait does not hold back an entry a live update h
   await syncOrders(w.risk, dd, { protect: true });
   assert.equal(looks.length, 2, "flagged by a live update: looked up at once");
 });
+
+// ---------------- Michael's item 1 of 2026-11-13 (afternoon): remainders noticed late while the list still shows the stop pending ----------------
+async function remainderRun(lagMs: number, live: boolean): Promise<{ msToStop: number | null; lagLogged: boolean; oversell: number }> {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "LUNR", 5, 12, 1);
+  w.sim.advance(5_000);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  const t0 = w.sim.simMs;
+  w.sim.partialTakeProfitListLag(id, 1, 12.08, lagMs);
+  if (live) w.memory.liveStopCancelled.set(id, t0); // what the worker's live-update hook records
+  // The worker: a sync at once (the live update), then the backup rechecks 0.5, 1 and 2 s later, then every 10 s.
+  const syncsAt = [0, 500, 1_500, 3_500, 13_500, 23_500, 33_500].map((x) => t0 + x);
+  for (const at of syncsAt) {
+    if (w.sim.simMs < at) w.sim.advanceTo(at);
+    if (w.sim.stopLog.length > 0) break;
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  }
+  const placed = w.sim.stopLog[0];
+  return { msToStop: placed ? placed.at - t0 : null, lagLogged: w.events.some((e) => e.event === "stop_cancel_list_lag"), oversell: w.sim.oversellAttempts };
+}
+
+test("Michael's item 1 of 2026-11-13 (afternoon): with the live update taken over a list that still shows the stop pending cancel, the remainder's fresh stop follows within about a second of the list clearing (before: the next 10 second sync)", async () => {
+  const rows: string[] = [];
+  for (const lag of [500, 2_000, 5_000, 11_000, 15_000]) {
+    const before = await remainderRun(lag, false);
+    const now = await remainderRun(lag, true);
+    rows.push(`list lag ${lag / 1000} s: fresh stop ${now.msToStop} ms after the live report (without the live report: ${before.msToStop} ms)`);
+    assert.ok(now.msToStop !== null && now.msToStop <= lag + 1_500, `lag ${lag}: ${now.msToStop} ms`);
+    assert.ok(now.lagLogged, "the list's lag is logged");
+    assert.equal(now.oversell, 0);
+    assert.equal(before.oversell, 0);
+  }
+  console.log("MEASURE item 1\n" + rows.join("\n"));
+});
+
+test("Michael's item 1 of 2026-11-13 (afternoon): the worker records the live report of a completed stop cancel for the sync, and schedules backup syncs 0.5, 1 and 2 s apart until the entry has its fresh stop", async () => {
+  const { rig } = await import("./rig.ts");
+  const r = rig({ orderStream: true });
+  const wk: any = r.worker;
+  wk.startOrderStream(D);
+  const syncs: number[] = [];
+  wk.syncAt = (atMs: number) => void syncs.push(atMs);
+  const id = "cyrus-20261102-LUNR-1";
+  await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "LUNR", qty: 5, referencePrice: 12, stopPrice: 11.87, status: "filled", alpacaOrderId: null, filledQty: 5, filledAvgPrice: 12, note: null });
+  wk.orderHandler.d.onStopCancelled({ clientOrderId: id, symbol: "LUNR", atMs: 1_000 });
+  assert.equal(wk.syncMemory.liveStopCancelled.get(id), 1_000, "recorded for the sync");
+  assert.equal(syncs.length, 1, "a sync at once");
+  await wk.stopCancelFollowUp(D);
+  await wk.stopCancelFollowUp(D);
+  await wk.stopCancelFollowUp(D);
+  await wk.stopCancelFollowUp(D);
+  const gaps = syncs.slice(1).map((x) => x - wk.d.now().getTime());
+  assert.deepEqual(gaps, [500, 1_000, 2_000], `backup syncs ${gaps.join(", ")}`);
+  // Once the entry has its fresh stop, no more.
+  wk.stopCancelPending.set(id, { symbol: "LUNR", at: wk.d.now().getTime(), tries: 0 });
+  wk.syncMemory.freshStops.set(id, { symbol: "LUNR", entryClientOrderId: id, stopClientOrderId: "cyrus-p-x", orderId: "x", qty: 4, stopPrice: 11.87, placedAt: 0, status: "accepted", lookedAt: 0 });
+  const n = syncs.length;
+  await wk.stopCancelFollowUp(D);
+  assert.equal(syncs.length, n, "no backup sync once it has its fresh stop");
+  wk.endOrderStream?.();
+});
+
+test("Michael's item 2 of 2026-11-13 (afternoon): a fresh stop Alpaca refuses is logged once (fresh_stop_refused), not also as a failed sale", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "TWST", 5, 12, 1);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 1, 12.08);
+  w.sim.refuseStops = true;
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.ok(w.events.some((e) => e.event === "fresh_stop_refused" && e.data.symbol === "TWST"));
+  assert.ok(!w.events.some((e) => e.event === "sell_failed" && e.data.symbol === "TWST"), "not also a failed sale");
+  assert.equal(await heldQty(w, "TWST"), 0, "sold at market instead, as designed");
+});
+
+test("Michael's item 4 of 2026-11-13 (afternoon): a sync of 2 seconds or more logs the time of each of its steps", async () => {
+  const w = world();
+  const dd = await day(w);
+  await hold(w, "IREN", 5, 9, 1);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.ok(!w.events.some((e) => e.event === "sync_slow"), "a quick sync logs nothing");
+  const realPaged = w.sim.listOrdersPaged.bind(w.sim);
+  w.sim.listOrdersPaged = async (...a: any[]) => {
+    w.sim.advance(3_000); // a slow order list
+    return (realPaged as any)(...a);
+  };
+  await syncOrders(w.risk, dd, { protect: true });
+  const slow = w.events.find((e) => e.event === "sync_slow");
+  assert.ok(slow, "logged");
+  assert.ok(slow!.data.totalMs >= 3_000 && slow!.data.steps.orderListAndPositions >= 3_000, JSON.stringify(slow!.data));
+  for (const k of ["store", "orderListAndPositions", "settleAwaiting", "olderLookups", "missingLookups", "alerts", "walk", "save"]) assert.ok(k in slow!.data.steps, k);
+});

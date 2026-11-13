@@ -180,7 +180,9 @@ export class SellGate {
     } catch (err) {
       const msg = (err as Error).message.slice(0, 200);
       this.view = null;
-      this.d.log?.("sell_failed", { symbol: req.symbol, qty: req.qty, reason: req.reason, error: msg, status: err instanceof AlpacaError ? err.status : null });
+      // Michael's item 2 of 2026-11-13 (afternoon): a fresh stop the order refused is logged once, by the sale (`fresh_stop_refused` or
+      // `fresh_stop_unclear`), not also as a failed sale.
+      if (req.stopPrice === undefined) this.d.log?.("sell_failed", { symbol: req.symbol, qty: req.qty, reason: req.reason, error: msg, status: err instanceof AlpacaError ? err.status : null });
       return { status: "error", reason: msg, httpStatus: err instanceof AlpacaError ? err.status : undefined };
     }
   }

@@ -74,6 +74,8 @@ export const FAST_LOST_EXIT_WAIT_MS = 2_500;
 // Release A, fix 4: at most this many entries missing from Alpaca's listing are looked up by id in one sync, and an id Alpaca
 // does not know is not asked again for this long.
 export const MISSING_LOOKUPS_PER_SYNC = 10;
+// Michael's item 4 of 2026-11-13 (afternoon): a sync that takes this long or longer logs the time of each of its steps (`sync_slow`).
+export const SLOW_SYNC_MS = 2_000;
 const MISSING_RETRY_MS = 60_000;
 const MISSING_INTENT_AGE_MS = 10_000;
 // The speed release, item 3: while Alpaca's live order updates are connected (they free symbols and report a stop's cancel at once),
@@ -182,6 +184,10 @@ export class SyncMemory {
   // its entry that was running then does not back off afterwards (it would undo the update's "sell now"): it is due again at once. This
   // fires once per stop end, because only an end at or after that try's start counts.
   readonly timedOutEndedAt = new Map<string, number>();
+  // Michael's item 1 of 2026-11-13 (afternoon): entries (client ids) whose stop cancel Alpaca's live update reported complete, with its
+  // time; set by the worker, dropped when the entry closes. Also: entries whose list lag was already logged (once each).
+  readonly liveStopCancelled = new Map<string, number>();
+  readonly listLagLogged = new Set<string>();
   // Item 3 of 2026-11-13: the wait after a failed lookup of an entry missing from Alpaca's listing (per entry, doubling to a minute).
   readonly lookupFailDelay = new Map<string, number>();
   readonly lookupFailUntil = new Map<string, number>();
@@ -447,11 +453,17 @@ const fallbackSync = new SyncMemory();
 
 // An entry whose stop is no longer live (cancelled or expired, not filled) while some of its shares are not sold yet: those shares
 // have no stop, even if the take-profit is still open. Null when the stop is live, filled, absent, or nothing is left.
-export function bareRemainder(o: Order): { shares: number; stop: Order } | null {
+// Michael's item 1 of 2026-11-13 (afternoon): `liveCancelledAtMs`, when Alpaca's live update has reported this entry's stop cancel as
+// complete (event "canceled"), while the order list Alpaca serves may still show the stop open (pending cancel) for several seconds (7 of
+// 34 remainders waited 11 to 16 s on 2026-11-13). The live update is taken over the lagging list. The sell gate still counts any sell the
+// list shows as open, so no sale or fresh stop can go on top of shares a stop still holds.
+export function bareRemainder(o: Order, liveCancelledAtMs?: number): { shares: number; stop: Order; liveCancel: boolean } | null {
   const stop = stopLeg(o);
-  if (!stop || OPEN_STATUSES.has(stop.status) || stop.filledQty > 0) return null;
+  if (!stop || stop.filledQty > 0) return null;
+  const liveCancel = OPEN_STATUSES.has(stop.status) && liveCancelledAtMs !== undefined;
+  if (OPEN_STATUSES.has(stop.status) && !liveCancel) return null;
   const left = o.filledQty - exitFilledQty(o);
-  return left > 1e-9 ? { shares: left, stop } : null;
+  return left > 1e-9 ? { shares: left, stop, liveCancel } : null;
 }
 
 // A live exit leg of an entry: a sell leg that can still execute.
@@ -486,6 +498,15 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   mem.streamLive = opts.streamLive === true;
   // Logging only (Michael's approval of 2026-11-10): what this sync did before it reached an entry noticed late.
   const syncStartMs = d.now().getTime();
+  // Michael's item 4 of 2026-11-13 (afternoon), logging only: the time of each step of this sync, logged (and stored) when the sync took
+  // SLOW_SYNC_MS or more, so a slow sync can be diagnosed.
+  const steps: Record<string, number> = {};
+  let stepFrom = syncStartMs;
+  const mark = (name: string): void => {
+    const t = d.now().getTime();
+    steps[name] = (steps[name] ?? 0) + (t - stepFrom);
+    stepFrom = t;
+  };
   const prevSyncEndedAt = mem.lastSyncAt;
   const mustLookAtStart = new Set(mem.mustLook);
   const lookedUp = new Set<string>();
@@ -509,6 +530,8 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   for (const id of [...mem.oldLookedAt.keys()]) if (!activeIds.has(id)) mem.oldLookedAt.delete(id);
   for (const id of [...mem.mustLook]) if (!activeIds.has(id)) mem.mustLook.delete(id);
   for (const id of [...mem.lateLogged]) if (!activeIds.has(id)) mem.lateLogged.delete(id);
+  for (const id of [...mem.liveStopCancelled.keys()]) if (!activeIds.has(id)) mem.liveStopCancelled.delete(id);
+  for (const id of [...mem.listLagLogged]) if (!activeIds.has(id)) mem.listLagLogged.delete(id);
   for (const id of [...mem.freshStops.keys()]) if (!activeIds.has(id)) dropFreshStop(d, mem, id, "its entry is no longer open", syncStartMs);
   for (const id of [...mem.stuck.keys()]) if (!activeIds.has(id)) await resolveStuck(d, mem, id, "no longer held");
   const midnight = etInstant(day.tradeDate, "00:00").getTime();
@@ -517,13 +540,16 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   const oldest = Math.min(...active.map(createdMs));
   const fromMs = Math.max(midnight, oldest - 60_000, opts.streamLive ? nowMs - RECENT_WINDOW_MS : midnight);
   const since = new Date(fromMs).toISOString();
+  mark("store");
   const [listed, positions] = await Promise.all([d.broker.listOrdersPaged("all", since, opts.streamLive ? RECENT_MAX_PAGES : 20), d.broker.listPositions()]);
+  mark("orderListAndPositions");
   // Logging only (Michael's decision of 2026-11-09): how old this order list and these positions are when the sync acts on them.
   const listedAtMs = d.now().getTime();
   const listAgeMs = () => d.now().getTime() - listedAtMs;
   const byClientId = new Map(listed.orders.map((o) => [o.clientOrderId, o]));
   // Fix C of 2026-11-10: a sale reported as "not filled yet" that has now filled gets its closing line.
   await settleAwaiting(d, mem, listed.orders, activeIds);
+  mark("settleAwaiting");
   // Item 3: open entries made before the window read above are looked up by id, a few per sync, oldest look first.
   if (opts.streamLive) {
     const older = active.filter((s) => createdMs(s) < fromMs && !byClientId.has(s.clientOrderId));
@@ -545,6 +571,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       }
     }
   }
+  mark("olderLookups");
   // Release A, fix 4: on 2026-11-04 Alpaca's listing left out 2 of the day's entries. An entry that should be at Alpaca but is
   // missing from the listing is fetched by its client id, so it still gets its record update and its missing-exit check. (An entry
   // older than the window read above is not "missing": item 3's lookups above take care of it.)
@@ -578,6 +605,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       d.log?.("order_lookup_failed", { clientOrderId: s.clientOrderId, error: (err as Error).message.slice(0, 120), retryInMs: delay });
     }
   }
+  mark("missingLookups");
   const held = new Set(positions.map((p) => p.symbol));
   let recheckAt: number | undefined;
   // Logging only (Michael's approval of 2026-11-10): an entry whose stop (or both exits) Alpaca cancelled more than LATE_NOTICE_MS ago.
@@ -617,6 +645,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     for (const s of active) openEntries.set(s.symbol, (openEntries.get(s.symbol) ?? 0) + 1);
     await startupProtectionCheck(d, mem, day.tradeDate, positions, latestPerSymbol, openEntries, nowMs);
   }
+  mark("startupCheck");
   // A sell already working on a symbol (a liquidation in progress) explains a missing exit: no false alarm.
   // A4 (group 1 review, round 2): a fresh stop of ours (cyrus-p-) counts only when it covers the symbol's whole holding (it is placed only
   // when its entry holds the whole symbol). With another position on the symbol it protects only its own shares, so it must not keep the
@@ -641,6 +670,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   // Michael's decision of 2026-11-09: the 5 minute alert goes by the clock, for every entry reported stuck, whether or not its retry
   // has had room yet.
   // Group 2, round 1 of the night release: a symbol the position list does not show is passed as 0 held (nothing left to protect).
+  mark("timedOutEnds");
   if (!opts.middayOwnsSelling?.()) for (const id of [...mem.stuck.keys()]) await escalateIfDue(d, mem, id, positions.find((p) => p.symbol === mem.stuck.get(id)?.symbol)?.qty ?? 0, listed.orders);
   // Michael's decision of 2026-11-09: entries on the short retry list are walked last, longest waiting first, so the first one due
   // takes the allowance's room and the others take turns (before, the same few won every minute).
@@ -656,6 +686,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       settleFreshStop(d.log, f, shown.status, "order list", nowMs);
     }
   }
+  mark("alerts");
   const walk = [...active.filter((s) => !shortRetry(s)), ...active.filter(shortRetry).sort((a, b) => mem.stuck.get(a.clientOrderId)!.lastTriedAt - mem.stuck.get(b.clientOrderId)!.lastTriedAt)];
   for (const s of walk) {
     const o = byClientId.get(s.clientOrderId);
@@ -758,14 +789,23 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       continue;
     }
     // Release A, fix 1: the take-profit is still open (so the check above passes) but the stop is gone and shares are left.
-    const bare = held.has(s.symbol) ? bareRemainder(o) : null;
+    const liveAt = mem.liveStopCancelled.get(s.clientOrderId);
+    const bare = held.has(s.symbol) ? bareRemainder(o, liveAt) : null;
+    // Michael's item 1 of 2026-11-13 (afternoon), logging first: what this sync's list showed for a stop the live update reported cancelled.
+    if (liveAt !== undefined && !mem.listLagLogged.has(s.clientOrderId)) {
+      const leg = stopLeg(o);
+      if (leg && OPEN_STATUSES.has(leg.status)) {
+        mem.listLagLogged.add(s.clientOrderId);
+        d.log?.("stop_cancel_list_lag", { symbol: s.symbol, clientOrderId: s.clientOrderId, listStatus: leg.status, msFromLiveCancel: nowMs - liveAt, foundBy: lookedUp.has(s.clientOrderId) ? "lookup" : "listing", listAgeMs: listAgeMs() });
+      }
+    }
     if (!bare) {
       mem.bareSeen.delete(s.clientOrderId);
       continue;
     }
     const firstSeen = mem.bareSeen.get(s.clientOrderId) ?? nowMs;
     mem.bareSeen.set(s.clientOrderId, firstSeen);
-    const cancelTime = bare.stop.canceledAt ?? bare.stop.updatedAt ?? null;
+    const cancelTime = bare.stop.canceledAt ?? (bare.liveCancel ? new Date(liveAt!).toISOString() : (bare.stop.updatedAt ?? null));
     const parsed = cancelTime ? Date.parse(cancelTime) : NaN;
     // Alpaca's own cancel time, never later than this worker's first sight of it (a clock that runs behind cannot add wait).
     const since = Number.isFinite(parsed) ? Math.min(parsed, firstSeen) : firstSeen;
@@ -802,8 +842,12 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     if (c.recheckAt !== undefined) recheckAt = recheckAt === undefined ? c.recheckAt : Math.min(recheckAt, c.recheckAt);
     if (!c.stuck) mem.bareSeen.delete(s.clientOrderId);
   }
+  mark("walk");
   if (!listed.complete) d.log?.("order_list_incomplete", { since, pages: listed.pages });
   if (FRESH_STOP_LIMIT.on) await persistTimedOutStops(d, mem, day.tradeDate, d.now().getTime());
+  mark("save");
+  const totalMs = d.now().getTime() - syncStartMs;
+  if (totalMs >= SLOW_SYNC_MS) d.log?.("sync_slow", { totalMs, steps, active: active.length, listed: listed.orders.length, pages: listed.pages, cleanups: cleanupsThisSync, cleanupMs: cleanupMsThisSync, olderLookups: lookedUp.size, streamLive: opts.streamLive === true });
   mem.lastSyncAt = d.now().getTime();
   return { unprotected, incomplete: !listed.complete, ...(recheckAt !== undefined ? { recheckAt } : {}) };
 }
@@ -1142,7 +1186,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   const ownShares = o.filledQty - exitFilledQty(o);
   // A5: at the moment the entry's fill arrives, Alpaca has not cancelled its exits yet, so they still look live: the sale goes ahead and
   // waits for that cancel in sells.ts (if Alpaca keeps the exits, nothing is sold).
-  const stillNeeded = extra.fast ? true : kind === "missing" ? !hasLiveExit(o) : bareRemainder(o) !== null;
+  const stillNeeded = extra.fast ? true : kind === "missing" ? !hasLiveExit(o) : bareRemainder(o, mem.liveStopCancelled.get(s.clientOrderId)) !== null;
   if (!(ownShares > EPS_QTY) || !stillNeeded) {
     d.log?.("cleanup_skipped", { symbol: s.symbol, clientOrderId: s.clientOrderId, kind, ownShares, liveExit: hasLiveExit(o) });
     await resolveStuck(d, mem, s.clientOrderId, ownShares > EPS_QTY ? "it has a live exit again" : "its own exit orders sold the shares");

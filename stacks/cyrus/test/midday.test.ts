@@ -72,6 +72,8 @@ test("a full day: at 10:30 CT the pause goes on and the mid-day close-out sells 
   await hold(sim, r.store, "AAA", 10, 50);
   await hold(sim, r.store, "BBB", 20, 10);
   await r.store.insertOrder({ clientOrderId: clientOrderIdFor(D, "CCC", 1), tradeDate: D, symbol: "CCC", qty: 1, referencePrice: 5, stopPrice: 4.9, takeProfitPrice: 5.1, status: "canceled", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: "stop flag set before sending", createdAt: new Date(sim.simMs).toISOString() });
+  // Michael's item 3 of 2026-11-13 (afternoon): an entry Alpaca refused is shown apart in the morning line.
+  await r.store.insertOrder({ clientOrderId: clientOrderIdFor(D, "DDD", 1), tradeDate: D, symbol: "DDD", qty: 1, referencePrice: 5, stopPrice: 4.9, takeProfitPrice: 5.1, status: "failed", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: "asset is not tradable (test)", createdAt: new Date(sim.simMs).toISOString() });
   sim.cancelMs = 7_000;
   await r.at("16:29:55");
   assert.equal(await readPause(r.store, D), null, "nothing before 10:30");
@@ -93,6 +95,7 @@ test("a full day: at 10:30 CT the pause goes on and the mid-day close-out sells 
   assert.ok(!r.said("trading").some((t) => t.startsWith("Close-out done")), "not the 2:55 message");
   const morning = r.said("commands").find((t) => t.startsWith("Morning (open to"))!;
   assert.ok(morning.startsWith("Morning (open to 10:30 AM CT): "), morning);
+  assert.ok(morning.includes(", 1 refused by Alpaca;"), morning);
   assert.ok(morning.includes("before 1:30 PM CT") && morning.includes("(last entry 2:00 PM CT)"), morning);
   assert.ok(morning && morning.includes("2 entries sent (2 filled)") && morning.includes("rate-limit answers from Alpaca: 0") && morning.includes("unless you send `hold`"), morning);
   const co = r.store.events.find((e) => e.event === "closeout_result")!;

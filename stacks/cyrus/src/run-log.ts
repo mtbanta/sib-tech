@@ -64,6 +64,10 @@ export const STORED_INFO_EVENTS = new Set([
   "loss_stop_retry_backoff",
   // Item 3 of 2026-11-13 (group 2, round 3 of the weekend build): a failed lookup of an entry missing from the listing, with its wait.
   "order_lookup_failed",
+  // Michael's item 4 of 2026-11-13 (afternoon): a sync of 2 seconds or more, with the time of each step.
+  "sync_slow",
+  // Michael's item 1 of 2026-11-13 (afternoon): the order list still showing a stop open that the live update reported cancelled.
+  "stop_cancel_list_lag",
   // Item 4 of 2026-11-13: the morning screen's duration (now at 8:15 AM, 10 minutes before "Armed").
   "screen_done",
   // Group 2, round 1 (rare, part of the day's story): the afternoon window's failures and cancels.

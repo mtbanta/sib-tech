@@ -284,6 +284,9 @@ export class Worker {
   private shadowNoEstimate = 0;
   // Decision 1 of 2026-11-06: entries whose two exits the live updates reported lost, with the symbol, when, and the syncs tried.
   private readonly lostExitsPending = new Map<string, { symbol: string; at: number; tries: number }>();
+  // Michael's item 1 of 2026-11-13 (afternoon): a remainder whose stop cancel the live update reported complete gets up to 3 more syncs,
+  // 0.5, 1 and 2 seconds apart, until it has its fresh stop (or is sold or closed); the 10 second sync is the backstop after that.
+  private readonly stopCancelPending = new Map<string, { symbol: string; at: number; tries: number }>();
   // The mid-day cycle (Michael, 2026-11-09): what started this process (main.ts, from the start note), whether the start-up decision
   // about the pause has been made, the mid-day close-out's last attempt, and the day its not-flat alert went out.
   private startInfo: { deploy: boolean; release: string } | null = null;
@@ -1172,6 +1175,7 @@ export class Worker {
         this.syncAt(synced.recheckAt);
       }
       await this.lostExitsFollowUp(dayNow.tradeDate, synced.unprotected);
+      await this.stopCancelFollowUp(dayNow.tradeDate);
       await sweepEntriesWhileStopped(risk);
     });
   }
@@ -1188,6 +1192,27 @@ export class Worker {
       const row = rows?.find((r) => r.clientOrderId === id);
       if (sold.includes(p.symbol) || !row || row.closedAt || p.tries >= 3 || now - p.at > 10_000) {
         this.lostExitsPending.delete(id);
+        continue;
+      }
+      const wait = [500, 1_000, 2_000][p.tries]!;
+      p.tries++;
+      again = again === null ? now + wait : Math.min(again, now + wait);
+    }
+    if (again !== null) this.syncAt(again, 0);
+  }
+
+  // Michael's item 1 of 2026-11-13 (afternoon), the backup: after a sync, a remainder reported by the live update whose entry has no fresh
+  // stop yet and is still open gets another sync, at most 3 more, 0.5, 1 and 2 seconds later, within 10 seconds of the report.
+  private async stopCancelFollowUp(date: string): Promise<void> {
+    if (this.stopCancelPending.size === 0) return;
+    const rows = await this.d.store.listOrders(date).catch(() => null);
+    const now = this.d.now().getTime();
+    let again: number | null = null;
+    for (const [id, p] of [...this.stopCancelPending]) {
+      const row = rows?.find((r) => r.clientOrderId === id);
+      const handled = this.syncMemory.freshStops.has(id) || this.syncMemory.stuck.has(id);
+      if (handled || !row || row.closedAt || p.tries >= 3 || now - p.at > 10_000) {
+        this.stopCancelPending.delete(id);
         continue;
       }
       const wait = [500, 1_000, 2_000][p.tries]!;
@@ -1524,6 +1549,9 @@ export class Worker {
       onExitEnded: (clientOrderId) => this.syncMemory.mustLook.add(clientOrderId),
       onStopCancelled: (info) => {
         this.d.log?.("info", "stop_cancelled_at_partial_take_profit", { symbol: info.symbol });
+        // Item 1 of 2026-11-13 (afternoon): the order sync takes this live report over an order list that may still show the stop open.
+        this.syncMemory.liveStopCancelled.set(info.clientOrderId, info.atMs);
+        this.stopCancelPending.set(info.clientOrderId, { symbol: info.symbol, at: this.d.now().getTime(), tries: 0 });
         this.stopCancelSeen.set(info.symbol, { alpacaAtMs: info.atMs, receivedMs: this.d.now().getTime(), syncSetFor: info.atMs + BARE_GRACE_MS });
         // A4 of 2026-11-12: BARE_GRACE_MS is 0, so the sync runs at once and the remainder gets its fresh stop.
         this.syncAt(info.atMs + BARE_GRACE_MS, BARE_GRACE_MS > 0 ? 250 : 0);
@@ -1783,6 +1811,8 @@ export class Worker {
     const stored = await this.d.store.listOrders(date).catch(() => []);
     const sent = stored.filter(isSentEntry).length;
     const filled = stored.filter((o) => o.status === "filled").length;
+    // Michael's item 3 of 2026-11-13 (afternoon): entries Alpaca refused (status "failed": a definite refusal, nothing sent) shown apart.
+    const refused = stored.filter((o) => o.status === "failed").length;
     const account = await this.d.broker.getAccount().catch(() => null);
     const start = day.dayStartEquity;
     const plText = account && start ? `P and L ${account.equity - start >= 0 ? "+" : ""}${(account.equity - start).toFixed(2)} dollars (equity ${start.toFixed(2)} to ${account.equity.toFixed(2)})` : "P and L not known (the account could not be read)";
@@ -1798,7 +1828,7 @@ export class Worker {
       (hold
         ? `\`hold\` is set: after a deploy I stay paused. Send \`go\` to trade until ${last} (the last entry).`
         : `Next: after a deploy before ${until} I resume on my own under today's limits, unless you send \`hold\`. Without a deploy, send \`go\` to resume${sameEnd ? ` (last entry ${last})` : `; from ${until} I stay paused unless you send \`go\` (last entry ${last})`}.`);
-    return `Morning (open to ${centralClock(pauseAt)}): ${sent} ${sent === 1 ? "entry" : "entries"} sent (${filled} filled); ${plText}; rate-limit answers from Alpaca: ${this.d.governor.stats().rateLimitAnswers}. ${next}`;
+    return `Morning (open to ${centralClock(pauseAt)}): ${sent} ${sent === 1 ? "entry" : "entries"} sent (${filled} filled)${refused > 0 ? `, ${refused} refused by Alpaca` : ""}; ${plText}; rate-limit answers from Alpaca: ${this.d.governor.stats().rateLimitAnswers}. ${next}`;
   }
 
   // After the mid-day close-out is flat: the start-up decision (once per start, after this start's first read of commands, so a

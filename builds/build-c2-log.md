@@ -4904,3 +4904,35 @@ Note for Michael: at a restart with the database down, Alpaca's check can count 
   - M7 (counting the close-out's tries after the close separately) changes only the timing of the after-close reports. It is checked by reading, without a test.
 
 Full suite 700 of 700. Type check clean.
+
+### Weekend build: Michael's additions of 2026-11-13 (afternoon), items 1 to 4
+
+**Item 1, the remainder misses (money-touching, within his addition).**
+- **Logging first:** when the order sync sees an entry whose stop cancel Alpaca's live update reported complete, while the order list still shows the stop open, it logs `stop_cancel_list_lag` (stored, once per entry) with the list's status and the time since the live report. That turns the mid-day review's inference into a measurement.
+- **Acting on the live update:** the worker's live-update hook (`onStopCancelled`, which fires only on the stop's "canceled" event, the cancel complete) records the entry in `SyncMemory.liveStopCancelled`. `bareRemainder` takes that report over a list that still shows the stop open, so the remainder's fresh stop is placed in the sync that runs at once.
+  - The sell gate still counts any sell the list shows as open, so nothing goes on top of shares a stop still holds. In the simulator the sale waits, polling, until the list clears.
+- **Backup:** `stopCancelFollowUp` gives such an entry up to 3 more syncs, 0.5, 1 and 2 seconds apart, until it has its fresh stop (or is stuck, sold or closed), within 10 seconds, as lost exits already have.
+- **Measured** (simulator, today's case, with the list showing the stop pending cancel for the given time after the live report):
+
+  | List lag | Fresh stop after the live report (now) | Without the live report (the backup rechecks and the 10 s syncs only) |
+  | --- | --- | --- |
+  | 0.5 s | 0.5 s | 1.0 s |
+  | 2 s | 2.55 s | 4.0 s |
+  | 5 s | 5.75 s | 14 s |
+  | 11 s | 11.7 s | 14 s |
+  | 15 s | 15.1 s | 24 s |
+
+- **Expected time without a stop:** the list's lag plus under a second (here at most 0.75 s), against the next 10 second sync before (11 to 16 s on 2026-11-13).
+  - This is the simulator's conservative case, where Alpaca also holds the shares until its list clears. If Alpaca frees the shares at once while only its list lags, the sell gate (which reads that list) still waits for it.
+  - The real lag is not yet measured; `stop_cancel_list_lag` will measure it from Monday.
+- **Tests:** the timing above (asserting at most the lag plus 1.5 s, the lag logged, and no oversell), and the worker's hook (records the live report, a sync at once, backup syncs 0.5, 1 and 2 s apart, none once the entry has its fresh stop).
+
+**Item 2.** A fresh stop the order refused is logged once, by the sale (`fresh_stop_refused` or `fresh_stop_unclear`); the sell gate no longer also logs `sell_failed` for it. Test: a refused fresh stop logs `fresh_stop_refused` and no `sell_failed`, and the shares are sold at market as designed.
+
+**Item 3.** The mid-day morning line shows the entries Alpaca refused (stored status "failed": a definite refusal, nothing sent) apart, for example "380 entries sent (300 filled), 12 refused by Alpaca". The mid-day test asserts it.
+
+**Item 4.** Each order sync records the time of each step: store, the order list and positions, the "not filled yet" lines, older lookups, missing lookups, the start-up check, timed-out ends, alerts, the walk, and save. A sync of 2 seconds or more logs `sync_slow` (stored) with those times, plus the list's size and pages, the cleanups and their time, and the lookups. Test: a 3 second order list logs `sync_slow` with the time in `orderListAndPositions`; a quick sync logs nothing.
+
+**Briefs:** both name the new events and the morning line's refused count.
+
+Full suite 705 of 705. Type check clean.
