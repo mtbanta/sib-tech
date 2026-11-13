@@ -1676,3 +1676,102 @@ test("group 1, round 6 of the weekend build (mutant E12): a recheck's charge cou
   await syncOrders(w.risk, dd, { protect: true, streamLive: true });
   assert.equal(w.memory.retrySpend.length, 4, "three pages and the positions");
 });
+
+// ---------------- Group 1, round 7 of the weekend build: the worker's own scheduling ----------------
+async function workerLag() {
+  const { rig, settle } = await import("./rig.ts");
+  const sim = new SimBroker(MID);
+  const r = rig({ broker: sim as any, simClock: sim, orderStream: true });
+  const wk: any = r.worker;
+  const id = clientOrderIdFor(D, "LUNR", 1);
+  await sim.submitEntry({ symbol: "LUNR", qty: 5, stopPrice: 11.87, takeProfitPrice: 12.08, referencePrice: 12, clientOrderId: id });
+  sim.fillEntry(id, 12);
+  await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "LUNR", qty: 5, referencePrice: 12, stopPrice: 11.87, takeProfitPrice: 12.08, status: "filled", alpacaOrderId: null, filledQty: 5, filledAvgPrice: 12, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() } as any);
+  await ensureDay({ store: r.store, broker: sim, now: () => new Date(sim.simMs) } as any, D);
+  const dd = (await r.store.getDay(D))!;
+  const closeAt = new Date(MID + 3 * 3600_000);
+  wk.sessionForSync = { day: dd, closeAt };
+  const mem = wk.syncMemory;
+  const t0 = sim.simMs;
+  sim.partialTakeProfitListLag(id, 1, 12.08, 15_000);
+  mem.liveStopCancelled.set(id, t0);
+  mem.mustLook.add(id);
+  const run = async (how: any) => {
+    wk.startSync(dd, closeAt, how);
+    await settle();
+    await settle();
+  };
+  return { sim, r, wk, mem, dd, closeAt, t0, run, settle, id };
+}
+
+test("group 1, round 7 of the weekend build: in the worker, when the 5 second pass starts a due recheck and the recheck's timer still fires after it, that leftover sync keeps its charge (charges equal the syncs that ran)", async () => {
+  const { sim, r, wk, mem, t0, run, settle } = await workerLag();
+  await run({}); // the live report's sync: sees the lag, charges 2, its recheck due at +500 (timer at +750)
+  const due1 = wk.syncRecheckAt;
+  assert.equal(mem.retrySpend.length, 2);
+  r.setNow(new Date(due1 + 100).toISOString()); // the pass lands inside the timer's 250 ms slack
+  await run({ fromPass: true });
+  assert.equal(mem.retrySpend.length, 4, "the pass's sync ran the recheck (kept) and charged the next");
+  const requestsBefore = sim.bucketTimes.filter((x) => x >= t0).length;
+  r.setNow(new Date(due1 + 260).toISOString()); // the leftover timer fires: a second sync runs
+  await settle();
+  await settle();
+  assert.ok(sim.bucketTimes.filter((x) => x >= t0).length > requestsBefore, "the leftover sync ran (Alpaca requests)");
+  assert.equal(mem.retrySpend.length, 6, "the leftover sync kept the charge it ran in place of, and charged the next: 3 syncs after the report, 3 charges");
+  assert.equal(mem.retryLog.length, 6);
+  r.worker.stop?.();
+});
+
+test("group 1, round 7 of the weekend build: in the worker, a live update's sync that replaces the recheck's timer still gives the charge back (that recheck never runs)", async () => {
+  const { r, wk, mem, run, settle } = await workerLag();
+  await run({}); // charges 2, recheck due at +500
+  const due1 = wk.syncRecheckAt;
+  r.setNow(new Date(due1 - 300).toISOString());
+  wk.syncAt(due1 - 300, 0); // a live update brings a sync forward: the recheck's timer is replaced
+  r.setNow(new Date(due1 - 299).toISOString());
+  await settle();
+  await settle();
+  assert.equal(mem.retrySpend.length, 2, "the replaced recheck's charge is given back; only the next one is charged");
+  r.setNow(new Date(due1 + 1_000).toISOString()); // nothing else: the next recheck's own timer fires
+  await settle();
+  await settle();
+  assert.equal(mem.retrySpend.length, 4, "a recheck that ran stays charged");
+  r.worker.stop?.();
+});
+
+test("group 1, round 7 of the weekend build: a leftover timer that fires while the pass's sync is still running is put off and still keeps the charge", async () => {
+  const { r, wk, mem, run, settle } = await workerLag();
+  await run({});
+  const due1 = wk.syncRecheckAt;
+  r.setNow(new Date(due1 + 100).toISOString());
+  await run({ fromPass: true });
+  assert.equal(mem.retrySpend.length, 4);
+  wk.inflight.add("risk"); // the pass's sync is still running when the leftover timer fires
+  r.setNow(new Date(due1 + 260).toISOString());
+  await settle();
+  assert.equal(mem.retrySpend.length, 4, "put off, nothing run yet");
+  assert.equal(wk.leftoverTimerAt, wk.eventSyncAt, "still marked as the leftover");
+  wk.inflight.delete("risk");
+  r.setNow(new Date(due1 + 600).toISOString());
+  await settle();
+  await settle();
+  assert.equal(mem.retrySpend.length, 6, "it ran and kept the charge");
+  r.worker.stop?.();
+});
+
+test("group 1, round 7 of the weekend build (mutant R5): the give-back removes only the recheck's own charge, not other charges made in the same millisecond", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "LUNR", 5, 12, 1);
+  w.sim.advance(5_000);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  const t0 = w.sim.simMs;
+  w.sim.partialTakeProfitListLag(id, 1, 12.08, 15_000);
+  w.memory.liveStopCancelled.set(id, t0);
+  for (let i = 0; i < 10; i++) w.memory.retrySpend.push(t0); // a stuck retry's charge in the same millisecond
+  const r1 = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.equal(w.memory.retrySpend.length, 12);
+  w.sim.advanceTo(r1.recheckAt! - 300);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.equal(w.memory.retrySpend.length, 12, "the stuck retry's 10 stay; the recheck's 2 are given back and the next 2 charged");
+});

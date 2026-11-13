@@ -5175,3 +5175,30 @@ Full suite 721 of 721. Type check clean.
 - When AAA's first try starts together with the lag, the "after" column is 12 sales and a 31 s gap on every row, including 10 s and 25 s. So the last row's trade-off depends on timing.
 - A per-minute statistics row taken between a charge and its give-back counts a recheck that never ran (2 to 4 requests).
 - **For group 1:** when the worker's 5 s pass starts a due recheck, the recheck's timer still fires about 250 ms later. That second sync is judged pre-empting and gives back the new charge, so it runs uncharged. That is at most about one per 5 s pass. In group 2's model at a 25 s lag: 17 syncs and 26 requests charged, against 28 before the fix.
+
+### Weekend build: group 1, round 7 (2401f0b) and fix
+
+**Group 1, round 7: CHANGES REQUIRED.** The give-back assumed that a sync starting before a recheck was due takes its place. In the worker that holds only for a sync whose timer replaces the recheck's timer (a live update, a backup, a stuck sale's time). The 5 second pass starts a sync without touching the pending timer. So when the pass ran a due recheck inside the timer's 250 ms slack, the recheck's timer still fired and ran a second sync. That second sync gave back the charge of the recheck the pass had just scheduled, and ran uncharged.
+- Group 1's real-worker probe: allowance 2, 4, then 4 (at ae09ea6: 2, 4, 6), with the same syncs and the same 8 Alpaca requests.
+- With 34 earlier charges in the minute, that allowed 42 real requests in the minute against the limit of 40.
+- Swept over 100 timings of the pass: under-charged in 40 of 100 (lag 15 s, no other syncs), 2 to 6 requests each time, never over-charged.
+
+**Fix (accounting only; timers and syncs unchanged):**
+- `src/worker.ts`: when the 5 second pass starts a sync while a timer is still pending, that timer is marked as the leftover (`leftoverTimerAt`). When it fires (also after being put off because a sync was still running), its sync is started with `keepLagCharge`.
+- `src/risk.ts`: a sync started with `keepLagCharge` keeps the remainder recheck's charge (it runs in place of that recheck) instead of giving it back. Any other sync that starts before the recheck was due still gives it back.
+- Why that is right: the worker keeps only its earliest timer. A timer still pending after the pass's sync swallows the recheck timer that sync asks for, so its sync is the one that runs the recheck. If the pending timer is later, the recheck's own timer replaces it and the recheck runs at its time.
+
+**New tests (each fails on its mutant):**
+- in the real worker, the pass runs a due recheck inside the slack and the leftover timer then fires: the allowance goes 2, 4, 6, with three syncs and three charges (mutants: the keep ignored; the leftover not marked; every timer treated as leftover);
+- in the real worker, a live update's sync that replaces the recheck's timer still gives the charge back, and the next recheck that runs stays charged;
+- a leftover timer that fires while the pass's sync is still running is put off and still keeps the charge (mutant: the put-off loses the mark);
+- the give-back removes only the recheck's own charge, not another charge made in the same millisecond (group 1's surviving mutant R5).
+
+The mutant "any sync marks the leftover" survives. It is equivalent: only the pass and the timer start syncs, and the timer clears itself first.
+
+**Kept from round 7:**
+- Mutant R8 (the give-back decided by the sync's end time) only over-charges.
+- The log's statement that charges equal the rechecks run held only under the round 6 test's model. It holds in the worker since this fix, as the new real-worker tests show.
+- **For Michael's question:** remainders back to back (one every 20 s, each lagging 20 s, with no other syncs) still left a stuck sale's longest gap at 58 s, against 31 s with no lag (group 1's probe, round 7).
+
+Full suite 725 of 725. Type check clean.

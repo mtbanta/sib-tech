@@ -515,6 +515,10 @@ export interface SyncOptions {
   // Michael's decision of 2026-11-09 ("Mid-day owns it"): true while the mid-day close-out is selling (10:30 until flat). Its own two
   // alerts (not flat yet, and 5 minutes later) cover those positions, so the stuck-entry 5 minute alert stands aside meanwhile.
   middayOwnsSelling?: () => boolean;
+  // Group 1, round 7 of the weekend build (accounting only): true when the worker started this sync from a timer that was still pending
+  // when its 5 second pass started an earlier sync. Such a sync runs in place of the remainder recheck charged since, so that charge is
+  // kept (it ran), not given back.
+  keepLagCharge?: boolean;
 }
 
 // Updates stored entries from Alpaca by looking only at orders newer than the oldest entry still being watched
@@ -905,10 +909,12 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     if (!c.stuck) mem.bareSeen.delete(s.clientOrderId);
   }
   // Group 1, round 6 of the weekend build: a recheck charged earlier that this sync pre-empted (it started before the recheck was due) never
-  // ran: its charge is given back here, before the next recheck is charged. A stuck sale's retry earlier in this same walk still saw that
+  // ran: the worker keeps only its earliest timer, so a sync that starts earlier takes its place. Its charge is given back here, before the
+  // next recheck is charged. Group 1, round 7: except when this sync is the leftover timer of an earlier one the worker's 5 second pass
+  // started (`keepLagCharge`): that timer still fires, and its sync runs in place of the recheck, so the charge is kept. A stuck sale's retry earlier in this same walk still saw that
   // charge (group 2, round 7: such a retry went 0.5 s later). One that ran (this sync started at or after its time) stays charged.
   if (mem.lagCharge !== undefined) {
-    if (syncStartMs < mem.lagCharge.dueAt) refundCharge(mem, mem.lagCharge.at, mem.lagCharge.cost);
+    if (syncStartMs < mem.lagCharge.dueAt && opts.keepLagCharge !== true) refundCharge(mem, mem.lagCharge.at, mem.lagCharge.cost);
     mem.lagCharge = undefined;
   }
   if (lagRecheckGap !== undefined) {

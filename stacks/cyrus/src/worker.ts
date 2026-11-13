@@ -266,6 +266,10 @@ export class Worker {
   private stopGapSaving = false;
   private eventSyncTimer: unknown = null;
   private eventSyncAt: number | null = null;
+  // Group 1, round 7 of the weekend build (accounting only): a timer that was still pending when the 5 second pass started a sync. When it
+  // fires, its sync is the leftover of a recheck the pass's sync already covered, and runs as one: it keeps the remainder recheck's charge
+  // instead of giving it back (syncOrders' `keepLagCharge`). Timers are not changed.
+  private leftoverTimerAt: number | null = null;
   // Logging only (Michael's approval of 2026-11-10), for `late_notice`: when the live updates last reported each symbol's stop cancelled,
   // and what the timed sync did (last set, last fired, how often it was put off because a sync was still running, since the last sync
   // the timer started).
@@ -1027,7 +1031,7 @@ export class Worker {
     // Release A, fix 1: a bare remainder found by the last sync brings the next one forward to its grace time (also by a timer, see
     // syncAt, so it does not wait for the next 5 second pass).
     const recheckDue = this.syncRecheckAt !== null && now.getTime() >= this.syncRecheckAt && !this.inflight.has("risk");
-    if (inSession && (now.getTime() - this.lastSync >= SYNC_EVERY_MS || recheckDue)) this.startSync(current, day.closeAt);
+    if (inSession && (now.getTime() - this.lastSync >= SYNC_EVERY_MS || recheckDue)) this.startSync(current, day.closeAt, { fromPass: true });
     if (inSession || (day.closeAt && now < addMinutes(day.closeAt, 10))) {
       await this.flushDigest();
       await this.stopGapStep(date, now);
@@ -1158,9 +1162,12 @@ export class Worker {
   // Michael's next command. While a close-out is running, and from the close-out time on, the missing-exit check is switched off
   // and nothing is sold here: the close-out alone flattens the account. It is asked again just before each sale, so a close-out
   // that starts meanwhile switches it off. One at a time: a sync already running is never doubled.
-  private startSync(dayNow: DayRecord, closeAt: Date): void {
+  private startSync(dayNow: DayRecord, closeAt: Date, how: { fromPass?: boolean; leftover?: boolean } = {}): void {
     if (this.inflight.has("risk")) return;
     this.lastSync = this.d.now().getTime();
+    // Group 1, round 7 of the weekend build: the pass starts a sync while a timer is still pending; that timer will still fire after it.
+    if (how.fromPass && this.eventSyncTimer !== null) this.leftoverTimerAt = this.eventSyncAt;
+    const keepLagCharge = how.leftover === true;
     const risk = this.riskDeps();
     const protect = () => this.protectNow(closeAt);
     const streamLive = this.orderStreamLive();
@@ -1169,7 +1176,7 @@ export class Worker {
       // missing-exit check would otherwise start a liquidation of its own for every such position every 30 seconds (round 8).
       const lossStopped = await this.lossStopInForce(dayNow.tradeDate);
       this.syncRecheckAt = null;
-      const synced = await syncOrders(risk, dayNow, { protect: () => !lossStopped && protect(), streamLive, middayOwnsSelling: () => this.middayOwnsSelling });
+      const synced = await syncOrders(risk, dayNow, { protect: () => !lossStopped && protect(), streamLive, middayOwnsSelling: () => this.middayOwnsSelling, keepLagCharge });
       if (synced.recheckAt !== undefined) {
         this.syncRecheckAt = synced.recheckAt;
         this.syncAt(synced.recheckAt);
@@ -1243,6 +1250,9 @@ export class Worker {
   }
 
   private syncFromTimer(): void {
+    const firedFor = this.eventSyncAt;
+    const leftover = firedFor !== null && firedFor === this.leftoverTimerAt;
+    if (leftover) this.leftoverTimerAt = null;
     this.eventSyncTimer = null;
     this.eventSyncAt = null;
     const s = this.sessionForSync;
@@ -1252,10 +1262,12 @@ export class Worker {
       this.syncTimerLog.putOff++;
       this.syncTimerLog.lastPutOffAt = this.d.now().getTime();
       this.syncAt(this.d.now().getTime());
+      // Still the leftover, put off a moment (unless an earlier timer took its place).
+      if (leftover && this.eventSyncAt !== null) this.leftoverTimerAt = this.eventSyncAt;
       return;
     }
     this.syncTimerLog.putOff = 0;
-    this.startSync(s.day, s.closeAt);
+    this.startSync(s.day, s.closeAt, { leftover });
   }
 
   // Decision 3's measurement: loads the day's saved totals once, settles the sales whose 5 seconds are over, and saves the totals.
