@@ -4432,3 +4432,65 @@ Work on decision 1 started 9:13 AM Central on branch `release-2026-11-13-b` (fro
 > Never print any token or key.
 
 The weekend build runs on branch `release-weekend-2026-11-16`, from `release-2026-11-13-b` (09eef3b plus logs, main merged in). Review rounds for this build are numbered 1 to 8 per group (Michael's decision 3).
+
+### Weekend build, steps 1 and 2 (d1ea616): the root wording, and item 2's points 1 and 3
+
+**Step 1, Michael's decision 2 (messaging only).** Every alert that said a position has no protective stop now says only what the stack knows, so it is true whether or not a stop rests at Alpaca.
+- First stuck alert: "**Michael: I can't confirm a protective stop for X's N shares (since T), and I could not sell them yet** (how; why). I am checking, and I will sell them if still unconfirmed. ..."
+- 5 minute alert, default: "**Michael: I can't confirm a protective stop for X after N minutes, and I have not been able to sell it yet** (why). [what the stack last saw] I am checking, and I will sell it if it is still unconfirmed. Please check X in Alpaca's dashboard and close it there if needed. I keep trying." What the stack last saw, as a fact with its time:
+  - "At my last try its fresh stop (not confirmed in time) was still resting at Alpaca; <cancel state>."
+  - "Alpaca's order list now shows its fresh stop (not confirmed in time) ended."
+- 5 minute alert when the order list the sync has just read shows the timed-out stop: the present-tense "is still resting at Alpaca" wording stays as it was.
+- Sold line: "**X: I could not confirm a live protective stop, so I sold it.**" "Not filled yet" line: "**X: I could not confirm a live protective stop.** I sent a sell ...".
+- Resolution line: "... after I reported that I could not confirm its protective stop."
+- Removed, because round 9 broke them: the mark that a look found the stop absent (`timedOutSeenAbsent`), and the hedged "may still be resting" alert.
+- The internal sale reason "no live protective stop" (a log field) is unchanged.
+
+**Step 2, item 2 points 3 and 1 (money-touching, Michael's decisions of 2026-11-13):**
+- **The allowance counted in requests.** `retrySpend` holds one time per request.
+  - Ordinary stuck retries still charge their flat 10 at once, so their behavior is identical.
+  - A try for an entry with a timed-out stop is charged per request as it makes them (`requestBudget` in `Liquidator.run`).
+    - Before each request (clock, positions, open orders, cancel, re-read, the sell gate's read and order, last look), the sale asks for room. Without room it ends at once and sends nothing more (`budgetOut`).
+    - The extra pages of a paged read are charged after the read.
+  - The 15 second limit's own lookups, the direct cancel and the second entry lookup are charged too.
+- **Each budgeted try is shaped to fit 15 in 5 seconds:**
+  - one round;
+  - a half-second wait for Alpaca's cancel;
+  - no entry lookup (it uses the copy from this sync's own list or lookup; these entries' bracket exits ended long ago);
+  - at most about 13 requests;
+  - it starts only when both windows have room for a whole try (`TIMED_OUT_TRY_REQUESTS` 13), and a try cut short is due again when room returns (no backoff step).
+- **While the timed-out stop is known open and our cancel was accepted, or it shows pending cancel, no sale is tried** (`timedOutWait`). Its status is checked instead:
+  - free from the sync's own list when the list shows it;
+  - otherwise one lookup by client id, charged: every 10 s with the live updates down (point 1), and every 30 s with them up (the live update that it ended runs the sale at once);
+  - if that lookup fails, Alpaca's open orders (1 request), and a stop not among them is taken as ended;
+  - a check that fails both ways backs off (doubling, at most 60 s), and meanwhile the sale's tries go on as before.
+  - While the stop is known open, its cancel is sent again on the backoff's steps (5, 10, 20, then 30 s).
+  - Known ended (the live update, a check, or the sync's list): noted, and the sale is tried at once.
+- **Reserve:** any other request leaves 10 of the minute's 40 free (`TIMED_OUT_SALE_RESERVE`) for the sale after a known end. The sync waits for the moment room returns (`retryRoomAt`), never a fixed second, because each extra sync is requests too.
+- **Point 1:** with the live updates down, an entry with a timed-out stop is on a backoff capped at 10 s, and its stop is checked every 10 s.
+
+**Measured** (simulator; group 1's round 4 and round 5 probes, and the night tests):
+- **Group 1's r4 probe** (75 a minute of routine traffic beside it, bucket starting at 120): no rate-limit answers in any row, no oversell, nothing left held.
+  - Visible route, 3 stops: worst minute 34 (cancel pending) and 55 (stop still working); before, 216, with 76 to 107 rate-limit answers.
+  - Hidden route, 3 stops: worst minute 46 and 56.
+  - 1 stop: 24 to 34.
+- **With three simultaneous timed-out stops**, the allowance spreads the sales: the last came up to 75 s after its cancel landed.
+- **The sale after the stop ends, live updates on** (the race test, 90 timings per route): within 1 s whenever the cancel was pending 6 s or more. Otherwise at most 5.5 s, because the allowance's 15 in 5 seconds is full for about 5 s after the try that sent the cancel. Before item 2 it was 250 ms.
+- **Live updates down:** the sale follows within the 10 s check and one try (pending 1.4 s: 10.1 s; 3 s: 8.5 s; 8.7 s: 2.8 s; 11 s: 0.5 s).
+- **Refused cancels, 3 stops, 5 minutes:** 18 cancels, most in a minute 104 requests in all (including the order syncs), no rate-limit answers.
+
+**Tests changed for the new timing** (none loosened on safety: oversell is still 0 and every share is still sold):
+- "found only later": syncs over up to 90 s instead of 6 s (the tries are spaced by the allowance).
+- Round 2 visible-route tests: the sale within 11 s of the cancel landing instead of 2 s (live updates down: the check every 10 s).
+- Round 3, 3 hidden stops: the second phase runs 240 s instead of 75 s (the stops share the allowance).
+- Round 4 note: no longer asserts the stuck backoff's delay (the waiting state does not use it). It asserts at most 10 tries in 3 minutes, tries at least 4 s apart, and at most 40 charged in the minute.
+- Round 5 race: within 1 s when the cancel was pending 6 s or more, otherwise within 6 s.
+- Round 7 re-read test: no longer requires the fault to fire (while the stop is known pending, no sale is tried, so the re-read rarely comes). Its alert checks are unchanged. Hits now: 0 shown, 31 hidden.
+- The item 6 structure test: matches the new `maxRounds` line.
+- Wording tests in 12 files: the new texts.
+
+**Found and fixed while building:**
+- A failed status check was forgotten and repeated at every sync (46 lookups in a minute, starving the sale; a rule 6 breach). It now keeps its schedule and backs off.
+- Tries cut short by the 5 second window spent requests without selling, until the minute ran out (a 52 s gap). Tries now start only with room for a whole try.
+
+Full suite 680 of 680 with the default on. Type check clean. Still to come in this build: item 2 point 2 (persistence and the start-up check), item 3 (the older loops) and item 4 (the 8:15 screen).
