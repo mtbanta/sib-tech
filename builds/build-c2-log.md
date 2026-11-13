@@ -4983,3 +4983,9 @@ Full suite 705 of 705. Type check clean.
 **Briefs:** name the ten `steps` keys and the new cleared event, and ask for "how many, the slowest, which step".
 
 Full suite 707 of 707. Type check clean.
+
+## Michael's change to the remainder rechecks (2026-11-13, evening), saved verbatim
+
+> Change: the remainder rechecks run at 0.5, 1, 2, then every 2 seconds (not 4), still for up to 30 seconds. They count against the stuck-retry request allowance, so many remainders at once can never exceed it. Do not change frozen commit e163089 while round 5 runs; make this change after round 5 reports, on top of its result, with its own review round. Update the expected-time table.
+
+Saved while round 5 runs on the frozen clone of e163089 (untouched). Built after round 5 reports.
