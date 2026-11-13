@@ -4936,3 +4936,50 @@ Full suite 700 of 700. Type check clean.
 **Briefs:** both name the new events and the morning line's refused count.
 
 Full suite 705 of 705. Type check clean.
+
+### Weekend build: round 4 (613c6c0) and fixes
+
+**Both groups, round 4: CHANGES REQUIRED, the same blocking finding.**
+- Item 1 started the remainder's sale while the order list still showed the stop pending cancel. The sell gate counts that stop, so the sale waited inside the sync, up to about 22.6 s, and every other entry and every timer sync waited behind it.
+- Measured by the reviewers:
+  - A second remainder at the same moment got its fresh stop 3 to 15.6 s late, instead of 0.5 to 1 s.
+  - Requests per lagging remainder roughly doubled to quadrupled.
+  - From about 21 s of lag, the outcome changed to a mention alert and a market sale, because the take-profit had already been cancelled.
+- Correction to the item 1 entry above: its "fresh stop at most 0.75 s after the list clears" held only for the lagging entry itself, and only up to about 22 s of lag. Its "705 of 705" was 704.
+- Group 1 also checked:
+  - its round 3 mutants M1 to M6 are now each caught;
+  - nothing ever went on top of a stop;
+  - no change without live reports (216 runs, B on and off);
+  - round 3's timing figures are unchanged.
+- Mutants M11, M15 and M18 survived.
+
+**Fix (money-touching, inside item 1's scope):**
+- While the list still shows the stop open, the sale is not started. The sync is run again at 0.5 s, then 1, 2, then every 4 s, for up to 30 s after the live report (rule 6: a limit and a backoff). The sale starts in the first sync after the list clears.
+- Nothing waits inside the sync, so no other entry waits. The take-profit stays in place until then, so no alert and no market sale come from the lag.
+- `cleanupSale` no longer uses the live report.
+- New stored event `stop_cancel_list_cleared`, with `msFromLiveCancel`: the list's real lag, which `stop_cancel_list_lag` alone could not give.
+- The worker's backup syncs (0.5, 1, 2 s) stay. A failed read there is logged.
+
+**Measured (simulator):**
+- **One remainder:**
+
+  | List lag | Fresh stop after the live report | Requests | Without the live report |
+  | --- | --- | --- | --- |
+  | 0.5 s | 1.0 s | 20 | 10.5 s, 20 requests |
+  | 2 s | 4.0 s | 24 | 10.5 s |
+  | 5 s | 8.0 s | 26 | 10.5 s |
+  | 11 s | 12.0 s | 28 | 20.5 s, 22 requests |
+  | 15 s | 16.0 s | 30 | 20.5 s |
+
+- **Two remainders**, the older one with its list lagging 2, 11 or 15 s: the other's fresh stop comes within 1 s, and the sync takes under 2 s.
+- **Expected time without a stop:** the list's lag plus at most one 4 s recheck, for lags up to 30 s. Past 30 s, the next regular sync. Before item 1 it was the next 10 s sync (11 to 16 s on 2026-11-13).
+
+**New tests:**
+- the lag logged once (catches M11);
+- a refused market sale still logs `sell_failed` (M15);
+- a partly filled stop is not a bare remainder, even with a live report (M18);
+- the two-remainder case.
+
+**Briefs:** name the ten `steps` keys and the new cleared event, and ask for "how many, the slowest, which step".
+
+Full suite 707 of 707. Type check clean.

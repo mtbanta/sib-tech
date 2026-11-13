@@ -1267,7 +1267,7 @@ test("item 3: a failed lookup's wait does not hold back an entry a live update h
 });
 
 // ---------------- Michael's item 1 of 2026-11-13 (afternoon): remainders noticed late while the list still shows the stop pending ----------------
-async function remainderRun(lagMs: number, live: boolean): Promise<{ msToStop: number | null; lagLogged: boolean; oversell: number }> {
+async function remainderRun(lagMs: number, live: boolean): Promise<{ msToStop: number | null; lagLogged: boolean; oversell: number; requests: number; lagEvents: number }> {
   const w = world();
   const dd = await day(w);
   const id = await hold(w, "LUNR", 5, 12, 1);
@@ -1276,24 +1276,24 @@ async function remainderRun(lagMs: number, live: boolean): Promise<{ msToStop: n
   const t0 = w.sim.simMs;
   w.sim.partialTakeProfitListLag(id, 1, 12.08, lagMs);
   if (live) w.memory.liveStopCancelled.set(id, t0); // what the worker's live-update hook records
-  // The worker: a sync at once (the live update), then the backup rechecks 0.5, 1 and 2 s later, then every 10 s.
-  const syncsAt = [0, 500, 1_500, 3_500, 13_500, 23_500, 33_500].map((x) => t0 + x);
-  for (const at of syncsAt) {
-    if (w.sim.simMs < at) w.sim.advanceTo(at);
-    if (w.sim.stopLog.length > 0) break;
-    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  // The worker: a sync at once (the live update), then the rechecks the sync asks for (or the 10 s sync).
+  while (w.sim.simMs < t0 + 40_000 && w.sim.stopLog.length === 0) {
+    const r = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    const next = r.recheckAt !== undefined ? Math.max(w.sim.simMs + 100, Math.min(r.recheckAt, w.sim.simMs + 10_000)) : w.sim.simMs + 10_000;
+    w.sim.advanceTo(next);
   }
   const placed = w.sim.stopLog[0];
-  return { msToStop: placed ? placed.at - t0 : null, lagLogged: w.events.some((e) => e.event === "stop_cancel_list_lag"), oversell: w.sim.oversellAttempts };
+  return { msToStop: placed ? placed.at - t0 : null, lagLogged: w.events.some((e) => e.event === "stop_cancel_list_lag"), oversell: w.sim.oversellAttempts, requests: w.sim.bucketTimes.filter((x) => x >= t0).length, lagEvents: w.events.filter((e) => e.event === "stop_cancel_list_lag").length };
 }
 
-test("Michael's item 1 of 2026-11-13 (afternoon): with the live update taken over a list that still shows the stop pending cancel, the remainder's fresh stop follows within about a second of the list clearing (before: the next 10 second sync)", async () => {
+test("Michael's item 1 of 2026-11-13 (afternoon): after a live report of a completed stop cancel, the sync rechecks quickly while the list still shows the stop open, and the remainder's fresh stop follows within about 2 seconds of the list clearing (before: the next 10 second sync)", async () => {
   const rows: string[] = [];
   for (const lag of [500, 2_000, 5_000, 11_000, 15_000]) {
     const before = await remainderRun(lag, false);
     const now = await remainderRun(lag, true);
-    rows.push(`list lag ${lag / 1000} s: fresh stop ${now.msToStop} ms after the live report (without the live report: ${before.msToStop} ms)`);
-    assert.ok(now.msToStop !== null && now.msToStop <= lag + 1_500, `lag ${lag}: ${now.msToStop} ms`);
+    rows.push(`list lag ${lag / 1000} s: fresh stop ${now.msToStop} ms after the live report, ${now.requests} requests (without the live report: ${before.msToStop} ms, ${before.requests} requests)`);
+    assert.equal(now.lagEvents, 1, "the lag is logged once, not at every recheck");
+    assert.ok(now.msToStop !== null && now.msToStop <= lag + 4_500, `lag ${lag}: ${now.msToStop} ms (the list's lag plus at most one 4 s recheck)`);
     assert.ok(now.lagLogged, "the list's lag is logged");
     assert.equal(now.oversell, 0);
     assert.equal(before.oversell, 0);
@@ -1358,4 +1358,46 @@ test("Michael's item 4 of 2026-11-13 (afternoon): a sync of 2 seconds or more lo
   assert.ok(slow, "logged");
   assert.ok(slow!.data.totalMs >= 3_000 && slow!.data.steps.orderListAndPositions >= 3_000, JSON.stringify(slow!.data));
   for (const k of ["store", "orderListAndPositions", "settleAwaiting", "olderLookups", "missingLookups", "alerts", "walk", "save"]) assert.ok(k in slow!.data.steps, k);
+});
+
+test("group 2, round 4 of the weekend build: a remainder whose list still shows its stop open never holds up the sync; another remainder at the same moment gets its fresh stop at once", async () => {
+  for (const lag of [2_000, 11_000, 15_000]) {
+    const w = world();
+    const dd = await day(w);
+    const lunr = await hold(w, "LUNR", 5, 12, 1); // the older entry, walked first
+    w.sim.advance(1_000);
+    const smci = await hold(w, "SMCI", 5, 30, 1);
+    w.sim.advance(5_000);
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    const t0 = w.sim.simMs;
+    w.sim.partialTakeProfitListLag(lunr, 1, 12.08, lag);
+    w.memory.liveStopCancelled.set(lunr, t0);
+    w.sim.partialTakeProfit(smci, 1, 30.08);
+    const r = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    const smciStop = w.sim.stopLog.find((x) => x.symbol === "SMCI");
+    assert.ok(smciStop && smciStop.at - t0 <= 1_000, `lag ${lag}: SMCI's fresh stop ${smciStop ? smciStop.at - t0 : "none"} ms`);
+    assert.ok(w.sim.simMs - t0 <= 2_000, `lag ${lag}: the sync took ${w.sim.simMs - t0} ms (it never waited on LUNR's list)`);
+    assert.ok(r.recheckAt !== undefined && r.recheckAt - w.sim.simMs <= 600, "a quick recheck for LUNR");
+    assert.ok(!w.sim.stopLog.some((x) => x.symbol === "LUNR"), "nothing placed for LUNR while its list shows the stop open");
+    assert.equal(w.sim.oversellAttempts, 0);
+  }
+});
+
+test("bareRemainder: a stop that filled part of the shares is not a bare remainder (the stop did its work), even with a live report", async () => {
+  const { bareRemainder } = await import("../src/risk.ts");
+  const o: any = { filledQty: 5, legs: [{ side: "sell", type: "limit", status: "partially_filled", filledQty: 1, stopPrice: null, legs: [] }, { side: "sell", type: "stop", status: "canceled", filledQty: 2, stopPrice: 9, legs: [] }] };
+  assert.equal(bareRemainder(o), null);
+  assert.equal(bareRemainder(o, 1_000), null);
+  o.legs[1].filledQty = 0;
+  assert.ok(bareRemainder(o));
+});
+
+test("item 2 of 2026-11-13 (afternoon): a refused market sale is still logged as sell_failed (only a fresh stop's refusal is logged once by the sale)", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "AAA", 5, 20, 1);
+  w.sim.cancelExitsAtFill(id); // both exits gone: a missing-exit sale at market
+  w.sim.refuseSellIf = (s: any) => s.stopPrice === undefined;
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.ok(w.events.some((e) => e.event === "sell_failed" && e.data.symbol === "AAA"), "a refused market sale is logged");
 });

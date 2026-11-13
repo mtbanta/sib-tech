@@ -68,6 +68,7 @@ export const STORED_INFO_EVENTS = new Set([
   "sync_slow",
   // Michael's item 1 of 2026-11-13 (afternoon): the order list still showing a stop open that the live update reported cancelled.
   "stop_cancel_list_lag",
+  "stop_cancel_list_cleared",
   // Item 4 of 2026-11-13: the morning screen's duration (now at 8:15 AM, 10 minutes before "Armed").
   "screen_done",
   // Group 2, round 1 (rare, part of the day's story): the afternoon window's failures and cancels.

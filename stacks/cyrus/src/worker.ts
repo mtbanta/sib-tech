@@ -1205,7 +1205,10 @@ export class Worker {
   // stop yet and is still open gets another sync, at most 3 more, 0.5, 1 and 2 seconds later, within 10 seconds of the report.
   private async stopCancelFollowUp(date: string): Promise<void> {
     if (this.stopCancelPending.size === 0) return;
-    const rows = await this.d.store.listOrders(date).catch(() => null);
+    const rows = await this.d.store.listOrders(date).catch((err) => {
+      this.d.log?.("warn", "stop_cancel_followup_read_failed", { error: (err as Error).message.slice(0, 120), pending: this.stopCancelPending.size });
+      return null;
+    });
     const now = this.d.now().getTime();
     let again: number | null = null;
     for (const [id, p] of [...this.stopCancelPending]) {
