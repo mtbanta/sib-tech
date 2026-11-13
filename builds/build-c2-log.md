@@ -5217,9 +5217,37 @@ The mutant "any sync marks the leftover" survives. It is equivalent: only the pa
 **What the traces show:**
 - The "above" cases are the sweep's own labelling: a live update at the same moment as the recheck's timer, so that one sync served both.
 - In the "below" cases with 4 requests, 2 come from labelling (a fresh stop's own follow-up timer counted as a recheck).
-- **The rest is a residual, and the fix does not remove it.** The pass runs the last recheck (the one that finds the list cleared) inside the timer's slack. That sync finds no lag, so it charges nothing new. The recheck's leftover timer then fires and runs one more sync, which nothing is left to charge. That is 2 to 3 requests, uncharged, at most once per lagging remainder, and only when the pass lands inside a 250 ms window (5 of 100 timings).
-- The duplicate sync itself is the worker's behaviour since release A: the pass never clears a pending timer. The same uncharged sync happened at ae09ea6.
+- **The rest is a residual, and the fix does not remove it** (corrected after group 2's round 8; the first wording named one case only). Whenever the 5 second pass starts a sync inside the recheck timer's 250 ms slack and that sync charges nothing new, the leftover timer then runs one more sync that nothing is left to charge: 2 to 3 requests, uncharged. Three cases:
+  - **the list cleared:** the pass's sync finds no lag (the sweep above: 5 of 100 timings);
+  - **past the 30 s window:** the pass's sync still sees the lag but is past the window (group 2, round 8: lag 45 s, 5 of 100 timings);
+  - **no room:** the pass's sync finds no room for the next charge. This case can take the minute past 40: group 2, round 8, in the real worker with 38 charges already in the minute, measured 38 + 2 + 2 = 42 real requests against 40.
+- **Limits of the measurement:** the sweep has one remainder, an allowance never short of room, and lags of 30 s or less. "At most once per lagging remainder" held in group 2's seven fill patterns (one remainder, 25 s lag, 100 timings each), but it is not shown in general.
+- The duplicate sync itself is the worker's behaviour since release A: the pass never clears a pending timer. Before `d978219` the same sync ran uncharged in these cases too (nothing had been charged for it to give back).
 - Charging it after the fact could not check for room before the requests run. Removing the duplicate (the pass clearing a timer for the recheck it runs) changes sync scheduling for every kind of recheck. Under Michael's rule of 2026-11-03 that needs his answer first, so it is a question for him, not built.
 
 Full suite 725 of 725 at `d978219`. Type check clean.
 With the real-pass test: full suite 726 of 726. Type check clean.
+
+### Weekend build: group 2, round 8 (c27346b): STOP AND FLAG MICHAEL
+
+Round 8 was the last allowed round, so any blocking finding stops the build for Michael. Nothing under checks 2, 7 or 10.
+
+**Blocking finding (the log's accuracy):** the "Before round 8" residual named only the list-cleared case. Group 2 measured two more:
+- **No room:** 42 real requests in the minute against the limit of 40, in the real worker with 38 earlier charges.
+- **Past the 30 s window:** 5 of 100 timings at a 45 s lag.
+
+The residual is corrected above. The correction itself has not been reviewed: no rounds are left.
+
+**What holds:**
+- the round 7 wording fixes;
+- the sweep table, which reproduces exactly, and the traces' explanation;
+- the new comments match the code, apart from the note below;
+- messages unchanged: none during a lag, one alert, one 5 minute alert and one resolution line per stuck position;
+- briefs, no dashes, rule 6, scope, no secrets.
+
+**Notes:**
+- The `leftoverTimerAt` comment is narrower than the code: any pending timer is marked, such as a lost-exits follow-up or a stuck sale's time. Keeping the charge for one of those over-charges by 2, which is safe.
+- The mark is not cleared when an earlier `syncAt` replaces the timer. That can only over-charge.
+- The sweep harness fires timers only on its clock steps (the counts are unaffected).
+
+**For group 1 and Michael:** the uncharged leftover sync can still go over the stuck-retry allowance, by 2 to 3 requests, when room runs out. Closing it, for example by the pass clearing the timer for the recheck it runs, changes sync scheduling and is Michael's call under his rule of 2026-11-03.
