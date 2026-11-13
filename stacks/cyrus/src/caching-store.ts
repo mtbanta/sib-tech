@@ -7,6 +7,7 @@
 // writes). A read that was already waiting on the database when a write happened never replaces what the write stored:
 // each key has a write counter, and a read may fill the memory only if the counter did not move while it waited. A
 // database that is down fails closed anyway: the gate writes each entry down before sending it.
+import { RetryBackoff } from "./retry-backoff.ts";
 import type { DayRecord, OrderRecord, RefusalRecord, Store } from "./store.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP } from "./store.ts";
 import { isMiddayKey } from "./midday.ts";
@@ -219,10 +220,15 @@ export class CachingStore implements Store {
   // Tries again every close that could not be written yet (called on every pass of the worker).
   // One run at a time (group 1 review note): a database that hangs cannot pile up a new waiting write on every pass.
   private retrying: Promise<void> | null = null;
+  // Item 3 of 2026-11-13 (Michael's retry rule): writes that keep failing are tried again after 2 seconds, doubling to 30, not every pass.
+  private readonly soonRetry = new RetryBackoff(2_000, 30_000);
   retrySoonWrites(): Promise<void> {
     if (this.retrying) return this.retrying;
+    if (this.soonPending.size === 0 || !this.soonRetry.due(this.now())) return Promise.resolve();
     this.retrying = (async () => {
       for (const id of [...this.soonPending.keys()]) await this.writeSoon(id);
+      if (this.soonPending.size > 0) this.soonRetry.failed(this.now());
+      else this.soonRetry.succeeded();
     })().finally(() => void (this.retrying = null));
     return this.retrying;
   }

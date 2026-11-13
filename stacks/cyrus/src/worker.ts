@@ -23,6 +23,7 @@ import type { Settings } from "./config.ts";
 import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
+import { RetryBackoff } from "./retry-backoff.ts";
 import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, noteTimedOutStopEnded, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import type { SelfMonitor } from "./self-monitor.ts";
 import { SCREEN_MINUTES_BEFORE_OPEN, AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
@@ -118,6 +119,10 @@ export function remainderAlert(sales: Array<{ symbol: string; shares: number }>)
 const FLUSH_EVERY_MS = 60_000;
 // Before the close the close-out is retried this often until the account is flat; after the close, every 5 minutes.
 const CLOSEOUT_RETRY_MS = 20_000;
+// Item 3 of 2026-11-13: the wait before the next try after `attempts` tries: `firstMs` after the first, doubling, at most `maxMs`.
+export function retryGapMs(firstMs: number, attempts: number, maxMs = 3 * firstMs): number {
+  return attempts <= 1 ? firstMs : Math.min(firstMs * 2 ** (attempts - 1), maxMs);
+}
 // The daily loss stop is checked every 5 seconds (Michael's ruling, 2026-11-03; it was 30, then 10). Passes run on a 5 second
 // tick, so the check runs on every tick; the 1 second allowance keeps a tick that fires a few milliseconds early from pushing it
 // to 10.
@@ -167,7 +172,24 @@ export class Worker {
   private notFlatAlertDate: string | null = null;
   private emergencyDate: string | null = null;
   private lastCloseoutAttempt = 0;
+  // Item 3 of 2026-11-13 (Michael's retry rule: a maximum number of tries or a maximum rate, always with a backoff): one backoff for each
+  // older retry that had none. Each wait starts small and doubles to its cap; a success resets it.
+  private readonly unsavedStopRetry = new RetryBackoff(5_000, 30_000);
+  private readonly notFlatSaveRetry = new RetryBackoff(5_000, 30_000);
+  private readonly migrateRetry = new RetryBackoff(5_000, 60_000);
+  private readonly carriedScanRetry = new RetryBackoff(5_000, 60_000); // the first retry on the next pass, as before
+  private readonly lapseRetry = new RetryBackoff(5_000, 60_000);
+  private readonly stopGapRetry = new RetryBackoff(5_000, 60_000);
+  private readonly limitsFlowRetry = new RetryBackoff(5_000, 60_000);
+  private readonly armRetry = new RetryBackoff(10_000, 60_000);
+  // Background steps that are retried when they fail (the screen, the daily summary): waits by step name.
+  private readonly stepRetry = new Map<string, RetryBackoff>([
+    ["screen", new RetryBackoff(5_000, 60_000)],
+    ["summary", new RetryBackoff(5_000, 5 * 60_000)],
+  ]);
   private lastCarriedAttempt = 0;
+  private carriedAttemptDate: string | null = null;
+  private carriedAttempts = 0;
   private lastArmAttempt = 0;
   private lastArmAlert = 0;
   // True while any close-out (regular, carried-over or emergency) is running, so two never overlap.
@@ -483,9 +505,13 @@ export class Worker {
   // Runs a long step in the background once; its finish is recorded in the database by the step itself.
   private background(name: string, fn: () => Promise<void>): void {
     if (this.inflight.has(name)) return;
+    const retry = this.stepRetry.get(name);
+    if (retry && !retry.due(this.d.now().getTime())) return;
     this.inflight.add(name);
     fn()
+      .then(() => retry?.succeeded())
       .catch((err) => {
+        retry?.failed(this.d.now().getTime());
         this.lastTickError = `${name}: ${(err as Error).message.slice(0, 150)}`;
         this.d.log?.("error", "background_failed", { name, error: (err as Error).message.slice(0, 200) });
         // At most one alert per step every 5 minutes (a database outage would otherwise post one every 30 seconds). The summary step,
@@ -579,16 +605,22 @@ export class Worker {
   private retryUnsavedStop(): void {
     const store = this.d.store;
     if (this.retryingStop || !store.hasUnsavedStop?.()) return;
+    if (!this.unsavedStopRetry.due(this.d.now().getTime())) return;
     this.retryingStop = true;
     void store
       .retryUnsavedStop!()
       .then((saved) => {
+        if (store.hasUnsavedStop?.()) this.unsavedStopRetry.failed(this.d.now().getTime());
+        else this.unsavedStopRetry.succeeded();
         if (saved) {
           this.d.log?.("info", "unsaved_stop_saved");
           void this.say("alerts", "The stop flag that could not be saved earlier is now saved in the database.").catch(() => undefined);
         }
       })
-      .catch((err) => this.d.log?.("warn", "unsaved_stop_retry_failed", { error: (err as Error).message.slice(0, 120) }))
+      .catch((err) => {
+        this.unsavedStopRetry.failed(this.d.now().getTime());
+        this.d.log?.("warn", "unsaved_stop_retry_failed", { error: (err as Error).message.slice(0, 120) });
+      })
       .finally(() => void (this.retryingStop = false));
   }
 
@@ -723,7 +755,16 @@ export class Worker {
     if (on) this.notFlatAlertDate = date;
     const state: NotFlatState = { on, since: this.d.now().toISOString(), remaining };
     this.notFlatSaved = false;
-    await this.d.store.setControl(CONTROL_NOT_FLAT, state).then(() => void (this.notFlatSaved = true)).catch((err) => this.d.log?.("warn", "not_flat_save_failed", { error: (err as Error).message.slice(0, 120) }));
+    await this.d.store
+      .setControl(CONTROL_NOT_FLAT, state)
+      .then(() => {
+        this.notFlatSaved = true;
+        this.notFlatSaveRetry.succeeded();
+      })
+      .catch((err) => {
+        this.notFlatSaveRetry.failed(this.d.now().getTime());
+        this.d.log?.("warn", "not_flat_save_failed", { error: (err as Error).message.slice(0, 120) });
+      });
   }
 
   // Runs on every pass, on any day. Loads the remembered state after a restart. Outside the session (before the
@@ -769,15 +810,15 @@ export class Worker {
     if (!this.notFlat) {
       await this.setNotFlat(true, held, date);
       await this.say("alerts", `**Michael: positions are held outside the session (${held.join(", ")}) and nothing had flagged it.** Flagged as not flat: no entries until the account is flat, and I will sell at the next open. You can also close by hand in Alpaca.`, { mentionOwner: true });
-    } else if (!this.notFlatSaved) {
-      await this.setNotFlat(true, held, date); // the earlier save failed (database down): save it again
+    } else if (!this.notFlatSaved && this.notFlatSaveRetry.due(now.getTime())) {
+      await this.setNotFlat(true, held, date); // the earlier save failed (database down): save it again, on the backoff
     }
   }
 
   // In-session check, every 30 seconds while nothing is flagged: any held symbol with no stored order from today
   // (every entry is written down by the gate before it is sent, so a legitimate position always has one) is carried.
   private async scanForCarried(today: DayRecord, now: Date): Promise<void> {
-    if (now.getTime() - this.lastCarriedScan < 30_000) return;
+    if (now.getTime() - this.lastCarriedScan < 30_000 || !this.carriedScanRetry.due(now.getTime())) return;
     try {
       const held = (await this.view.freshPositions(10_000)).map((p) => p.symbol);
       let carried: string[] = [];
@@ -785,12 +826,14 @@ export class Worker {
         const known = new Set((await this.d.store.listOrders(today.tradeDate)).map((o) => o.symbol));
         carried = held.filter((sym) => !known.has(sym));
       }
-      this.lastCarriedScan = now.getTime(); // only a scan that finished counts; a failed one is retried on the next pass
+      this.lastCarriedScan = now.getTime(); // only a scan that finished counts; a failed one is retried on the backoff (5 s doubling to 60)
+      this.carriedScanRetry.succeeded();
       if (carried.length === 0) return;
       await this.setNotFlat(true, carried, etDate(now));
       await this.say("alerts", `**Michael: positions are held that this worker did not enter today (${carried.join(", ")}).** Treated as carried over: no entries until the account is flat, and I am selling everything now (nothing here has a protective stop from today).`, { mentionOwner: true });
     } catch (err) {
       this.lastTickError = `carried-position scan: ${(err as Error).message.slice(0, 120)}`;
+      this.carriedScanRetry.failed(now.getTime());
       this.d.log?.("error", "carried_scan_failed", { error: (err as Error).message.slice(0, 200) });
       if (now.getTime() - this.lastScanAlert >= 5 * 60_000) {
         this.lastScanAlert = now.getTime();
@@ -803,7 +846,7 @@ export class Worker {
     const now = this.d.now();
     // A stop that could not be saved is retried on every pass, at any hour (it carries over to later days until `resume`).
     this.retryUnsavedStop();
-    if (!this.migrated) {
+    if (!this.migrated && this.migrateRetry.due(now.getTime())) {
       // Once per start, before any command is read: a future day saved by an older release (before build C2) is put in the
       // new shape and its old request is forgotten, so an old reply cannot count and the request is posted again. If the
       // database cannot do it now, commands and the limits flow wait for it (an old reply must not count), and so do live
@@ -814,6 +857,7 @@ export class Worker {
         if (reset.length > 0) this.d.log?.("info", "future_days_reset", { days: reset });
       } catch (err) {
         this.lastTickError = `start-up check of future days: ${(err as Error).message.slice(0, 120)}`;
+        this.migrateRetry.failed(now.getTime());
         this.d.log?.("error", "future_days_reset_failed", { error: (err as Error).message.slice(0, 200) });
         this.passDegraded = true;
         if (now.getTime() - this.lastMigrateAlert >= 10 * 60_000) {
@@ -886,8 +930,12 @@ export class Worker {
     // A failure here (the calendar, Discord) must not skip the order sync, the loss stop or the close-out below.
     let current: DayRecord = today;
     try {
-      if (this.migrated) current = await this.limitsFlow(now, date, today, steps);
+      if (this.migrated && this.limitsFlowRetry.due(now.getTime())) {
+        current = await this.limitsFlow(now, date, today, steps);
+        this.limitsFlowRetry.succeeded();
+      }
     } catch (err) {
+      this.limitsFlowRetry.failed(now.getTime());
       this.lastTickError = `limits flow: ${(err as Error).message.slice(0, 120)}`;
       this.d.log?.("error", "limits_flow_failed", { error: (err as Error).message.slice(0, 200) });
       if (now.getTime() - this.lastFlowAlert >= 10 * 60_000) {
@@ -904,11 +952,13 @@ export class Worker {
     if (at(-SCREEN_MINUTES_BEFORE_OPEN) && now < day.closeAt && alivePending && !current.phases.screen) this.background("screen", () => this.screenPhase(date, isLoadDay(current)));
 
     // Arming: set long only and the approved cap at Alpaca. Until it works the gate refuses every entry.
-    if (at(-5) && now < day.closeAt && current.status === "approved" && !current.phases.armed && now.getTime() - this.lastArmAttempt >= 10_000) {
+    if (at(-5) && now < day.closeAt && current.status === "approved" && !current.phases.armed && now.getTime() - this.lastArmAttempt >= 10_000 && this.armRetry.due(now.getTime())) {
       this.lastArmAttempt = now.getTime();
       try {
         current = await armDay(steps, current);
+        this.armRetry.succeeded();
       } catch (err) {
+        this.armRetry.failed(now.getTime());
         this.lastTickError = `arming: ${(err as Error).message.slice(0, 120)}`;
         if (now.getTime() - this.lastArmAlert >= 5 * 60_000) {
           this.lastArmAlert = now.getTime();
@@ -916,11 +966,13 @@ export class Worker {
         }
       }
     }
-    if (at(0)) {
+    if (at(0) && this.lapseRetry.due(now.getTime())) {
       try {
         current = await lapseIfUndecided(steps, current);
+        this.lapseRetry.succeeded();
       } catch (err) {
-        this.lastTickError = `lapse: ${(err as Error).message.slice(0, 120)}`; // retried on the next pass; an undecided day never trades
+        this.lapseRetry.failed(now.getTime());
+        this.lastTickError = `lapse: ${(err as Error).message.slice(0, 120)}`; // retried on the backoff; an undecided day never trades
       }
     }
     if (current.tradeDate === date) this.lastDay = current;
@@ -983,15 +1035,22 @@ export class Worker {
     // Release A, fix 3: only before the day's close-out time, and never once that day's close-out has started; from then on the
     // close-out and its retry alone sell (on 2026-11-04 both ran and each posted "Close-out done").
     const closeoutStarted = this.closeoutAttemptDate === date || Boolean(current.phases.closeout);
-    if (this.notFlat && now >= day.openAt && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !closeoutStarted && !this.closingOut && now.getTime() - this.lastCarriedAttempt >= 5 * 60_000) {
+    // Item 3 of 2026-11-13: tried again after 5 minutes, then 10, 20, at most every 30 (counted per day).
+    if (this.carriedAttemptDate !== date) {
+      this.carriedAttemptDate = date;
+      this.carriedAttempts = 0;
+    }
+    const carriedGapMs = Math.min(5 * 60_000 * 2 ** Math.max(0, this.carriedAttempts - 1), 30 * 60_000);
+    if (this.notFlat && now >= day.openAt && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !closeoutStarted && !this.closingOut && now.getTime() - this.lastCarriedAttempt >= carriedGapMs) {
       this.lastCarriedAttempt = now.getTime();
+      this.carriedAttempts++;
       this.background("carried", () => this.carriedPhase(date));
     }
 
     // The mid-day cycle (Michael, 2026-11-09): at 10:30 AM Central the pause goes on and the mid-day close-out sells everything, retried
     // every 20 seconds until flat, never from the regular close-out time on (that close-out takes over). Its own phase, never `closeout`.
     const mt = this.d.middayCycle === false ? null : middayTimes(current);
-    if (inSession && mt && current.phases.armed && now >= mt.pauseAt && !current.phases[MIDDAY_PHASE] && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !this.closingOut && !this.inflight.has("carried") && !this.inflight.has("midday") && now.getTime() - this.lastMiddayAttempt >= MIDDAY_RETRY_MS) {
+    if (inSession && mt && current.phases.armed && now >= mt.pauseAt && !current.phases[MIDDAY_PHASE] && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !this.closingOut && !this.inflight.has("carried") && !this.inflight.has("midday") && now.getTime() - this.lastMiddayAttempt >= retryGapMs(MIDDAY_RETRY_MS, this.middayAttemptDate === date ? this.middayAttempts : 0)) {
       if (this.middayAttemptDate !== date) {
         this.middayAttemptDate = date;
         this.middayAttempts = 0;
@@ -1013,7 +1072,7 @@ export class Worker {
     // The close-out after the afternoon load window (Michael, 2026-11-12): when the window's 30 minutes are up (or the last entry comes
     // first), entries pause again and the mid-day close-out code sells everything, retried every 20 seconds within the same 60 requests
     // a minute and above the reserve, until flat. Never from the regular close-out time on (that close-out takes over). Its own phase.
-    if (afternoonCloseoutDue && !this.closingOut && !this.inflight.has("carried") && !this.inflight.has("midday") && now.getTime() - this.lastAfternoonAttempt >= MIDDAY_RETRY_MS) {
+    if (afternoonCloseoutDue && !this.closingOut && !this.inflight.has("carried") && !this.inflight.has("midday") && now.getTime() - this.lastAfternoonAttempt >= retryGapMs(MIDDAY_RETRY_MS, this.afternoonAttemptDate === date ? this.afternoonAttempts : 0)) {
       if (this.afternoonAttemptDate !== date) {
         this.afternoonAttemptDate = date;
         this.afternoonAttempts = 0;
@@ -1047,8 +1106,11 @@ export class Worker {
     // Close-out runs until the account is flat: a failed attempt is retried every 5 minutes for 30 minutes
     // past the close (after the close it only reports, it sends nothing), and the heartbeat says "fail" for as
     // long as positions remain.
-    const retryMs = now < day.closeAt ? CLOSEOUT_RETRY_MS : 5 * 60_000;
-    if (now >= addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !current.phases.closeout && !this.closingOut && now.getTime() - this.lastCloseoutAttempt >= retryMs) {
+    // Item 3 of 2026-11-13: before the close the retries come 20 s apart, then 40, then every 60; after the close (it only reports then)
+    // 5 minutes apart, then 10, at most 15; and none from an hour after the close (the last try at 30 minutes writes the phase).
+    const attemptsToday = this.closeoutAttemptDate === date ? this.closeoutAttempts : 0;
+    const retryMs = now < day.closeAt ? retryGapMs(CLOSEOUT_RETRY_MS, attemptsToday, 60_000) : retryGapMs(5 * 60_000, Math.max(1, attemptsToday), 15 * 60_000);
+    if (now >= addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && now < addMinutes(day.closeAt, 60) && !current.phases.closeout && !this.closingOut && now.getTime() - this.lastCloseoutAttempt >= retryMs) {
       this.lastCloseoutAttempt = now.getTime();
       if (this.closeoutAttemptDate !== date) {
         this.closeoutAttemptDate = date;
@@ -1142,11 +1204,14 @@ export class Worker {
   // Decision 3's measurement: loads the day's saved totals once, settles the sales whose 5 seconds are over, and saves the totals.
   private async stopGapStep(date: string, now: Date): Promise<void> {
     if (this.stopGapDate !== date) {
+      if (!this.stopGapRetry.due(now.getTime())) return;
       let saved: StopGapDay | null;
       try {
         saved = await this.d.store.getControl<StopGapDay>(stopGapKey(date));
+        this.stopGapRetry.succeeded();
       } catch {
-        return; // tried again on the next pass
+        this.stopGapRetry.failed(now.getTime());
+        return; // tried again on the backoff
       }
       this.stopGap.startDay(date, saved);
       this.stopGapDate = date;

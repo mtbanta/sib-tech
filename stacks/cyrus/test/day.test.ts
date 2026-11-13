@@ -198,9 +198,11 @@ test("a close-out that cannot get flat is retried, is not recorded as done, tell
   assert.ok(r.broker.count("submitSell") > attempts, "tries again");
   assert.equal(r.said("alerts").filter((t) => t.includes("NOT FLAT")).length, 1, "reported once, not every try");
   works = true;
-  await r.at("20:56:00"); // the retry goes through (the broker still says open)
+  await r.at("20:56:00");
+  assert.equal((await r.store.getDay(D))!.phases.closeout, undefined, "item 3 of 2026-11-13: the third try waits 40 seconds after the second");
+  await r.at("20:56:10"); // the retry goes through (the broker still says open)
   assert.ok((await r.store.getDay(D))!.phases.closeout, "recorded once flat");
-  await r.at("20:56:10");
+  await r.at("20:56:20");
   assert.notEqual(r.pings.at(-1), "fail");
 });
 

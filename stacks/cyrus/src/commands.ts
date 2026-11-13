@@ -177,6 +177,11 @@ export function limitsListFor(day: DayRecord, mode: "edit" | "tighten"): string 
   return [`**${dayWord(day.tradeDate)}** (${day.status}):`, limitLines(day), closing].filter(Boolean).join("\n");
 }
 
+// Discord message ids are increasing numbers (snowflakes); true when `a` is later than `b`.
+function laterId(a: string, b: string): boolean {
+  return a.length !== b.length ? a.length > b.length : a > b;
+}
+
 export class CommandProcessor {
   private readonly d: CommandDeps;
   constructor(deps: CommandDeps) {
@@ -207,8 +212,13 @@ export class CommandProcessor {
   // How many messages the last command read returned (the worker treats a read of Discord's maximum, 50, as possibly incomplete).
   lastReadCount = 0;
 
+  // Item 3 of 2026-11-13 (Michael's retry rule): the last message this process handled. If writing the cursor fails, the next read starts
+  // after this one, so no command is run again on every pass (the read itself stays every pass: a `stop` must never wait).
+  private handledUpTo: string | null = null;
+
   async poll(): Promise<number> {
-    const cursor = await this.d.store.getControl<{ id: string }>(CONTROL_COMMAND_CURSOR);
+    const stored = await this.d.store.getControl<{ id: string }>(CONTROL_COMMAND_CURSOR);
+    const cursor = stored && this.handledUpTo !== null && laterId(this.handledUpTo, stored.id) ? { id: this.handledUpTo } : stored;
     if (!cursor) {
       // First run: start after whatever is already there, never act on history.
       const latest = await this.d.bot.latestCommandMessageId();
@@ -228,6 +238,7 @@ export class CommandProcessor {
           await this.say("That command failed. Nothing may have changed, so check `status`.");
         }
       }
+      this.handledUpTo = m.id;
       await this.d.store.setControl(CONTROL_COMMAND_CURSOR, { id: m.id });
     }
     return handled;

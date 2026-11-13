@@ -679,7 +679,8 @@ test("Michael's ruling on a mid-day close-out that cannot get flat: 40 positions
   assert.ok(!w.events.some((e) => e.e === "unprotected_position"), "the order sync's missing-exit check stood aside while the mid-day close-out owned the selling");
   // Alpaca accepts sales again
   sim.refuseSellsTimes = 0;
-  for (let k = 0; k < 40 && !(await r.store.getDay(D))!.phases[MIDDAY_PHASE]; k++) {
+  // Item 3 of 2026-11-13: the retries come 20, 40, then 60 seconds apart (each sells at most 10 of the 40), so up to about 400 s.
+  for (let k = 0; k < 80 && !(await r.store.getDay(D))!.phases[MIDDAY_PHASE]; k++) {
     t += 5000;
     await r.at(new Date(t).toISOString());
     await until(() => !midday(), 2000);
