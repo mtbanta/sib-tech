@@ -1551,36 +1551,6 @@ test("Michael's change of 2026-11-13 (evening): a charged recheck needs room in 
   assert.ok(w.memory.retrySpend.length > 15, "and it is charged");
 });
 
-test("Michael's change of 2026-11-13 (evening): the quick rechecks give way to a stuck sale; the sale's retries are not held up by a lagging remainder", async () => {
-  async function run(withLag: boolean) {
-    const w = world();
-    const dd = await day(w);
-    const aaa = await hold(w, "AAA", 5, 20, 1);
-    const lunr = await hold(w, "LUNR", 5, 12, 1);
-    w.sim.advance(5_000);
-    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
-    const t0 = w.sim.simMs;
-    let sells = 0;
-    w.sim.cancelExitsAtFill(aaa); // both exits gone: AAA must be sold
-    w.sim.refuseSellIf = (s: any) => s.symbol === "AAA" && s.stopPrice === undefined && (sells++, true);
-    if (withLag) {
-      w.sim.partialTakeProfitListLag(lunr, 1, 12.08, 25_000);
-      w.memory.liveStopCancelled.set(lunr, t0);
-    }
-    while (w.sim.simMs < t0 + 30_000) {
-      const r = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
-      const next = r.recheckAt !== undefined ? Math.max(w.sim.simMs + 100, Math.min(r.recheckAt, w.sim.simMs + 10_000)) : w.sim.simMs + 10_000;
-      w.sim.advanceTo(next);
-    }
-    return { sells, yielded: w.events.some((e) => e.event === "timed_out_try_out_of_room" && e.data.yieldedToSale) };
-  }
-  const alone = await run(false);
-  const both = await run(true);
-  assert.ok(alone.sells >= 3, `AAA's sale tries alone: ${alone.sells}`);
-  assert.ok(both.sells >= alone.sells, `AAA's sale tries with a lagging remainder: ${both.sells} (alone ${alone.sells})`);
-  console.log(`MEASURE stuck sale tries in 30 s: alone ${alone.sells}, with a lagging remainder ${both.sells} (rechecks yielded: ${both.yielded})`);
-});
-
 test("Michael's change of 2026-11-13 (evening): the worker's backup syncs stand aside for an entry the sync is rechecking (those rechecks are charged)", async () => {
   const { rig } = await import("./rig.ts");
   const r = rig({ orderStream: true });

@@ -5027,7 +5027,6 @@ Full suite 709 of 709. Type check clean.
 - The quick rechecks run 0.5 s, then 1 s, then every 2 s apart (`LIVE_LAG_RECHECK_MAX_MS` 2000; it was 4000), still only for up to 30 s after the live report (`LIVE_LAG_WATCH_MS`).
 - One recheck sync serves every remainder whose list still lags. It is charged once to the stuck-retry allowance, at its real cost: the order list's pages and the positions as the sync read them, plus one lookup per lagging entry older than the list's 10 minute window. The charge is made when the recheck is scheduled, before it runs.
 - With no room in the allowance (40 a minute, 15 in any 5 seconds), no quick recheck is scheduled: the regular sync (every 10 s, or sooner on a live update) comes next, and the next sync that still sees the lag asks again. This is logged as `timed_out_try_out_of_room` with stage "list lag recheck". So many remainders at once can never take the allowance past its limits.
-- **Builder's choice, for Michael to confirm:** a sale waits first. While a stuck entry or a timed-out fresh stop is being retried, a recheck is charged only if the allowance still has room for one such try after it. Without this, rechecks every 2 s (about 2 requests each) would hold the 5 second allowance under the 10 a stuck retry needs, for the whole 30 s window. Logged with `yieldedToSale`.
 - The worker's backup syncs (0.5, 1 and 2 s after a live report) stand aside for an entry the sync is already rechecking, so they never add uncharged syncs for it.
 
 **Bounds (the standing design rule):** a quick recheck is limited by the 30 s window and by the allowance (each charged before it runs). Its backoff is 0.5, 1, then 2 s.
@@ -5046,7 +5045,6 @@ That is the list's lag plus at most one 2 s recheck, for lags up to 30 s, while 
 
 **Other measurements (simulator):**
 - 8 remainders lagging 25 to 32 s at once: the allowance peaked at 32 a minute and 8 in 5 s, across 18 syncs. Every remainder got its fresh stop.
-- A stuck sale retried for 30 s: 6 tries alone, and 6 with a lagging remainder beside it (the rechecks gave way).
 
 **New tests (each fails on its mutant):**
 - gaps 500, 1000, 2000, 2000, 2000, 2000 (mutant: maximum 4 s);
@@ -5055,7 +5053,6 @@ That is the list's lag plus at most one 2 s recheck, for lags up to 30 s, while 
 - `bareRemainder` is null for a stop still open with no live report, for four open statuses (mutant M12);
 - many remainders never take the allowance past its limits, and the rechecks are charged (mutant: no charge);
 - no room means no quick recheck, and nothing charged (mutant: a recheck without room);
-- rechecks give way to a stuck sale (mutant: no yield);
 - a recheck costs 2 requests for a recent entry and 3 for an older one (mutant: the lookup not costed);
 - the backup syncs stand aside (mutant: no standing aside).
 
@@ -5064,3 +5061,22 @@ The item 1 test's bound is tightened from the lag plus 4.5 s to the lag plus 2.5
 **Briefs:** the expected time, the allowance's rise while a list lags, and "list lag recheck" out-of-room events to report.
 
 Full suite 718 of 718. Type check clean.
+
+### A rule taken out before review, and a question for Michael (2026-11-13, night)
+
+Commit `5c0d0d1` also had the rechecks give way to a stuck sale: while a stuck entry or a timed-out fresh stop was being retried, a recheck was charged only if the allowance still had room for one such try after it. Michael did not ask for that, and his rule of 2026-11-03 says to ask before any change to money-touching code beyond his request. So it was taken out before review (patch kept outside the repo), and the question goes to him.
+
+**Measured in the simulator** (one stuck sale being refused by Alpaca, one lagging remainder, over 40 s):
+
+| List lag | Without the rule: fresh stop, stuck sale tries | With the rule: fresh stop, stuck sale tries |
+| --- | --- | --- |
+| 2 s | 4.0 s, 6 | 4.5 s, 6 |
+| 5 s | 6.0 s, 6 | 17.5 s, 6 |
+| 15 s | 16.0 s, 3 | 17.5 s, 6 |
+| 25 s | 25.5 s, 0 | 27.5 s, 6 |
+
+Without the rule, the rechecks can take the room a stuck sale's retries need: at a 25 s lag, the stuck sale got no retry for 40 s. With it, the remainder waits for the regular sync (up to about 12 s longer). With no stuck sale, both are the same.
+
+Without the rule (as built now): every quick recheck is charged before it runs; with no room, the regular sync comes next.
+
+Full suite 717 of 717 (the rule's one test went with it). Type check clean.

@@ -892,19 +892,14 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     // positions (as this sync read them), plus the lookups of lagging entries older than the list's window. Every quick recheck is charged
     // before it runs, so many remainders at once can never exceed the allowance. With no room, no quick recheck is scheduled: the regular
     // sync (every 10 seconds, or sooner on a live update) comes next, and the next sync that still sees the list lag asks again.
-    // A sale waits first: while a stuck entry or a timed-out fresh stop is being retried, a recheck is charged only if the allowance still
-    // has room for one such try after it (TIMED_OUT_TRY_REQUESTS in 5 seconds, that plus TIMED_OUT_SALE_RESERVE in the minute), so the
-    // rechecks never hold up a sale of shares without a stop.
     const cost = Math.max(1, listed.pages) + 1 + lagLookups;
     const t = d.now().getTime();
-    const saleWaiting = mem.stuck.size > 0 || mem.timedOutStops.size > 0;
-    const leaves = !saleWaiting || retryRoomAt(mem, t, cost + TIMED_OUT_TRY_REQUESTS + TIMED_OUT_SALE_RESERVE, cost + TIMED_OUT_TRY_REQUESTS) <= t;
-    const room = leaves ? retryRoomFor(mem, t, cost, true) : ({ ok: false, at: t } as const);
+    const room = retryRoomFor(mem, t, cost, true);
     if (room.ok) {
       const due = t + lagRecheckGap;
       recheckAt = recheckAt === undefined ? due : Math.min(recheckAt, due);
     } else {
-      d.log?.("timed_out_try_out_of_room", { stage: "list lag recheck", cost, ...(leaves ? { roomInMs: room.at - t } : { yieldedToSale: true }), next: "regular sync" });
+      d.log?.("timed_out_try_out_of_room", { stage: "list lag recheck", cost, roomInMs: room.at - t, next: "regular sync" });
     }
   }
   mark("walk");
