@@ -4494,3 +4494,115 @@ The weekend build runs on branch `release-weekend-2026-11-16`, from `release-202
 - Tries cut short by the 5 second window spent requests without selling, until the minute ran out (a 52 s gap). Tries now start only with room for a whole try.
 
 Full suite 680 of 680 with the default on. Type check clean. Still to come in this build: item 2 point 2 (persistence and the start-up check), item 3 (the older loops) and item 4 (the 8:15 screen).
+
+### Weekend build: round 1 reviews, fixes, and steps 3 to 5 (items 2 point 2, 3 and 4)
+
+**Round 1 (131aea4).**
+- **Group 2: CHANGES REQUIRED.**
+  - (1) The sale reason "no live protective stop" reached Discord in the sell gate's refusal alert, with a mention: "refused a sell of 4 RKLB (no live protective stop) ...". It came in 47 of 161 runs with a race injected.
+  - (2) Four new events were not stored.
+  - (3) Test guards searched for texts the code can no longer post.
+  - Otherwise the step 1 wording was true in 3,000 random-fault runs.
+- **Group 1: CHANGES REQUIRED.** With B off, the code was identical to v21 (216 runs, 79,727 broker calls), and ordinary retries were unchanged.
+  - (1) A cancel re-send with no room made the sync run every half second (33 syncs a minute).
+  - (2) The sale after a known end skipped the room check, and a try cut short retried at once.
+  - (3) The Alpaca client's own retries were not charged to the allowance (a failed status check was 6 HTTP requests charged as 2).
+  - (4) Under faults, protection gaps were longer than on 3681f9c, because refused-cancel stops got full sale tries.
+
+**Findings ledger** (Michael's decision 3: stop and ask if the same finding returns after two fixes). The false "no protective stop" claim, since decision 2's root wording: 1 recurrence, the gate's refusal reason in group 2's round 1, fixed. The fix counter for this finding stands at 1.
+
+**Fixes:**
+- **Group 2:**
+  - The sale reason is now "protective stop not confirmed".
+  - The new events are stored, along with the start-up check's events.
+  - Any retired wording posted in the night tests fails the test at once, the sell gate's included.
+  - Wording: "At my last check", "Alpaca told me it does not hold that stop open", and "protect or sell" on the A4 path.
+- **Group 1, money-touching, within item 2:**
+  - (1) A re-send without room waits for the allowance's room.
+  - (2) An entry with a timed-out stop needs room for a whole try even when due at once, and a try cut short wins over "ended during the try".
+  - (3) `src/request-scope.ts`: inside a timed-out stop's work (its sale, lookups, cancel, status checks), the Alpaca client asks the allowance before each of its own retries and stops retrying without room. It uses Node's AsyncLocalStorage, which follows that call's awaits only. Outside that scope the client is unchanged (tested: 3 tries outside, 2 inside with room for one, a cancel with no room tries once).
+  - (4) A stop known open, whether its cancel was refused, accepted or pending, gets status checks and its cancel sent again on the backoff, 1 request each, never full sale tries. A failed check waits on its backoff instead of starting a full try. The first cancel goes at once.
+  - The alert's reason is kept current from each check, and a stop the sync's list shows ended is noted before the 5 minute alerts run.
+
+**Step 3, item 2 point 2 (money-touching):**
+- The timed-out stops are written to the database, control key `timed_out_stops:<date>`, no schema change. A failed write is retried at 5 s, doubling to 60.
+- At start-up (first sync, ruling B on):
+  - the stored stops are loaded and Alpaca's open orders are read;
+  - for each symbol held by one open entry, a fresh stop shown working and covering the holding is confirmed;
+  - one shown pending cancel takes the B path;
+  - a working stop covering part of the holding is left alone.
+- A failed check is retried at 5 s, doubling to 60.
+- With B on, a fresh stop pending cancel never counts as protection.
+- Tests: the write and its backoff; a restart loading a stored stop (never re-adopted, then sold); confirmed, pending cancel, two entries, and a failing check.
+- Group 1's r5 restart probe: worst minute 29 to 51 requests (before: 97 to 126), every share sold, no rate-limit answers.
+
+**Step 4, item 4:**
+- The morning screen runs at 8:15 AM Central (`SCREEN_MINUTES_BEFORE_OPEN` 15), and `load on` is accepted until then. Armed is unchanged at 8:25.
+- `screen_done` is stored with its duration. Help, briefs and tests are updated.
+- **Does the screen reliably finish in 10 minutes?**
+  - Measured from the day records, 11 mornings since 2026-11-02: 0.6 to 2.7 minutes. Load days took 1.0 to 2.7.
+  - Worst case from the code: the universe fetch (30 s timeout), daily bars in chunks of 400 symbols (60 s per request, now at most 50 pages), and up to 45 tradable checks (10 s each, 3 tries). If every request timed out it could exceed 10 minutes, so this is a bound on paper, not a measurement.
+  - It fails safe: the price feed starts only once the list exists, so a late screen delays trading and never trades without a list. Arming does not wait for the screen, so moving "Armed" to 8:28 would not change this.
+  - Builder's recommendation: keep "Armed" at 8:25, and watch `screen_done` each morning (the daily brief flags any screen over 5 minutes).
+
+**Step 5, item 3, the older loops (Michael confirmed: a maximum number of tries or a maximum rate, always with a backoff).** Bound per loop:
+
+| Loop | Before | Now |
+| --- | --- | --- |
+| Unsaved stop flag | every pass | 5 s doubling to 30 |
+| Not-flat save | every pass | 5 s doubling to 30 |
+| Future-days check | every pass | 5 s doubling to 60 |
+| Carried-position scan failure | every pass | 5 s doubling to 60 (the first on the next pass, as before) |
+| Lapse check | every pass | 5 s doubling to 60 |
+| Stop-gap read | every pass | 5 s doubling to 60 |
+| Limits flow, including the morning posts and the limits request | every pass | 5 s doubling to 60 |
+| Arming | every 10 s | 10 s doubling to 60 |
+| Screen | every pass | 5 s doubling to 60 |
+| Daily summary | every pass | 5 s doubling to 5 minutes |
+| Carried-position sale | every 5 minutes | 5, 10, 20, then every 30 minutes |
+| Mid-day and afternoon close-out retries | every 20 s (within 60 a minute) | 20, 40, then 60 s (within 60 a minute) |
+| Regular close-out, before the close | every 20 s | 20, 40, then 60 s |
+| Regular close-out, after the close | every 5 minutes, no end | 5, 10, then 15 minutes, none from an hour after the close |
+| Background closes to the database | every pass | 2 s doubling to 30 |
+| Command cursor write failing | the same commands replayed every pass | the poller remembers the last message it handled, so nothing is run twice (the read itself stays every pass: a `stop` must never wait) |
+| Ordinary stuck sale held by visible open orders | every sync, uncharged | 10, 20, then every 30 s, charged to the allowance, on its own wait so the hidden-hold backoff of 2026-11-09 is unchanged |
+| Loss stop's retry after a check whose sales were all refused | the next check (5 s) | 5 s doubling to 30 (unchanged after a rate limit: 10 doubling to 60) |
+| Lookup of an entry missing from the listing | the next sync | 10 s doubling to 60 |
+| Price and order stream reconnects | reset to 2 s on every subscribe | grow to 30 s, reset only after a minute connected |
+| Daily bars paging | no cap | at most 50 pages a chunk |
+
+Left as they are, each bounded:
+- the sync's 250 ms put-off timer makes no requests and lasts only while a sync runs;
+- fixed-interval jobs (the 5 s pass, the 10 s sync, the loss stop's 5 s check) are not retries;
+- the unclear fresh stop's 5 s lookups end at the 15 s limit.
+
+**Measured, group 1's rate probe** (480 runs: 1 or 3 stops, shown or hidden, live updates on or off, 4 cancel modes, 0, 10 or 30 percent random faults on every call; simulator):
+
+| | 3681f9c (Friday) | Now |
+| --- | --- | --- |
+| Most requests in any minute | 258 (over Alpaca's 200) | 67 |
+| Oversell, sale on top of a stop | 0, 0 | 0, 0 |
+| No faults, 1 stop: gap from the stop's end to its sale, median / worst | 1.5 / 29.8 s | 4.1 / 9.8 s |
+| No faults, 3 stops: median / worst | 0.05 / 51.9 s | 10.3 / 60.1 s |
+| 10 % faults, 1 stop: median / worst | 10 / 60 s | 15 / 176 s |
+| 10 % faults, 3 stops: median / worst | 22 / 153 s | 51 / 312 s |
+| 10 % faults, 3 stops: runs still held after 6 minutes | 0 of 80 | 6 of 80 |
+| 30 % faults, 1 stop: runs still held | 33 of 80 | 47 of 80 |
+| 30 % faults, 3 stops: runs still held | 51 of 80 | 55 of 80 |
+
+So under faults, protection recovers more slowly. That is the cost of capping these tries at the allowance (Michael's "so total requests can never exceed Alpaca's limit"). Friday's code recovered faster only by spending more than Alpaca's limit. This trade-off is for Michael.
+
+**Tests changed in this part**, none loosened on safety (oversell is still 0, every share is still sold):
+- the close-out retry test: the third try 40 s after the second;
+- the mid-day test with 40 refused positions: runs up to 400 s;
+- the loss stop's retry tests: refused retries at 0, 5, 15 and 35 s, and a 420 s window for all 40 symbols;
+- the visible-hold test: the retry after 10 s;
+- the group 2 round 2 probe tests: the retry made due at once, to keep that probe's own timing;
+- the refused-cancel test: at most 4 cancels a stop in a minute;
+- the round 3 visible test: the cancel is now sent by the status check;
+- the round 4 "not sent" test: moved to the 15 second limit's own try;
+- the round 5 visible stream-off test: accepts the current reason.
+
+New tests: `test/item3-retries.test.ts` (the backoff helper, the close-out gaps, no command replay, background closes, stream reconnects); the client's scoped retries; the start-up check and the database write.
+
+Full suite 692 of 692. Type check clean.
