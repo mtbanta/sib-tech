@@ -6,7 +6,38 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**BUILD C2: THE NIGHT RELEASE OF 2026-11-12 (MICHAEL'S RULINGS A TO E) IS STOPPED AFTER ROUND 3 OF BOTH REVIEW GROUPS AND FLAGGED TO MICHAEL. NOTHING DEPLOYED: FLY KEEPS RELEASE V20.** As of November 12, 2026 (evening, Central).
+**BUILD C2: FLY RELEASE V21 RUNS, THE NIGHT RELEASE OF 2026-11-12 WITH RULING B OFF (MICHAEL'S PRE-APPROVED SPLIT). A, C, D AND E ARE ON. DEPLOYED 2:04 AM CENTRAL, 2026-11-13, BEFORE THE OPEN.** As of November 13, 2026 (about 2:10 AM Central).
+- **v21:** `main` `a6b9fe9`, code of `01f8337`. It is release `cf5e3ba` with `FRESH_STOP_LIMIT = { on: false }` in `src/risk.ts`. Both review groups passed it in round 6, the last round allowed (Michael's decisions of 2026-11-13, saved verbatim in the C2 log).
+  - **A:** the review briefs count "take-profit cancelled, then stop filled" as a stop exit.
+  - **C:** the order index. Gate CPU per decision went from 0.874 ms to 0.073 ms at 9,000 orders (measured on the Mac).
+  - **D:**
+    - deploys are allowed while flat with Michael's own stop on;
+    - during market hours, both deploy routes need his written yes (decision 5: his written approval of a mid-day fix counts for that fix only);
+    - the check fails closed.
+  - **E:** `load afternoon` works after `go`, then `stop` or `flatten`, on a normal morning.
+  - **Ruling B** (the 15 s limit on an unclear fresh stop) ships switched off and is inert. Unclear fresh stops are handled as on v20.
+- **Why B is off:**
+  - Group 1 passed B on in round 6.
+  - Group 2 stopped it in round 6: the 5 minute alert can still say "no protective stop" while the timed-out stop rests at Alpaca, when Alpaca's open-orders read fails inside the sale near the 5 minute mark. The suggested fix is messaging only.
+  - Switching B on needs that fix, a review, and Michael's approval of more rounds.
+- **New standing rule in CLAUDE.md** (Michael's decision 6): every retry loop has a limit and a backoff. The builder's reading of "limit" is marked there for Michael to confirm.
+  - A read-only audit lists the older retries without a backoff or a limit. They are not changed and are for Michael: see the C2 log, "Rule 6 audit".
+- **Checks at the deploy:**
+  - Alpaca flat, with no open orders, before and after the deploy, and no orders since it.
+  - Machine started on version 21; its start was recorded in the database at 08:04:39 UTC.
+  - Secret scan clean on every commit.
+  - "Live" line posted in `commands` (HTTP 200), saying B is off.
+- **Open for Michael:**
+  - whether to fix B's last false alert and allow more rounds;
+  - his reading of the rule 6 "limit";
+  - the items listed under "Not changed, for Michael" in the C2 log:
+    - the wait after a stop ends while live updates are down;
+    - a restart losing the timed-out stops;
+    - the visible route's 216 requests a minute;
+    - the audit list.
+- Details: `builds/build-c2-log.md`, from "Michael's decisions of 2026-11-13" to the end. Paper only. Research input for a human decision.
+
+Earlier entry, superseded by the paragraph above: **BUILD C2: THE NIGHT RELEASE OF 2026-11-12 (MICHAEL'S RULINGS A TO E) IS STOPPED AFTER ROUND 3 OF BOTH REVIEW GROUPS AND FLAGGED TO MICHAEL. NOTHING DEPLOYED: FLY KEEPS RELEASE V20.** As of November 12, 2026 (evening, Central).
 - Built on branch `release-2026-11-12-night` (407c90b, log at 7df6974; full suite 654 of 654; unmerged): A, review briefs count "take-profit cancelled, then stop filled" as a stop exit; B, an unclear fresh stop is looked up every 5 s and, still unclear at 15 s, cancelled and its remainder sold, with time to confirm stored; C, the order index (gate CPU per decision 0.874 ms to 0.073 ms at 9,000 orders, measured on the Mac in simulation); D, deploys while flat with Michael's own stop at any time, in market hours only with his explicit written yes for that deploy (fails closed); E, `load afternoon` on a normal morning after `go` then `stop` or `flatten`.
 - Round 3 findings (both on ruling B's timed-out stop): group 1, an unbounded retry when the sync's own list misses the stop and Alpaca accepts the cancel but keeps showing the stop working (simulator: about 290 requests a minute for one stop; never a sale on top of a stop); group 2, the 5 minute alert says "no protective stop" while that stop still rests at Alpaca. Fixes are small but money-touching (group 1) and need Michael's approval for another review round.
 - Open for Michael: how to proceed (fix plus extra rounds, or rework B); whether the market-hours yes also covers the 2026-11-09 mid-day pause route; his reading of B's limit. Details: `builds/build-c2-log.md` on that branch, "Review of the night release". Paper only.

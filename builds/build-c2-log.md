@@ -4291,3 +4291,14 @@ Work started 12:55 AM Central on branch `release-2026-11-12-night` (main merged 
 - **Outcome under Michael's decisions 2 and 3 of 2026-11-13:** B on failed group 2's last round, so it does not deploy. A fix and further rounds would need Michael's approval. A, C, D and E with B off (01f8337) passed both groups, so they deploy before 7:30 AM Central, and the "live" line says B is off.
   - The B code ships switched off (`FRESH_STOP_LIMIT = { on: false }` in `src/risk.ts`). It is inert: nothing fills `timedOutStops`.
   - Switching B on later is a one-line change, but it needs the group 2 fix above and a review first.
+
+## Deploy (2026-11-13, 2:04 AM Central, market closed): Fly release v21, the night release with ruling B off
+
+- Merged `release-2026-11-12-night-boff` into `main` as `a6b9fe9`. Its stack code is identical to the reviewed `01f8337` (`git diff 01f8337 a6b9fe9 -- stacks/cyrus` is empty).
+- Deployed from a clean clone of `main` at `a6b9fe9` (no key file in it) at 2:04 AM, before 7:30 AM as decision 3 asks. Image `deployment-01M79YYW39SBSXH9GZGB5DA4EB`.
+- Checks:
+  - before the deploy: Alpaca flat, no open orders;
+  - Fly shows the machine started on version 21, and its start was recorded in the database at 08:04:39 UTC;
+  - after the deploy: Alpaca flat, no open orders, no orders since;
+  - the secret scan was clean on every commit.
+- "Live" line posted in Discord `commands` (HTTP 200): v21, ruling B off and why, A, C, D and E on, the account flat. Paper only.
