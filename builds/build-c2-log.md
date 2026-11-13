@@ -5025,7 +5025,7 @@ Full suite 709 of 709. Type check clean.
 
 **What changed (`src/risk.ts`, `src/worker.ts`):**
 - The quick rechecks run 0.5 s, then 1 s, then every 2 s apart (`LIVE_LAG_RECHECK_MAX_MS` 2000; it was 4000), still only for up to 30 s after the live report (`LIVE_LAG_WATCH_MS`).
-- One recheck sync serves every remainder whose list still lags. It is charged once to the stuck-retry allowance, at its real cost: the order list's pages and the positions as the sync read them, plus one lookup per lagging entry older than the list's 10 minute window. The charge is made when the recheck is scheduled, before it runs.
+- One recheck sync serves every remainder whose list still lags. It is charged once to the stuck-retry allowance, at its real cost: the order list's pages and the positions as the sync read them, plus one lookup per lagging entry older than the list's 10 minute window. The charge is made when the recheck is scheduled, before it runs. Since group 1's round 6 fix (below), a recheck that an earlier sync pre-empted gives its charge back, so only rechecks that run stay charged.
 - With no room in the allowance (40 a minute, 15 in any 5 seconds), no quick recheck is scheduled: the regular sync (every 10 s, or sooner on a live update) comes next, and the next sync that still sees the lag asks again. This is logged as `timed_out_try_out_of_room` with stage "list lag recheck". So many remainders at once can never take the allowance past its limits.
 - The worker's backup syncs (0.5, 1 and 2 s after a live report) stand aside for any entry a sync has seen still showing its stop open (`liveLagTries`): the sync's charged rechecks carry it, or, with no room or after the 30 s window, the regular sync. So the backup never adds uncharged syncs for it.
 
@@ -5110,3 +5110,45 @@ Full suite 717 of 717 (the rule's one test went with it). Type check clean.
 - the charge is recorded up to 2 s before the requests run;
 - a recheck can land on a sync that was due anyway (over-charging);
 - with 45 remainders every 2 s, each lagging 15 s, the worst time to a fresh stop was 66 s (78 s at e163089), with no alert, as before.
+
+### Weekend build: group 1, round 6 (ae09ea6) and fixes
+
+**Group 1, round 6: CHANGES REQUIRED.**
+
+1. **A recheck could be charged and never run (code).** The charge was made when the recheck was scheduled. In the worker, any earlier sync replaces the timer, so it pre-empts the recheck: a live update, a stuck sale's own retry time, the backups. That earlier sync saw the lag and charged again. So charges piled up for rechecks that never ran, and took the room a stuck sale needs.
+   - Group 1's probe: one stuck sale and six remainders, one every 30 s, each lagging 15 s. AAA got 12 tries in 242 s, with a 171 s gap. With charges for rechecks that ran only: 27 tries, longest gap 31 s, the same as with no lag.
+   - Charged against rechecks run, one remainder at a 25 s lag: 18 against 10 with other updates every 3 s; 20 (the minute's whole allowance) against 1 with updates every 1 s.
+2. **Tests only.** Two mutants survived: the gap taken as the largest of the lagging remainders' gaps (E8), and the cost ignoring the order list's pages (E12).
+
+**Group 1's answers:**
+- both design choices (no room falls to the regular sync; the backup syncs stand aside) are within "count against the allowance";
+- taking out the stuck-sale rule was right;
+- rule 6 holds (the 30 s window and the allowance; 0.5, 1, then 2 s);
+- the stuck-sale trade-off left after the fix does not block for paper (the 5 minute alert goes by the clock, the close-out still flattens, the rechecks end at 30 s): it is the question to Michael.
+
+**Fix (`src/risk.ts`, commit `e5bb24f`):**
+- `SyncMemory.lagCharge` holds the recheck charged and not yet run: when it was charged, its cost, and when it is due.
+- At the end of the walk, before anything new is charged: if this sync started before that recheck was due, the recheck never ran, so its charge is given back (`refundCharge`, from the allowance and from the statistics log). A recheck that ran stays charged.
+- The stale comment in the walk is corrected (no room means the regular sync, not a wait for room).
+
+**Measured (simulator, the worker's pattern of other syncs; one stuck sale refused by Alpaca, one lagging remainder, 90 s):**
+
+| Other syncs every | List lag | Before the fix: AAA sales sent, longest gap | After the fix: AAA sales sent, longest gap | Fresh stop after the fix |
+| --- | --- | --- | --- | --- |
+| 1 s | none | 9, 31 s | 9, 31 s | |
+| 1 s | 15 s | 6, 60 s | 9, 31 s | 15.5 s |
+| 1 s | 25 s | 6, 63 s | 9, 31 s | 25.5 s |
+| 3 s | 15 s | 6, 44.5 s | 9, 31 s | 16.5 s |
+| 3 s | 25 s | 6, 64 s | 9, 35 s | 25.5 s |
+| 10 s | 15 s | 6, 44 s | 9, 31 s | 16.5 s |
+| 10 s | 25 s | 6, 64 s | 6, 52.5 s | 26.5 s |
+
+The last row is the trade-off in the question to Michael: when nothing else syncs, the quick rechecks themselves run and use the room.
+
+**New tests (each fails on its mutant):**
+- a pre-empted recheck gives its charge back, in the allowance and the statistics, and one that ran stays charged (mutants: no refund; refund always; refund not in the statistics);
+- with other syncs every 1 or 3 s, the charges equal the rechecks that ran, plus the one still due;
+- a new lagging remainder gets its first recheck 0.5 s later while an older one is at 2 s (E8);
+- a three-page order list makes a recheck cost 4 (E12).
+
+Full suite 721 of 721. Type check clean.
