@@ -594,14 +594,15 @@ test("fix (a), round 2 (group 1): the time put back after a failed pass sync is 
 });
 
 // Group 2, fix (a) round 3: the restore after a failed pass sync is bounded. With Alpaca's order list failing for 30 s and a recheck
-// pending, the real code makes one more failing sync than before the restore, or two in a 250 ms window (see the build log, "Fix (a),
-// round 2 (53e367c): group 1"); a variant whose restored timer restores itself again failed every 100 ms (263 to 286 failed reads).
-test("fix (a), rounds 3 to 5: with Alpaca's order list failing for 30 s and a recheck pending, the restore is bounded: at most 4 failed reads, and at most 3 sync starts in 5 s (two restores only when the next pass lands in the restored timer's 250 ms slack)", async () => {
+// pending, the real code makes one more failing sync than before the restore, also in the 250 ms two-restore window (see the build log,
+// "Fix (a), round 6 (7a203aa): group 1"); a variant whose restored timer restores itself again failed every 100 ms (263 to 286 failed reads).
+test("fix (a), rounds 3 to 6: with Alpaca's order list failing for 30 s and a recheck pending, the restore is bounded: at most 4 failed reads and at most 2 sync starts in 5 s, including when the next pass lands in the restored timer's 250 ms slack (two restores)", async () => {
   const rows: string[] = [];
   for (const kind of ["stuck", "lag"] as const) {
     // Group 1, fix (a) round 5: -4 900 and -9 900 put the next pass inside the restored timer's 250 ms slack (two restores, each after its
-    // own pass cancel: 3 sync starts within 750 ms in the lag case).
-    for (const off of [-4_000, -300, 100, -4_900, -9_900]) {
+    // own pass cancel). Group 1, round 6: a lagging remainder's recheck is due 0.5 s after the report, so offsets before about -500 ms would
+    // lie in the past (the simulated clock never moves back) and run a different case; the lag kind uses only offsets that lie ahead.
+    for (const off of kind === "stuck" ? [-4_000, -300, 100, -4_900, -9_900] : [-300, 100]) {
       const { sim, r } = await armedDay(true);
       const wk: any = r.worker;
       const mem = wk.syncMemory;
@@ -628,6 +629,7 @@ test("fix (a), rounds 3 to 5: with Alpaca's order list failing for 30 s and a re
       await settle();
       const due = kind === "stuck" ? (mem.stuck.get(id)?.nextAt ?? wk.syncRecheckAt) : (wk.syncRecheckAt ?? t0 + 9_000);
       const P = due + off;
+      assert.ok(P >= sim.simMs, `${kind} ${off}: the pass time lies ahead of the clock at setup (it ran as labelled)`);
       if (off < 0) wk.lastSync = P - 10_000;
       let fails = 0;
       const realList = (sim as any).listOrdersPaged.bind(sim);
@@ -649,7 +651,7 @@ test("fix (a), rounds 3 to 5: with Alpaca's order list failing for 30 s and a re
       const most5s = Math.max(0, ...starts.map((a) => starts.filter((b) => b >= a && b < a + 5_000).length));
       rows.push(`${kind}, pass ${off} ms from due: ${fails} failed order list reads in the 30 s outage, at most ${most5s} sync starts in 5 s`);
       assert.ok(fails >= 1 && fails <= 4, rows[rows.length - 1]!);
-      assert.ok(most5s <= 3, rows[rows.length - 1]!);
+      assert.ok(most5s <= 2, rows[rows.length - 1]!);
     }
   }
   console.log("MEASURE 30 s outage\n" + rows.join("\n"));
