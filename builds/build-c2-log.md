@@ -5012,3 +5012,55 @@ Noted for group 1:
   - the quick rechecks stop 30 s after the live report, then only regular syncs (it catches the `if (true)` mutant).
 
 Full suite 709 of 709. Type check clean.
+
+### Weekend build: group 1, round 5 (e163089)
+
+**Group 1, round 5: CHANGES REQUIRED (tests only).** Every round 4 criterion holds. No code change was asked for. Blocking: tests were missing for:
+- the recheck steps;
+- the 30 s end;
+- the lookup re-add for an entry older than the 10 minute window;
+- `bareRemainder` returning null for an open stop with no live report (mutant M12 survived).
+
+### Michael's change to the remainder rechecks (2026-11-13, evening): built
+
+**What changed (`src/risk.ts`, `src/worker.ts`):**
+- The quick rechecks run 0.5 s, then 1 s, then every 2 s apart (`LIVE_LAG_RECHECK_MAX_MS` 2000; it was 4000), still only for up to 30 s after the live report (`LIVE_LAG_WATCH_MS`).
+- One recheck sync serves every remainder whose list still lags. It is charged once to the stuck-retry allowance, at its real cost: the order list's pages and the positions as the sync read them, plus one lookup per lagging entry older than the list's 10 minute window. The charge is made when the recheck is scheduled, before it runs.
+- With no room in the allowance (40 a minute, 15 in any 5 seconds), no quick recheck is scheduled: the regular sync (every 10 s, or sooner on a live update) comes next, and the next sync that still sees the lag asks again. This is logged as `timed_out_try_out_of_room` with stage "list lag recheck". So many remainders at once can never take the allowance past its limits.
+- **Builder's choice, for Michael to confirm:** a sale waits first. While a stuck entry or a timed-out fresh stop is being retried, a recheck is charged only if the allowance still has room for one such try after it. Without this, rechecks every 2 s (about 2 requests each) would hold the 5 second allowance under the 10 a stuck retry needs, for the whole 30 s window. Logged with `yieldedToSale`.
+- The worker's backup syncs (0.5, 1 and 2 s after a live report) stand aside for an entry the sync is already rechecking, so they never add uncharged syncs for it.
+
+**Bounds (the standing design rule):** a quick recheck is limited by the 30 s window and by the allowance (each charged before it runs). Its backoff is 0.5, 1, then 2 s.
+
+**Expected time without a stop (simulator, one remainder, the entry within the list's window):**
+
+| List lag | Fresh stop after the live report | Requests from the report | Without the live report |
+| --- | --- | --- | --- |
+| 0.5 s | 1.0 s | 20 | 10.5 s |
+| 2 s | 4.0 s | 24 | 10.5 s |
+| 5 s | 6.0 s | 26 | 10.5 s |
+| 11 s | 12.0 s | 32 | 20.5 s |
+| 15 s | 16.0 s | 36 | 20.5 s |
+
+That is the list's lag plus at most one 2 s recheck, for lags up to 30 s, while the allowance has room. Past 30 s, the next regular sync. Measured in the simulator, not on Alpaca: Monday's `stop_cancel_list_cleared` events turn it into a measurement.
+
+**Other measurements (simulator):**
+- 8 remainders lagging 25 to 32 s at once: the allowance peaked at 32 a minute and 8 in 5 s, across 18 syncs. Every remainder got its fresh stop.
+- A stuck sale retried for 30 s: 6 tries alone, and 6 with a lagging remainder beside it (the rechecks gave way).
+
+**New tests (each fails on its mutant):**
+- gaps 500, 1000, 2000, 2000, 2000, 2000 (mutant: maximum 4 s);
+- no sync asks for a quick recheck from 30 s on, and each before asks within 2 s (mutant: no 30 s end);
+- an entry older than the 10 minute window gets its fresh stop within the lag plus 2.5 s, at lags of 2, 5 and 15 s (mutant: no lookup re-add);
+- `bareRemainder` is null for a stop still open with no live report, for four open statuses (mutant M12);
+- many remainders never take the allowance past its limits, and the rechecks are charged (mutant: no charge);
+- no room means no quick recheck, and nothing charged (mutant: a recheck without room);
+- rechecks give way to a stuck sale (mutant: no yield);
+- a recheck costs 2 requests for a recent entry and 3 for an older one (mutant: the lookup not costed);
+- the backup syncs stand aside (mutant: no standing aside).
+
+The item 1 test's bound is tightened from the lag plus 4.5 s to the lag plus 2.5 s. The cleared event's bounds are now within 2.5 s of each other.
+
+**Briefs:** the expected time, the allowance's rise while a list lags, and "list lag recheck" out-of-room events to report.
+
+Full suite 718 of 718. Type check clean.

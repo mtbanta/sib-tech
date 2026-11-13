@@ -79,6 +79,9 @@ export const SLOW_SYNC_MS = 2_000;
 // Group 2, round 4 of the weekend build: how long after a live report of a completed stop cancel the sync keeps rechecking quickly while the
 // list still shows that stop open.
 export const LIVE_LAG_WATCH_MS = 30_000;
+// Michael's change of 2026-11-13 (evening): the longest gap between those rechecks (each recheck sync is charged to the stuck-retry
+// allowance at its real cost, once for all the remainders it serves).
+export const LIVE_LAG_RECHECK_MAX_MS = 2_000;
 const MISSING_RETRY_MS = 60_000;
 const MISSING_INTENT_AGE_MS = 10_000;
 // The speed release, item 3: while Alpaca's live order updates are connected (they free symbols and report a stop's cancel at once),
@@ -699,6 +702,9 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     }
   }
   mark("alerts");
+  // Michael's change of 2026-11-13 (evening): one recheck sync serves every remainder whose list still lags; it is charged once.
+  let lagRecheckGap: number | undefined;
+  let lagLookups = 0;
   const walk = [...active.filter((s) => !shortRetry(s)), ...active.filter(shortRetry).sort((a, b) => mem.stuck.get(a.clientOrderId)!.lastTriedAt - mem.stuck.get(b.clientOrderId)!.lastTriedAt)];
   for (const s of walk) {
     const o = byClientId.get(s.clientOrderId);
@@ -817,15 +823,20 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     }
     // Group 2, round 4 of the weekend build: while the list still shows the stop open, the sale is not started (the sell gate counts that
     // stop, so the sale would wait inside this sync, up to about 22 s, and every entry after it would wait too). The sync is run again soon
-    // instead: 0.5 s, then 1, 2, then every 4 s, for up to LIVE_LAG_WATCH_MS after the live report (rule 6: a limit and a backoff); the sale
+    // instead: 0.5 s, then 1, then every 2 s (Michael, 2026-11-13 evening), for up to LIVE_LAG_WATCH_MS after the live report, each charged
+    // to the stuck-retry allowance (rule 6: a limit and a backoff); the sale
     // then starts in the first sync after the list clears. After that window the regular syncs carry on.
     if (bare.liveCancel) {
       const tries = (mem.liveLagTries.get(s.clientOrderId) ?? 0) + 1;
       mem.liveLagTries.set(s.clientOrderId, tries);
       mem.liveLagLastOpen.set(s.clientOrderId, nowMs);
       if (nowMs - liveAt! < LIVE_LAG_WATCH_MS) {
-        const due = nowMs + Math.min(500 * 2 ** (tries - 1), 4_000);
-        recheckAt = recheckAt === undefined ? due : Math.min(recheckAt, due);
+        // Michael's change of 2026-11-13 (evening): every 2 s after the first steps, and each recheck charged to the stuck-retry request
+        // allowance (the sync's order list, its positions and this entry's lookup), so many remainders at once can never exceed it. With
+        // no room, the recheck waits until the allowance has room.
+        const gap = Math.min(500 * 2 ** (tries - 1), LIVE_LAG_RECHECK_MAX_MS);
+        lagRecheckGap = lagRecheckGap === undefined ? gap : Math.min(lagRecheckGap, gap);
+        if (createdMs(s) < fromMs) lagLookups++; // looked up by id at the recheck (older than the order list's window)
         mem.mustLook.add(s.clientOrderId);
       }
       continue;
@@ -875,6 +886,26 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     if (c.attempted) unprotected.push(s.symbol);
     if (c.recheckAt !== undefined) recheckAt = recheckAt === undefined ? c.recheckAt : Math.min(recheckAt, c.recheckAt);
     if (!c.stuck) mem.bareSeen.delete(s.clientOrderId);
+  }
+  if (lagRecheckGap !== undefined) {
+    // The recheck sync is charged to the stuck-retry allowance at its real cost, when it is scheduled: the order list's pages and the
+    // positions (as this sync read them), plus the lookups of lagging entries older than the list's window. Every quick recheck is charged
+    // before it runs, so many remainders at once can never exceed the allowance. With no room, no quick recheck is scheduled: the regular
+    // sync (every 10 seconds, or sooner on a live update) comes next, and the next sync that still sees the list lag asks again.
+    // A sale waits first: while a stuck entry or a timed-out fresh stop is being retried, a recheck is charged only if the allowance still
+    // has room for one such try after it (TIMED_OUT_TRY_REQUESTS in 5 seconds, that plus TIMED_OUT_SALE_RESERVE in the minute), so the
+    // rechecks never hold up a sale of shares without a stop.
+    const cost = Math.max(1, listed.pages) + 1 + lagLookups;
+    const t = d.now().getTime();
+    const saleWaiting = mem.stuck.size > 0 || mem.timedOutStops.size > 0;
+    const leaves = !saleWaiting || retryRoomAt(mem, t, cost + TIMED_OUT_TRY_REQUESTS + TIMED_OUT_SALE_RESERVE, cost + TIMED_OUT_TRY_REQUESTS) <= t;
+    const room = leaves ? retryRoomFor(mem, t, cost, true) : ({ ok: false, at: t } as const);
+    if (room.ok) {
+      const due = t + lagRecheckGap;
+      recheckAt = recheckAt === undefined ? due : Math.min(recheckAt, due);
+    } else {
+      d.log?.("timed_out_try_out_of_room", { stage: "list lag recheck", cost, ...(leaves ? { roomInMs: room.at - t } : { yieldedToSale: true }), next: "regular sync" });
+    }
   }
   mark("walk");
   if (!listed.complete) d.log?.("order_list_incomplete", { since, pages: listed.pages });

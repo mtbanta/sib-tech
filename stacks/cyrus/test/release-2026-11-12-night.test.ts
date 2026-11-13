@@ -1293,7 +1293,7 @@ test("Michael's item 1 of 2026-11-13 (afternoon): after a live report of a compl
     const now = await remainderRun(lag, true);
     rows.push(`list lag ${lag / 1000} s: fresh stop ${now.msToStop} ms after the live report, ${now.requests} requests (without the live report: ${before.msToStop} ms, ${before.requests} requests)`);
     assert.equal(now.lagEvents, 1, "the lag is logged once, not at every recheck");
-    assert.ok(now.msToStop !== null && now.msToStop <= lag + 4_500, `lag ${lag}: ${now.msToStop} ms (the list's lag plus at most one 4 s recheck)`);
+    assert.ok(now.msToStop !== null && now.msToStop <= lag + 2_500, `lag ${lag}: ${now.msToStop} ms (the list's lag plus at most one 2 s recheck, Michael's change of 2026-11-13 evening)`);
     assert.ok(now.lagLogged, "the list's lag is logged");
     assert.equal(now.oversell, 0);
     assert.equal(before.oversell, 0);
@@ -1413,13 +1413,15 @@ async function lagRun(lagMs: number, runMs: number) {
   w.sim.partialTakeProfitListLag(id, 1, 12.08, lagMs);
   w.memory.liveStopCancelled.set(id, t0);
   const syncs: number[] = [];
+  const asked: Array<{ at: number; inMs: number | undefined }> = [];
   while (w.sim.simMs < t0 + runMs && w.sim.stopLog.length === 0) {
     syncs.push(w.sim.simMs - t0);
     const r = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    asked.push({ at: syncs[syncs.length - 1]!, inMs: r.recheckAt === undefined ? undefined : r.recheckAt - w.sim.simMs });
     const next = r.recheckAt !== undefined ? Math.max(w.sim.simMs + 100, Math.min(r.recheckAt, w.sim.simMs + 10_000)) : w.sim.simMs + 10_000;
     w.sim.advanceTo(next);
   }
-  return { w, syncs };
+  return { w, syncs, asked };
 }
 
 test("group 2, round 5 of the weekend build: the list-clearing event comes once per entry, and the list's real lag lies between its two bounds", async () => {
@@ -1429,7 +1431,7 @@ test("group 2, round 5 of the weekend build: the list-clearing event comes once 
     assert.equal(cleared.length, 1, `lag ${lag}: ${cleared.length} cleared events`);
     const c = cleared[0]!.data;
     assert.ok(c.lagAtLeastMs < lag && c.msFromLiveCancel >= lag, `lag ${lag}: between ${c.lagAtLeastMs} and ${c.msFromLiveCancel}`);
-    assert.ok(c.msFromLiveCancel - c.lagAtLeastMs <= 4_000, `lag ${lag}: bounds ${c.lagAtLeastMs} to ${c.msFromLiveCancel} within one recheck`);
+    assert.ok(c.msFromLiveCancel - c.lagAtLeastMs <= 2_500, `lag ${lag}: bounds ${c.lagAtLeastMs} to ${c.msFromLiveCancel} within one recheck (at most 2 s apart)`);
     assert.ok(c.syncsSawOpen >= 1);
   }
 });
@@ -1440,4 +1442,180 @@ test("group 1 note, round 5 of the weekend build: the quick rechecks stop 30 sec
   const late = syncs.filter((t, i) => i > 0 && t > 31_000 + 4_000 && t - syncs[i - 1]! < 9_000);
   assert.ok(quick.length >= 5, `quick rechecks within the window: ${syncs.join(", ")}`);
   assert.equal(late.length, 0, `no quick recheck after the 30 s window: ${syncs.join(", ")}`);
+});
+
+// ---------------- Michael's change of 2026-11-13 (evening), and group 1's round 5 tests ----------------
+test("Michael's change of 2026-11-13 (evening): while the list lags, the quick rechecks come 0.5 s, then 1 s, then every 2 s apart (not 4)", async () => {
+  const { syncs, asked } = await lagRun(15_000, 20_000);
+  const gaps = syncs.slice(1).map((t, i) => t - syncs[i]!);
+  assert.deepEqual(gaps.slice(0, 6), [500, 1_000, 2_000, 2_000, 2_000, 2_000], `gaps ${gaps.join(", ")}`);
+  assert.deepEqual(asked.slice(0, 6).map((a) => a.inMs), [500, 1_000, 2_000, 2_000, 2_000, 2_000], "what each sync asked for");
+});
+
+test("group 1, round 5 of the weekend build: no sync asks for a quick recheck from 30 s after the live report; every one before that asks within 2 s", async () => {
+  const { asked } = await lagRun(120_000, 90_000);
+  const early = asked.filter((a) => a.at < 30_000);
+  const late = asked.filter((a) => a.at >= 30_000);
+  assert.ok(early.length >= 15, `quick rechecks inside the window: ${early.length}`);
+  for (const a of early) assert.ok(a.inMs !== undefined && a.inMs <= 2_000, `at ${a.at}: asked ${a.inMs}`);
+  assert.ok(late.length >= 5, `regular syncs after the window: ${late.length}`);
+  for (const a of late) assert.equal(a.inMs, undefined, `at ${a.at}: asked ${a.inMs} after the 30 s window`);
+});
+
+test("group 1, round 5 of the weekend build: an entry older than the 10 minute window gets its fresh stop within the list's lag plus about 2.5 s (it is looked up by id at each recheck)", async () => {
+  for (const lag of [2_000, 5_000, 15_000]) {
+    const w = world();
+    const dd = await day(w);
+    const id = await hold(w, "LUNR", 5, 12, 1);
+    for (let i = 0; i < 70; i++) {
+      w.sim.advance(10_000); // 11 minutes and more of regular syncs
+      await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    }
+    const t0 = w.sim.simMs;
+    w.sim.partialTakeProfitListLag(id, 1, 12.08, lag);
+    w.memory.liveStopCancelled.set(id, t0);
+    w.memory.mustLook.add(id); // as the live update of the stop's cancel does
+    while (w.sim.simMs < t0 + 60_000 && w.sim.stopLog.length === 0) {
+      const r = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+      const next = r.recheckAt !== undefined ? Math.max(w.sim.simMs + 100, Math.min(r.recheckAt, w.sim.simMs + 10_000)) : w.sim.simMs + 10_000;
+      w.sim.advanceTo(next);
+    }
+    const placed = w.sim.stopLog[0];
+    assert.ok(placed && placed.at - t0 <= lag + 2_500, `lag ${lag}: fresh stop ${placed ? placed.at - t0 : "none"} ms after the live report`);
+    assert.equal(w.sim.oversellAttempts, 0);
+  }
+});
+
+test("group 1, round 5 of the weekend build (mutant M12): bareRemainder is null for a stop still open with no live report, and a remainder with one", async () => {
+  const { bareRemainder } = await import("../src/risk.ts");
+  for (const status of ["pending_cancel", "new", "accepted", "held"]) {
+    const o: any = { filledQty: 5, legs: [{ side: "sell", type: "limit", status: "partially_filled", filledQty: 1, stopPrice: null, legs: [] }, { side: "sell", type: "stop", status, filledQty: 0, stopPrice: 9, legs: [] }] };
+    assert.equal(bareRemainder(o), null, `${status}, no live report`);
+    const r = bareRemainder(o, 1_000);
+    assert.ok(r && r.shares === 4 && r.liveCancel === true, `${status}, live report: ${JSON.stringify(r)}`);
+  }
+  const done: any = { filledQty: 5, legs: [{ side: "sell", type: "limit", status: "partially_filled", filledQty: 1, stopPrice: null, legs: [] }, { side: "sell", type: "stop", status: "canceled", filledQty: 0, stopPrice: 9, legs: [] }] };
+  const r = bareRemainder(done);
+  assert.ok(r && r.shares === 4 && r.liveCancel === false, "a cancel the list shows needs no live report");
+});
+
+test("Michael's change of 2026-11-13 (evening): with many remainders lagging at once, the quick rechecks are charged and never take the stuck-retry allowance past 40 a minute or 15 in 5 seconds", async () => {
+  const { allowanceUse } = await import("../src/worker.ts");
+  const { STUCK_RETRY_PER_MINUTE, STUCK_RETRY_PER_5S } = await import("../src/risk.ts");
+  const w = world();
+  const dd = await day(w);
+  const syms = ["LUNR", "SMCI", "IREN", "CIFR", "RIOT", "MARA", "HUT", "WULF"];
+  const ids: string[] = [];
+  for (const [i, sym] of syms.entries()) ids.push(await hold(w, sym, 5, 10 + i, 1));
+  w.sim.advance(5_000);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  const t0 = w.sim.simMs;
+  for (const [i, id] of ids.entries()) {
+    w.sim.partialTakeProfitListLag(id, 1, 10 + i + 0.08, 25_000 + i * 1_000);
+    w.memory.liveStopCancelled.set(id, t0);
+  }
+  let most = { lastMinute: 0, most5s: 0 };
+  let syncs = 0;
+  while (w.sim.simMs < t0 + 90_000 && w.sim.stopLog.length < ids.length) {
+    const r = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    syncs++;
+    const u = allowanceUse(w.memory.retryLog, w.sim.simMs);
+    most = { lastMinute: Math.max(most.lastMinute, u.lastMinute), most5s: Math.max(most.most5s, u.most5s) };
+    const next = r.recheckAt !== undefined ? Math.max(w.sim.simMs + 100, Math.min(r.recheckAt, w.sim.simMs + 10_000)) : w.sim.simMs + 10_000;
+    w.sim.advanceTo(next);
+  }
+  assert.ok(most.lastMinute > 0, "the rechecks were charged");
+  assert.ok(most.lastMinute <= STUCK_RETRY_PER_MINUTE && most.most5s <= STUCK_RETRY_PER_5S, `allowance ${JSON.stringify(most)} over ${syncs} syncs`);
+  assert.equal(w.sim.stopLog.length, ids.length, "every remainder got its fresh stop");
+  assert.equal(w.sim.oversellAttempts, 0);
+  console.log(`MEASURE many remainders: allowance at most ${most.lastMinute} a minute and ${most.most5s} in 5 s, ${syncs} syncs`);
+});
+
+test("Michael's change of 2026-11-13 (evening): a charged recheck needs room in the allowance; with none, the regular sync comes next (no uncharged quick recheck)", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "LUNR", 5, 12, 1);
+  w.sim.advance(5_000);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  const t0 = w.sim.simMs;
+  w.sim.partialTakeProfitListLag(id, 1, 12.08, 15_000);
+  w.memory.liveStopCancelled.set(id, t0);
+  for (let i = 0; i < 15; i++) w.memory.retrySpend.push(t0); // the 5 seconds' allowance is used up
+  const r = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.equal(r.recheckAt, undefined, "no quick recheck without room");
+  assert.ok(w.events.some((e) => e.event === "timed_out_try_out_of_room" && e.data.stage === "list lag recheck" && e.data.next === "regular sync"));
+  assert.equal(w.memory.retrySpend.length, 15, "nothing charged");
+  w.sim.advance(5_000); // room again
+  const r2 = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.ok(r2.recheckAt !== undefined, "a quick recheck once there is room");
+  assert.ok(w.memory.retrySpend.length > 15, "and it is charged");
+});
+
+test("Michael's change of 2026-11-13 (evening): the quick rechecks give way to a stuck sale; the sale's retries are not held up by a lagging remainder", async () => {
+  async function run(withLag: boolean) {
+    const w = world();
+    const dd = await day(w);
+    const aaa = await hold(w, "AAA", 5, 20, 1);
+    const lunr = await hold(w, "LUNR", 5, 12, 1);
+    w.sim.advance(5_000);
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    const t0 = w.sim.simMs;
+    let sells = 0;
+    w.sim.cancelExitsAtFill(aaa); // both exits gone: AAA must be sold
+    w.sim.refuseSellIf = (s: any) => s.symbol === "AAA" && s.stopPrice === undefined && (sells++, true);
+    if (withLag) {
+      w.sim.partialTakeProfitListLag(lunr, 1, 12.08, 25_000);
+      w.memory.liveStopCancelled.set(lunr, t0);
+    }
+    while (w.sim.simMs < t0 + 30_000) {
+      const r = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+      const next = r.recheckAt !== undefined ? Math.max(w.sim.simMs + 100, Math.min(r.recheckAt, w.sim.simMs + 10_000)) : w.sim.simMs + 10_000;
+      w.sim.advanceTo(next);
+    }
+    return { sells, yielded: w.events.some((e) => e.event === "timed_out_try_out_of_room" && e.data.yieldedToSale) };
+  }
+  const alone = await run(false);
+  const both = await run(true);
+  assert.ok(alone.sells >= 3, `AAA's sale tries alone: ${alone.sells}`);
+  assert.ok(both.sells >= alone.sells, `AAA's sale tries with a lagging remainder: ${both.sells} (alone ${alone.sells})`);
+  console.log(`MEASURE stuck sale tries in 30 s: alone ${alone.sells}, with a lagging remainder ${both.sells} (rechecks yielded: ${both.yielded})`);
+});
+
+test("Michael's change of 2026-11-13 (evening): the worker's backup syncs stand aside for an entry the sync is rechecking (those rechecks are charged)", async () => {
+  const { rig } = await import("./rig.ts");
+  const r = rig({ orderStream: true });
+  const wk: any = r.worker;
+  wk.startOrderStream(D);
+  const syncs: number[] = [];
+  wk.syncAt = (atMs: number) => void syncs.push(atMs);
+  const id = "cyrus-20261102-LUNR-1";
+  await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "LUNR", qty: 5, referencePrice: 12, stopPrice: 11.87, status: "filled", alpacaOrderId: null, filledQty: 5, filledAvgPrice: 12, note: null });
+  wk.orderHandler.d.onStopCancelled({ clientOrderId: id, symbol: "LUNR", atMs: 1_000 });
+  assert.equal(syncs.length, 1, "a sync at once");
+  wk.syncMemory.liveLagTries.set(id, 1); // the sync saw the list still showing the stop open
+  await wk.stopCancelFollowUp(D);
+  assert.equal(syncs.length, 1, "no backup sync: the sync's own charged rechecks carry it");
+  assert.equal(wk.stopCancelPending.has(id), false);
+  wk.endOrderStream?.();
+});
+
+test("Michael's change of 2026-11-13 (evening): a recheck is charged at its real cost: the order list's pages and the positions, plus one lookup for an entry older than the list's window", async () => {
+  async function charged(oldEntry: boolean) {
+    const w = world();
+    const dd = await day(w);
+    const id = await hold(w, "LUNR", 5, 12, 1);
+    for (let i = 0; i < (oldEntry ? 70 : 1); i++) {
+      w.sim.advance(10_000);
+      await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    }
+    const t0 = w.sim.simMs;
+    w.sim.partialTakeProfitListLag(id, 1, 12.08, 15_000);
+    w.memory.liveStopCancelled.set(id, t0);
+    w.memory.mustLook.add(id);
+    const before = w.memory.retrySpend.length;
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    return w.memory.retrySpend.length - before;
+  }
+  assert.equal(await charged(false), 2, "a recent entry: one page of the order list and the positions");
+  assert.equal(await charged(true), 3, "an entry older than the window: and its lookup by id");
 });
