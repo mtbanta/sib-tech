@@ -5305,7 +5305,7 @@ Round numbering from here: fix (a) rounds are numbered "fix (a), round 1" to "ro
 **What changed (`src/worker.ts` only):**
 - `recheckTimerAt` records the timer a sync set for its `recheckAt`, only if that timer took its place (an earlier pending timer keeps its place and serves instead). When that timer is put off because a sync is still running, the mark goes with it.
 - In the 5 second pass, on its recheck-due branch only: if the pending timer is that recheck's own (`eventSyncAt === recheckTimerAt`), the pass cancels it (`cancelRecheckTimer`) and then starts the sync. Any other pending timer, such as a live update's, is left to fire.
-- `syncAt` clears both marks (`recheckTimerAt`, and group 1's round 7 `leftoverTimerAt`) when it replaces a timer. The callers that mark set them afterwards. This also settles group 1's round 7 and 8 note that the leftover mark was never cleared.
+- `syncAt` clears both marks (`recheckTimerAt`, and group 1's round 7 `leftoverTimerAt`) when it replaces a timer. The callers that mark set them afterwards. This also settles the note (group 2, round 8, and group 1, round 8) that the leftover mark was never cleared.
 - The leftover marking and `keepLagCharge` of round 7 stay for the regular 10 s branch. There, a sync that starts before a recheck is due leaves the recheck's timer to fire at its time.
 - Effect on scheduling: the only sync removed is one that repeats, about 0.25 s later, a recheck the pass has just run. This applies to every kind of recheck (Michael's decision 1).
 
@@ -5321,10 +5321,10 @@ Round numbering from here: fix (a) rounds are numbered "fix (a), round 1" to "ro
   | 10 older | 28 | 40 | 1 |
 
 - A recheck's own timer that was put off while a sync ran is still its own, and the pass cancels it. Mutant: the put-off loses the mark.
-- The pass leaves a live update's put-off timer pending, and it fires. A replaced timer's marks are cleared. Mutants: cancel any timer; cancel on the regular branch too; replace keeps the marks.
+- The pass leaves a live update's put-off timer pending, and it fires. A replaced timer's marks are cleared. Mutants: cancel any timer; replace keeps the marks. (The first version of this entry also named "cancel on the regular branch too". That was wrong: group 2's fix (a) round 1 showed it passes every test. The builder's run of it had come from a batch in which another test was already failing.)
 
 **Group 1's round 8 sweep, rerun (simulator; 100 pass timings per case, 45 s each, live updates on; scripts kept outside the repo):**
-- **The leftover sync is gone:** 0 leftover syncs in every run, at 0, 40 and 110 ms per read. At `c27346b`, 40 ms per read: up to 2 per run, in 5 to 100 of 100 timings depending on the case.
+- **The leftover sync is gone from the recheck-due branch:** 0 leftover syncs in every run, at 0, 40 and 110 ms per read. (Not yet from the regular 10 s branch, nor when a newer recheck landed on an older recheck's timer; fix (a) round 1 below.) At `c27346b`, 40 ms per read: up to 2 per run, in 5 to 100 of 100 timings depending on the case.
 - **How the sweep counts matters.** As written, it counts the first 2 + N reads of each recheck sync. With fix (a) and 40 or 110 ms per read, that gave 42 in the minute in 3 to 7 of 100 timings (5 older remainders, 25 s lag).
   - The trace (40 ms per read, timing 2200 ms) shows the sync at +29 180 ms made the order list, the positions and 3 lookups: exactly the 5 it was charged for (3 remainders still lagging when the charge was made).
   - Its next reads (a repeat lookup, positions, open orders) were the start of placing those remainders' fresh stops. That is first-try protection work, never charged to the allowance.
@@ -5335,3 +5335,41 @@ Round numbering from here: fix (a) rounds are numbered "fix (a), round 1" to "ro
 These are simulator measurements. Sync durations on Fly (`sync_slow`) would turn the per-read delays into measurements.
 
 Full suite 729 of 729. Type check clean.
+
+### Fix (a), round 1 (b1ff17e): both groups CHANGES REQUIRED, and fixes
+
+**Group 2, fix (a) round 1:**
+1. **Log accuracy.** On the pass's regular 10 s branch the leftover sync was still there. This needs a slow sync (the next pass 10 s or more after the sync started) while the recheck is not yet due. The pass's sync gives back the recheck's charge, the recheck's own timer still fires, and if that sync charges nothing new (list cleared, no room, past the window), the timer's sync runs uncharged. Group 2's forced probe (`lastSync` set back 11 s, the pass 100 ms before the recheck was due) measured 41 real recheck requests in the minute against 40 in the no-room case. How often it happens is not measured.
+2. **Test claim.** The mutant "cancel on the regular branch too" passed every test. The log said it was caught; corrected above.
+
+**Group 1, fix (a) round 1:**
+- **What holds:** B1 of round 8 is closed in the form it was measured. The extra reads after a recheck's own reads are first-try protection work (`cleanupSale`, `Liquidator.run`, `SellGate.read`), tagged by calling function. The cancel holds in every other state checked.
+- **B1 (fix (a) round 1).** When `syncAt` kept an earlier pending timer, `startSync` cleared the recheck mark. That earlier timer could be an older recheck's own timer, so the pass running the newer recheck did not cancel it, and it ran uncharged. Measured through the real pass, with the older timer injected: 47 and 52 real requests in the minute against 40, and 21 in 5 s against 15. The narrow window was not measured for frequency.
+
+**Fixes (`src/worker.ts`):**
+- The pass cancels the recheck's own timer on both branches, when no sync is running (so the sync it starts takes the recheck's place). On the regular branch before the recheck is due, that sync already gives the recheck's charge back, and it asks again for any recheck still needed.
+- `startSync` sets the recheck mark only when its timer took its place, and otherwise leaves the mark of the timer that kept its place (group 1's suggested line).
+- The stale comment on `leftoverTimerAt` ("Timers are not changed") and the test file's header are corrected.
+
+**Builder's reasoning (not measured):** with the cancel on both branches, a sync never starts while a recheck's own timer is pending: the pass cancels it, and a timer's own sync starts only when that timer fires. A sync's own timer is set only when it ends. So the case group 1 measured, a newer recheck landing on an older own timer, can no longer arise through the pass. Group 1's line in `startSync` is kept as a guard. The mutants "older mark lost" (the old line) and "mark whatever is pending" pass every test, and the builder reads both as equivalent for that reason; both are named for the reviewers to check.
+
+**New tests (`test/weekend-r8.test.ts`, through the real pass):**
+- **Group 2's regular-branch cases**, with `lastSync` set back 11 s and the pass 100 ms before the recheck is due: lags of 0.3 and 15 s with 1 recent remainder; 0.3 s with 5 older remainders; 40 s with 5 older remainders and 33 + 1 charged; 40 s with 1 recent remainder and 38 + 1 charged. In every case there are 0 leftover syncs and at most 40 real recheck requests (34 and 39 in the no-room cases). Mutant: the recheck-due branch only.
+- **While a sync is still running,** the regular branch starts nothing and cancels nothing. Mutant: no running-sync guard.
+- **A replaced timer drops a leftover mark it carried** (group 2's note: the earlier assertion checked a mark that was already null).
+- **Group 1's older-timer probe, kept as a test** (415 ms per read, the older timer injected):
+
+  | Older remainders | Already charged | A minute | 5 s | Leftover syncs |
+  | --- | --- | --- | --- | --- |
+  | 5 | 33 | 40 | 7 | 0 |
+  | 10 | 28 | 40 | 12 | 0 |
+  | 10 | 16 | 28 | 12 | 0 |
+
+  It fails if the cancel is limited to the recheck-due branch and the old marking line is restored together.
+
+**Notes kept:**
+- `cancelRecheckTimer` does not update `syncTimerLog`. A later `late_notice` can show a timed sync that was set and then cancelled (logging only).
+- Mutant K5 (leftover marking only on the recheck-due branch) still survives.
+- At `c27346b`, the sweep's 5 s window was over in 100 of 100 timings (5 older remainders, 40 ms per read). The fix (a) entry above gives the minute's figure only.
+
+Full suite 733 of 733. Type check clean.

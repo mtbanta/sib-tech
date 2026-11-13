@@ -268,7 +268,7 @@ export class Worker {
   private eventSyncAt: number | null = null;
   // Group 1, round 7 of the weekend build (accounting only): a timer that was still pending when the 5 second pass started a sync. When it
   // fires, its sync is the leftover of a recheck the pass's sync already covered, and runs as one: it keeps the remainder recheck's charge
-  // instead of giving it back (syncOrders' `keepLagCharge`). Timers are not changed.
+  // instead of giving it back (syncOrders' `keepLagCharge`). This mark changes no timer (fix (a) below cancels a recheck's own timer).
   private leftoverTimerAt: number | null = null;
   // Michael's fix (a) of 2026-11-13: the moment the pending timer was set for when a sync asked for a recheck (its `recheckAt`), carried
   // over when that timer is put off. When the 5 second pass runs that recheck itself, it cancels this timer, so no second sync repeats it.
@@ -1035,9 +1035,11 @@ export class Worker {
     // syncAt, so it does not wait for the next 5 second pass).
     const recheckDue = this.syncRecheckAt !== null && now.getTime() >= this.syncRecheckAt && !this.inflight.has("risk");
     if (inSession && (now.getTime() - this.lastSync >= SYNC_EVERY_MS || recheckDue)) {
-      // Michael's fix (a) of 2026-11-13: the pass runs a recheck that is due, so it cancels that recheck's own timer (still pending inside
-      // its 250 ms slack, or put off while a sync ran). Only that timer: any other pending timer (a live update's) is left to fire.
-      if (recheckDue && this.eventSyncTimer !== null && this.eventSyncAt !== null && this.eventSyncAt === this.recheckTimerAt) this.cancelRecheckTimer();
+      // Michael's fix (a) of 2026-11-13: the pass's sync runs the recheck, so it cancels that recheck's own timer (still pending inside its
+      // 250 ms slack, or put off while a sync ran). Only that timer: any other pending timer (a live update's) is left to fire.
+      // Fix (a), round 1 (group 2): also on the regular 10 s branch before the recheck is due. That sync takes the recheck's place (it gives
+      // the recheck's charge back), and it asks again for any recheck still needed. Only when the sync will start (none is running).
+      if (!this.inflight.has("risk") && this.eventSyncTimer !== null && this.eventSyncAt !== null && this.eventSyncAt === this.recheckTimerAt) this.cancelRecheckTimer();
       this.startSync(current, day.closeAt, { fromPass: true });
     }
     if (inSession || (day.closeAt && now < addMinutes(day.closeAt, 10))) {
@@ -1188,8 +1190,9 @@ export class Worker {
       if (synced.recheckAt !== undefined) {
         this.syncRecheckAt = synced.recheckAt;
         this.syncAt(synced.recheckAt);
-        // Fix (a): this timer is the recheck's own only if it took its place (an earlier pending timer keeps its place and serves instead).
-        this.recheckTimerAt = this.eventSyncAt === synced.recheckAt ? synced.recheckAt : null;
+        // Fix (a): this timer is the recheck's own only if it took its place. If an earlier pending timer kept its place, that timer keeps
+        // its own mark (fix (a), round 1, group 1: it may be an older recheck's own timer, which the pass must still cancel).
+        if (this.eventSyncAt === synced.recheckAt) this.recheckTimerAt = synced.recheckAt;
       }
       await this.lostExitsFollowUp(dayNow.tradeDate, synced.unprotected);
       await this.stopCancelFollowUp(dayNow.tradeDate);
