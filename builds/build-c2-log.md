@@ -4265,3 +4265,29 @@ Work started 12:55 AM Central on branch `release-2026-11-12-night` (main merged 
   - a crash restart empties `timedOutStops` (v20's behavior then applies to that stop);
   - the visible route's sale waiting out a pending cancel: 216 requests a minute for 3 stops with routine traffic beside (v20 shares it);
   - the rule 6 audit list above.
+
+### Round 6 (the last allowed): results, and the split
+
+- **Group 1, round 6: (a) cf5e3ba, B on: PASS. (b) 01f8337, B off: PASS.**
+  - Round 5's race is fixed. With the live updates on, the worst delay from the cancel landing to the sale was 250 ms on both routes, across 179 timings (before: 30 s).
+  - `dueNow` cannot loop. In the loop probe, after one immediate retry the backoff carries on, with at most 8 tries in 180 s.
+  - The r4, r4b and r5 restart probes gave the same figures on 5a1992d and cf5e3ba.
+  - With B off, v20's own tests against 01f8337 pass 624 of 630. The 6 failures are deliberate message, command and deploy-check changes in this release; none is a fresh-stop test.
+  - Non-blocking:
+    - No test drives the worker's hook while that entry's sale runs. Moving the hook's call after its early return passes all 673 tests.
+    - A clock that steps backward could repeat the "due now" for the length of the step.
+    - While any other sale runs, the hook schedules no sync (as on v20).
+- **Group 2, round 6: (a) cf5e3ba, B on: STOP AND FLAG MICHAEL. (b) 01f8337, B off: PASS.**
+  - Blocking, B on only: the 5 minute alert says "still has no protective stop" while the timed-out stop still rests at Alpaca, when Alpaca's open-orders read fails inside the sale near the 5 minute mark. Measured in the reviewer's probe (open-orders read failing inside the sale only, windows of 10 to 40 s starting 240 to 320 s): hidden route, 10 of 34 runs; visible route, 2 of 34.
+    - Cause: the sale's first position read sets `heldBefore`, so the note is cleared even though the later look failed and never saw the stop.
+    - It was also present in 5a1992d, and the round 5 review missed it.
+    - Suggested fix, messaging only: clear the note only after a last look that read both open orders and positions.
+  - Wider sweeps found nothing else: 1,452, 366, 488, 216 and 102 runs, 0 bad.
+  - Non-blocking, for the briefs:
+    - name the "was still resting at my last try" and "has ended at Alpaca" alerts;
+    - list the other fresh stop events with B off;
+    - with B off, "ended first" includes stops Alpaca held;
+    - `retryInMs` is set on the visible branch only.
+- **Outcome under Michael's decisions 2 and 3 of 2026-11-13:** B on failed group 2's last round, so it does not deploy. A fix and further rounds would need Michael's approval. A, C, D and E with B off (01f8337) passed both groups, so they deploy before 7:30 AM Central, and the "live" line says B is off.
+  - The B code ships switched off (`FRESH_STOP_LIMIT = { on: false }` in `src/risk.ts`). It is inert: nothing fills `timedOutStops`.
+  - Switching B on later is a one-line change, but it needs the group 2 fix above and a review first.
