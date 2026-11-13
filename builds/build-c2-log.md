@@ -5299,3 +5299,39 @@ The same numbers come out on 2401f0b, so the residual predates the round 7 fix.
 > Never print any token or key.
 
 Round numbering from here: fix (a) rounds are numbered "fix (a), round 1" to "round 8" per group. The "same finding after two fixes" count restarts at fix (a).
+
+### Fix (a): the pass cancels the recheck's own timer (built 2026-11-13)
+
+**What changed (`src/worker.ts` only):**
+- `recheckTimerAt` records the timer a sync set for its `recheckAt`, only if that timer took its place (an earlier pending timer keeps its place and serves instead). When that timer is put off because a sync is still running, the mark goes with it.
+- In the 5 second pass, on its recheck-due branch only: if the pending timer is that recheck's own (`eventSyncAt === recheckTimerAt`), the pass cancels it (`cancelRecheckTimer`) and then starts the sync. Any other pending timer, such as a live update's, is left to fire.
+- `syncAt` clears both marks (`recheckTimerAt`, and group 1's round 7 `leftoverTimerAt`) when it replaces a timer. The callers that mark set them afterwards. This also settles group 1's round 7 and 8 note that the leftover mark was never cleared.
+- The leftover marking and `keepLagCharge` of round 7 stay for the regular 10 s branch. There, a sync that starts before a recheck is due leaves the recheck's timer to fire at its time.
+- Effect on scheduling: the only sync removed is one that repeats, about 0.25 s later, a recheck the pass has just run. This applies to every kind of recheck (Michael's decision 1).
+
+**New tests (`test/weekend-r8.test.ts`, through the worker's real pass on an armed day; each fails on its mutant):**
+- The pass runs a due recheck 100 ms into its timer's slack. It cancels that timer, no second sync follows, and the next recheck runs at its own time and stays charged. Mutants: no cancel; the own timer never marked.
+- Group 1's round 8 B1 rows, with Alpaca's live order updates on, so older entries are looked up. Before fix (a), group 1 measured 42, 43, 47 and 52.
+
+  | Lagging remainders | Already charged | Real recheck requests in the minute | Syncs after the report |
+  | --- | --- | --- | --- |
+  | 1 recent | 38 | 40 | 1 |
+  | 1 older | 37 | 40 | 1 |
+  | 5 older | 33 | 40 | 1 |
+  | 10 older | 28 | 40 | 1 |
+
+- A recheck's own timer that was put off while a sync ran is still its own, and the pass cancels it. Mutant: the put-off loses the mark.
+- The pass leaves a live update's put-off timer pending, and it fires. A replaced timer's marks are cleared. Mutants: cancel any timer; cancel on the regular branch too; replace keeps the marks.
+
+**Group 1's round 8 sweep, rerun (simulator; 100 pass timings per case, 45 s each, live updates on; scripts kept outside the repo):**
+- **The leftover sync is gone:** 0 leftover syncs in every run, at 0, 40 and 110 ms per read. At `c27346b`, 40 ms per read: up to 2 per run, in 5 to 100 of 100 timings depending on the case.
+- **How the sweep counts matters.** As written, it counts the first 2 + N reads of each recheck sync. With fix (a) and 40 or 110 ms per read, that gave 42 in the minute in 3 to 7 of 100 timings (5 older remainders, 25 s lag).
+  - The trace (40 ms per read, timing 2200 ms) shows the sync at +29 180 ms made the order list, the positions and 3 lookups: exactly the 5 it was charged for (3 remainders still lagging when the charge was made).
+  - Its next reads (a repeat lookup, positions, open orders) were the start of placing those remainders' fresh stops. That is first-try protection work, never charged to the allowance.
+- **Counted by the recheck's own reads** (the order list, the first positions read, then distinct lookups until a repeat or a fresh stop's look):
+  - with fix (a), at 40 and 110 ms per read: 0 of 100 over 40 a minute and 0 of 100 over 15 in 5 s, in all six cases;
+  - at `c27346b`, same counting: still over in 5 to 41 of 100 (worst 47 a minute, 24 in 5 s). So the counting change hides nothing.
+
+These are simulator measurements. Sync durations on Fly (`sync_slow`) would turn the per-read delays into measurements.
+
+Full suite 729 of 729. Type check clean.

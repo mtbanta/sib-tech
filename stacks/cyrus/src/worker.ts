@@ -270,6 +270,9 @@ export class Worker {
   // fires, its sync is the leftover of a recheck the pass's sync already covered, and runs as one: it keeps the remainder recheck's charge
   // instead of giving it back (syncOrders' `keepLagCharge`). Timers are not changed.
   private leftoverTimerAt: number | null = null;
+  // Michael's fix (a) of 2026-11-13: the moment the pending timer was set for when a sync asked for a recheck (its `recheckAt`), carried
+  // over when that timer is put off. When the 5 second pass runs that recheck itself, it cancels this timer, so no second sync repeats it.
+  private recheckTimerAt: number | null = null;
   // Logging only (Michael's approval of 2026-11-10), for `late_notice`: when the live updates last reported each symbol's stop cancelled,
   // and what the timed sync did (last set, last fired, how often it was put off because a sync was still running, since the last sync
   // the timer started).
@@ -1031,7 +1034,12 @@ export class Worker {
     // Release A, fix 1: a bare remainder found by the last sync brings the next one forward to its grace time (also by a timer, see
     // syncAt, so it does not wait for the next 5 second pass).
     const recheckDue = this.syncRecheckAt !== null && now.getTime() >= this.syncRecheckAt && !this.inflight.has("risk");
-    if (inSession && (now.getTime() - this.lastSync >= SYNC_EVERY_MS || recheckDue)) this.startSync(current, day.closeAt, { fromPass: true });
+    if (inSession && (now.getTime() - this.lastSync >= SYNC_EVERY_MS || recheckDue)) {
+      // Michael's fix (a) of 2026-11-13: the pass runs a recheck that is due, so it cancels that recheck's own timer (still pending inside
+      // its 250 ms slack, or put off while a sync ran). Only that timer: any other pending timer (a live update's) is left to fire.
+      if (recheckDue && this.eventSyncTimer !== null && this.eventSyncAt !== null && this.eventSyncAt === this.recheckTimerAt) this.cancelRecheckTimer();
+      this.startSync(current, day.closeAt, { fromPass: true });
+    }
     if (inSession || (day.closeAt && now < addMinutes(day.closeAt, 10))) {
       await this.flushDigest();
       await this.stopGapStep(date, now);
@@ -1180,6 +1188,8 @@ export class Worker {
       if (synced.recheckAt !== undefined) {
         this.syncRecheckAt = synced.recheckAt;
         this.syncAt(synced.recheckAt);
+        // Fix (a): this timer is the recheck's own only if it took its place (an earlier pending timer keeps its place and serves instead).
+        this.recheckTimerAt = this.eventSyncAt === synced.recheckAt ? synced.recheckAt : null;
       }
       await this.lostExitsFollowUp(dayNow.tradeDate, synced.unprotected);
       await this.stopCancelFollowUp(dayNow.tradeDate);
@@ -1243,16 +1253,29 @@ export class Worker {
     if (this.eventSyncAt !== null && this.eventSyncAt <= atMs) return;
     if (this.eventSyncTimer) (this.d.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>)))(this.eventSyncTimer);
     this.eventSyncAt = atMs;
+    // A replaced timer's marks go with it (fix (a), and the leftover mark of group 1's round 7); the callers that mark set them after this.
+    this.recheckTimerAt = null;
+    this.leftoverTimerAt = null;
     this.syncTimerLog.setAt = this.d.now().getTime();
     this.syncTimerLog.setFor = atMs;
     const delay = Math.max(slackMs > 0 ? 100 : 0, atMs + slackMs - this.d.now().getTime());
     this.eventSyncTimer = (this.d.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms)))(() => this.syncFromTimer(), delay);
   }
 
+  // Michael's fix (a) of 2026-11-13: cancels the pending timer that is a recheck's own, because the pass is running that recheck now.
+  private cancelRecheckTimer(): void {
+    if (this.eventSyncTimer) (this.d.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>)))(this.eventSyncTimer);
+    this.eventSyncTimer = null;
+    this.eventSyncAt = null;
+    this.recheckTimerAt = null;
+  }
+
   private syncFromTimer(): void {
     const firedFor = this.eventSyncAt;
     const leftover = firedFor !== null && firedFor === this.leftoverTimerAt;
     if (leftover) this.leftoverTimerAt = null;
+    const ownRecheck = firedFor !== null && firedFor === this.recheckTimerAt;
+    this.recheckTimerAt = null;
     this.eventSyncTimer = null;
     this.eventSyncAt = null;
     const s = this.sessionForSync;
@@ -1264,6 +1287,8 @@ export class Worker {
       this.syncAt(this.d.now().getTime());
       // Still the leftover, put off a moment (unless an earlier timer took its place).
       if (leftover && this.eventSyncAt !== null) this.leftoverTimerAt = this.eventSyncAt;
+      // Fix (a): still the recheck's own timer, put off a moment.
+      if (ownRecheck && this.eventSyncAt !== null) this.recheckTimerAt = this.eventSyncAt;
       return;
     }
     this.syncTimerLog.putOff = 0;
