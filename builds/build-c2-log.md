@@ -5413,8 +5413,8 @@ Measured by group 1 in the simulator: a stuck sale's retry came 5.75 s late (pas
 **Fix (`src/worker.ts`):**
 - The pass passes the time it cancelled to its sync (`restoreAt`).
 - If that sync throws before `syncOrders` returns (including the loss stop's read before it), the time is put back once as the recheck's own timer: `syncRecheckAt` if empty, `syncAt(restoreAt)`, and the mark. `syncAt` keeps its 250 ms slack (at least 100 ms from now), so the retry in the tests ran at due + 250.
-- A sync started by that timer carries no `restoreAt`, so a failure there puts nothing back. **Measured (group 2, fix (a) round 3; now a test):** with Alpaca's order list failing for 30 s and a recheck pending, the real code made 4 failing syncs against 3 at `53e367c` (one more per outage), and 3 against 3 with no recheck pending. A variant whose restored timer restored itself again failed every 100 ms (263 to 286 failed reads), which is why the test exists. Rule 6 holds: at most one restore per pass cancel. The tests enforce it since fix (a) round 4: at most 4 failed reads in a 30 s outage, at most 2 sync starts in 5 s, and over a 120 s outage at most 8 syncs a minute.
-- So a failed pass sync now leads to at most one more failing sync and one more `background_failed` log row per outage (group 2, round 4: none more with a stuck sale and the pass 6 to 16 s before due). In the lag cases that row comes 150 to 750 ms after the first, a near-duplicate. The Discord alert is not doubled, because `Worker.background` sends at most one per step every 5 minutes.
+- A sync started by that timer carries no `restoreAt`, so a failure there puts nothing back. **Measured (group 2, fix (a) round 3; now a test):** with Alpaca's order list failing for 30 s and a recheck pending, the real code made 4 failing syncs against 3 at `53e367c` (one more per outage), and 3 against 3 with no recheck pending. A variant whose restored timer restored itself again failed every 100 ms (263 to 286 failed reads), which is why the test exists. Rule 6 holds: at most one restore per pass cancel. The tests enforce it since fix (a) rounds 4 and 5: in a 30 s outage at most 4 failed reads and at most 3 sync starts in 5 s (offsets including the two-restore windows); over a 120 s outage at most 8 syncs a minute and 2 in 5 s.
+- So a failed pass sync now leads to one more failing sync and one more `background_failed` log row per outage. It is two more when the next pass lands in the 250 ms before the restored timer fires: that pass cancels the restored timer, its sync fails and restores again, then the timer fires and fails (group 1, fix (a) round 5: offsets -10 000 to -9 775 and -5 000 to -4 775 ms; in the lag case 3 sync starts within 750 ms, and at -10 000 ms 4 failed reads against 2 with no restore). Outside those windows group 2 measured none more with a stuck sale and the pass 6 to 16 s before due (round 4). Failed reads never went above 4 in a 30 s outage at any offset (group 1's sweep of a full 10 s cycle). In the lag cases that row comes 150 to 750 ms after the first, a near-duplicate. The Discord alert is not doubled, because `Worker.background` sends at most one per step every 5 minutes.
 - **Measured (group 2):** the restored timer's sync sets `lastSync` even when it fails, so after a 30 s outage the regular rhythm can shift one pass later. In the three pass timings measured, the first good sync and the stuck sale's next retry came 5 s later than at `53e367c` (for example +44 501 against +39 501), within one regular gap. At other timings group 2 measured no shift (round 4), so: 0 to 5 s later.
 - The follow-ups are unchanged: the restored timer's sync runs them when it succeeds.
 
@@ -5444,7 +5444,7 @@ Full suite 737 of 737. Type check clean.
 - **Two readings of "mark whatever is pending", reconciled** (corrected after group 2's fix (a) round 4; the first wording claimed a measured harm to protection that nobody measured):
   - group 1 counted requests: the variant only lets the pass cancel a timer and start its own sync at once;
   - group 2's test shows that the cancelled timer can be a live update's, whose own sync then does not run.
-  - **Group 2's round 4 probe** (simulator; LUNR with 5 shares, a 1 share take-profit, a live update injected during the report's sync, `lastSync` set back 11 s, driven 30 s): with the order list 0.3 s behind, the fresh stop came at +1 770 ms under the variant against +2 800 in the real code. With it 15 s behind, +17 270 against +16 300. The variant made one sync fewer.
+  - **Group 2's round 4 probe** (simulator; LUNR with 5 shares, a 1 share take-profit, a live update injected during the report's sync, `lastSync` set back 11 s, driven 30 s): with the order list 0.3 s behind, the fresh stop came at +1 770 ms under the variant against +2 800 in the real code. With it 15 s behind, +17 270 against +16 300. At 0.3 s behind the variant made one sync fewer; at 15 s, the same number (group 2, round 5).
   - Keeping the stricter marking (only a recheck's own timer is cancelled) is the builder's choice, the cautious one, not a measured need. The variant is not shown to be safe or equivalent either: with the order list behind, the pass's earlier sync could read stale state. The code and the live-timer test stay as they are.
 - **The proposal's credit for 67** now uses the section's own heading, "(items 2 point 2, 3 and 4)".
 
@@ -5465,7 +5465,7 @@ Full suite 737 of 737. Type check clean.
 **Notes:**
 - Surviving variants (group 1's mutation run against the full suite): R2, R8, R5 and R7 are equivalent or minor; F7, F10, F12, F13 and K8 as in round 2. Group 1 reports F6 now caught by group 2's live-timer test.
 - After `stop()`, the restore can set a timer, as a successful sync already could (existing behaviour; shutdown exits the process).
-- Group 1's reading (not measured; group 2 did not reproduce it): one recheck can be restored twice if a later pass cancels the restored timer. That would be one sync more again, about 2 reads, once per outage.
+- One recheck can be restored twice if a later pass cancels the restored timer: one sync more again, about 2 reads, once per outage. Group 1 measured this in fix (a) round 5; it happens only in a 250 ms window, which group 2's round 4 timings had missed.
 - The doubled "(before," comment was fixed in `f2904ab`.
 
 ### Fix (a), round 4 (5edb9e5): group 2 CHANGES REQUIRED (one log line), and fixes
@@ -5481,7 +5481,7 @@ Full suite 737 of 737. Type check clean.
 
 **Checked by group 2:**
 - the rule 6 figures, the extra log row's timing and the 250 ms slack;
-- the variants (ALWAYS and SLACK0 now fail; NOSRA and M3 survive, as the log says);
+- the variants (ALWAYS and SLACK0 now fail; NOSRA and M3, also called "older mark lost", survive, as the log says);
 - messages unchanged through a 30 s outage and a 330 s stuck sale (one alert, one 5 minute alert, one resolution line, the outage alert not doubled);
 - `src/` and the briefs byte-identical to `7051f5e`.
 
@@ -5506,3 +5506,27 @@ Full suite 737 of 737. Type check clean.
 - the round 3 mutants as listed (R7 now caught).
 
 If this finding returns after this fix, it will have survived two fixes, which is a STOP AND FLAG MICHAEL case.
+
+### Fix (a), round 5 (ee633b0): group 2 PASS; group 1 CHANGES REQUIRED (a test title and the log), and fixes
+
+**Group 2, fix (a) round 5: PASS.**
+- It reran both outage tests: 4 reads and 2 starts; 13 syncs, 7 a minute and 2 in 5 s.
+- It confirmed "the same as `c27346b`" and "3 before the restore" against the older workers.
+- Its own restore variants fail both tests.
+- Messages and briefs are unchanged.
+
+**Group 1, fix (a) round 5: CHANGES REQUIRED, a new finding.** Round 3's B1 is resolved: every restore loop group 1 built that actually ran fails at least one outage test. That covers fixed waits from 250 ms to 10 s, doubling waits, growing waits, every other fire, and slow then fast after 31 s or 121 s.
+
+**B1:** the 30 s test's title and the log said the restore adds at most one failing sync and never more than 2 starts in 5 s. In a 250 ms window (the next pass inside the restored timer's slack) there are two restores, each after its own pass cancel: 3 starts within 750 ms, and 4 failed reads against 2 with no restore. Rule 6 still holds, because each restore needs its own pass cancel and the chain ends. The test passed only because its offsets missed the window.
+
+**Fixes (tests and log; `src/` unchanged since `7051f5e`):**
+- **The 30 s test** adds offsets -4 900 and -9 900 ms (inside the window). It keeps at most 4 failed reads and allows at most 3 sync starts in 5 s. Measured: 4 reads in all ten cases; 2 starts, except 3 in the lag case at -4 900 and -9 900. The title now says what is asserted. X1 and X3b still fail.
+- **The 120 s test** keeps its 2 in 5 s bound (that is what catches X1, Y7 and Z10 there). It now wraps `listOrders` too, and asserts at least 20 failed reads, so the outage really happens; it measured 26.
+- **The log:** the "one more failing sync" line now includes the two-restore window; the double-restore note is marked measured; the rule 6 sentence lists every asserted bound.
+- **Group 2's round 5 notes:** "one sync fewer" is now true only at 0.3 s; the 120 s test's wording no longer says "every read"; "older mark lost" and M3 are named as one variant.
+
+**Notes kept:**
+- Group 1's Y8d (a pass-level restore 6 s later) passes, with totals identical to the real code over 120 and 300 s. Group 1's reasoning: the restored sync replaces a regular sync.
+- Y9, Y9b, Z11 and Z12 never started a loop.
+- The remaining gap is theoretical, in group 1's judgement.
+- A structural check (a restore only after a pass cancel, one per cancel) was suggested and is not built.
