@@ -120,6 +120,13 @@ const FLUSH_EVERY_MS = 60_000;
 // Before the close the close-out is retried this often until the account is flat; after the close, every 5 minutes.
 const CLOSEOUT_RETRY_MS = 20_000;
 // Item 3 of 2026-11-13: the wait before the next try after `attempts` tries: `firstMs` after the first, doubling, at most `maxMs`.
+// Item 2 of 2026-11-13: requests charged to the stuck-retry allowance in the last minute, and the most in any 5 seconds of that minute.
+export function allowanceUse(spend: readonly number[], nowMs: number): { lastMinute: number; most5s: number } {
+  const recent = spend.filter((t) => nowMs - t < 60_000);
+  let most5s = 0;
+  for (const t of recent) most5s = Math.max(most5s, recent.filter((x) => x >= t && x < t + 5_000).length);
+  return { lastMinute: recent.length, most5s };
+}
 export function retryGapMs(firstMs: number, attempts: number, maxMs = 3 * firstMs): number {
   return attempts <= 1 ? firstMs : Math.min(firstMs * 2 ** (attempts - 1), maxMs);
 }
@@ -1106,11 +1113,12 @@ export class Worker {
     // Close-out runs until the account is flat: a failed attempt is retried every 5 minutes for 30 minutes
     // past the close (after the close it only reports, it sends nothing), and the heartbeat says "fail" for as
     // long as positions remain.
-    // Item 3 of 2026-11-13: before the close the retries come 20 s apart, then 40, then every 60; after the close (it only reports then)
-    // 5 minutes apart, then 10, at most 15; and none from an hour after the close (the last try at 30 minutes writes the phase).
+    // Item 3 of 2026-11-13: before the close the retries come 20 s apart, then 40, then every 60; after the close (it only reports then, and
+    // a try from 30 minutes on writes the phase) 5 minutes apart, then 10, then every 15, until the day ends. No hard end (group 2, round 2
+    // of the weekend build): with the database down past the hour, the phase, and with it the daily summary, would never come.
     const attemptsToday = this.closeoutAttemptDate === date ? this.closeoutAttempts : 0;
     const retryMs = now < day.closeAt ? retryGapMs(CLOSEOUT_RETRY_MS, attemptsToday, 60_000) : retryGapMs(5 * 60_000, Math.max(1, attemptsToday), 15 * 60_000);
-    if (now >= addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && now < addMinutes(day.closeAt, 60) && !current.phases.closeout && !this.closingOut && now.getTime() - this.lastCloseoutAttempt >= retryMs) {
+    if (now >= addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !current.phases.closeout && !this.closingOut && now.getTime() - this.lastCloseoutAttempt >= retryMs) {
       this.lastCloseoutAttempt = now.getTime();
       if (this.closeoutAttemptDate !== date) {
         this.closeoutAttemptDate = date;
@@ -1251,6 +1259,9 @@ export class Worker {
       ...(reserve ? { reserveThisMinute: reserve } : {}),
       viewEveryMs: this.orderStreamLive() ? VIEW_EVERY_MS : VIEW_EVERY_NO_STREAM_MS,
       ...(raw ? { rawUpdate: raw } : {}),
+      // Item 2 of 2026-11-13 (group 2, round 2 of the weekend build): the stuck-retry allowance's use, so each review can check it (at most 40
+      // in a minute and 15 in any 5 seconds): requests charged in the last minute, and the most in any 5 seconds of it.
+      stuckRetryAllowance: allowanceUse(this.syncMemory.retrySpend, this.d.now().getTime()),
     };
   }
 

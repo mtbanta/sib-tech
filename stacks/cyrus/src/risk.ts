@@ -842,7 +842,7 @@ async function escalateIfDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string
     seen = ` At my last check its fresh stop (not confirmed in time) was still resting at Alpaca; ${cancel}.`;
   }
   const what = st.protecting ? "protect or sell it" : "sell it";
-  await d.say("alerts", `**Michael: I can't confirm a protective stop for ${st.symbol} after ${minutes}, and I have not been able to ${what} yet** (${st.why || "still held"}).${seen} I am checking, and I will sell it if it is still unconfirmed. Please check ${st.symbol} in Alpaca's dashboard and close it there if needed. I keep trying.`, { mentionOwner: true });
+  await d.say("alerts", `**Michael: I can't confirm a protective stop for ${st.symbol} after ${minutes}, and I have not been able to ${what} yet** (${st.why || "still held"}).${seen} I am checking, and I will ${what} if it is still unconfirmed. Please check ${st.symbol} in Alpaca's dashboard and close it there if needed. I keep trying.`, { mentionOwner: true });
 }
 
 // Fix C (Michael's approval of 2026-11-10): the closing line for a sale reported as "not filled yet": when every sale of the entry is seen
@@ -868,14 +868,30 @@ async function settleAwaiting(d: RiskDeps, mem: SyncMemory, orders: Order[] | nu
   }
 }
 
-// Item 2 of 2026-11-13 (Michael's decision, the leftovers): what to do this sync for an entry with a timed-out fresh stop. Returns null to
-// go on to the sale (with the backoff and the allowance, as before), or the moment to look again while it waits. It waits only while the
-// stop is known open and our cancel of it was accepted (or it shows pending cancel): then the sale cannot sell the shares, so no sale try
-// is spent. Its status comes free from the sync's list when the list shows it; otherwise one lookup by client id (charged to the allowance,
-// leaving the reserve), every 10 seconds with the live updates down and every 30 with them up. Ended (cancelled, expired, rejected, or
-// unknown to Alpaca): noted (noteTimedOutStopEnded) and the sale is tried at once. A failed lookup: the sale goes on as before (its tries
-// on the backoff). While it waits, its cancel is sent again no more often than the stuck backoff's steps (5, 10, 20, then every 30 seconds).
+// Group 2, round 2 of the weekend build (messaging only): an entry with a timed-out stop that this process has not reported yet (after a
+// restart, a stop loaded from the database or found pending cancel at start-up) gets the first alert once, and from then the 5 minute alert
+// and the resolution line as any other.
+async function reportTimedOutOnce(d: RiskDeps, mem: SyncMemory, s: OrderRecord, nowMs: number): Promise<void> {
+  const st = mem.stuck.get(s.clientOrderId);
+  if (st?.alerted) return;
+  const rec = st ?? { symbol: s.symbol, since: nowMs, nextAt: 0, delayMs: 0, alerted: false, escalated: false, lastTriedAt: nowMs, why: "" };
+  rec.alerted = true;
+  rec.why ||= "its fresh stop was not confirmed in time, so I do not count it as protection";
+  mem.stuck.set(s.clientOrderId, rec);
+  await d.say("alerts", `**Michael: I can't confirm a protective stop for ${s.symbol} (since ${centralClock(new Date(nowMs))}): its fresh stop was not confirmed in time, so I do not count it as protection.** I am checking, and I will sell it if still unconfirmed. I will post again when it is sold or gone.`, { mentionOwner: true });
+}
+
+// Item 2 of 2026-11-13 (Michael's decision, the leftovers), with group 1's round 1 fixes: what to do this sync for an entry with a timed-out
+// fresh stop. Returns null to go on to the sale (whole tries, charged per request to the allowance), or the moment to look again while it
+// waits. It waits while the stop is known open (the sync's list shows it, or the last try or check saw it, whatever the state of our cancel:
+// accepted, pending or refused): a sale try could not sell the shares that stop holds. Its status comes free from the sync's list when the
+// list shows it; otherwise one lookup by client id (charged, leaving the reserve), every 10 seconds with the live updates down and every 30
+// with them up, then Alpaca's open orders if that lookup fails; a check that fails both ways waits on its own backoff (doubling to a
+// minute). Ended (cancelled, expired, rejected, unknown to Alpaca, or not among the open orders): noted, and the sale is tried (when a whole
+// try fits). While it waits its cancel is sent again on the backoff's steps (5, 10, 20, then every 30 seconds; the first at once), 1
+// request each, never while Alpaca shows it pending cancel.
 async function timedOutWait(d: RiskDeps, mem: SyncMemory, s: OrderRecord, listed: readonly Order[], nowMs: number): Promise<number | null> {
+  await reportTimedOutOnce(d, mem, s, nowMs);
   const st = mem.stuck.get(s.clientOrderId);
   for (const [stop, entry] of mem.timedOutStops) {
     if (entry !== s.clientOrderId || mem.timedOutEndedAt.has(stop)) continue;
@@ -938,7 +954,8 @@ async function timedOutWait(d: RiskDeps, mem: SyncMemory, s: OrderRecord, listed
       if (st) st.restingStop = { stopClientOrderId: stop, cancel: status === "pending_cancel" ? "pending" : noted === "refused" ? "refused" : "accepted" };
     }
     // Messaging only: the reason the 5 minute alert gives is what this check found, not an older error.
-    if (st) st.why = status === "pending_cancel" ? "Alpaca has not finished cancelling its fresh stop (not confirmed in time)" : "its fresh stop (not confirmed in time) is still open at Alpaca, holding the shares";
+    // Past tense (group 2, round 2 of the weekend build): the alert can come a check later, so it states what this check saw.
+    if (st) st.why = status === "pending_cancel" ? "at my last check Alpaca had not finished cancelling its fresh stop (not confirmed in time)" : "at my last check its fresh stop (not confirmed in time) was still open at Alpaca";
     // Known open: our cancel again, at most on the backoff's steps (not while Alpaca shows it pending cancel).
     if (status !== "pending_cancel" && orderId && chk.resendAt <= nowMs) {
       const budget = retryBudget(mem, () => d.now().getTime(), TIMED_OUT_SALE_RESERVE);
@@ -951,7 +968,7 @@ async function timedOutWait(d: RiskDeps, mem: SyncMemory, s: OrderRecord, listed
           d.log?.("fresh_stop_timeout_cancel_failed", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: stop, by: "status check", again: mem.timedOutCancelAccepted.has(stop), error: (err as Error).message.slice(0, 120) });
           if (st) {
             st.restingStop = { stopClientOrderId: stop, cancel: "refused" };
-            st.why = "Alpaca did not accept my cancel of its fresh stop (not confirmed in time)";
+            st.why = "Alpaca did not accept my last cancel of its fresh stop (not confirmed in time)";
           }
         }
         chk.resendDelayMs = Math.min(chk.resendDelayMs * 2, STUCK_RETRY_MAX_MS);
@@ -1185,6 +1202,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   const stillOpen = soldQty === 0 ? r.freshStopStillOpen?.find((x) => x.symbol === s.symbol && mem.timedOutStops.get(x.clientOrderId) === s.clientOrderId) : undefined;
   if (stillOpen) {
     if (stopEndedDuringTry()) return dueNow(now);
+    await reportTimedOutOnce(d, mem, s, now);
     const outcome = cancelOutcome.get(stillOpen.clientOrderId);
     const cancel = stillOpen.status === "pending_cancel" ? "pending" : outcome === "accepted" || (outcome === undefined && mem.timedOutCancelAccepted.has(stillOpen.clientOrderId)) ? "accepted" : outcome === "refused" ? "refused" : "not sent";
     const st = backoffStuck(mem, s.symbol, s.clientOrderId, now, "the cancel of the unconfirmed fresh stop has not cleared at Alpaca");
@@ -1194,6 +1212,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   }
   const heldBy = r.heldByFreshStop?.find((x) => x.symbol === s.symbol);
   if (heldBy && soldQty === 0 && mem.timedOutStops.has(heldBy.clientOrderId)) {
+    await reportTimedOutOnce(d, mem, s, now);
     // Ruling B of 2026-11-12: a fresh stop that was not confirmed in time is never taken as protection again: cancelled now.
     // Group 1, round 3 of the night release (Michael's decision 1 of 2026-11-13, and his rule that every retry loop has a limit and a
     // backoff): only the FIRST accepted cancel of a stop gets a look in a second, charged to the retry allowance (Alpaca's cancel then

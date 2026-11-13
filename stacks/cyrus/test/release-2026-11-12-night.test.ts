@@ -20,7 +20,8 @@ RULING_B.on = true;
 
 const MID = Date.UTC(2026, 10, 2, 15, 0); // 9:00 AM Central on the rig's day
 // Every wording Michael's decision 2 of 2026-11-13 retired (a claim that there is no stop, or a guess that one may rest).
-const OLD_WORDING = /has no protective stop|no live protective stop|without a protective stop|may still be resting/;
+// Group 2, round 2 of the weekend build: and a reason stated in the present tense from an older check.
+const OLD_WORDING = /has no protective stop|no live protective stop|without a protective stop|may still be resting|\(its fresh stop \(not confirmed in time\) is still open|\(Alpaca has not finished cancelling/;
 
 function world() {
   const sim = new SimBroker(MID);
@@ -1176,4 +1177,21 @@ test("item 2 (second point): a start-up check that cannot read Alpaca's open ord
   assert.equal(tries.length, 3, `tries at ${tries.join(", ")}`);
   assert.ok(gaps[0]! >= 4_900 && gaps[1]! >= 9_900, `gaps ${gaps.join(", ")}`);
   assert.ok(w.events.some((e) => e.event === "startup_protection_check"), "succeeds once Alpaca answers");
+});
+
+test("group 2, round 2 of the weekend build: after a restart, a stored timed-out stop that keeps holding the shares gets the first alert once, then the 5 minute alert", async () => {
+  const w = world();
+  const { dd } = await timedOutStops(w, ["RKLB"], true);
+  w.sim.cancelMs = 20 * 60_000; // the cancel stays pending: the stop keeps holding the shares
+  await runWorker(w, dd, 2_000);
+  const before = w.said.length;
+  w.risk.syncMemory = new SyncMemory(); // a restart
+  await runWorker(w, dd, 6 * 60_000);
+  const after = w.said.slice(before).filter((m) => m.mention);
+  const first = after.filter((m) => m.text.includes("I can't confirm a protective stop for RKLB (since"));
+  const five = after.filter((m) => /after \d+ minutes?/.test(m.text));
+  assert.equal(first.length, 1, after.map((m) => m.text).join(" | ") || "nothing posted");
+  assert.equal(five.length, 1, after.map((m) => m.text).join(" | "));
+  assert.equal(await heldQty(w, "RKLB"), 4);
+  assert.equal(w.sim.oversellAttempts, 0);
 });

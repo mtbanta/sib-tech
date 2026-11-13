@@ -60,6 +60,8 @@ export const STORED_INFO_EVENTS = new Set([
   "startup_fresh_stop_confirmed",
   "startup_fresh_stop_unconfirmed",
   "timed_out_stops_save_failed",
+  // Item 3 of 2026-11-13: the loss stop's retry pausing (after a rate limit, or a check whose sales were all refused).
+  "loss_stop_retry_backoff",
   // Item 4 of 2026-11-13: the morning screen's duration (now at 8:15 AM, 10 minutes before "Armed").
   "screen_done",
   // Group 2, round 1 (rare, part of the day's story): the afternoon window's failures and cancels.

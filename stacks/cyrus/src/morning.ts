@@ -313,7 +313,7 @@ export function decideLoad(day: DayRecord, on: boolean, now: Date, messageAt: Da
   }
   if (!day.openAt || now >= day.openAt) return { ok: false, reply: `Too late: ${dayWord(day.tradeDate)} has already opened.` };
   // Michael's ruling, 2026-11-03: if load mode was on that morning (from the morning screen, when the cheap list is built,
-  // 45 minutes before the open), the 75 dollar cap stays whenever `load off` comes: the window ends, the cap does not. Since his
+  // 15 minutes before the open since item 4 of 2026-11-13), the 75 dollar cap stays whenever `load off` comes: the window ends, the cap does not. Since his
   // decision of 2026-11-10 the cap ends at the mid-day pause.
   if (!on && state !== "off" && (day.phases.screen || now >= addMinutes(day.openAt, -LOAD_SWITCH_DEADLINE_MIN))) {
     return { ok: true, value: "ended", reply: `Load window switched off for ${dayWord(day.tradeDate)}: the normal placeholder, on today's cheap list. Load mode was on this morning, so positions stay at most ${LOAD_MAX_POSITION_USD} dollars until the mid-day pause; after it, a normal day.` };

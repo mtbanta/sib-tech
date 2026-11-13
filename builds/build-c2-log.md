@@ -4606,3 +4606,27 @@ So under faults, protection recovers more slowly. That is the cost of capping th
 New tests: `test/item3-retries.test.ts` (the backoff helper, the close-out gaps, no command replay, background closes, stream reconnects); the client's scoped retries; the start-up check and the database write.
 
 Full suite 692 of 692. Type check clean.
+
+### Weekend build: group 2, round 2 (8d08e2f) and fixes
+
+**Group 2, round 2: CHANGES REQUIRED.** Round 1's three findings are fixed: with the race injected (3,000 runs), retired wording now appears 0 times, against 79 before.
+
+Blocking findings:
+1. **A stale reason in the present tense.** The 5 minute alert's reason was the previous check's claim, in the present tense ("is still open at Alpaca", "has not finished cancelling"), while Alpaca had already ended the stop. This came in 100 of 601 runs, and in 50 of 301 with a pending cancel. A new finding under decision 2, not a return of the ledgered "no protective stop" claim, whose counter stays at 1.
+2. **The summary could go missing.** The close-out's new hard end (an hour after the close) meant that with the database down past that hour, the phase, and so the daily summary, never came. v21 posted it at 5:15 PM ET in the same case.
+3. **No alert after a restart.** After a restart, an entry with a timed-out stop (loaded from the database, or found pending cancel at start-up) was treated as unprotected but got no alert at all.
+4. **The briefs.** They asked for an allowance report with no stored data, and one sentence was spliced.
+
+**Fixes:**
+1. The reasons are in the past tense ("at my last check its fresh stop (not confirmed in time) was still open at Alpaca", "at my last check Alpaca had not finished cancelling ..."). The night tests' message sink now fails on the old present-tense reasons too.
+2. No hard end after the close: the retries come 5, 10, then every 15 minutes until the day ends, which is still a rate limit with a backoff. A new test has the database down until 70 minutes after the close; it fails on 8d08e2f and passes now.
+3. `reportTimedOutOnce`: an entry with a timed-out stop not yet reported in this process gets the first alert once ("I can't confirm a protective stop for X (since T): its fresh stop was not confirmed in time, so I do not count it as protection. ..."), then the 5 minute alert and the resolution line as any other. A new restart test checks that the first alert comes once and the 5 minute alert once.
+4. The per-minute `governor_stats` row now stores `stuckRetryAllowance` (`lastMinute`, `most5s`), and the briefs read it. The ruling B events moved to their own bullet. The daily brief compares the `screen` phase time with 8:15.
+
+Notes handled:
+- `loss_stop_retry_backoff` is stored.
+- The 5 minute alert's promise says "protect or sell" on the A4 path.
+- Stale comments fixed (`decideLoad`, `timedOutWait`).
+- Also changed in round 1's part, now listed: the restart test in `release-2026-11-12.test.ts` accepts `startup_fresh_stop_confirmed`.
+
+Full suite 694 of 694. Type check clean.

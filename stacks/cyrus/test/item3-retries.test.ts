@@ -92,3 +92,22 @@ test("item 3: a price stream that drops right after it is accepted keeps growing
   (st as any).connect();
   assert.deepEqual(timers.slice(0, 5), [2_000, 4_000, 8_000, 16_000, 30_000], `waits ${timers.join(", ")}`);
 });
+
+test("item 3 (group 2, round 2 of the weekend build): with the database down until 70 minutes after the close, the close-out phase is still written once it is back (no hard end), so the summary can follow", async () => {
+  const { rig } = await import("./rig.ts");
+  const r = rig();
+  await r.at("13:30:00");
+  r.broker.clock = { ...r.broker.clock, isOpen: true };
+  r.broker.positions = [];
+  const realUpdate = r.store.updateDay.bind(r.store);
+  let down = true;
+  r.store.updateDay = async (date: string, patch: any) => {
+    if (down && patch?.phases?.closeout) throw new Error("database down (test)");
+    return realUpdate(date, patch);
+  };
+  for (const t of ["20:55:00", "21:00:00", "21:05:00", "21:15:00", "21:30:00", "21:45:00", "22:00:00"]) await r.at(t);
+  assert.equal((await r.store.getDay(D))!.phases.closeout, undefined, "not written while the database is down");
+  down = false;
+  for (const t of ["22:10:00", "22:20:00", "22:30:00", "22:40:00", "22:50:00"]) await r.at(t);
+  assert.ok((await r.store.getDay(D))!.phases.closeout, "written once the database is back, more than an hour after the close");
+});
