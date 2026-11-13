@@ -1589,3 +1589,90 @@ test("Michael's change of 2026-11-13 (evening): a recheck is charged at its real
   assert.equal(await charged(false), 2, "a recent entry: one page of the order list and the positions");
   assert.equal(await charged(true), 3, "an entry older than the window: and its lookup by id");
 });
+
+// ---------------- Group 1, round 6 of the weekend build ----------------
+test("group 1, round 6 of the weekend build: a recheck pre-empted by an earlier sync gives its charge back; only rechecks that run are charged", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "LUNR", 5, 12, 1);
+  w.sim.advance(5_000);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  const t0 = w.sim.simMs;
+  w.sim.partialTakeProfitListLag(id, 1, 12.08, 15_000);
+  w.memory.liveStopCancelled.set(id, t0);
+  const r1 = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.equal(w.memory.retrySpend.length, 2, "the first recheck is charged");
+  w.sim.advanceTo(r1.recheckAt! - 300); // another sync comes first (a live update)
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.equal(w.memory.retrySpend.length, 2, "the pre-empted recheck's charge is given back; only the next one is charged");
+  assert.equal(w.memory.retryLog.length, 2, "and the statistics agree");
+  w.sim.advanceTo(w.memory.lagCharge!.dueAt);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.equal(w.memory.retrySpend.length, 4, "a recheck that ran stays charged");
+});
+
+test("group 1, round 6 of the weekend build: with other syncs every 1 or 3 seconds, the charges equal the rechecks that ran (plus the one still due)", async () => {
+  for (const every of [1_000, 3_000]) {
+    const w = world();
+    const dd = await day(w);
+    const id = await hold(w, "LUNR", 5, 12, 1);
+    w.sim.advance(5_000);
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    const t0 = w.sim.simMs;
+    w.sim.partialTakeProfitListLag(id, 1, 12.08, 25_000);
+    w.memory.liveStopCancelled.set(id, t0);
+    let ran = 0;
+    let nextOther = t0;
+    while (w.sim.simMs < t0 + 40_000 && w.sim.stopLog.length === 0) {
+      const due = w.memory.lagCharge?.dueAt;
+      if (due !== undefined && w.sim.simMs >= due) ran++;
+      const r = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+      if (w.sim.simMs >= nextOther) nextOther = w.sim.simMs + every;
+      const next = Math.min(r.recheckAt ?? Infinity, nextOther, w.sim.simMs + 10_000);
+      w.sim.advanceTo(Math.max(w.sim.simMs + 100, next));
+    }
+    const charged = w.memory.retryLog.filter((x) => x >= t0).length;
+    const pending = w.memory.lagCharge ? w.memory.lagCharge.cost : 0;
+    assert.ok(ran >= 1 || every === 1_000, `other syncs every ${every} ms: rechecks ran ${ran}`);
+    assert.equal(charged, 2 * ran + pending, `other syncs every ${every} ms: charged ${charged}, rechecks ran ${ran}, still due ${pending}`);
+    assert.ok(w.sim.stopLog.length === 1 && w.sim.stopLog[0]!.at - t0 <= 25_000 + 2_500, "the fresh stop still comes within the lag plus 2.5 s");
+  }
+});
+
+test("group 1, round 6 of the weekend build (mutant E8): a new lagging remainder gets its first recheck 0.5 s later, while an older one is already at 2 s", async () => {
+  const w = world();
+  const dd = await day(w);
+  const lunr = await hold(w, "LUNR", 5, 12, 1);
+  w.sim.advance(1_000);
+  const smci = await hold(w, "SMCI", 5, 30, 1);
+  w.sim.advance(5_000);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  const t0 = w.sim.simMs;
+  w.sim.partialTakeProfitListLag(lunr, 1, 12.08, 20_000);
+  w.memory.liveStopCancelled.set(lunr, t0);
+  let r = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  for (let i = 0; i < 4; i++) {
+    w.sim.advanceTo(r.recheckAt!);
+    r = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  }
+  assert.equal(r.recheckAt! - w.sim.simMs, 2_000, "LUNR is at 2 s");
+  w.sim.partialTakeProfitListLag(smci, 1, 30.08, 20_000);
+  w.memory.liveStopCancelled.set(smci, w.sim.simMs);
+  r = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.equal(r.recheckAt! - w.sim.simMs, 500, "SMCI's first recheck is 0.5 s away, not LUNR's 2 s");
+});
+
+test("group 1, round 6 of the weekend build (mutant E12): a recheck's charge counts every page of the order list", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "LUNR", 5, 12, 1);
+  w.sim.advance(5_000);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  const realPaged = w.sim.listOrdersPaged.bind(w.sim);
+  w.sim.listOrdersPaged = async (...a: any[]) => ({ ...(await (realPaged as any)(...a)), pages: 3 }); // a busy day: three pages
+  const t0 = w.sim.simMs;
+  w.sim.partialTakeProfitListLag(id, 1, 12.08, 15_000);
+  w.memory.liveStopCancelled.set(id, t0);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.equal(w.memory.retrySpend.length, 4, "three pages and the positions");
+});

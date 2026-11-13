@@ -200,6 +200,10 @@ export class SyncMemory {
   readonly listClearLogged = new Set<string>();
   // Logging only (group 2, round 5): when a sync last saw such a stop still open (a lower bound on the list's lag).
   readonly liveLagLastOpen = new Map<string, number>();
+  // Group 1, round 6 of the weekend build: the quick recheck charged and not yet run (when it was charged, its cost, when it is due). A
+  // sync that starts before it is due takes the recheck's place (the worker's timer keeps only the earliest sync), so that charge is given
+  // back: only rechecks that run are charged.
+  lagCharge: { at: number; cost: number; dueAt: number } | undefined = undefined;
   // Item 3 of 2026-11-13: the wait after a failed lookup of an entry missing from Alpaca's listing (per entry, doubling to a minute).
   readonly lookupFailDelay = new Map<string, number>();
   readonly lookupFailUntil = new Map<string, number>();
@@ -440,6 +444,19 @@ const endedKnown = (mem: SyncMemory, entryClientOrderId: string): boolean => {
   const stops = [...mem.timedOutStops].filter(([, e]) => e === entryClientOrderId).map(([stop]) => stop);
   return stops.length > 0 && stops.every((stop) => mem.timedOutEndedAt.has(stop));
 };
+// Group 1, round 6 of the weekend build: gives back n charges made at `atMs` (a quick recheck that never ran), from the allowance and from
+// the statistics log. Charges that have already aged out are simply not there.
+function refundCharge(mem: SyncMemory, atMs: number, n: number): void {
+  for (const list of [mem.retrySpend, mem.retryLog]) {
+    let left = n;
+    for (let i = list.length - 1; i >= 0 && left > 0; i--) {
+      if (list[i] === atMs) {
+        list.splice(i, 1);
+        left--;
+      }
+    }
+  }
+}
 // Statistics only: records n charges at nowMs in the 70 second log.
 function logCharge(mem: SyncMemory, nowMs: number, n: number): void {
   for (let i = 0; i < n; i++) mem.retryLog.push(nowMs);
@@ -833,7 +850,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       if (nowMs - liveAt! < LIVE_LAG_WATCH_MS) {
         // Michael's change of 2026-11-13 (evening): every 2 s after the first steps, and each recheck charged to the stuck-retry request
         // allowance (the sync's order list, its positions and this entry's lookup), so many remainders at once can never exceed it. With
-        // no room, the recheck waits until the allowance has room.
+        // no room, no quick recheck: the regular sync comes next (see the end of the walk).
         const gap = Math.min(500 * 2 ** (tries - 1), LIVE_LAG_RECHECK_MAX_MS);
         lagRecheckGap = lagRecheckGap === undefined ? gap : Math.min(lagRecheckGap, gap);
         if (createdMs(s) < fromMs) lagLookups++; // looked up by id at the recheck (older than the order list's window)
@@ -887,6 +904,12 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     if (c.recheckAt !== undefined) recheckAt = recheckAt === undefined ? c.recheckAt : Math.min(recheckAt, c.recheckAt);
     if (!c.stuck) mem.bareSeen.delete(s.clientOrderId);
   }
+  // Group 1, round 6 of the weekend build: a recheck charged earlier that this sync pre-empted (it started before the recheck was due) never
+  // ran: its charge is given back before anything new is charged. One that ran (this sync started at or after its time) stays charged.
+  if (mem.lagCharge !== undefined) {
+    if (syncStartMs < mem.lagCharge.dueAt) refundCharge(mem, mem.lagCharge.at, mem.lagCharge.cost);
+    mem.lagCharge = undefined;
+  }
   if (lagRecheckGap !== undefined) {
     // The recheck sync is charged to the stuck-retry allowance at its real cost, when it is scheduled: the order list's pages and the
     // positions (as this sync read them), plus the lookups of lagging entries older than the list's window. Every quick recheck is charged
@@ -897,6 +920,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     const room = retryRoomFor(mem, t, cost, true);
     if (room.ok) {
       const due = t + lagRecheckGap;
+      mem.lagCharge = { at: t, cost, dueAt: due };
       recheckAt = recheckAt === undefined ? due : Math.min(recheckAt, due);
     } else {
       d.log?.("timed_out_try_out_of_room", { stage: "list lag recheck", cost, roomInMs: room.at - t, next: "regular sync" });
