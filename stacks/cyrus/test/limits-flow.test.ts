@@ -211,7 +211,7 @@ test("if arming fails the day does not trade, Michael is told, and it works once
   await r.at("2026-11-01T22:10:00Z");
   r.ownerSays("approve", "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
-  await r.at("13:45:00"); // screen: live list AAA, BBB
+  await r.at("14:15:00"); // screen: live list AAA, BBB
   broker.failOn.add("setAccountConfig");
   await r.at("14:25:00");
   assert.equal((await r.store.getDay(D))!.phases.armed, undefined);
@@ -337,7 +337,7 @@ async function notFlatDay() {
   await r.at("2026-11-01T22:10:00Z");
   r.ownerSays("approve", "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
-  await r.at("13:45:00");
+  await r.at("14:15:00");
   broker.positions = HOLD;
   // the gate recorded this entry before sending it, so the position is today's and not a carried one
   await r.store.insertOrder({ clientOrderId: "cyrus-20261102-AAA", tradeDate: D, symbol: "AAA", qty: 5, referencePrice: 100, stopPrice: 98.5, status: "submitted", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: null });
@@ -397,7 +397,7 @@ test("the emergency close-out and the regular one never run at the same time", {
   broker.clock = { isOpen: true, timestamp: "", nextOpen: "", nextClose: "2026-11-02T21:00:00Z" };
   const r = rig({ broker });
   await r.at("2026-11-01T22:10:00Z");
-  await r.at("13:45:00");
+  await r.at("14:15:00");
   broker.positions = HOLD;
   let release: () => void = () => undefined;
   const gate = new Promise<void>((res) => (release = res));
@@ -523,7 +523,7 @@ test("a flag that could not be saved (database down) is saved again once the dat
   broker.clock = { isOpen: true, timestamp: "", nextOpen: "", nextClose: "2026-11-02T21:00:00Z" };
   const r = rig({ broker });
   await r.at("2026-11-01T22:10:00Z");
-  await r.at("13:45:00");
+  await r.at("14:15:00");
   broker.positions = HOLD;
   broker.onSell = async () => { throw new Error("rejected (test)"); };
   // the regular close-out is already recorded as done, so only the re-save can write the flag later

@@ -296,7 +296,7 @@ export function decideLimits(day: DayRecord, cmd: Extract<Command, { kind: "appr
 }
 
 // Applies `load on` / `load off` to a day (load-mode.ts). Pure: no clock, no network. The same timing rules as the limits:
-// before "Armed" either way, except that `load on` closes at the morning screen (45 minutes before the open), because the load
+// before "Armed" either way, except that `load on` closes at the morning screen (15 minutes before the open), because the load
 // day's cheap list is built there; after "Armed" (mode "tighten") only `load off`, which ends the window and keeps the
 // 75 dollar cap until the mid-day pause. Returns the new phase value, or a reply that nothing changed.
 export function decideLoad(day: DayRecord, on: boolean, now: Date, messageAt: Date, mode: "edit" | "tighten"): { ok: true; value: "on" | "off" | "ended"; reply: string } | { ok: false; reply: string } {

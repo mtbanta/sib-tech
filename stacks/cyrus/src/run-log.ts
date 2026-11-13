@@ -49,6 +49,8 @@ export const STORED_INFO_EVENTS = new Set([
   "load_afternoon",
   "afternoon_closeout",
   "screen_not_tradable",
+  // Item 4 of 2026-11-13: the morning screen's duration (now at 8:15 AM, 10 minutes before "Armed").
+  "screen_done",
   // Group 2, round 1 (rare, part of the day's story): the afternoon window's failures and cancels.
   "load_afternoon_failed",
   "load_afternoon_refused",

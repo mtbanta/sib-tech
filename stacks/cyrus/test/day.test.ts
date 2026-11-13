@@ -29,7 +29,7 @@ test("a full day: request, approval, screen, live list, entry with a stop, a ref
   await r.at("13:31:00");
   assert.equal(r.said("commands").filter((t) => t.includes("Good morning")).length, 1, "the review is posted once");
 
-  await r.at("13:45:00"); // 8:45: the screen starts in the background
+  await r.at("14:15:00"); // 9:15 New York (8:15 Central): the screen starts in the background
   assert.equal(r.counts().screens, 1);
   assert.deepEqual((await r.store.getDay(D))!.liveList, ["AAA", "BBB"]);
   assert.ok(r.said("trading").some((t) => t.includes("live list") && t.includes("1. Alpha Corp (AAA)") && t.includes("2. Beta (BBB)")), "numbered, name and ticker, one per line");
@@ -99,7 +99,7 @@ test("if limits are not all decided at the open: no trading, no stream, and a la
   await r.at("2026-11-01T22:10:00Z");
   r.ownerSays("approve position", "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:20Z");
-  await r.at("13:45:00");
+  await r.at("14:15:00");
   await r.at("14:26:00"); // a stream may start while the day is still pending
   await r.at("14:30:00"); // the open
   assert.equal((await r.store.getDay(D))!.status, "lapsed");
@@ -119,7 +119,7 @@ test("a restart in the middle of the morning does not repeat the request, the re
   const first = rig();
   await first.at("2026-11-01T22:10:00Z");
   await first.at("13:30:00");
-  await first.at("13:45:00");
+  await first.at("14:15:00");
   const second = rig({ store: first.store, broker: first.broker, bot: first.bot });
   await second.at("13:50:00");
   assert.equal(first.said("commands").filter((t) => t.includes("Suggested limits")).length, 1);

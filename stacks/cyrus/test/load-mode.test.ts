@@ -1,6 +1,6 @@
 // Load mode (Michael's decisions of 2026-11-03). Each test was checked to fail with its change taken out (recorded in
 // builds/build-c2-log.md). The session on this rig's day opens at 14:30 UTC (8:30 AM Central); the load window is
-// 14:45 to 15:00 UTC (8:45 to 9:00 AM Central); the morning screen is at 13:45 UTC.
+// 14:45 to 15:00 UTC (8:45 to 9:00 AM Central); the morning screen is at 14:15 UTC (8:15 AM Central since item 4 of 2026-11-13).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { BusyPlaceholder } from "../src/strategy.ts";
@@ -22,7 +22,7 @@ async function day(load: boolean) {
   r.ownerSays(`position 500\napprove${load ? "\nload on" : ""}`, "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
   r.broker.clock = { isOpen: true, timestamp: "", nextOpen: "", nextClose: "2026-11-02T21:00:00Z" };
-  await r.at("13:45:00");
+  await r.at("14:15:00");
   await r.at("14:25:00");
   assert.ok((await r.store.getDay(D))!.phases.armed, "armed");
   return r;
@@ -65,8 +65,8 @@ test("load on is refused from the morning screen on; after Armed only load off, 
   await late.at("2026-11-01T22:10:00Z");
   late.ownerSays("approve", "2026-11-01T22:20:00Z");
   await late.at("2026-11-01T22:20:10Z");
-  late.ownerSays("load on", "13:46:00"); // after the 13:45 screen time
-  await late.at("13:46:10");
+  late.ownerSays("load on", "14:16:00"); // after the 14:15 screen time (8:15 AM Central since item 4 of 2026-11-13)
+  await late.at("14:16:10");
   assert.ok(late.said("commands").some((t) => t.includes("Too late for a load day")), "refused after the screen time");
   assert.equal(isLoadDay((await late.store.getDay(D))!), false);
 

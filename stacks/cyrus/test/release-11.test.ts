@@ -389,7 +389,7 @@ test("decision 4, worker: Alpaca's positions lag a fill by a second; the old est
   r.ownerSays("approve", "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
   r.broker.clock = { isOpen: true, timestamp: "", nextOpen: "", nextClose: "2026-11-02T21:00:00Z" };
-  await r.at("13:45:00");
+  await r.at("14:15:00");
   await r.at("14:25:00");
   await r.at("15:00:00");
   await r.trade("BBB", 50, "15:00:05");
@@ -540,7 +540,7 @@ test("decision 7, worker: each view refresh counts the open symbols (held, or wi
   r.ownerSays("approve", "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
   r.broker.clock = { isOpen: true, timestamp: "", nextOpen: "", nextClose: "2026-11-02T21:00:00Z" };
-  await r.at("13:45:00");
+  await r.at("14:15:00");
   await r.at("14:25:00");
   r.broker.positions = Array.from({ length: 5 }, (_, i) => ({ symbol: `P${i}`, qty: 1, qtyAvailable: 0, marketValue: 10, avgEntryPrice: 10, unrealizedPl: 0 }));
   await r.store.insertOrder({ clientOrderId: "cyrus-20261102-W-1", tradeDate: D, symbol: "W", qty: 1, referencePrice: 10, stopPrice: 9.9, takeProfitPrice: 10.1, status: "submitted", alpacaOrderId: "x", filledQty: null, filledAvgPrice: null, note: null, createdAt: z("14:59:00").toISOString() });

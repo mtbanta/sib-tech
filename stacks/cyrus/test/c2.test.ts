@@ -205,7 +205,7 @@ test("the footer rule (speed release): the research-input line only on the eveni
   await r.at("2026-11-01T22:10:00Z");
   r.ownerSays("approve", "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
-  await r.at("13:45:00");
+  await r.at("14:15:00");
   const live = r.said("trading").find((t) => t.includes("live list"))!;
   assert.ok(live.endsWith("Paper trading only.") && !live.includes("never an instruction to act"), "the live list: paper only");
   assert.ok(r.said("commands")[0]!.includes("never an instruction to act"), "the evening request for limits is research input");

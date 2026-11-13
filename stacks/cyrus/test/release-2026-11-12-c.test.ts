@@ -20,7 +20,7 @@ async function flatAtMidday(opts: { off?: boolean } = {}) {
   await r.at("2026-11-01T22:10:00Z");
   r.ownerSays("trades 20\nposition 300\napprove", "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
-  await r.at("13:45:00");
+  await r.at("14:15:00");
   await r.at("14:25:00");
   await r.at("14:30:05");
   await r.at("16:30:00");

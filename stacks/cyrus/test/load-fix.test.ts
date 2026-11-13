@@ -98,15 +98,15 @@ async function loadDay() {
   r.ownerSays("position 500\napprove\nload on", "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
   r.broker.clock = { isOpen: true, timestamp: "", nextOpen: "", nextClose: "2026-11-02T21:00:00Z" };
-  await r.at("13:45:00"); // the morning screen: the cheap list
+  await r.at("14:15:00"); // the morning screen: the cheap list
   return r;
 }
 const lastEntry = (r: { broker: FakeBroker }) => r.broker.calls.filter((c) => c.fn === "submitEntry").at(-1)?.args[0] as { qty: number } | undefined;
 
 test("load mode on that morning: load off after the screen (before Armed) still keeps the 75 dollar cap all day", async () => {
   const r = await loadDay();
-  r.ownerSays("load off", "13:50:00");
-  await r.at("13:50:10");
+  r.ownerSays("load off", "14:20:00");
+  await r.at("14:20:10");
   assert.equal((await r.store.getDay(D))!.phases.load, "ended", "the window ends, the load day does not");
   assert.ok(r.said("commands").some((t) => t.includes("Load mode was on this morning")));
   await r.at("14:25:00");

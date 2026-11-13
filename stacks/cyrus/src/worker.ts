@@ -25,7 +25,7 @@ import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
 import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, noteTimedOutStopEnded, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import type { SelfMonitor } from "./self-monitor.ts";
-import { AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
+import { SCREEN_MINUTES_BEFORE_OPEN, AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
 import { BusyPlaceholder } from "./strategy.ts";
 import { OrderUpdateHandler, type TradeUpdate } from "./order-stream.ts";
 import { EntryExpiry } from "./entry-expiry.ts";
@@ -900,7 +900,8 @@ export class Worker {
     const at = (minutesFromOpen: number) => now >= addMinutes(day.openAt!, minutesFromOpen);
     const alivePending = current.status === "approved" || current.status === "pending";
 
-    if (at(-45) && now < day.closeAt && alivePending && !current.phases.screen) this.background("screen", () => this.screenPhase(date, isLoadDay(current)));
+    // Michael's item 4 of 2026-11-13: the morning screen at 8:15 AM Central (15 minutes before the open), after `load on` closes.
+    if (at(-SCREEN_MINUTES_BEFORE_OPEN) && now < day.closeAt && alivePending && !current.phases.screen) this.background("screen", () => this.screenPhase(date, isLoadDay(current)));
 
     // Arming: set long only and the approved cap at Alpaca. Until it works the gate refuses every entry.
     if (at(-5) && now < day.closeAt && current.status === "approved" && !current.phases.armed && now.getTime() - this.lastArmAttempt >= 10_000) {
@@ -1219,10 +1220,13 @@ export class Worker {
   }
 
   private async screenPhase(date: string, load = false): Promise<void> {
+    const startedMs = this.d.now().getTime();
     const { symbols: list, names } = await this.d.buildLiveList(load ? { load: true } : undefined);
     await this.d.store.updateDay(date, { liveList: list });
     await this.d.store.setControl(`live_names:${date}`, names).catch(() => undefined);
     await setPhase(this.d.store, date, "screen", this.d.now().toISOString());
+    // Item 4 of 2026-11-13 (logging only, stored): how long the screen took, so each morning measures it against the 10 minutes to "Armed".
+    this.d.log?.("info", "screen_done", { load, symbols: list.length, durationMs: this.d.now().getTime() - startedMs });
     await this.say("trading", `Today's live list (${list.length})${load ? ", a load day: cheap, heavily traded names" : ""}:\n${list.length ? formatLiveList(list, names) : "(empty, nothing passed the screen)"}\n${PAPER_ONLY}`);
   }
 

@@ -38,7 +38,7 @@ async function flatAtMidday(opts: { load?: boolean; early?: boolean; off?: boole
   await r.at("2026-11-01T22:10:00Z");
   r.ownerSays(`${opts.load ? "load on\n" : ""}trades 20\nposition 300\napprove`, "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
-  await r.at("13:45:00"); // the morning screen (45 minutes before the open)
+  await r.at("14:15:00"); // the morning screen (15 minutes before the open since item 4 of 2026-11-13)
   await r.at("14:25:00");
   await r.at("14:30:05");
   await r.at("16:30:00");

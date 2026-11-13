@@ -70,7 +70,7 @@ async function runDay(opts: { tradesPerMinute: number; source: () => Generator<P
   r.ownerSays(`position 400\nloss 5000\ntrades ${opts.tradesPerMinute}\ncap 1`, "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
   assert.equal((await mem.getDay(D))!.status, "approved", "four commands in one message decided all four limits");
-  await r.at("13:45:00");
+  await r.at("14:15:00");
   sim.clockOpen = true;
   await r.at("14:25:00");
   assert.ok((await mem.getDay(D))!.phases.armed);

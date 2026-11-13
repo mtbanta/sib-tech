@@ -33,7 +33,7 @@ test("rehearsal: a load window at 150 orders a minute on the simulated broker", 
   r.ownerSays("load on\nposition 400\nloss 5000\ntrades 150\ncap 1", "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
   assert.equal((await mem.getDay(D))!.limits.maxTradesPerMinute, 150);
-  await r.at("13:45:00");
+  await r.at("14:15:00");
   sim.clockOpen = true;
   await r.at("14:25:00");
   assert.ok((await mem.getDay(D))!.phases.armed);

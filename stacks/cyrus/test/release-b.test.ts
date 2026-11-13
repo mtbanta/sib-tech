@@ -166,7 +166,7 @@ async function day(load: boolean) {
   r.ownerSays(`position 500\napprove${load ? "\nload on" : ""}`, "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
   r.broker.clock = { isOpen: true, timestamp: "", nextOpen: "", nextClose: "2026-11-02T21:00:00Z" };
-  await r.at("13:45:00");
+  await r.at("14:15:00");
   await r.at("14:25:00");
   return r;
 }
@@ -250,7 +250,7 @@ test("the window at volume on the simulated broker: 1-share entries up to the 10
   await r.at("2026-11-01T22:10:00Z");
   r.ownerSays("position 400\nloss 5000\ntrades 100\ncap 1\nload on", "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
-  await r.at("13:45:00");
+  await r.at("14:15:00");
   sim.clockOpen = true;
   await r.at("14:25:00");
   assert.ok((await mem.getDay(D))!.phases.armed);

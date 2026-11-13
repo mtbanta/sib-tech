@@ -1,6 +1,6 @@
 // LOAD MODE (Michael's decision, 2026-11-03): a day set aside to drive the stack at up to 100 entries a minute for 15
 // minutes, to measure whether Alpaca's 200 requests a minute holds. Off by default every day, never carried forward,
-// switched on with `load on` before the morning screen (45 minutes before the open) and approved with the evening limits.
+// switched on with `load on` before the morning screen (15 minutes before the open since Michael's item 4 of 2026-11-13) and approved with the evening limits.
 // On a normal day nothing here applies and the stack behaves exactly as before.
 //
 // On a load day:
@@ -37,7 +37,10 @@ export const LOAD_WINDOW_START_MIN = 15; // minutes after the open
 // The window ends at the mid-day pause (middayTimes, 10:30 AM Central). Only on a day with no mid-day cycle (a session too short for
 // one) does it end this many minutes after the open, as before Michael's decision of 2026-11-10.
 export const LOAD_WINDOW_END_MIN = 30;
-export const LOAD_SWITCH_DEADLINE_MIN = 45; // `load on` is accepted until this many minutes before the open (the morning screen)
+// Michael's item 4 of 2026-11-13: the morning screen runs 15 minutes before the open (8:15 AM Central), and `load on` is accepted until
+// then (it was 45, 7:45 AM). "Armed" stays 5 minutes before the open; the price feed waits for the screen's list (fail safe).
+export const SCREEN_MINUTES_BEFORE_OPEN = 15;
+export const LOAD_SWITCH_DEADLINE_MIN = SCREEN_MINUTES_BEFORE_OPEN; // `load on` is accepted until this many minutes before the open
 export const LOAD_COOLDOWN_SECONDS = 1;
 // The speed release (Michael's decision 4, chosen from the replay of 2026-11-05's prints, see the C2 log): the two load-day settings.
 // The take-profit sits this many cents above the entry's limit price.

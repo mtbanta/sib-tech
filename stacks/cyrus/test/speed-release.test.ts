@@ -31,7 +31,7 @@ async function day(load: boolean, liveList = ["BBB", "CCC", "DDD", "EEE"]) {
   r.ownerSays(`position 500\napprove${load ? "\nload on" : ""}`, "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
   r.broker.clock = { isOpen: true, timestamp: "", nextOpen: "", nextClose: "2026-11-02T21:00:00Z" };
-  await r.at("13:45:00");
+  await r.at("14:15:00");
   await r.at("14:25:00");
   return r;
 }
