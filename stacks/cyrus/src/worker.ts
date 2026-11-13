@@ -23,7 +23,7 @@ import type { Settings } from "./config.ts";
 import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
-import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
+import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, noteTimedOutStopEnded, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import type { SelfMonitor } from "./self-monitor.ts";
 import { AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
 import { BusyPlaceholder } from "./strategy.ts";
@@ -1439,11 +1439,8 @@ export class Worker {
           // sale is due now (no new request; a pending retry time for that entry is cleared), so the order sync runs at once.
           const entry = this.syncMemory.timedOutStops.get(info.clientOrderId);
           if (entry && (info.event === "canceled" || info.event === "expired" || info.event === "rejected")) {
-            const st = this.syncMemory.stuck.get(entry);
-            if (st) {
-              st.nextAt = 0;
-              delete st.restingStop; // messaging only: the 5 minute alert no longer says the stop rests at Alpaca
-            }
+            // Recorded before any early return (group 1, round 5): a sale of that entry running now will not back off afterwards.
+            noteTimedOutStopEnded(this.syncMemory, info.clientOrderId, this.d.now().getTime());
             if (this.closingOut || this.liquidator.isLiquidating() || this.middayOwnsSelling) return;
             this.syncAt(this.d.now().getTime(), 0);
           }

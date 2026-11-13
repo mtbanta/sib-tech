@@ -12,6 +12,11 @@ import { clientOrderIdFor } from "../src/gate.ts";
 import { AlpacaError } from "../src/alpaca-trading.ts";
 import { SimBroker } from "./sim-broker.ts";
 import { D } from "./rig.ts";
+import { FRESH_STOP_LIMIT as RULING_B } from "../src/risk.ts";
+
+// These tests check ruling B switched on, whatever the shipped default of the switch (Michael's decision 2 of 2026-11-13: a release with B
+// off ships the same code with the switch's default off). Node runs each test file in its own process.
+RULING_B.on = true;
 
 const MID = Date.UTC(2026, 10, 2, 15, 0); // 9:00 AM Central on the rig's day
 
@@ -675,9 +680,9 @@ for (const c of [
   { name: "shown in the sync's list, cancel pending", hide: false, mode: "pending", want: "Alpaca shows it pending cancel but has not finished cancelling it" },
   { name: "shown in the sync's list, cancel accepted but the stop still working", hide: false, mode: "accepted", want: "Alpaca accepted my cancel of it but still shows it working" },
   { name: "shown in the sync's list, every cancel refused", hide: false, mode: "refused", want: "Alpaca did not accept my last cancel of it" },
-  { name: "hidden from the sync's list, cancel pending", hide: true, mode: "pending", want: "Alpaca shows it pending cancel but has not finished cancelling it" },
-  { name: "hidden from the sync's list, cancel accepted but the stop still working", hide: true, mode: "accepted", want: "Alpaca accepted my cancel of it but still shows it working" },
-  { name: "hidden from the sync's list, every cancel refused", hide: true, mode: "refused", want: "Alpaca did not accept my last cancel of it" },
+  { name: "hidden from the sync's list, cancel pending", hide: true, mode: "pending", want: "at my last try, 5 minutes on; Alpaca showed it pending cancel" },
+  { name: "hidden from the sync's list, cancel accepted but the stop still working", hide: true, mode: "accepted", want: "at my last try, 5 minutes on; Alpaca had accepted my cancel of it but still showed it working" },
+  { name: "hidden from the sync's list, every cancel refused", hide: true, mode: "refused", want: "at my last try, 5 minutes on; Alpaca did not accept my last cancel of it" },
 ] as const) {
   test(`group 2, rounds 3 and 4 (night): the 5 minute alert tells the truth when the timed-out stop still rests at Alpaca (${c.name}), whenever the 5 minute mark falls`, async () => {
     for (const shift of [0, 4_000, 8_000, 13_000, 15_000, 19_000, 24_000, 27_000]) {
@@ -696,7 +701,7 @@ for (const c of [
       else w.sim.cancelMs = 10 * 60_000;
       w.sim.advance(shift);
       await runWorker(w, dd, 5 * 60_000 + 40_000);
-      const five = w.said.filter((m) => m.mention && /after \d+ minute/.test(m.text));
+      const five = w.said.filter((m) => m.mention && /(after|, )\d+ minutes?( on)?[;*]|after \d+ minute/.test(m.text));
       const at = `shift ${shift / 1000} s: `;
       assert.equal(five.length, 1, at + (five.map((m) => m.text).join(" | ") || "no 5 minute alert"));
       assert.ok(five[0]!.text.includes(RESTING), at + five[0]!.text);
@@ -795,3 +800,96 @@ test("group 1, round 3 (night): the live update that a timed-out stop ended clea
   assert.equal(syncs.length, 1, "the order sync runs at once");
   wk.endOrderStream?.();
 });
+
+// ---------------- round 5 fixes ----------------
+import { noteTimedOutStopEnded } from "../src/risk.ts";
+
+// The worker's live update (onFreshStopUpdate) at the moment Alpaca's cancel of the timed-out stop lands: the real hook function, and a sync
+// at once when no sale is running (as the worker does). Returns the time from the cancel landing to our sale.
+async function raceRun(hide: boolean, pendMs: number): Promise<{ gap: number | null; oversell: number }> {
+  const w = world();
+  const { dd } = await timedOutStops(w, ["RKLB"], hide);
+  w.sim.cancelMs = pendMs;
+  const stop = w.sim.orders.find((o) => o.clientOrderId.startsWith("cyrus-p-"))!;
+  let landedAt: number | null = null;
+  let syncNow = false;
+  const realAdvance = w.sim.advance.bind(w.sim);
+  (w.sim as any).advance = (ms: number) => {
+    const before = stop.status;
+    realAdvance(ms);
+    if (landedAt === null && before !== "canceled" && stop.status === "canceled") {
+      landedAt = w.sim.simMs;
+      noteTimedOutStopEnded(w.memory, stop.clientOrderId, w.sim.simMs);
+      if (!(w.risk.liquidator as any).isLiquidating()) syncNow = true;
+    }
+  };
+  w.sim.sleep = async (ms: number) => (w.sim as any).advance(ms);
+  (w.risk.liquidator as any).sleep = w.sim.sleep;
+  const end = w.sim.simMs + pendMs + 90_000;
+  while (w.sim.simMs < end && !w.sim.sellLog.some((x) => x.symbol === "RKLB")) {
+    syncNow = false;
+    const r = await syncOrders(w.risk, dd, { protect: true });
+    const next = r.recheckAt !== undefined ? Math.max(w.sim.simMs + 100, Math.min(r.recheckAt + 250, w.sim.simMs + 10_000)) : w.sim.simMs + 10_000;
+    while (w.sim.simMs < Math.min(next, end) && !syncNow) (w.sim as any).advance(50);
+  }
+  const sale = w.sim.sellLog.find((x) => x.symbol === "RKLB")?.at ?? null;
+  return { gap: sale !== null && landedAt !== null ? sale - landedAt : null, oversell: w.sim.oversellAttempts };
+}
+for (const hide of [true, false]) {
+  test(`group 1, round 5 (night): with the live updates on, the sale comes within a second of the timed-out stop's cancel landing, even when the update arrives during that entry's own sale (${hide ? "hidden from" : "shown in"} the sync's list; cancel pending 0.5 to 45 s)`, async () => {
+    let worst = 0;
+    for (let p = 500; p <= 45_000; p += 500) {
+      const r = await raceRun(hide, p);
+      assert.ok(r.gap !== null, `pending ${p} ms: no sale`);
+      worst = Math.max(worst, r.gap!);
+      assert.ok(r.gap! <= 1_000, `pending ${p} ms: sale ${r.gap} ms after the cancel landed (before the fix: up to 30 s)`);
+      assert.equal(r.oversell, 0);
+    }
+    console.log(`MEASURE round 5 fix, live update during the sale, ${hide ? "hidden" : "visible"}: worst ${worst} ms from the cancel landing to the sale`);
+  });
+}
+
+const fiveMinute = (w: World) => w.said.filter((m) => m.mention && /minute/.test(m.text) && !/within 15 seconds/.test(m.text));
+for (const hide of [false, true]) {
+  test(`group 2, round 5 (night): with the live updates off, a timed-out stop whose cancel lands between tries near the 5 minute mark is never called "still resting" once the sync's list shows it ended (${hide ? "hidden from" : "shown in"} the list)`, async () => {
+    for (let land = 270_000; land <= 340_000; land += 2_000) {
+      const w = world();
+      const statusAt: string[] = [];
+      const realSay = w.risk.say;
+      w.risk.say = async (ch: string, text: string, opts?: any) => {
+        if (opts?.mentionOwner) statusAt.push(String(w.sim.orders.find((o) => o.clientOrderId.startsWith("cyrus-p-"))?.status));
+        return realSay(ch, text, opts);
+      };
+      const { dd } = await timedOutStops(w, ["RKLB"], hide);
+      const before = w.said.length;
+      const statusBefore = statusAt.length;
+      w.sim.cancelMs = land;
+      await runWorker(w, dd, 5 * 60_000 + 60_000);
+      const five = w.said.slice(before).filter((m) => m.mention && /minute/.test(m.text));
+      const statuses = statusAt.slice(statusBefore);
+      assert.ok(five.length <= 1, `land ${land / 1000} s: ${five.length} alerts`);
+      for (const [i, m] of five.entries()) {
+        const at = `land ${land / 1000} s, stop ${statuses[i]} at the alert: `;
+        if (statuses[i] === "canceled") assert.ok(!m.text.includes("is still resting"), at + m.text);
+        if (statuses[i] === "canceled" && !hide) assert.ok(m.text.includes("has ended at Alpaca"), at + m.text);
+        assert.ok(!m.text.includes("still has no protective stop") || statuses[i] === "canceled", at + m.text);
+      }
+      assert.equal(w.sim.oversellAttempts, 0);
+    }
+  });
+}
+
+for (const hide of [false, true]) {
+  test(`group 2, round 5 (night): a try that gives way to the loss stop's sale keeps the note, so the 5 minute alert still says the stop rests at Alpaca (${hide ? "hidden from" : "shown in"} the list, cancel pending)`, async () => {
+    const w = world();
+    const { dd } = await timedOutStops(w, ["RKLB"], hide);
+    w.sim.cancelMs = 10 * 60_000;
+    await runWorker(w, dd, 4 * 60_000 + 30_000);
+    (w.risk.liquidator as any).priorityPending = 1;
+    await runWorker(w, dd, 70_000);
+    const five = fiveMinute(w);
+    assert.equal(five.length, 1, five.map((m) => m.text).join(" | ") || "no 5 minute alert");
+    assert.ok(five[0]!.text.includes("still resting at Alpaca"), five[0]!.text);
+    assert.ok(!five[0]!.text.includes("still has no protective stop"), five[0]!.text);
+  });
+}
