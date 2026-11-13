@@ -80,7 +80,7 @@ test("decision 1, worker: the 6 cases of 2026-11-06 (both exits cancelled as the
   for (let i = 0; i < 20 && sim.sellLog.length === 0; i++) await settle();
   assert.deepEqual(sim.sellLog.map((x) => [x.symbol, x.qty]), [["IREN", 1]], "sold by the missing-exit check");
   assert.ok(sim.sellLog[0]!.at < z("15:00:03").getTime(), `sold ${(sim.sellLog[0]!.at - z("15:00:01").getTime()) / 1000} s after the cancel`);
-  assert.ok(r.said("alerts").some((t) => t.includes("IREN had no live protective stop, so I sold it")));
+  assert.ok(r.said("alerts").some((t) => t.includes("IREN: I could not confirm a live protective stop, so I sold it")));
   assert.equal(sim.oversellAttempts, 0);
 });
 

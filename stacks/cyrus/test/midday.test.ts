@@ -796,14 +796,14 @@ test("Michael's decision 'Mid-day owns it': a position stuck from 10:27 across t
   for (const l of sim.orders.find((o) => o.clientOrderId === id)!.legs) await sim.cancelOrder(l.id);
   sim.staleHeld.set("IONQ", 2); // Alpaca keeps the shares reported as not free
   await r.at("16:27:30");
-  assert.equal(r.said("alerts").filter((t) => t.includes("IONQ has 2 shares with no protective stop")).length, 1, "the stuck alert before 10:30");
+  assert.equal(r.said("alerts").filter((t) => t.includes("can't confirm a protective stop for IONQ's 2 shares")).length, 1, "the stuck alert before 10:30");
   for (const t of ["16:30:00", "16:31:00", "16:33:00", "16:35:00", "16:37:00", "16:39:00"]) await r.at(t);
-  assert.equal(r.said("alerts").filter((t) => t.includes("IONQ still has no protective stop after")).length, 0, "no stuck-entry 5 minute alert while the mid-day close-out sells");
+  assert.equal(r.said("alerts").filter((t) => t.includes("can't confirm a protective stop for IONQ after")).length, 0, "no stuck-entry 5 minute alert while the mid-day close-out sells");
   assert.equal(r.said("alerts").filter((t) => t.includes("mid-day close-out is NOT FLAT yet")).length, 1, "the mid-day close-out's own alert");
   sim.staleHeld.delete("IONQ");
   await r.at("16:42:00");
   await r.at("16:43:30");
   await until(async () => Boolean((await r.store.getDay(D))!.phases[MIDDAY_PHASE]));
   assert.equal(sim.heldQty("IONQ"), 0, "sold once Alpaca freed it");
-  assert.equal(r.said("alerts").filter((t) => t.includes("IONQ still has no protective stop after")).length, 0);
+  assert.equal(r.said("alerts").filter((t) => t.includes("can't confirm a protective stop for IONQ after")).length, 0);
 });

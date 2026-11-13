@@ -315,7 +315,7 @@ test("fix C: a missing-exit sale not filled yet gets its own closing line when i
   w.sim.cancelExitsAtFill(id);
   w.sim.advance(500);
   await syncOrders(w.risk, day, { protect: true });
-  assert.ok(w.said.some((m) => /HIMS had no live protective stop.*has not filled it yet/.test(m.text)));
+  assert.ok(w.said.some((m) => /HIMS: I could not confirm a live protective stop.*has not filled it yet/.test(m.text)));
   w.sim.advance(10_000);
   await syncOrders(w.risk, day, { protect: true });
   assert.ok(w.said.some((m) => m.text === "**HIMS: the sale of its 26 shares has filled.**"), w.said.map((m) => m.text).join(" | "));

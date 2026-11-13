@@ -141,7 +141,7 @@ test("normal behaviour unchanged: an entry with no live exit at all is still sol
   for (const l of w.sim.orders.find((o) => o.clientOrderId === id)!.legs) l.status = "canceled";
   await syncOrders(w.risk, day, { protect: true });
   assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["AAA", 5]]);
-  assert.ok(w.said.some((m) => m.text.includes("AAA had no live protective stop, so I sold it")));
+  assert.ok(w.said.some((m) => m.text.includes("AAA: I could not confirm a live protective stop, so I sold it")));
 });
 
 test("A4, worker level: a remainder found by a regular sync gets its fresh stop at once (no grace, no timer), and nothing is sold", async () => {

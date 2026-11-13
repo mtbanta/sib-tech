@@ -100,7 +100,7 @@ for (const [hide, noQty] of [[false, false], [true, false], [true, true]] as con
     w.sim.advance(5_000);
     assert.equal(w.sim.heldQty("APLD"), 4, "APLD-108's 4 shares are still held");
     assert.equal(mentions(w).length, 0);
-    assert.ok(!w.said.some((m) => /reported it without a protective stop/.test(m.text)), "never reported stuck, so no resolution line");
+    assert.ok(!w.said.some((m) => /reported that I could not confirm its protective stop/.test(m.text)), "never reported stuck, so no resolution line");
   });
 }
 
@@ -134,7 +134,7 @@ test("part A and C, Monday's IONQ case: shares held with no open order visible; 
   assert.ok(w.sim.requests - req0 <= 11, `${w.sim.requests - req0} requests`);
   assert.equal(w.sim.sellLog.length, 0);
   assert.equal(mentions(w).length, 1, "one alert");
-  assert.match(mentions(w)[0]!.text, /IONQ has 2 shares with no protective stop since \d{1,2}:\d{2} [AP]M CT, and I could not sell them yet.*will post again when they are sold or gone\./);
+  assert.match(mentions(w)[0]!.text, /can't confirm a protective stop for IONQ's 2 shares \(since \d{1,2}:\d{2} [AP]M CT\), and I could not sell them yet.*will post again when they are sold or gone\./);
   assert.ok(r.recheckAt !== undefined, "a retry is set");
   const firstDue = r.recheckAt!;
   assert.ok(firstDue - w.sim.simMs <= STUCK_RETRY_FIRST_MS && firstDue - w.sim.simMs > STUCK_RETRY_FIRST_MS - 2_000, "about 5 seconds");
@@ -157,7 +157,7 @@ test("part A and C, Monday's IONQ case: shares held with no open order visible; 
   assert.deepEqual(gaps.slice(0, 4), [10, 20, 30, 30], "after the first 5: 10, 20, then at most 30");
   assert.ok(gaps.every((g) => g <= STUCK_RETRY_MAX_MS / 1000));
   assert.equal(mentions(w).length, 2, "the first alert and one after 5 minutes, nothing in between");
-  assert.match(mentions(w)[1]!.text, /still has no protective stop after 5 minutes.*Please close it in Alpaca's dashboard/);
+  assert.match(mentions(w)[1]!.text, /can't confirm a protective stop for IONQ after 5 minutes.*close it there if needed/);
   // Alpaca frees the shares: sold at the next try, one line without a mention
   w.sim.staleHeld.delete("IONQ");
   w.sim.advanceTo(last);
@@ -167,7 +167,7 @@ test("part A and C, Monday's IONQ case: shares held with no open order visible; 
   await syncOrders(w.risk, day, { protect: true });
   const lines = w.said.filter((m) => m.ch === "alerts" && m.text.includes("IONQ"));
   assert.equal(lines.length, 3, "three posts in all");
-  assert.ok(/^IONQ: sold \(\d+ minutes after I reported it without a protective stop\)\.$/.test(lines[2]!.text) && !lines[2]!.mention, lines[2]!.text);
+  assert.ok(/^IONQ: sold \(\d+ minutes after I reported that I could not confirm its protective stop\)\.$/.test(lines[2]!.text) && !lines[2]!.mention, lines[2]!.text);
 });
 
 test("part A: a stuck symbol does not hold up a remainder's fresh stop (A4) on another symbol in the same sync", async () => {
@@ -211,7 +211,7 @@ test("part A and C: a sale held by a cancel still landing (visible) keeps the ol
   const riot = w.said.filter((m) => m.ch === "alerts");
   assert.equal(riot.length, 2, "one alert and one resolution line, nothing else");
   const last = riot.at(-1)!;
-  assert.ok(/^RIOT: (sold|no longer held) \(\d+ seconds after I reported it without a protective stop\)\.$/.test(last.text) && !last.mention, last.text);
+  assert.ok(/^RIOT: (sold|no longer held) \(\d+ seconds after I reported that I could not confirm its protective stop\)\.$/.test(last.text) && !last.mention, last.text);
   assert.equal(w.sim.oversellAttempts, 0);
 });
 
@@ -300,7 +300,7 @@ for (const other of [false, true]) test(`part C: an entry reported stuck whose r
   await syncOrders(w.risk, day, { protect: true });
   const lines = w.said.filter((m) => m.ch === "alerts");
   assert.equal(lines.length, 2);
-  assert.ok(/^IONQ: no longer held \(\d+ seconds after I reported it without a protective stop\)\.$/.test(lines[1]!.text) && !lines[1]!.mention, lines[1]!.text);
+  assert.ok(/^IONQ: no longer held \(\d+ seconds after I reported that I could not confirm its protective stop\)\.$/.test(lines[1]!.text) && !lines[1]!.mention, lines[1]!.text);
 });
 
 test("part C: an entry reported stuck that stops being the newest on its symbol gets one resolution line, no mention", async () => {
@@ -316,9 +316,9 @@ test("part C: an entry reported stuck that stops being the newest on its symbol 
   w.sim.advance(10_000);
   await hold(w, "IONQ", 1, 34, 126); // a newer IONQ entry on record
   await syncOrders(w.risk, day, { protect: true });
-  const lines = w.said.filter((m) => m.ch === "alerts" && /reported it without a protective stop/.test(m.text));
+  const lines = w.said.filter((m) => m.ch === "alerts" && /reported that I could not confirm its protective stop/.test(m.text));
   assert.equal(lines.length, 1);
-  assert.match(lines[0]!.text, /^IONQ: a newer IONQ position took over, and I watch that one now \(\d+ seconds after I reported it without a protective stop\)\.$/);
+  assert.match(lines[0]!.text, /^IONQ: a newer IONQ position took over, and I watch that one now \(\d+ seconds after I reported that I could not confirm its protective stop\)\.$/);
   assert.ok(!lines[0]!.mention);
 });
 
@@ -400,7 +400,7 @@ test("the 5 minute alert goes by the clock: eight stuck, each gets exactly one 5
   const { w, day, syms, t0 } = await stuckMany(8);
   await runFor(w, day, t0 + STUCK_ESCALATE_MS + 30_000);
   for (const sym of syms) {
-    const esc = w.said.filter((m) => m.mention && m.text.includes(`${sym} still has no protective stop after`));
+    const esc = w.said.filter((m) => m.mention && m.text.includes(`can't confirm a protective stop for ${sym} after`));
     assert.equal(esc.length, 1, `${sym}: ${esc.length} five minute alerts`);
   }
   assert.equal(mentions(w).length, 16, "one first alert and one 5 minute alert each, nothing else");
@@ -423,5 +423,5 @@ test("Michael's decision 'Mid-day owns it': while the mid-day close-out is selli
   owns = false;
   w.sim.advance(10_000);
   await syncOrders(w.risk, day, { protect: true, middayOwnsSelling: () => owns });
-  assert.equal(mentions(w).filter((m) => /still has no protective stop after/.test(m.text)).length, 1, "once afterwards");
+  assert.equal(mentions(w).filter((m) => /can't confirm a protective stop for \w+ after/.test(m.text)).length, 1, "once afterwards");
 });

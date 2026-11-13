@@ -338,7 +338,7 @@ test("sync marks fills; an entry whose exits are gone is sold and reported", asy
   r = await syncOrders({ ...s.deps }, day);
   assert.deepEqual(r.unprotected, ["AAA"]);
   assert.equal(s.broker.count("submitSell"), 1);
-  assert.ok(s.said.some((m) => m.ch === "alerts" && m.text.includes("no live protective stop")));
+  assert.ok(s.said.some((m) => m.ch === "alerts" && m.text.includes("confirm a live protective stop")));
 });
 
 test("with protection checks off (a close-out is running or its time has come) the sync sells nothing", async () => {
@@ -351,7 +351,7 @@ test("with protection checks off (a close-out is running or its time has come) t
   const r = await syncOrders({ ...s.deps }, (await s.store.getDay(D))!, { protect: false });
   assert.deepEqual(r.unprotected, []);
   assert.equal(s.broker.count("submitSell"), 0);
-  assert.ok(!s.said.some((m) => m.text.includes("no live protective stop")), "no false alarm");
+  assert.ok(!s.said.some((m) => m.text.includes("confirm a live protective stop")), "no false alarm");
 });
 
 test("a symbol entered again after its first position closed is judged by its own order, not the old one", async () => {

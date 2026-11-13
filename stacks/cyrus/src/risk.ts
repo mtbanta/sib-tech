@@ -157,10 +157,6 @@ export class SyncMemory {
   // its entry that was running then does not back off afterwards (it would undo the update's "sell now"): it is due again at once. This
   // fires once per stop end, because only an end at or after that try's start counts.
   readonly timedOutEndedAt = new Map<string, number>();
-  // Messaging only (group 2, round 8): timed-out stops (client ids) that a complete look since the timeout found absent (not open and not
-  // holding the shares, without an unexplained hold), or that Alpaca said at the limit it does not hold open. Read only by the 5 minute
-  // alert: such a stop never gets the hedged "may still be resting" wording.
-  readonly timedOutSeenAbsent = new Set<string>();
 }
 
 // Ruling B (the worker's live update, onFreshStopUpdate): a timed-out fresh stop ended at Alpaca. Its entry's sale is due now (no new
@@ -639,43 +635,29 @@ async function escalateIfDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string
   const ourSale = (listed ?? []).filter((x) => x.symbol === st.symbol && x.side === "sell" && x.clientOrderId.startsWith("cyrus-x-") && working(x.status)).reduce((n, x) => n + Math.max(0, x.qty - x.filledQty), 0);
   if (ourSale > 0 && covers(ourSale)) return;
   st.escalated = true;
-  // Group 2, round 3 of the night release (messaging only): the entry's fresh stop that hit the 15 second limit is still working at
-  // Alpaca, shown in the list the sync has already read or, when that list does not show it, held the shares at the last try (read only).
-  // Then the alert says the truth: the stop rests at Alpaca and may still protect the shares, but the stack no longer counts on it.
+  // Michael's decision 2 of 2026-11-13 (10:15 AM), messaging only: the 5 minute alert says only what the stack knows, so it is true
+  // whether or not a stop rests at Alpaca. One present-tense variant states what the list this sync has just read shows; every other
+  // case leads with "I can't confirm a protective stop", plus what the stack last saw, in the past tense.
   const shownStop = (listed ?? []).find((x) => mem.timedOutStops.get(x.clientOrderId) === clientOrderId && OPEN_STATUSES.has(x.status));
-  // Group 2, round 5: the note from the last try is out of date when the list the sync has just read shows that stop ended (the live
-  // updates were down, so nothing else cleared it). Then the shares have no stop at all: the note is dropped and the alert says so.
+  const minutes = minutesText(now - st.since);
+  if (shownStop) {
+    const known = st.restingStop?.stopClientOrderId === shownStop.clientOrderId ? st.restingStop.cancel : undefined;
+    const cancel = shownStop.status === "pending_cancel" ? "Alpaca shows it pending cancel but has not finished cancelling it" : known === "refused" ? "Alpaca did not accept my last cancel of it" : known === "accepted" || mem.timedOutCancelAccepted.has(shownStop.clientOrderId) ? "Alpaca accepted my cancel of it but still shows it working" : "my cancel of it has not taken effect";
+    await d.say("alerts", `**Michael: ${st.symbol}'s fresh protective stop, not confirmed in time, is still resting at Alpaca after ${minutes}; ${cancel}, so I still cannot sell the shares.** That stop may still protect them, but I no longer count on it. Please check ${st.symbol} in Alpaca's dashboard and close it there if needed. I keep trying.`, { mentionOwner: true });
+    return;
+  }
+  // What the stack last saw of the entry's timed-out stop, as a fact with its time (never a claim about now).
   const noted = st.restingStop;
-  if (!shownStop && noted && (listed ?? []).some((x) => x.clientOrderId === noted.stopClientOrderId && !OPEN_STATUSES.has(x.status))) {
+  let seen = "";
+  if (noted && (listed ?? []).some((x) => x.clientOrderId === noted.stopClientOrderId && !OPEN_STATUSES.has(x.status))) {
     delete st.restingStop;
-    await d.say("alerts", `**Michael: ${st.symbol} has no protective stop: its fresh stop, not confirmed in time, has ended at Alpaca, and after ${minutesText(now - st.since)} I have not sold the shares yet.** Please close it in Alpaca's dashboard if it is still held. I keep trying.`, { mentionOwner: true });
-    return;
+    seen = " Alpaca's order list now shows its fresh stop (not confirmed in time) ended.";
+  } else if (noted) {
+    const cancel = noted.cancel === "pending" ? "Alpaca showed it pending cancel" : noted.cancel === "refused" ? "Alpaca did not accept my last cancel of it" : noted.cancel === "accepted" || mem.timedOutCancelAccepted.has(noted.stopClientOrderId) ? "Alpaca had accepted my cancel of it but still showed it working" : "my cancel of it had not taken effect";
+    seen = ` At my last try its fresh stop (not confirmed in time) was still resting at Alpaca; ${cancel}.`;
   }
-  const restingId = shownStop?.clientOrderId ?? st.restingStop?.stopClientOrderId;
-  if (restingId) {
-    const known = st.restingStop?.stopClientOrderId === restingId ? st.restingStop.cancel : undefined;
-    const pending = shownStop?.status === "pending_cancel" || (!shownStop && known === "pending");
-    if (shownStop) {
-      // Shown in the list the sync has just read: present tense.
-      const cancel = pending ? "Alpaca shows it pending cancel but has not finished cancelling it" : known === "refused" ? "Alpaca did not accept my last cancel of it" : known === "accepted" || mem.timedOutCancelAccepted.has(restingId) ? "Alpaca accepted my cancel of it but still shows it working" : "my cancel of it has not taken effect";
-      await d.say("alerts", `**Michael: ${st.symbol}'s fresh protective stop, not confirmed in time, is still resting at Alpaca after ${minutesText(now - st.since)}; ${cancel}, so I still cannot sell the shares.** That stop may still protect them, but I no longer count on it. Please check ${st.symbol} in Alpaca's dashboard and close it there if needed. I keep trying.`, { mentionOwner: true });
-    } else {
-      // Known only from the last try (group 2, round 5): past tense, since it may have changed since.
-      const cancel = pending ? "Alpaca showed it pending cancel" : known === "refused" ? "Alpaca did not accept my last cancel of it" : known === "accepted" || mem.timedOutCancelAccepted.has(restingId) ? "Alpaca had accepted my cancel of it but still showed it working" : "my cancel of it had not taken effect";
-      await d.say("alerts", `**Michael: ${st.symbol}'s fresh protective stop, not confirmed in time, was still resting at Alpaca at my last try, ${minutesText(now - st.since)} on; ${cancel}, so I have not been able to sell the shares.** If that stop is still there it may protect them, but I no longer count on it. Please check ${st.symbol} in Alpaca's dashboard and close it there if needed. I keep trying.`, { mentionOwner: true });
-    }
-    return;
-  }
-  // Group 1, round 7 note (messaging only): the entry has a timed-out stop that no look has shown open or ended: no live update said it
-  // ended, the sync's list does not show it, and no complete look since the timeout found it absent (group 2, round 8). It may still rest
-  // at Alpaca, so the alert does not say there is no stop.
-  const unseenStop = [...mem.timedOutStops].some(([stop, entry]) => entry === clientOrderId && !mem.timedOutEndedAt.has(stop) && !mem.timedOutSeenAbsent.has(stop) && !(listed ?? []).some((x) => x.clientOrderId === stop));
-  if (unseenStop) {
-    await d.say("alerts", `**Michael: ${st.symbol} has had no confirmed protective stop for ${minutesText(now - st.since)}, and I have not been able to sell the shares.** Its fresh stop, not confirmed in time, may still be resting at Alpaca: my last tries did not see it either way. Please check ${st.symbol} in Alpaca's dashboard and close it there if needed. I keep trying.`, { mentionOwner: true });
-    return;
-  }
-  const what = st.protecting ? "I still cannot protect or sell it" : "I still cannot sell it";
-  await d.say("alerts", `**Michael: ${st.symbol} still has no protective stop after ${minutesText(now - st.since)}, and ${what}** (${st.why || "still held"}). Please close it in Alpaca's dashboard. I keep trying.`, { mentionOwner: true });
+  const what = st.protecting ? "protect or sell it" : "sell it";
+  await d.say("alerts", `**Michael: I can't confirm a protective stop for ${st.symbol} after ${minutes}, and I have not been able to ${what} yet** (${st.why || "still held"}).${seen} I am checking, and I will sell it if it is still unconfirmed. Please check ${st.symbol} in Alpaca's dashboard and close it there if needed. I keep trying.`, { mentionOwner: true });
 }
 
 // Fix C (Michael's approval of 2026-11-10): the closing line for a sale reported as "not filled yet": when every sale of the entry is seen
@@ -729,8 +711,6 @@ async function freshStopTimeout(d: RiskDeps, day: DayRecord, mem: SyncMemory, s:
     }
   }
   d.log?.("fresh_stop_timeout", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: f.stopClientOrderId, msFromSent: nowMs - f.placedAt, found, cancelling: cancelId !== null });
-  // Messaging only (group 2, round 8): Alpaca answered that it does not hold this stop open (not a failed read).
-  if (cancelId === null && found !== "lookup failed") mem.timedOutSeenAbsent.add(f.stopClientOrderId);
   // The stop filled after all: its shares are sold; the next sync closes the entry. Nothing to cancel or sell.
   if (found === "filled") return { attempted: false, stuck: false };
   const left = f.qty;
@@ -749,7 +729,7 @@ async function resolveStuck(d: RiskDeps, mem: SyncMemory, clientOrderId: string,
   const st = mem.stuck.get(clientOrderId);
   mem.stuck.delete(clientOrderId);
   if (!st?.alerted) return false;
-  await d.say("alerts", `${st.symbol}: ${how} (${minutesText(d.now().getTime() - st.since)} after I reported it without a protective stop).`);
+  await d.say("alerts", `${st.symbol}: ${how} (${minutesText(d.now().getTime() - st.since)} after I reported that I could not confirm its protective stop).`);
   return true;
 }
 
@@ -855,17 +835,6 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   // Group 2, round 6: and only when that try's last look read both the open orders and the positions (`lastLookOk`); a look that failed
   // never saw the stop, so it cannot say the stop is gone.
   if (stuckBefore && !r.yielded && r.lastLookOk === true) delete stuckBefore.restingStop;
-  // Messaging only (group 2, round 8): what this try's complete look saw of the entry's timed-out stops. Seen open or holding the shares:
-  // not absent. Not seen, and no unexplained hold (shares held that no visible order explains): absent.
-  if (!r.yielded && r.lastLookOk === true) {
-    const unexplainedHold = r.hiddenHold?.includes(s.symbol) === true;
-    for (const [stop, entry] of mem.timedOutStops) {
-      if (entry !== s.clientOrderId) continue;
-      const seen = r.freshStopStillOpen?.some((x) => x.clientOrderId === stop) === true || r.heldByFreshStop?.some((x) => x.clientOrderId === stop) === true;
-      if (seen) mem.timedOutSeenAbsent.delete(stop);
-      else if (!unexplainedHold) mem.timedOutSeenAbsent.add(stop);
-    }
-  }
   // A4: the remainder now has a fresh stop. Nothing is sold; the entry stays open until the stop fills or the close-out sells it.
   if (r.freshStop && r.freshStop.symbol === s.symbol) {
     const f = r.freshStop;
@@ -1002,7 +971,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     const filled = soldWhole(soldMeasure);
     if (filled) {
       if (!(await resolveStuck(d, mem, s.clientOrderId, "sold"))) {
-        if (kind === "missing") await d.say("alerts", `**${s.symbol} had no live protective stop, so I sold it.**`);
+        if (kind === "missing") await d.say("alerts", `**${s.symbol}: I could not confirm a live protective stop, so I sold it.**`);
         // Messaging only (speed release, decision 6): the worker gathers these into one alert a minute; without it, posted at once.
         else if (d.onRemainderSold) d.onRemainderSold(s.symbol, soldQty);
         else await d.say("alerts", `**${s.symbol}: Alpaca cancelled its stop when the take-profit partly filled, so I sold the remaining ${soldQty} shares.**`);
@@ -1011,7 +980,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     }
     // The sell went out and Alpaca has not filled it yet (paper has held sells 16 seconds before submitting them): not a failure.
     if (!mem.stuck.get(s.clientOrderId)?.alerted) {
-      const what = kind === "missing" ? `**${s.symbol} had no live protective stop.** I sent a sell for its ${plural(soldQty, "share")}` : `**${s.symbol}: Alpaca cancelled its stop when the take-profit partly filled.** I sent a sell for the remaining ${plural(soldQty, "share")}`;
+      const what = kind === "missing" ? `**${s.symbol}: I could not confirm a live protective stop.** I sent a sell for its ${plural(soldQty, "share")}` : `**${s.symbol}: Alpaca cancelled its stop when the take-profit partly filled.** I sent a sell for the remaining ${plural(soldQty, "share")}`;
       await d.say("alerts", `${what}; Alpaca has not filled it yet. I will say when it has.`);
       // Fix C: its closing line comes from the order sync when the sale is seen filled.
       mem.awaitingFill.set(s.clientOrderId, { symbol: s.symbol, qty: soldQty, kind, saleIds: [...saleIds], since: now });
@@ -1066,7 +1035,8 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     const lostAt = new Date(endedAt.length > 0 ? Math.max(...endedAt) : now);
     const it = left === 1 ? "it" : "them";
     const tail = protecting ? `I keep trying and will post again when ${left === 1 ? "it has" : "they have"} a stop, ${left === 1 ? "is" : "are"} sold, or ${left === 1 ? "is" : "are"} gone.` : `I keep trying and will post again when ${left === 1 ? "it is" : "they are"} sold or gone.`;
-    await d.say("alerts", `**Michael: ${s.symbol} has ${plural(left, "share")} with no protective stop since ${centralClock(lostAt)}, and I could not ${protecting ? "protect or sell" : "sell"} ${it} yet** (${how}; ${why}). ${tail}`, { mentionOwner: true });
+    // Michael's decision 2 of 2026-11-13 (10:15 AM), messaging only: what the stack knows, true whether or not a stop rests at Alpaca.
+    await d.say("alerts", `**Michael: I can't confirm a protective stop for ${s.symbol}'s ${plural(left, "share")} (since ${centralClock(lostAt)}), and I could not ${protecting ? "protect or sell" : "sell"} ${it} yet** (${how}; ${why}). I am checking, and I will sell ${it} if still unconfirmed. ${tail}`, { mentionOwner: true });
     // Group 2, round 6 (messaging only): not after a try whose last look failed (it has no view of the stop); the next sync's own
     // escalation, which has the order list, decides then.
   } else if (r.lastLookOk === true) await escalateIfDue(d, mem, s.clientOrderId, r.heldAfter?.[s.symbol]); // messaging only: the holding this sale last saw, read only

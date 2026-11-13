@@ -158,7 +158,7 @@ test("high-volume rehearsal: a cap of 30 orders a minute, a stop command in the 
   assert.equal(pos.length, 0, "the account ends flat");
   assert.equal(((await mem.getControl<{ on: boolean }>("not_flat")) ?? { on: false }).on, false);
   const alerts = r.said("alerts");
-  assert.ok(!alerts.some((a) => a.includes("no live protective stop")), "no false protective-stop alert");
+  assert.ok(!alerts.some((a) => a.includes("confirm a live protective stop")), "no false protective-stop alert");
   assert.ok(!alerts.some((a) => a.includes("NOT FLAT")));
   assert.ok(r.said("trading").some((x) => x.includes("Close-out done: the account is flat")));
   // every entry carried both exits at the broker
@@ -188,5 +188,5 @@ test("high-volume rehearsal at the ceiling: 100 orders a minute never exceeded, 
   assert.ok(t.sim.lowestTokens >= 40, "Alpaca's request budget was never run dry by trading: the reserve for safety work held");
   assert.equal(t.sim.oversellAttempts, 0);
   assert.equal((await t.sim.listPositions()).length, 0, "flat at the end even at the ceiling");
-  assert.ok(!t.r.said("alerts").some((a) => a.includes("no live protective stop")));
+  assert.ok(!t.r.said("alerts").some((a) => a.includes("confirm a live protective stop")));
 });

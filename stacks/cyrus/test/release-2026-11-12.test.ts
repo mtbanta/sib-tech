@@ -385,7 +385,7 @@ for (const [CMS, GAP] of [[25_000, 0], [30_000, 0], [28_000, 1_000], [35_000, 5_
       await syncOrders(w.risk, dd, { protect: true, streamLive: true });
     }
     const late = mentions(w).slice(before).map((m) => m.text);
-    assert.ok(!late.some((t) => t.includes("still has no protective stop")), late.join(" | "));
+    assert.ok(!late.some((t) => t.includes("has no protective stop")), late.join(" | "));
     assert.equal(freshStopOrder(w, "LUNR")!.status, "accepted", "the fresh stop rests");
     assert.equal(w.sim.heldQty("LUNR"), 3);
     assert.equal(w.sim.sellLog.length, 0, "nothing sold");
@@ -409,7 +409,7 @@ test("group 2, finding 3: a remainder waiting for its fresh stop (the take-profi
   w.memory.stuck.get(id)!.since -= 5 * 60_000;
   await syncOrders(w.risk, dd, { protect: true });
   const esc = mentions(w).at(-1)!.text;
-  assert.ok(esc.includes("I still cannot protect or sell it"), esc);
+  assert.ok(esc.includes("I have not been able to protect or sell it yet"), esc);
 });
 
 test("group 2, finding 4: no 5 minute alert while a remembered fresh stop (confirmed after an unclear answer) is working and covers the holding; the stuck record itself is unchanged", async () => {
@@ -492,7 +492,7 @@ test("A5, APLD-81's shape: the entry filled as its 5 second cancel landed and Al
   assert.equal(w.sim.heldQty("APLD"), 0);
   assert.equal(w.sim.oversellAttempts, 0);
   // Sold and filled ("so I sold it"), or sold and reported "not filled yet" with its closing line to come (fix C of 2026-11-10).
-  assert.ok(w.said.some((m) => m.text.includes("APLD had no live protective stop")), w.said.map((m) => m.text).join(" | "));
+  assert.ok(w.said.some((m) => m.text.includes("APLD: I could not confirm a live protective stop")), w.said.map((m) => m.text).join(" | "));
   assert.equal(mentions(w).length, 0);
 });
 
@@ -614,7 +614,7 @@ test("finding 1, restart: a fresh-stopped remainder 11 minutes old, a new worker
   const used = w.sim.requests - req0;
   assert.equal(w.sim.sellLog.length, 0);
   assert.equal(mentions(w).length, 0);
-  assert.ok(!w.said.some((m) => /no protective stop/.test(m.text)), "no 'no protective stop' alert");
+  assert.ok(!w.said.some((m) => /confirm a (live )?protective stop/.test(m.text)), "no \'cannot confirm a protective stop\' alert");
   assert.equal(freshStopOrder(w, "IREN")!.status, "accepted", "the fresh stop is left resting");
   assert.ok(w.risk.syncMemory.freshStops.has(id), "remembered again");
   assert.ok(w.events.some((e) => e.event === "fresh_stop_recovered"));
@@ -832,7 +832,7 @@ test("round 2, PA as a restart: E1's 3-share fresh stop rests, E2 (4 shares) los
   assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["SOUN", 4]], "E2's 4 shares sold; E1's 3 never re-sold");
   assert.equal(w.sim.heldQty("SOUN"), 3, "E1's 3 shares, still held");
   assert.ok(e1StopResting(w), "E1's fresh stop still rests");
-  assert.ok(w.said.some((m) => m.text.includes("SOUN had no live protective stop, so I sold it")), "E2's sale is reported");
+  assert.ok(w.said.some((m) => m.text.includes("SOUN: I could not confirm a live protective stop, so I sold it")), "E2's sale is reported");
   assert.equal(mentions(w).length, 0, "no alert to Michael");
   assert.equal(w.sim.oversellAttempts, 0);
   // 91 measured: 18 syncs (2 each), E2's sale, and E1's stop looked up every 30 seconds once it is older than the sync's 10 minute read.

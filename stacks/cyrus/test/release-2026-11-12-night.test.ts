@@ -105,7 +105,7 @@ test("ruling B: a fresh stop still unclear 15 s after it was sent is treated as 
     await syncOrders(w.risk, dd, { protect: true });
   }
   assert.equal(await heldQty(w, "WULF"), 0);
-  assert.ok(w.said.some((m) => m.ch === "alerts" && m.text.startsWith("WULF: ") && /after I reported it without a protective stop/.test(m.text)), JSON.stringify(w.said.map((m) => m.text)));
+  assert.ok(w.said.some((m) => m.ch === "alerts" && m.text.startsWith("WULF: ") && /after I reported that I could not confirm its protective stop/.test(m.text)), JSON.stringify(w.said.map((m) => m.text)));
   assert.equal(w.said.filter((m) => m.mention).length, 1, "one alert mentioning Michael");
 });
 
@@ -257,7 +257,7 @@ test("group 2, round 1 (night): no 5 minute escalation while ruling B's own sale
     w.sim.advance(10_000);
     await syncOrders(w.risk, dd, { protect: true });
   }
-  assert.ok(!w.said.some((m) => m.text.includes("still has no protective stop")), w.said.map((m) => m.text).join(" | "));
+  assert.ok(!w.said.some((m) => m.text.includes("has no protective stop")), w.said.map((m) => m.text).join(" | "));
   assert.equal(w.said.filter((m) => m.mention).length, 1, "only the one alert at once");
   assert.equal(await heldQty(w, "WULF"), 0);
   assert.ok(w.said.some((m) => m.text.startsWith("WULF: ")), w.said.map((m) => m.text).join(" | "));
@@ -680,9 +680,9 @@ for (const c of [
   { name: "shown in the sync's list, cancel pending", hide: false, mode: "pending", want: "Alpaca shows it pending cancel but has not finished cancelling it" },
   { name: "shown in the sync's list, cancel accepted but the stop still working", hide: false, mode: "accepted", want: "Alpaca accepted my cancel of it but still shows it working" },
   { name: "shown in the sync's list, every cancel refused", hide: false, mode: "refused", want: "Alpaca did not accept my last cancel of it" },
-  { name: "hidden from the sync's list, cancel pending", hide: true, mode: "pending", want: "at my last try, 5 minutes on; Alpaca showed it pending cancel" },
-  { name: "hidden from the sync's list, cancel accepted but the stop still working", hide: true, mode: "accepted", want: "at my last try, 5 minutes on; Alpaca had accepted my cancel of it but still showed it working" },
-  { name: "hidden from the sync's list, every cancel refused", hide: true, mode: "refused", want: "at my last try, 5 minutes on; Alpaca did not accept my last cancel of it" },
+  { name: "hidden from the sync's list, cancel pending", hide: true, mode: "pending", want: "At my last try its fresh stop (not confirmed in time) was still resting at Alpaca; Alpaca showed it pending cancel" },
+  { name: "hidden from the sync's list, cancel accepted but the stop still working", hide: true, mode: "accepted", want: "At my last try its fresh stop (not confirmed in time) was still resting at Alpaca; Alpaca had accepted my cancel of it but still showed it working" },
+  { name: "hidden from the sync's list, every cancel refused", hide: true, mode: "refused", want: "At my last try its fresh stop (not confirmed in time) was still resting at Alpaca; Alpaca did not accept my last cancel of it" },
 ] as const) {
   test(`group 2, rounds 3 and 4 (night): the 5 minute alert tells the truth when the timed-out stop still rests at Alpaca (${c.name}), whenever the 5 minute mark falls`, async () => {
     for (const shift of [0, 4_000, 8_000, 13_000, 15_000, 19_000, 24_000, 27_000]) {
@@ -706,7 +706,7 @@ for (const c of [
       assert.equal(five.length, 1, at + (five.map((m) => m.text).join(" | ") || "no 5 minute alert"));
       assert.ok(five[0]!.text.includes(RESTING), at + five[0]!.text);
       assert.ok(five[0]!.text.includes(c.want), at + five[0]!.text);
-      assert.ok(!five[0]!.text.includes("still has no protective stop"), at + five[0]!.text);
+      assert.ok(!five[0]!.text.includes("has no protective stop"), at + five[0]!.text);
       assert.equal(await heldQty(w, "RKLB"), 4, at + "the stop still holds the shares (nothing sold on top)");
       assert.equal(w.sim.oversellAttempts, 0);
     }
@@ -880,8 +880,8 @@ for (const hide of [false, true]) {
       for (const [i, m] of five.entries()) {
         const at = `land ${land / 1000} s, stop ${statuses[i]} at the alert: `;
         if (statuses[i] === "canceled") assert.ok(!m.text.includes("is still resting"), at + m.text);
-        if (statuses[i] === "canceled" && !hide) assert.ok(m.text.includes("has ended at Alpaca"), at + m.text);
-        assert.ok(!m.text.includes("still has no protective stop") || statuses[i] === "canceled", at + m.text);
+        if (statuses[i] === "canceled" && !hide) assert.ok(m.text.includes("now shows its fresh stop (not confirmed in time) ended"), at + m.text);
+        assert.ok(!m.text.includes("has no protective stop") || statuses[i] === "canceled", at + m.text);
       }
       assert.equal(w.sim.oversellAttempts, 0);
     }
@@ -899,7 +899,7 @@ for (const hide of [false, true]) {
     const five = fiveMinute(w);
     assert.equal(five.length, 1, five.map((m) => m.text).join(" | ") || "no 5 minute alert");
     assert.ok(five[0]!.text.includes("still resting at Alpaca"), five[0]!.text);
-    assert.ok(!five[0]!.text.includes("still has no protective stop"), five[0]!.text);
+    assert.ok(!five[0]!.text.includes("has no protective stop"), five[0]!.text);
   });
 }
 
@@ -932,7 +932,7 @@ for (const hide of [false, true]) {
       const at = `window ${y / 1000} s for ${len / 1000} s: `;
       assert.equal(five.length, 1, at + (five.map((m) => m.text).join(" | ") || "no 5 minute alert"));
       assert.ok(five[0]!.text.includes("still resting at Alpaca"), at + five[0]!.text);
-      assert.ok(!five[0]!.text.includes("still has no protective stop"), at + five[0]!.text);
+      assert.ok(!five[0]!.text.includes("has no protective stop"), at + five[0]!.text);
       assert.equal(w.sim.oversellAttempts, 0);
     }
   });
@@ -965,14 +965,14 @@ for (const hide of [false, true]) {
       const at = `y ${y / 1000} s: `;
       assert.equal(five.length, 1, at + (five.map((m) => m.text).join(" | ") || "no 5 minute alert"));
       assert.ok(five[0]!.text.includes("still resting at Alpaca"), at + five[0]!.text);
-      assert.ok(!five[0]!.text.includes("still has no protective stop"), at + five[0]!.text);
+      assert.ok(!five[0]!.text.includes("has no protective stop"), at + five[0]!.text);
       assert.equal(w.sim.oversellAttempts, 0);
     }
     assert.ok(hits >= 20, `the fault fired in ${hits} runs`);
   });
 }
 
-test("group 1, round 7 note (night): a timed-out stop that no look has shown open or ended gets the hedged 5 minute alert (it may still rest at Alpaca), never \"no protective stop\"", async () => {
+test("Michael's decision 2 of 2026-11-13 (10:15 AM): a timed-out stop that no look has seen gets the 5 minute alert that says only what the stack knows (\"I can't confirm a protective stop\"), never that there is no stop", async () => {
   const w = world();
   const { dd } = await timedOutStops(w, ["RKLB"], true);
   w.sim.cancelMs = 10 * 60_000;
@@ -996,8 +996,8 @@ test("group 1, round 7 note (night): a timed-out stop that no look has shown ope
   await runWorker(w, dd, 6 * 60_000);
   const five = fiveMinute(w);
   assert.equal(five.length, 1, five.map((m) => m.text).join(" | ") || "no 5 minute alert");
-  assert.ok(five[0]!.text.includes("may still be resting at Alpaca"), five[0]!.text);
-  assert.ok(!five[0]!.text.includes("still has no protective stop"), five[0]!.text);
+  assert.ok(five[0]!.text.includes("I can't confirm a protective stop for RKLB after 5 minutes"), five[0]!.text);
+  assert.ok(!five[0]!.text.includes("has no protective stop") && !five[0]!.text.includes("is still resting"), five[0]!.text);
 });
 
 for (const hide of [false, true]) {
@@ -1019,7 +1019,7 @@ for (const hide of [false, true]) {
       await runWorker(w, dd, 7 * 60_000);
       const alerts = w.said.slice(before).filter((m) => m.mention);
       const statuses = statusAt.slice(statusBefore);
-      const five = alerts.map((m, i) => ({ m, status: statuses[i] })).filter((x) => /minute/.test(x.m.text) && !/within 15 seconds/.test(x.m.text) && !/with no protective stop since/.test(x.m.text));
+      const five = alerts.map((m, i) => ({ m, status: statuses[i] })).filter((x) => /minute/.test(x.m.text) && !/within 15 seconds/.test(x.m.text) && !/shares \(since /.test(x.m.text));
       assert.ok(five.length <= 1, `land ${land / 1000} s: ${five.length} alerts`);
       for (const x of five) {
         if (x.status === "canceled") {

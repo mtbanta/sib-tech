@@ -304,5 +304,5 @@ test("the window at volume on the simulated broker: 1-share entries up to the 10
   assert.ok(sim.lowestTokens >= 80, "the safety reserve was never reached");
   assert.equal(sim.rejected429, 0);
   assert.equal(sim.oversellAttempts, 0);
-  assert.ok(!r.said("alerts").some((a) => a.includes("no live protective stop") || a.includes("NO PROTECTIVE STOP")), "no false alarm");
+  assert.ok(!r.said("alerts").some((a) => a.includes("confirm a live protective stop") || a.includes("NO PROTECTIVE STOP")), "no false alarm");
 });

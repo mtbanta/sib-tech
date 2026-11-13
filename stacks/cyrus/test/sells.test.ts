@@ -156,7 +156,7 @@ test("the Monday case: five positions with live stops, the close-out alone flatt
   assert.deepEqual(res, { flat: true, remaining: [] });
   assert.equal((await w.sim.listPositions()).length, 0);
   assert.equal(syncSold, 0);
-  assert.ok(!w.said.some((m) => m.text.includes("no live protective stop")), "no false alarm");
+  assert.ok(!w.said.some((m) => m.text.includes("confirm a live protective stop")), "no false alarm");
   assert.equal(w.sim.oversellAttempts, 0, "no sell was ever refused for being too big, because the cancels were awaited first");
   const sells = new Map(w.sim.sellLog.map((x) => [x.symbol, x.qty]));
   assert.deepEqual([...sells].sort(), [["AEM", 11], ["COO", 33], ["FIS", 51], ["HRL", 92], ["RMD", 8]]);
@@ -261,7 +261,7 @@ test("worker level: a sync tick that lands inside the close-out's slow cancels s
   assert.equal((await sim.listPositions()).length, 0);
   assert.equal(sim.sellLog.length, 2, "exactly one sell per symbol, from the close-out alone");
   assert.equal(sim.oversellAttempts, 0);
-  assert.ok(!r.said("alerts").some((t) => t.includes("no live protective stop")), "no false alarm");
+  assert.ok(!r.said("alerts").some((t) => t.includes("confirm a live protective stop")), "no false alarm");
   assert.ok(!events.includes("unprotected_position"), "the sync did not even start a sale: the close-out guard is on");
 });
 
@@ -301,7 +301,7 @@ for (const [label, mode] of MODES) {
     assert.equal(res.flat, true, JSON.stringify(res));
     assert.equal(w.sim.oversellAttempts, 0);
     assert.equal(w.sim.sellLog.length, 5);
-    assert.ok(!w.said.some((m) => m.text.includes("no live protective stop")));
+    assert.ok(!w.said.some((m) => m.text.includes("confirm a live protective stop")));
   });
 
   test(`the bulk cancel failing after cancelling still ends flat when ${label}`, async () => {

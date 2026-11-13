@@ -45,5 +45,5 @@ test("loss stop fires, its sale fails, Michael resumes: the position left withou
   for (let s = 40; s <= 100; s += 5) await r.at(plus("14:50:00", s));
   await settle();
   assert.equal(r.broker.positions.length, 0, "AAA, left without a protective stop, is sold");
-  assert.ok(r.said("alerts").some((t) => t.includes("AAA had no live protective stop, so I sold it")), "with an alert");
+  assert.ok(r.said("alerts").some((t) => t.includes("AAA: I could not confirm a live protective stop, so I sold it")), "with an alert");
 });
