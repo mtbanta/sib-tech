@@ -5056,7 +5056,7 @@ That is the list's lag plus at most one 2 s recheck, for lags up to 30 s, while 
 - a recheck costs 2 requests for a recent entry and 3 for an older one (mutant: the lookup not costed);
 - the backup syncs stand aside (mutant: no standing aside).
 
-The item 1 test's bound is tightened from the lag plus 4.5 s to the lag plus 2.5 s. The cleared event's bounds are now within 2.5 s of each other inside the 30 s window while the allowance has room. With no room, or past the window, they can be up to a regular sync gap (about 10 s) apart (group 2, round 6: 10 000 and 20 000 ms at a 15 s lag with no room; 41 500 and 51 500 ms at a 45 s lag). The real lag always lies between them.
+The item 1 test's bound is tightened from the lag plus 4.5 s to the lag plus 2.5 s. The cleared event's bounds are now within 2.5 s of each other inside the 30 s window while the allowance has room. With no room, or past the window, they can be up to a regular sync gap apart, which in the worker is 10 to 15 s (its 5 s pass starts the regular sync once 10 s have passed since the last sync). Group 2, round 6, with a probe stepping a fixed 10 s: 10 000 and 20 000 ms at a 15 s lag with no room; 41 500 and 51 500 ms at a 45 s lag. Group 2, round 7, modelling the worker's pass: 300 and 15 000 ms at a 15 s lag with no room. The real lag always lies between them.
 
 **Briefs:** the expected time, the allowance's rise while a list lags, and "list lag recheck" out-of-room events to report.
 
@@ -5117,7 +5117,7 @@ Full suite 717 of 717 (the rule's one test went with it). Type check clean.
 
 1. **A recheck could be charged and never run (code).** The charge was made when the recheck was scheduled. In the worker, any earlier sync replaces the timer, so it pre-empts the recheck: a live update, a stuck sale's own retry time, the backups. That earlier sync saw the lag and charged again. So charges piled up for rechecks that never ran, and took the room a stuck sale needs.
    - Group 1's probe: one stuck sale and six remainders, one every 30 s, each lagging 15 s. AAA got 12 tries in 242 s, with a 171 s gap. With charges for rechecks that ran only: 27 tries, longest gap 31 s, the same as with no lag.
-   - Charged against rechecks run, one remainder at a 25 s lag: 18 against 10 with other updates every 3 s; 20 (the minute's whole allowance) against 1 with updates every 1 s.
+   - Charged against rechecks run, one remainder at a 25 s lag: 18 rechecks charged (2 requests each) against 10 that ran with other updates every 3 s; 20 (the minute's whole allowance) against 1 with updates every 1 s.
 2. **Tests only.** Two mutants survived: the gap taken as the largest of the lagging remainders' gaps (E8), and the cost ignoring the order list's pages (E12).
 
 **Group 1's answers:**
@@ -5128,7 +5128,7 @@ Full suite 717 of 717 (the rule's one test went with it). Type check clean.
 
 **Fix (`src/risk.ts`, commit `e5bb24f`):**
 - `SyncMemory.lagCharge` holds the recheck charged and not yet run: when it was charged, its cost, and when it is due.
-- At the end of the walk, before anything new is charged: if this sync started before that recheck was due, the recheck never ran, so its charge is given back (`refundCharge`, from the allowance and from the statistics log). A recheck that ran stays charged.
+- At the end of the walk, before the next recheck is charged: if this sync started before that recheck was due, the recheck never ran, so its charge is given back (`refundCharge`, from the allowance and from the statistics log). A recheck that ran stays charged.
 - The stale comment in the walk is corrected (no room means the regular sync, not a wait for room).
 
 **Measured (simulator, the worker's pattern of other syncs; one stuck sale refused by Alpaca, one lagging remainder, 90 s):**
@@ -5152,3 +5152,26 @@ The last row is the trade-off in the question to Michael: when nothing else sync
 - a three-page order list makes a recheck cost 4 (E12).
 
 Full suite 721 of 721. Type check clean.
+
+### Weekend build: group 2, round 7 (2401f0b) and fixes
+
+**Group 2, round 7: CHANGES REQUIRED (two wordings).** The code changes are sound.
+
+1. **"Before anything new is charged" was false.** A stuck sale's retry is checked and charged inside the walk, before the give-back at its end. So a retry due in the sync that pre-empts a charged recheck still sees that charge. In group 2's probe, AAA's retry was pushed from 13.0 s to 13.5 s by a charge given back in the same sync. In another setup, room came 1.3 s later with the charge and 0.8 s without it. The log and the comment now say the give-back comes after the walk, before the next recheck is charged, and that a retry in the same walk still sees the old charge. Moving the give-back ahead of the walk would change money-touching code beyond the request, so it is not done (a question for Michael if he wants it).
+2. **"About 10 s" understated the regular sync gap.** In the worker the 5 s pass starts the regular sync once 10 s have passed since the last one, so after an off-tick sync the next regular sync is 10 to 15 s later. Group 2's model of the worker gave bounds 14.7 s apart at a 15 s lag with no room. The briefs and the log now say 10 to 15 s.
+
+**What holds:**
+- group 2's round 6 fix and notes;
+- group 1's before and after table reproduces exactly, with the earlier table's setup (AAA first, three syncs 2 s apart, then the lag; the longest gap counted from the run's start);
+- messages unchanged, with none during any lag;
+- rule 6;
+- only `stacks/cyrus` and `builds` touched.
+
+**Non-blocking notes, done:**
+- "18 against 10" counts rechecks of 2 requests each;
+- the briefs say a fresh stop can come later than the lag plus 2 s with no out-of-room event when the same sync was slow, and point to `sync_slow`.
+
+**Non-blocking notes, kept:**
+- When AAA's first try starts together with the lag, the "after" column is 12 sales and a 31 s gap on every row, including 10 s and 25 s. So the last row's trade-off depends on timing.
+- A per-minute statistics row taken between a charge and its give-back counts a recheck that never ran (2 to 4 requests).
+- **For group 1:** when the worker's 5 s pass starts a due recheck, the recheck's timer still fires about 250 ms later. That second sync is judged pre-empting and gives back the new charge, so it runs uncharged. That is at most about one per 5 s pass. In group 2's model at a 25 s lag: 17 syncs and 26 requests charged, against 28 before the fix.

@@ -905,7 +905,8 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     if (!c.stuck) mem.bareSeen.delete(s.clientOrderId);
   }
   // Group 1, round 6 of the weekend build: a recheck charged earlier that this sync pre-empted (it started before the recheck was due) never
-  // ran: its charge is given back before anything new is charged. One that ran (this sync started at or after its time) stays charged.
+  // ran: its charge is given back here, before the next recheck is charged. A stuck sale's retry earlier in this same walk still saw that
+  // charge (group 2, round 7: such a retry went 0.5 s later). One that ran (this sync started at or after its time) stays charged.
   if (mem.lagCharge !== undefined) {
     if (syncStartMs < mem.lagCharge.dueAt) refundCharge(mem, mem.lagCharge.at, mem.lagCharge.cost);
     mem.lagCharge = undefined;
