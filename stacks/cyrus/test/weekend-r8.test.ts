@@ -594,8 +594,8 @@ test("fix (a), round 2 (group 1): the time put back after a failed pass sync is 
 });
 
 // Group 2, fix (a) round 3: the restore after a failed pass sync is bounded. With Alpaca's order list failing for 30 s and a recheck
-// pending, the real code makes one more failing sync than before the restore (group 2 measured 4 failed syncs against 3); a variant whose
-// restored timer restores itself again failed every 100 ms (263 to 286 failed reads). Group 2's outage probe, kept as a test.
+// pending, the real code makes one more failing sync than before the restore, or two in a 250 ms window (see the build log, "Fix (a),
+// round 2 (53e367c): group 1"); a variant whose restored timer restores itself again failed every 100 ms (263 to 286 failed reads).
 test("fix (a), rounds 3 to 5: with Alpaca's order list failing for 30 s and a recheck pending, the restore is bounded: at most 4 failed reads, and at most 3 sync starts in 5 s (two restores only when the next pass lands in the restored timer's 250 ms slack)", async () => {
   const rows: string[] = [];
   for (const kind of ["stuck", "lag"] as const) {
@@ -655,8 +655,8 @@ test("fix (a), rounds 3 to 5: with Alpaca's order list failing for 30 s and a re
   console.log("MEASURE 30 s outage\n" + rows.join("\n"));
 });
 
-// Group 1, fix (a) round 4: a loop that keeps restoring for a whole outage (even with a growing wait) must not pass. Every Alpaca read
-// inside the sync fails for 120 s while a stuck sale's retry is pending; the real code made 13 syncs, at most 7 in a minute and 2 in 5 s
+// Group 1, fix (a) round 4: a loop that keeps restoring for a whole outage (even with a growing wait) must not pass. The sync's Alpaca reads
+// (order lists, positions, lookups) fail for 120 s while a stuck sale's retry is pending; the real code made 13 syncs, at most 7 in a minute and 2 in 5 s
 // (group 1's measurement). Bounds: at most 8 a minute and 2 in 5 s.
 test("fix (a), round 4 (group 1): with the sync's Alpaca reads (order lists, positions, lookups) failing for 120 s, syncs stay at most 8 a minute and 2 in 5 s (no restore loop for the length of the outage)", async () => {
   const rows: string[] = [];
