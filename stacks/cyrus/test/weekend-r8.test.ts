@@ -451,3 +451,144 @@ test("fix (a), round 2 (group 2): a live update's timer that kept its place at a
   assert.ok(starts.some((x) => x.startsWith("leftover@+6")), `the live update's timer fired: ${starts.join(" | ")}`);
   wk.stop?.();
 });
+
+// ---------------- Fix (a), round 2 (group 1): the pass's sync fails after the pass cancelled a recheck's own timer ----------------
+// Group 1's probes Q5 and Q6, kept as tests: the cancelled time is put back once, so a stuck sale's retry and a lost-exits follow-up still
+// run at their times (before this fix, the retry came 5.75 to 9.85 s late and the follow-up's remaining tries were dropped).
+async function driveTo(r: any, sim: SimBroker, nextPass: number, end: number) {
+  for (let g = 0; g < 4000; g++) {
+    const tAll = Math.min(...r.timers(), Infinity);
+    if (tAll <= sim.simMs) {
+      r.setNow(iso(sim.simMs));
+      await settle();
+      await settle();
+      continue;
+    }
+    const next = Math.min(nextPass, tAll);
+    if (next > end) break;
+    if (next === nextPass) {
+      await r.at(iso(next));
+      nextPass += 5_000;
+    } else r.setNow(iso(next));
+    await settle();
+    await settle();
+  }
+}
+
+test("fix (a), round 2 (group 1): when the pass's sync fails (the order list read throws), the cancelled recheck is put back, so a stuck sale's retry still runs at its time, on either branch", async () => {
+  const rows: string[] = [];
+  for (const off of [-4_000, -300, 100]) {
+    const { sim, r } = await armedDay(true);
+    const wk: any = r.worker;
+    const mem = wk.syncMemory;
+    const id = clientOrderIdFor(D, "GE", 1);
+    await sim.submitEntry({ symbol: "GE", qty: 5, stopPrice: 11.87, takeProfitPrice: 12.08, referencePrice: 12, clientOrderId: id });
+    sim.fillEntry(id, 12);
+    await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "GE", qty: 5, referencePrice: 12, stopPrice: 11.87, takeProfitPrice: 12.08, status: "filled", alpacaOrderId: null, filledQty: 5, filledAvgPrice: 12, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+    await r.at("14:30:10");
+    const t0 = sim.simMs + 100;
+    r.setNow(iso(t0));
+    const sells: number[] = [];
+    sim.refuseStops = true;
+    sim.refuseSellIf = (s: any) => {
+      if (s.symbol === "GE") {
+        sells.push(sim.simMs - t0);
+        return true;
+      }
+      return false;
+    };
+    sim.partialTakeProfit(id, 1, 12.08); // a remainder whose fresh stop and sale Alpaca refuses: a stuck sale
+    wk.syncAt(t0, 0);
+    r.setNow(iso(t0 + 1));
+    await settle();
+    await settle();
+    await settle();
+    const due = mem.stuck.get(id)?.nextAt ?? wk.syncRecheckAt;
+    const P = due + off;
+    if (off < 0) wk.lastSync = P - 10_000; // a slow sync: the pass takes its regular branch
+    let armed = true;
+    const realList = (sim as any).listOrdersPaged.bind(sim);
+    (sim as any).listOrdersPaged = async (...a: any[]) => {
+      if (armed && sim.simMs >= P) {
+        armed = false;
+        throw new Error("order list read failed (test)");
+      }
+      return realList(...a);
+    };
+    await driveTo(r, sim, P, t0 + 40_000);
+    wk.stop?.();
+    const retry = sells.filter((x) => x > 5_000)[0];
+    rows.push(`pass ${off} ms from due: retry due +${due - t0}, ran +${retry}`);
+    assert.equal(armed, false, "the pass's sync failed");
+    assert.ok(retry !== undefined && retry - (due - t0) <= 350, rows[rows.length - 1]!);
+  }
+  console.log("MEASURE failed pass sync\n" + rows.join("\n"));
+});
+
+test("fix (a), round 2 (group 1): when the pass's regular sync fails, a lost-exits follow-up keeps its tries (0.5, 1 and 2 s apart)", async () => {
+  const { sim, r } = await armedDay(true);
+  const wk: any = r.worker;
+  const mem = wk.syncMemory;
+  const mk = async (s: string, n: number) => {
+    const id = clientOrderIdFor(D, s, n);
+    await sim.submitEntry({ symbol: s, qty: 5, stopPrice: 11.87, takeProfitPrice: 12.08, referencePrice: 12, clientOrderId: id });
+    sim.fillEntry(id, 12);
+    await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: s, qty: 5, referencePrice: 12, stopPrice: 11.87, takeProfitPrice: 12.08, status: "filled", alpacaOrderId: null, filledQty: 5, filledAvgPrice: 12, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+    return id;
+  };
+  const a = await mk("LUNR", 1);
+  const b = await mk("AAPL", 2);
+  await r.at("14:30:10");
+  const t0 = sim.simMs + 100;
+  r.setNow(iso(t0));
+  sim.partialTakeProfitListLag(a, 1, 12.08, 8_000);
+  mem.liveStopCancelled.set(a, t0);
+  mem.mustLook.add(a);
+  wk.lostExitsPending.set(b, { symbol: "AAPL", at: t0, tries: 0 });
+  const triesAt: Array<{ at: number; tries: number | string }> = [];
+  const real = wk.startSync.bind(wk);
+  wk.startSync = (d: any, c: any, how: any = {}) => {
+    if (!wk.inflight.has("risk")) triesAt.push({ at: sim.simMs - t0, tries: wk.lostExitsPending.get(b)?.tries ?? "gone" });
+    return real(d, c, how);
+  };
+  wk.syncAt(t0, 0);
+  r.setNow(iso(t0 + 1));
+  await settle();
+  await settle();
+  const P = wk.syncRecheckAt - 300;
+  wk.lastSync = P - 10_000;
+  let armed = true;
+  const realList = (sim as any).listOrdersPaged.bind(sim);
+  (sim as any).listOrdersPaged = async (...x: any[]) => {
+    if (armed && sim.simMs >= P) {
+      armed = false;
+      throw new Error("order list read failed (test)");
+    }
+    return realList(...x);
+  };
+  await driveTo(r, sim, P, t0 + 6_000);
+  wk.stop?.();
+  const trace = triesAt.map((x) => `+${x.at} tries=${x.tries}`).join(" | ");
+  assert.equal(armed, false, "the pass's sync failed");
+  for (const n of [1, 2, 3]) assert.ok(triesAt.some((x) => x.tries === n && x.at < 5_000), `try ${n} ran within 5 s: ${trace}`);
+});
+
+test("fix (a), round 2 (group 1): the time put back after a failed pass sync is the recheck's own timer again (a later pass would cancel it)", async () => {
+  const { sim, r, wk, due1 } = await lagReported();
+  let armed = true;
+  const realList = (sim as any).listOrdersPaged.bind(sim);
+  (sim as any).listOrdersPaged = async (...x: any[]) => {
+    if (armed) {
+      armed = false;
+      throw new Error("order list read failed (test)");
+    }
+    return realList(...x);
+  };
+  wk.lastSync = due1 - 11_000;
+  await r.at(iso(due1 - 100)); // the regular pass cancels the recheck's own timer; its sync fails
+  await settle();
+  assert.equal(armed, false, "the pass's sync failed");
+  assert.equal(wk.eventSyncAt, due1, "the cancelled time is back");
+  assert.equal(wk.recheckTimerAt, due1, "as the recheck's own timer");
+  wk.stop?.();
+});

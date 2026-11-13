@@ -1039,8 +1039,13 @@ export class Worker {
       // 250 ms slack, or put off while a sync ran). Only that timer: any other pending timer (a live update's) is left to fire.
       // Fix (a), round 1 (group 2): also on the regular 10 s branch before the recheck is due. That sync takes the recheck's place (it gives
       // the recheck's charge back), and it asks again for any recheck still needed. Only when the sync will start (none is running).
-      if (!this.inflight.has("risk") && this.eventSyncTimer !== null && this.eventSyncAt !== null && this.eventSyncAt === this.recheckTimerAt) this.cancelRecheckTimer();
-      this.startSync(current, day.closeAt, { fromPass: true });
+      // Fix (a), round 2 (group 1): if that sync fails, it has not run the recheck, so the cancelled time is put back once (`restoreAt`).
+      let restoreAt: number | undefined;
+      if (!this.inflight.has("risk") && this.eventSyncTimer !== null && this.eventSyncAt !== null && this.eventSyncAt === this.recheckTimerAt) {
+        restoreAt = this.eventSyncAt;
+        this.cancelRecheckTimer();
+      }
+      this.startSync(current, day.closeAt, { fromPass: true, restoreAt });
     }
     if (inSession || (day.closeAt && now < addMinutes(day.closeAt, 10))) {
       await this.flushDigest();
@@ -1172,7 +1177,7 @@ export class Worker {
   // Michael's next command. While a close-out is running, and from the close-out time on, the missing-exit check is switched off
   // and nothing is sold here: the close-out alone flattens the account. It is asked again just before each sale, so a close-out
   // that starts meanwhile switches it off. One at a time: a sync already running is never doubled.
-  private startSync(dayNow: DayRecord, closeAt: Date, how: { fromPass?: boolean; leftover?: boolean } = {}): void {
+  private startSync(dayNow: DayRecord, closeAt: Date, how: { fromPass?: boolean; leftover?: boolean; restoreAt?: number } = {}): void {
     if (this.inflight.has("risk")) return;
     this.lastSync = this.d.now().getTime();
     // Group 1, round 7 of the weekend build: the pass starts a sync while a timer is still pending; that timer will still fire after it.
@@ -1184,9 +1189,22 @@ export class Worker {
     this.background("risk", async () => {
       // While the daily loss stop is in force its own retry re-sells whatever is still held, inside its request budget; the
       // missing-exit check would otherwise start a liquidation of its own for every such position every 30 seconds (round 8).
-      const lossStopped = await this.lossStopInForce(dayNow.tradeDate);
-      this.syncRecheckAt = null;
-      const synced = await syncOrders(risk, dayNow, { protect: () => !lossStopped && protect(), streamLive, middayOwnsSelling: () => this.middayOwnsSelling, keepLagCharge });
+      let synced: Awaited<ReturnType<typeof syncOrders>>;
+      try {
+        const lossStopped = await this.lossStopInForce(dayNow.tradeDate);
+        this.syncRecheckAt = null;
+        synced = await syncOrders(risk, dayNow, { protect: () => !lossStopped && protect(), streamLive, middayOwnsSelling: () => this.middayOwnsSelling, keepLagCharge });
+      } catch (err) {
+        // Fix (a), round 2 (group 1): the pass cancelled a recheck's own timer for this sync, and the sync failed before it could run that
+        // recheck or ask for it again. The cancelled time is put back once, as the recheck's own timer (it fires at once if already past).
+        // A sync started by that timer carries no `restoreAt`, so a failure there puts nothing back: at most one restore per pass.
+        if (how.restoreAt !== undefined) {
+          if (this.syncRecheckAt === null) this.syncRecheckAt = how.restoreAt;
+          this.syncAt(how.restoreAt);
+          if (this.eventSyncAt === how.restoreAt) this.recheckTimerAt = how.restoreAt;
+        }
+        throw err;
+      }
       if (synced.recheckAt !== undefined) {
         this.syncRecheckAt = synced.recheckAt;
         this.syncAt(synced.recheckAt);

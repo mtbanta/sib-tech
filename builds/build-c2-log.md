@@ -5347,7 +5347,7 @@ Full suite 729 of 729. Type check clean.
 - **B1 (fix (a) round 1).** When `syncAt` kept an earlier pending timer, `startSync` cleared the recheck mark. That earlier timer could be an older recheck's own timer, so the pass running the newer recheck did not cancel it, and it ran uncharged. Measured through the real pass, with the older timer injected: 47 and 52 real requests in the minute against 40, and 21 in 5 s against 15. The narrow window was not measured for frequency.
 
 **Fixes (`src/worker.ts`):**
-- The pass cancels the recheck's own timer on both branches, when no sync is running (so the sync it starts takes the recheck's place). On the regular branch before the recheck is due, that sync already gives the recheck's charge back, and it asks again for any recheck still needed.
+- The pass cancels the recheck's own timer on both branches, when no sync is running (so the sync it starts takes the recheck's place). On the regular branch before the recheck is due, that sync already gives the recheck's charge back, and, when it succeeds, it asks again for any recheck still needed (a failed sync: fix (a) round 2 below).
 - `startSync` sets the recheck mark only when its timer took its place, and otherwise leaves the mark of the timer that kept its place (group 1's suggested line).
 - The stale comment on `leftoverTimerAt` ("Timers are not changed") and the test file's header are corrected.
 
@@ -5398,3 +5398,31 @@ Full suite 733 of 733. Type check clean.
 - messages unchanged (0 Discord posts across a 70 s lag window in 8 cases);
 - briefs, rule 6, scope;
 - the proposal's constants.
+
+### Fix (a), round 2 (53e367c): group 1 CHANGES REQUIRED, and fix
+
+**What holds (group 1):**
+- Fix 1 (an older own timer keeps its mark) is closed: 0 leftover syncs, at most 40 a minute and 12 in 5 s.
+- The regular-branch cancel is within decision 1 and the findings about it. Apart from the finding below it is safe: a stuck retry's timer is re-armed and runs on time; a lost-exits follow-up re-arms and no try is lost.
+- The builder's reasoning is confirmed through the real paths (instrumented): through the pass and the timers, a sync never started with a recheck's own timer pending. "Older mark lost" is equivalent there. "Mark whatever is pending" is not strictly equivalent, but it differs only in letting the pass cancel a timer, which is the safe direction.
+
+**B1 (fix (a) round 2), a new family: a failed sync loses a recheck.** The pass cancels the recheck's own timer before its sync runs. If that sync throws (for example, the order list read still fails after the Alpaca client's own retries), the timer is gone, `syncRecheckAt` is cleared, and the follow-ups after `syncOrders` do not run. Nothing asked again until the next regular sync.
+
+Measured by group 1 in the simulator: a stuck sale's retry came 5.75 s late (pass 4 s before due), 9.45 s late (0.3 s before) and 9.85 s late (recheck-due branch). A lost-exits follow-up's remaining tries were dropped. At `c27346b` all were on time. The worst case is bounded at about 10 s.
+
+**Fix (`src/worker.ts`):**
+- The pass passes the time it cancelled to its sync (`restoreAt`).
+- If that sync throws before `syncOrders` returns (including the loss stop's read before it), the time is put back once as the recheck's own timer: `syncRecheckAt` if empty, `syncAt(restoreAt)`, and the mark. It fires at once if already past.
+- A sync started by that timer carries no `restoreAt`, so a failure there puts nothing back: at most one restore per pass, every 5 s. That is no new retry loop (rule 6).
+- The follow-ups are unchanged: the restored timer's sync runs them when it succeeds.
+
+**New tests (`test/weekend-r8.test.ts`, group 1's Q5 and Q6 kept as tests; each fails on its mutant):**
+- **Stuck retry after a failed pass sync.** The order list read throws once in the pass's sync, with the pass 4 s or 0.3 s before the retry is due (regular branch), or 100 ms after (recheck-due branch). In every case the retry ran at +13 751 ms, due + 250, as at `c27346b`. Mutant: no restore.
+- **Lost-exits follow-up after a failed pass sync.** Tries 1, 2 and 3 run within 5 s, at +201, +751, +2 001 and +4 251 ms in group 1's probe. Mutant: no restore.
+- **The restored time is the recheck's own timer again.** Mutant: the restored timer not marked.
+
+**Notes:**
+- REAL2's 47 and 52 come from a regular sync carrying lookups queued while there was no room (routine work under the current design, the same at `b1ff17e`). Counted as regular, they are 40.
+- These mutants survive: F6, F7, F10, F12, F13, K6, K7, K8 and K9. F13 is equivalent through the real paths. K8 means the regular branch's charge give-back is untested, the safe direction.
+
+Full suite 737 of 737. Type check clean.
