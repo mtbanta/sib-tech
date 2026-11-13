@@ -15,18 +15,18 @@ Alpaca allows 200 requests a minute per account (one bucket for account, order a
 | Mid-day and afternoon close-out retries, 60 a minute | `src/midday.ts` (`MIDDAY_RETRY_REQUESTS_PER_MINUTE`) | Re-tries after the first close-out try |
 | Summary, at least 100 left | `src/worker.ts` (`SUMMARY_MIN_BUDGET`) | The daily summary's reads, after the close |
 
-A position's first sale is never limited, and neither is a sync's routine work (the order list, positions, the periodic lookups).
+A position's first sale is not limited, with one exception: an entry whose fresh stop timed out (ruling B) has even its first try charged per request, and that try starts only with room for a whole try (`requestBudget` in `cleanupSale`, `TIMED_OUT_TRY_REQUESTS` 13). A sync's routine work (the order list, positions, the periodic lookups) is not limited.
 
 ## Why change it
 
-- **Each allowance counts only itself.** Several can be busy at once, and together they can take more than any one shows. In group 1's rate probe this weekend (simulator, random faults on every call), the code before the weekend build (`3681f9c`) reached 258 requests in a minute; item 2's allowance brought it to 67 (build log, the item 2 rate table). That fix was per feature; the next feature has to repeat it.
-- **Each new feature brings its own counting.** This weekend, rounds 6 to 8 were spent on whether the remainder rechecks were counted exactly once. The fault was in charging a request before knowing whether it would run.
+- **Each allowance counts only itself.** Several can be busy at once, and together they can take more than any one shows. In group 1's rate probe this weekend (simulator; 480 runs with 0, 10 or 30 percent random faults on every call), the code the log calls "Friday" (`3681f9c`, the ruling B branch) reached 258 requests in a minute, and the code after items 2 and 3 and their round 1 fixes reached 67 (build log, "Measured, group 1's rate probe", under "Weekend build: round 1 reviews, fixes, and steps 3 to 5"). Those fixes were per feature; the next feature has to repeat them.
+- **Each new feature brings its own counting.** This weekend, rounds 6 to 8 were spent on whether the remainder rechecks were counted exactly once. In the builder's reading, the faults came from charging a request at a different moment from when it ran: rounds 6 and 7 found charges for rechecks that never ran or were given back wrongly, and round 8 found a sync that ran with no charge at all.
 - **Priorities are implicit.** Which of two retries goes first depends on which allowance it belongs to, not on which matters more. Michael's question about stuck sales against rechecks came from this.
 
 ## The proposal
 
 1. **One budget object** for every request that is not a new entry or a first try: retries, rechecks, re-sells, and lookups caused by a retry. Its size is set below Alpaca's 200 so that entries and first tries keep their room. A starting point to discuss is 120 a minute, with a cap on any 5 seconds. This is a guess, not a measurement; the per-minute statistics (`governor_stats`) and Monday's logs would size it.
-2. **Charged when the request is made, not before.** The worker already tags each Alpaca request with who made it (`src/request-scope.ts`, built this weekend so the Alpaca client's own retries are charged). The budget would count those tags directly. No estimate, no refund, no "charged but never ran".
+2. **Charged when the request is made, not before.** This would have to be built. Today nothing tags an Alpaca request with who made it. `src/request-scope.ts` (built this weekend) only carries the stuck-retry allowance, through Node's AsyncLocalStorage, inside a timed-out stop's try, so the Alpaca client can ask before its own retries (`retryAllowedInScope` in `src/alpaca-trading.ts`). The same mechanism could be widened to carry a "who is asking" tag on every retry path, and the budget would count those tags as requests are made. No estimate, no refund, no "charged but never ran".
 3. **Priority classes, with a reserve for the classes above.** For example:
    - (1) shares without a stop: the loss stop's re-sells, a stuck sale, a timed-out fresh stop's try;
    - (2) close-out retries;

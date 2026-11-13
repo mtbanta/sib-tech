@@ -5305,7 +5305,7 @@ Round numbering from here: fix (a) rounds are numbered "fix (a), round 1" to "ro
 **What changed (`src/worker.ts` only):**
 - `recheckTimerAt` records the timer a sync set for its `recheckAt`, only if that timer took its place (an earlier pending timer keeps its place and serves instead). When that timer is put off because a sync is still running, the mark goes with it.
 - In the 5 second pass, on its recheck-due branch only: if the pending timer is that recheck's own (`eventSyncAt === recheckTimerAt`), the pass cancels it (`cancelRecheckTimer`) and then starts the sync. Any other pending timer, such as a live update's, is left to fire.
-- `syncAt` clears both marks (`recheckTimerAt`, and group 1's round 7 `leftoverTimerAt`) when it replaces a timer. The callers that mark set them afterwards. This also settles the note (group 2, round 8, and group 1, round 8) that the leftover mark was never cleared.
+- `syncAt` clears both marks (`recheckTimerAt`, and group 1's round 7 `leftoverTimerAt`) when it replaces a timer. The callers that mark set them afterwards. This also settles the note that the leftover mark was never cleared (group 2's round 8 entry; group 1's full round 8 report also had it, though its log entry above does not).
 - The leftover marking and `keepLagCharge` of round 7 stay for the regular 10 s branch. There, a sync that starts before a recheck is due leaves the recheck's timer to fire at its time.
 - Effect on scheduling: the only sync removed is one that repeats, about 0.25 s later, a recheck the pass has just run. This applies to every kind of recheck (Michael's decision 1).
 
@@ -5351,7 +5351,9 @@ Full suite 729 of 729. Type check clean.
 - `startSync` sets the recheck mark only when its timer took its place, and otherwise leaves the mark of the timer that kept its place (group 1's suggested line).
 - The stale comment on `leftoverTimerAt` ("Timers are not changed") and the test file's header are corrected.
 
-**Builder's reasoning (not measured):** with the cancel on both branches, a sync never starts while a recheck's own timer is pending: the pass cancels it, and a timer's own sync starts only when that timer fires. A sync's own timer is set only when it ends. So the case group 1 measured, a newer recheck landing on an older own timer, can no longer arise through the pass. Group 1's line in `startSync` is kept as a guard. The mutants "older mark lost" (the old line) and "mark whatever is pending" pass every test, and the builder reads both as equivalent for that reason; both are named for the reviewers to check.
+**Builder's reasoning (not measured):** with the cancel on both branches, a sync never starts while a recheck's own timer is pending: the pass cancels it, and a timer's own sync starts only when that timer fires. A sync's own timer is set only when it ends. So the case group 1 measured, a newer recheck landing on an older own timer, can no longer arise through the pass. Group 1's line in `startSync` is kept as a guard.
+
+**Correction (group 2, fix (a) round 2):** the first version of this paragraph also called the mutant "mark whatever is pending" equivalent. It is not. A live update can set a timer while a sync runs, and that timer keeps its place at the sync's end, because it is earlier than the recheck the sync asks for. The mutant marks that live update's timer as the recheck's own, and a regular pass then cancels it, so the live update's sync never runs. Group 2's probe showed this, and it is now a test that fails on the mutant. The mutant "older mark lost" (the old line) is not told apart by the suite or by group 2's probe. That is a measurement, not a proof that it is equivalent.
 
 **New tests (`test/weekend-r8.test.ts`, through the real pass):**
 - **Group 2's regular-branch cases**, with `lastSync` set back 11 s and the pass 100 ms before the recheck is due: lags of 0.3 and 15 s with 1 recent remainder; 0.3 s with 5 older remainders; 40 s with 5 older remainders and 33 + 1 charged; 40 s with 1 recent remainder and 38 + 1 charged. In every case there are 0 leftover syncs and at most 40 real recheck requests (34 and 39 in the no-room cases). Mutant: the recheck-due branch only.
@@ -5370,6 +5372,29 @@ Full suite 729 of 729. Type check clean.
 **Notes kept:**
 - `cancelRecheckTimer` does not update `syncTimerLog`. A later `late_notice` can show a timed sync that was set and then cancelled (logging only).
 - Mutant K5 (leftover marking only on the recheck-due branch) still survives.
-- At `c27346b`, the sweep's 5 s window was over in 100 of 100 timings (5 older remainders, 40 ms per read). The fix (a) entry above gives the minute's figure only.
+- At `c27346b`, counted the sweep's original way (the first 2 + N reads of each recheck sync), the 5 s window was over in 100 of 100 timings (5 older remainders, 40 ms per read). The fix (a) entry above gives how often the minute was over by the recheck's own reads ("5 to 41 of 100") and the 5 s worst, not how often the 5 s window was over.
 
 Full suite 733 of 733. Type check clean.
+
+### Fix (a), round 2 (53e367c): group 2 CHANGES REQUIRED (documents and a test), and fixes
+
+**Group 2, fix (a) round 2:**
+1. **The log's reasoning called "mark whatever is pending" equivalent; it is not.** A live update's timer that kept its place at a sync's end would be marked as the recheck's own, and a regular pass would cancel it, so the live update's sync would never run. Corrected above. Group 2's probe is now a test (`test/weekend-r8.test.ts`, "a live update's timer that kept its place at a sync's end is not the recheck's own"), and it fails on the mutant.
+2. **The proposal misstated the current code in three places.** All three are corrected in `builds/c2-proposal-shared-request-budget.md`:
+   - request tagging does not exist yet; `request-scope.ts` only carries the stuck-retry allowance inside a timed-out stop's try, and the proposal now says tagging would have to be built;
+   - the 258 and 67 figures are credited to the combined measurement with its real heading;
+   - a timed-out fresh stop's first try is charged.
+
+**Non-blocking notes, done:**
+- The older-timer test's name and comment now say the regular pass cancels the older timer itself, and the test asserts 0 leftover syncs.
+- The attribution of the mark-clearing note is corrected.
+- The 5 s note at `c27346b` names its counting.
+- The proposal marks the builder's reading of what went wrong in rounds 6 to 8.
+
+**What holds (group 2):**
+- the regular-branch leftover is gone: 34 and 39 in the no-room cases, 0 leftovers, against 41 with leftovers at `b1ff17e`;
+- the older-timer table matches;
+- the mutants caught are as the log says;
+- messages unchanged (0 Discord posts across a 70 s lag window in 8 cases);
+- briefs, rule 6, scope;
+- the proposal's constants.

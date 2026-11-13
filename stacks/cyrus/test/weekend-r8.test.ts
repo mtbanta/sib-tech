@@ -321,8 +321,8 @@ test("fix (a), round 1 (group 2's note): a timer replaced by an earlier one drop
   wk.stop?.();
 });
 
-// Group 1, fix (a) round 1 (B1): an older recheck's own timer R1 is still pending when a sync asks for a newer recheck; R1 keeps its place
-// and its own mark, so the pass that runs the newer recheck cancels it (before, the mark was lost and R1's sync ran uncharged: 47 and 52
+// Group 1, fix (a) round 1 (B1): an older recheck's own timer R1 is still pending when the regular pass runs. Since fix (a) round 1 that
+// pass cancels R1 itself (before, a newer recheck could land on R1 and R1 lost its own mark (before, the mark was lost and R1's sync ran uncharged: 47 and 52
 // real requests in the minute against 40). Group 1's probe, kept as a test: the older timer injected, 415 ms per read so the syncs take time.
 async function olderOwn(PRE: number, N: number, lagMs: number, LAT: number, r1Off: number | null) {
   const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
@@ -391,13 +391,63 @@ async function olderOwn(PRE: number, N: number, lagMs: number, LAT: number, r1Of
   const charged = mem.retryLog.filter((x: number) => x >= pS - 1).length;
   return { leftovers: syncs.filter((s) => s.kind === "leftover").length, R1: R1 - pS, dueAfterS, max60, max5, chargedSince: charged, trace: syncs.map((s) => `${s.kind}@+${s.at} req=${s.reqAt.length} timer=${s.timerAt} own=${s.own}`).join(" | ") };
 }
-test("fix (a), round 1 (group 1, B1): an older recheck's own timer that a newer recheck lands on is still cancelled by the pass; real recheck requests stay within 40 a minute and 15 in 5 s", async () => {
+test("fix (a), round 1 (group 1, B1): an older recheck's own timer pending when the regular pass runs is cancelled by that pass (so no newer recheck can land on it); no leftover sync, and real recheck requests stay within 40 a minute and 15 in 5 s", async () => {
   const rows: string[] = [];
   for (const [PRE, N] of [[33, 5], [28, 10], [16, 10]] as Array<[number, number]>) {
     const dry = await olderOwn(PRE, N, 25_000, 415, null);
     const x = await olderOwn(PRE, N, 25_000, 415, (dry.dueAfterS as number) - 100);
     rows.push(`${N} older, ${PRE} charged, R1 at +${x.R1}: ${x.max60} a minute, ${x.max5} in 5 s, leftover syncs ${x.leftovers} (${x.trace})`);
     assert.ok(x.max60 <= 40 && x.max5 <= 15, rows[rows.length - 1]!);
+    assert.equal(x.leftovers, 0, rows[rows.length - 1]!);
   }
   console.log("MEASURE older own timer with fix (a)\n" + rows.join("\n"));
+});
+
+// Group 2, fix (a) round 2: a live update's timer set while a sync runs keeps its place at that sync's end (it is earlier than the recheck
+// the sync asks for). It is not the recheck's own timer, so a regular pass leaves it to fire. (A mutant that marks whatever timer is
+// pending as the recheck's own cancelled it, and the live update's sync never ran.) Group 2's probe, kept as a test.
+test("fix (a), round 2 (group 2): a live update's timer that kept its place at a sync's end is not the recheck's own; the regular pass leaves it to fire", async () => {
+  const { sim, r } = await armedDay();
+  const wk: any = r.worker;
+  const mem = wk.syncMemory;
+  const id = clientOrderIdFor(D, "LUNR", 1);
+  await sim.submitEntry({ symbol: "LUNR", qty: 5, stopPrice: 11.87, takeProfitPrice: 12.08, referencePrice: 12, clientOrderId: id });
+  sim.fillEntry(id, 12);
+  await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "LUNR", qty: 5, referencePrice: 12, stopPrice: 11.87, takeProfitPrice: 12.08, status: "filled", alpacaOrderId: null, filledQty: 5, filledAvgPrice: 12, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+  await r.at("14:30:10");
+  const t0 = sim.simMs + 100;
+  r.setNow(iso(t0));
+  sim.partialTakeProfitListLag(id, 1, 12.08, 15_000);
+  mem.liveStopCancelled.set(id, t0);
+  mem.mustLook.add(id);
+  let inject = true;
+  const realList = (sim as any).listOrdersPaged.bind(sim);
+  (sim as any).listOrdersPaged = async (...a: any[]) => {
+    if (inject && wk.inflight.has("risk")) {
+      inject = false;
+      wk.syncAt(t0 + 50, 0); // a live update while the report's sync runs
+    }
+    return realList(...a);
+  };
+  const starts: string[] = [];
+  const real = wk.startSync.bind(wk);
+  wk.startSync = (d: any, c: any, how: any = {}) => {
+    if (!wk.inflight.has("risk")) starts.push(`${how.fromPass ? "pass" : how.leftover ? "leftover" : "timer"}@+${sim.simMs - t0}`);
+    return real(d, c, how);
+  };
+  wk.syncAt(t0, 0);
+  r.setNow(iso(t0 + 1));
+  await settle();
+  await settle();
+  assert.equal(wk.eventSyncAt, t0 + 50, "the live update's timer kept its place");
+  assert.ok(wk.syncRecheckAt > t0 + 50, "the recheck asked for is later");
+  assert.notEqual(wk.recheckTimerAt, t0 + 50, "and the live update's timer is not marked as the recheck's own");
+  wk.lastSync = sim.simMs - 11_000; // a slow sync: the next pass takes its regular branch
+  await r.at(iso(t0 + 20));
+  await settle();
+  r.setNow(iso(t0 + 60));
+  await settle();
+  await settle();
+  assert.ok(starts.some((x) => x.startsWith("leftover@+6")), `the live update's timer fired: ${starts.join(" | ")}`);
+  wk.stop?.();
 });
