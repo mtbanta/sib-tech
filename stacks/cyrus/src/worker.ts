@@ -117,16 +117,19 @@ export function remainderAlert(sales: Array<{ symbol: string; shares: number }>)
   return `**Sold ${n} remainder${n === 1 ? "" : "s"} left without a stop** (Alpaca cancelled the stop when the take-profit partly filled): ${sales.map((s) => `${s.symbol} ${s.shares}`).join(", ")}.`;
 }
 const FLUSH_EVERY_MS = 60_000;
-// Before the close the close-out is retried this often until the account is flat; after the close, every 5 minutes.
+// The close-out's first retry wait before the close (item 3 of 2026-11-13: then 40 s, at most 60, and 20 s again in the last minute).
 const CLOSEOUT_RETRY_MS = 20_000;
-// Item 3 of 2026-11-13: the wait before the next try after `attempts` tries: `firstMs` after the first, doubling, at most `maxMs`.
 // Item 2 of 2026-11-13: requests charged to the stuck-retry allowance in the last minute, and the most in any 5 seconds of that minute.
-export function allowanceUse(spend: readonly number[], nowMs: number): { lastMinute: number; most5s: number } {
-  const recent = spend.filter((t) => nowMs - t < 60_000);
+// Group 2, round 3 of the weekend build: `log` keeps 70 seconds, so every 5 second window that ends inside the last minute is counted (a
+// burst across a minute boundary is not split between two rows).
+export function allowanceUse(log: readonly number[], nowMs: number): { lastMinute: number; most5s: number } {
+  const lastMinute = log.filter((t) => nowMs - t < 60_000).length;
+  const recent = log.filter((t) => nowMs - t < 65_000);
   let most5s = 0;
   for (const t of recent) most5s = Math.max(most5s, recent.filter((x) => x >= t && x < t + 5_000).length);
-  return { lastMinute: recent.length, most5s };
+  return { lastMinute, most5s };
 }
+// Item 3 of 2026-11-13: the wait before the next try after `attempts` tries: `firstMs` after the first, doubling, at most `maxMs`.
 export function retryGapMs(firstMs: number, attempts: number, maxMs = 3 * firstMs): number {
   return attempts <= 1 ? firstMs : Math.min(firstMs * 2 ** (attempts - 1), maxMs);
 }
@@ -1085,7 +1088,8 @@ export class Worker {
       }
     }
     // The close-out after the afternoon load window (Michael, 2026-11-12): when the window's 30 minutes are up (or the last entry comes
-    // first), entries pause again and the mid-day close-out code sells everything, retried every 20 seconds within the same 60 requests
+    // first), entries pause again and the mid-day close-out code sells everything, retried 20 seconds apart (longer while nothing sells, at
+    // most a minute; item 3 of 2026-11-13) within the same 60 requests
     // a minute and above the reserve, until flat. Never from the regular close-out time on (that close-out takes over). Its own phase.
     if (afternoonCloseoutDue && !this.closingOut && !this.inflight.has("carried") && !this.inflight.has("midday") && now.getTime() - this.lastAfternoonAttempt >= (this.afternoonAttemptDate === date ? this.afternoonProgress.gapMs(MIDDAY_RETRY_MS, 60_000, this.afternoonLastRemaining.length) : 0)) {
       if (this.afternoonAttemptDate !== date) {
@@ -1120,11 +1124,10 @@ export class Worker {
       }
     }
 
-    // Close-out runs until the account is flat: a failed attempt is retried every 5 minutes for 30 minutes
-    // past the close (after the close it only reports, it sends nothing), and the heartbeat says "fail" for as
-    // long as positions remain.
+    // Close-out runs until the account is flat (after the close it only reports, it sends nothing; a try from 30 minutes after the close
+    // writes the phase), and the heartbeat says "fail" for as long as positions remain.
     // Item 3 of 2026-11-13: before the close the retries come 20 s apart, then 40, then every 60; after the close (it only reports then, and
-    // a try from 30 minutes on writes the phase) 5 minutes apart, then 10, then every 15, until the day ends. No hard end (group 2, round 2
+    // a try from 30 minutes on writes the phase) 5 minutes apart for the first two, then 10, then every 15, until the day ends. No hard end (group 2, round 2
     // of the weekend build): with the database down past the hour, the phase, and with it the daily summary, would never come.
     // Group 1, round 2 of the weekend build: in the last minute before the close the tries come every 20 seconds again (the last chances to
     // get flat before the shares, already without their stops, are held overnight); after the close the waits count the tries since the close.
@@ -1276,7 +1279,7 @@ export class Worker {
       ...(raw ? { rawUpdate: raw } : {}),
       // Item 2 of 2026-11-13 (group 2, round 2 of the weekend build): the stuck-retry allowance's use, so each review can check it (at most 40
       // in a minute and 15 in any 5 seconds): requests charged in the last minute, and the most in any 5 seconds of it.
-      stuckRetryAllowance: allowanceUse(this.syncMemory.retrySpend, this.d.now().getTime()),
+      stuckRetryAllowance: allowanceUse(this.syncMemory.retryLog, this.d.now().getTime()),
     };
   }
 
@@ -1759,7 +1762,7 @@ export class Worker {
     this.afternoonLastRemaining = result.remaining;
     if (this.afternoonAlertDate !== date) {
       this.afternoonAlertDate = date;
-      await this.say("alerts", `**Michael: the close-out after the afternoon load window is NOT FLAT yet: ${result.remaining.length > 0 ? result.remaining.join(", ") : "the positions could not be listed"}.** New entries stay paused. I keep trying every 20 seconds within 60 Alpaca requests a minute; the regular close-out takes over at its time.`, { mentionOwner: true });
+      await this.say("alerts", `**Michael: the close-out after the afternoon load window is NOT FLAT yet: ${result.remaining.length > 0 ? result.remaining.join(", ") : "the positions could not be listed"}.** New entries stay paused. I keep trying (20 seconds apart, longer while nothing sells, at most a minute) within 60 Alpaca requests a minute; the regular close-out takes over at its time.`, { mentionOwner: true });
     }
   }
 

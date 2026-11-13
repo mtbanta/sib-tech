@@ -4865,3 +4865,42 @@ Full suite 697 of 697. Type check clean.
 > Do not change frozen commit 4971548 while round 3 runs. Start these items after round 3 reports, on top of its result.
 
 Saved while round 3 runs on the frozen clone of 4971548 (untouched). These items start after round 3 reports.
+
+### Weekend build: round 3 (4971548) and fixes
+
+**Group 2, round 3: CHANGES REQUIRED.** Round 2's fixes hold: 0 present-tense reasons in 3,000 random runs, no hard end after the close, one alert after a restart, and the allowance stored. Blocking findings:
+1. The afternoon not-flat alert still said "every 20 seconds".
+2. The alert after a restart gave "(since T)" for the time it was picked up, not when protection was lost.
+3. The briefs asked for `order_lookup_failed`, which was never stored.
+4. The briefs did not name the alert after a restart.
+
+**Group 1, round 3: CHANGES REQUIRED.** Round 2's three findings measure as fixed:
+- **Close-out before the close:** flat at 20:59:20 and 20:59:40, as on v21.
+- **Mid-day, 40 positions:** flat 140 to 185 s after Alpaca accepts, against 100 to 145 s on v21. A constant 40 s, one 60 s step after a stretch where nothing sold, which is the cost of the backoff rule.
+- **Carried sale:** minute 12, 37 and 72, against v21's 15, 40 and 70.
+- **Restart:** 16 cases, every share sold, no oversell.
+- Other checks:
+  - timed-out-stop requests at most 40 a minute and 15 in 5 s;
+  - with B off, identical to v21 once item 3 is put back.
+
+Blocking: the carried fix had no test (mutant M1 survived the suite). Mutants M2 to M7 survived too (non-blocking).
+
+Note for Michael: at a restart with the database down, Alpaca's check can count a timed-out stop as protection until the stored list can be read. In the probe the list loaded 47 s after the database came back, and the stop was then dropped. On 8d08e2f those stops never ended.
+
+**Fixes:**
+- **Group 2:**
+  - the afternoon alert's wording, and the stale comments;
+  - "(noticed at T)", with the comment naming the newer-entry path;
+  - `order_lookup_failed` stored;
+  - the briefs name the alert after a restart;
+  - the 5 minute alert leaves out a reason that repeats the "At my last check" sentence;
+  - the allowance statistics read a 70 s log of charges, so a burst across a minute boundary is no longer split (it read 8 and 8 for 16 in 3 s);
+  - the start-up check's log keeps the counts of whichever try did each part;
+  - the after-close wording: 5, 5, 10, then 15 minutes.
+- **Group 1**, new tests, each checked against its mutant:
+  - **The carried sale** (tries at minutes 0, 1, 3, 7, 12, 17; sold at most 5 minutes after Alpaca accepts; a second carried position the same day starts again at 1 minute). It catches M1 and M2.
+  - **The start-up check with the database down:** Alpaca's check runs anyway, nothing is written before the stored list is read, and a re-adopted stop is dropped once it loads. It catches M3, M4 and M5.
+  - **A failed lookup's wait** does not hold back a live-update-flagged entry. It catches M6.
+  - M7 (counting the close-out's tries after the close separately) changes only the timing of the after-close reports. It is checked by reading, without a test.
+
+Full suite 700 of 700. Type check clean.

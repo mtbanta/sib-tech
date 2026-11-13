@@ -1188,10 +1188,80 @@ test("group 2, round 2 of the weekend build: after a restart, a stored timed-out
   w.risk.syncMemory = new SyncMemory(); // a restart
   await runWorker(w, dd, 6 * 60_000);
   const after = w.said.slice(before).filter((m) => m.mention);
-  const first = after.filter((m) => m.text.includes("I can't confirm a protective stop for RKLB (since"));
+  const first = after.filter((m) => m.text.includes("I can't confirm a protective stop for RKLB (noticed at"));
   const five = after.filter((m) => /after \d+ minutes?/.test(m.text));
   assert.equal(first.length, 1, after.map((m) => m.text).join(" | ") || "nothing posted");
   assert.equal(five.length, 1, after.map((m) => m.text).join(" | "));
   assert.equal(await heldQty(w, "RKLB"), 4);
   assert.equal(w.sim.oversellAttempts, 0);
+});
+
+// Group 1, round 3 of the weekend build: the start-up check's parts, each guarded by a test.
+test("item 2 (second point): with the database down at a restart, Alpaca's check still runs; the stored list is read once the database answers, a stop the sale re-adopted meanwhile is dropped as protection, and nothing is written before that read", async () => {
+  const w = world();
+  const { dd, ids } = await timedOutStops(w, ["RKLB"], true);
+  w.sim.cancelMs = 20 * 60_000;
+  await runWorker(w, dd, 2_000);
+  const stored = await w.store.getControl<{ stops: Array<[string, string]> }>(timedOutStopsKey(D));
+  assert.ok(stored && stored.stops.length === 1);
+  const stopId = stored.stops[0]![0];
+  // A restart with the database down for reads and writes of that key.
+  const fresh = new SyncMemory();
+  w.risk.syncMemory = fresh;
+  const realGet = w.store.getControl.bind(w.store);
+  const realSet = w.store.setControl.bind(w.store);
+  let down = true;
+  let writesWhileUnread = 0;
+  w.store.getControl = (async (key: string) => {
+    if (down && key.startsWith("timed_out_stops:")) throw new Error("database down (test)");
+    return realGet(key);
+  }) as any;
+  w.store.setControl = async (key: string, value: unknown) => {
+    if (key.startsWith("timed_out_stops:") && !fresh.storedLoaded) writesWhileUnread++;
+    return realSet(key, value);
+  };
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(fresh.alpacaChecked, true, "Alpaca's check ran although the stored list could not be read");
+  assert.equal(fresh.storedLoaded, false);
+  // Meanwhile the sale re-adopts that stop as the entry's fresh stop (it is working at Alpaca).
+  fresh.freshStops.set(ids[0]!, { symbol: "RKLB", entryClientOrderId: ids[0]!, stopClientOrderId: stopId, orderId: null, qty: 4, stopPrice: 19.87, placedAt: w.sim.simMs, status: "accepted", lookedAt: w.sim.simMs });
+  fresh.timedOutDirty = true;
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(writesWhileUnread, 0, "the stored list is never written before it has been read");
+  down = false;
+  w.sim.advance(65_000);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(fresh.storedLoaded, true);
+  assert.ok(fresh.timedOutStops.has(stopId), "loaded");
+  assert.ok(![...fresh.freshStops.values()].some((f) => f.stopClientOrderId === stopId), "the re-adopted stop is dropped as protection");
+});
+
+test("item 3: a failed lookup's wait does not hold back an entry a live update has just flagged", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "IREN", 5, 9, 1);
+  // The listing leaves the entry out, and its lookup fails once.
+  const realPaged = w.sim.listOrdersPaged.bind(w.sim);
+  w.sim.listOrdersPaged = async (...a: any[]) => {
+    const r: any = await (realPaged as any)(...a);
+    return a[0] === "all" ? { ...r, orders: r.orders.filter((o: any) => o.clientOrderId !== id) } : r;
+  };
+  const realFind = w.sim.findOrderByClientId.bind(w.sim);
+  let fails = 1;
+  const looks: number[] = [];
+  w.sim.findOrderByClientId = async (cid: string) => {
+    if (cid === id) {
+      looks.push(w.sim.simMs);
+      if (fails-- > 0) throw new Error("lookup timed out (test)");
+    }
+    return realFind(cid);
+  };
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(looks.length, 1);
+  w.sim.advance(1_000);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(looks.length, 1, "within the failed lookup's wait: not looked up");
+  w.memory.mustLook.add(id); // a live update flagged it
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(looks.length, 2, "flagged by a live update: looked up at once");
 });

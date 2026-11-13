@@ -62,6 +62,8 @@ export const STORED_INFO_EVENTS = new Set([
   "timed_out_stops_save_failed",
   // Item 3 of 2026-11-13: the loss stop's retry pausing (after a rate limit, or a check whose sales were all refused).
   "loss_stop_retry_backoff",
+  // Item 3 of 2026-11-13 (group 2, round 3 of the weekend build): a failed lookup of an entry missing from the listing, with its wait.
+  "order_lookup_failed",
   // Item 4 of 2026-11-13: the morning screen's duration (now at 8:15 AM, 10 minutes before "Armed").
   "screen_done",
   // Group 2, round 1 (rare, part of the day's story): the afternoon window's failures and cancels.

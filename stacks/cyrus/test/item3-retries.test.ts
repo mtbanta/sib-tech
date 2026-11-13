@@ -146,3 +146,45 @@ for (const accept of ["20:59:10", "20:59:30"]) {
     assert.ok((await r.store.getDay(D))!.phases.closeout, "flat (recorded) before the close");
   });
 }
+
+// Group 1, round 3 of the weekend build: the carried-position sale's waits (1, 2, 4, then 5 minutes, v21's interval at most), sold soon
+// after Alpaca accepts, and the count starting again once the account is flat.
+test("item 3: a carried position is tried after 1, 2, 4, then every 5 minutes, sold within about 5 minutes of Alpaca accepting, and a later carried position starts from the first wait again", async () => {
+  const { rig } = await import("./rig.ts");
+  const full = (date: string) => ({ date, open: "09:30", close: "16:00" });
+  const broker = new FakeBroker();
+  (broker as any).calendar = [full("2026-10-29"), full("2026-10-30"), full("2026-11-02"), full("2026-11-03")];
+  broker.clock = { isOpen: true, timestamp: "", nextOpen: "", nextClose: "2026-11-02T21:00:00Z" } as any;
+  const first = rig({ broker });
+  await first.at("2026-11-01T22:10:00Z");
+  first.ownerSays("approve", "2026-11-01T22:20:00Z");
+  await first.at("2026-11-01T22:20:10Z");
+  const hold = () => [{ symbol: "AAA", qty: 5, marketValue: 500, avgEntryPrice: 100, unrealizedPl: 0 } as any];
+  broker.positions = hold();
+  const r = rig({ broker, store: first.store, bot: first.bot });
+  const t0 = Date.parse("2026-11-02T15:00:00Z");
+  let cur = t0;
+  let works = false;
+  const tries: number[] = [];
+  broker.onSell = async () => {
+    tries.push(Math.round((cur - t0) / 60_000));
+    if (!works) throw new Error("rejected (test)");
+  };
+  let soldAt = -1;
+  for (; cur <= t0 + 60 * 60_000; cur += 30_000) {
+    if (cur - t0 >= 36 * 60_000) works = true;
+    await r.at(new Date(cur).toISOString());
+    if (soldAt < 0 && broker.positions.length === 0) soldAt = Math.round((cur - t0) / 60_000);
+  }
+  const at = [...new Set(tries)];
+  assert.deepEqual(at.slice(0, 6), [0, 1, 3, 7, 12, 17], `tries at minutes ${at.join(", ")}`);
+  assert.ok(soldAt >= 36 && soldAt <= 41, `sold at minute ${soldAt} (accepted from minute 36; v21: 40)`);
+  // A second carried position the same day, after the account was seen flat: the waits start from 1 minute again.
+  works = false;
+  tries.length = 0;
+  const t1 = cur;
+  broker.positions = hold();
+  for (; cur <= t1 + 6 * 60_000; cur += 30_000) await r.at(new Date(cur).toISOString());
+  const again = [...new Set(tries.map((m) => m - Math.round((t1 - t0) / 60_000)))];
+  assert.ok(again.length >= 2 && again[1]! - again[0]! <= 1, `the second episode's first wait is 1 minute: ${again.join(", ")}`);
+});

@@ -160,6 +160,9 @@ export class SyncMemory {
   // When each short retry of a stuck entry was charged against the allowance above (milliseconds).
   // Since item 2 of 2026-11-13: one entry per request charged (an ordinary retry charges STUCK_RETRY_COST entries at once).
   readonly retrySpend: number[] = [];
+  // Messaging and statistics only (group 2, round 3 of the weekend build): the same charges kept 70 seconds, so the per-minute statistics
+  // can count every 5 second window that ends inside the minute (retrySpend itself keeps only the last 60 seconds).
+  readonly retryLog: number[] = [];
   // Whether the live order updates were connected at the start of the current sync (set by syncOrders; read by the backoff's cap).
   streamLive = false;
   // Fix C of 2026-11-10: entries whose cleanup sale was sent but not seen filled, waiting for their closing line.
@@ -195,6 +198,8 @@ export class SyncMemory {
   // stop the check of Alpaca), and the stored list is never written before it has been read (it would be overwritten).
   storedLoaded = false;
   alpacaChecked = false;
+  startupStoredCount = 0; // logging only: what the parts found, whichever try did them
+  startupUnconfirmed = 0;
   startupCheckAt = 0;
   startupDelayMs = 0;
   timedOutDirty = false;
@@ -231,6 +236,7 @@ async function startupProtectionCheck(d: RiskDeps, mem: SyncMemory, tradeDate: s
         for (const [e, f] of [...mem.freshStops]) if (f.stopClientOrderId === stop) mem.freshStops.delete(e);
       }
       storedCount = stored?.stops?.length ?? 0;
+      mem.startupStoredCount = storedCount;
       mem.storedLoaded = true;
       if (mem.timedOutStops.size > storedCount) mem.timedOutDirty = true; // stops timed out before the read are written with the loaded ones
     } catch (err) {
@@ -259,6 +265,7 @@ async function startupProtectionCheck(d: RiskDeps, mem: SyncMemory, tradeDate: s
         }
       }
       if (added > 0) mem.timedOutDirty = true;
+      mem.startupUnconfirmed = added;
       mem.alpacaChecked = true;
     } catch (err) {
       failed = `${failed ? `${failed}; ` : ""}Alpaca: ${(err as Error).message.slice(0, 120)}`;
@@ -266,7 +273,7 @@ async function startupProtectionCheck(d: RiskDeps, mem: SyncMemory, tradeDate: s
   }
   if (failed === null) {
     mem.startupChecked = true;
-    d.log?.("startup_protection_check", { positions: positions.length, storedTimedOut: storedCount, unconfirmed: added });
+    d.log?.("startup_protection_check", { positions: positions.length, storedTimedOut: mem.startupStoredCount, unconfirmed: mem.startupUnconfirmed });
     return;
   }
   mem.startupDelayMs = mem.startupDelayMs > 0 ? Math.min(mem.startupDelayMs * 2, START_RETRY_MAX_MS) : START_RETRY_FIRST_MS;
@@ -384,7 +391,10 @@ export function retryRoomFor(mem: SyncMemory, nowMs: number, n: number, charge: 
   mem.retrySpend.splice(0, mem.retrySpend.length, ...recent);
   const last5s = recent.filter((t) => nowMs - t < 5_000);
   if (recent.length + n <= STUCK_RETRY_PER_MINUTE && last5s.length + n <= STUCK_RETRY_PER_5S) {
-    if (charge) for (let i = 0; i < n; i++) mem.retrySpend.push(nowMs);
+    if (charge) {
+      for (let i = 0; i < n; i++) mem.retrySpend.push(nowMs);
+      logCharge(mem, nowMs, n);
+    }
     return { ok: true };
   }
   // The next moment n more fit: when enough of the minute's, and of the 5 seconds', requests have aged out (both lists are oldest first).
@@ -412,6 +422,11 @@ const endedKnown = (mem: SyncMemory, entryClientOrderId: string): boolean => {
   const stops = [...mem.timedOutStops].filter(([, e]) => e === entryClientOrderId).map(([stop]) => stop);
   return stops.length > 0 && stops.every((stop) => mem.timedOutEndedAt.has(stop));
 };
+// Statistics only: records n charges at nowMs in the 70 second log.
+function logCharge(mem: SyncMemory, nowMs: number, n: number): void {
+  for (let i = 0; i < n; i++) mem.retryLog.push(nowMs);
+  while (mem.retryLog.length > 0 && nowMs - mem.retryLog[0]! >= 70_000) mem.retryLog.shift();
+}
 // Ruling B: true when the entry has a fresh stop that hit the 15 second limit.
 const hasTimedOut = (mem: SyncMemory, entryClientOrderId: string): boolean => [...mem.timedOutStops.values()].includes(entryClientOrderId);
 // Item 2 of 2026-11-13: the request allowance for a try of an entry with a timed-out stop (each request charged as it is made).
@@ -422,6 +437,7 @@ function retryBudget(mem: SyncMemory, now: () => number, reserve = 0): { take(n:
     force: (n) => {
       const t = now();
       for (let i = 0; i < n; i++) mem.retrySpend.push(t);
+      logCharge(mem, t, n);
     },
   };
 }
@@ -872,7 +888,9 @@ async function escalateIfDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string
     seen = ` At my last check its fresh stop (not confirmed in time) was still resting at Alpaca; ${cancel}.`;
   }
   const what = st.protecting ? "protect or sell it" : "sell it";
-  await d.say("alerts", `**Michael: I can't confirm a protective stop for ${st.symbol} after ${minutes}, and I have not been able to ${what} yet** (${st.why || "still held"}).${seen} I am checking, and I will ${what} if it is still unconfirmed. Please check ${st.symbol} in Alpaca's dashboard and close it there if needed. I keep trying.`, { mentionOwner: true });
+  // Group 2, round 3 of the weekend build: the reason is left out when it says what the sentence after it says (the last check's finding).
+  const reason = seen && (st.why ?? "").startsWith("at my last check") ? "" : ` (${st.why || "still held"})`;
+  await d.say("alerts", `**Michael: I can't confirm a protective stop for ${st.symbol} after ${minutes}, and I have not been able to ${what} yet**${reason}.${seen} I am checking, and I will ${what} if it is still unconfirmed. Please check ${st.symbol} in Alpaca's dashboard and close it there if needed. I keep trying.`, { mentionOwner: true });
 }
 
 // Fix C (Michael's approval of 2026-11-10): the closing line for a sale reported as "not filled yet": when every sale of the entry is seen
@@ -898,9 +916,10 @@ async function settleAwaiting(d: RiskDeps, mem: SyncMemory, orders: Order[] | nu
   }
 }
 
-// Group 2, round 2 of the weekend build (messaging only): an entry with a timed-out stop that this process has not reported yet (after a
-// restart, a stop loaded from the database or found pending cancel at start-up) gets the first alert once, and from then the 5 minute alert
-// and the resolution line as any other.
+// Group 2, round 2 of the weekend build (messaging only): an entry with a timed-out stop that has no open report in this process (after a
+// restart, a stop loaded from the database or found pending cancel at start-up; or an older entry that is again the newest on its symbol
+// after its earlier report was resolved) gets the first alert once, and from then the 5 minute alert and the resolution line as any other.
+// The time given is when this process noticed it (group 2, round 3), not when protection was lost.
 async function reportTimedOutOnce(d: RiskDeps, mem: SyncMemory, s: OrderRecord, nowMs: number): Promise<void> {
   const st = mem.stuck.get(s.clientOrderId);
   if (st?.alerted) return;
@@ -908,7 +927,7 @@ async function reportTimedOutOnce(d: RiskDeps, mem: SyncMemory, s: OrderRecord, 
   rec.alerted = true;
   rec.why ||= "its fresh stop was not confirmed in time, so I do not count it as protection";
   mem.stuck.set(s.clientOrderId, rec);
-  await d.say("alerts", `**Michael: I can't confirm a protective stop for ${s.symbol} (since ${centralClock(new Date(nowMs))}): its fresh stop was not confirmed in time, so I do not count it as protection.** I am checking, and I will sell it if still unconfirmed. I will post again when it is sold or gone.`, { mentionOwner: true });
+  await d.say("alerts", `**Michael: I can't confirm a protective stop for ${s.symbol} (noticed at ${centralClock(new Date(nowMs))}): its fresh stop was not confirmed in time, so I do not count it as protection.** I am checking, and I will sell it if still unconfirmed. I will post again when it is sold or gone.`, { mentionOwner: true });
 }
 
 // Item 2 of 2026-11-13 (Michael's decision, the leftovers), with group 1's round 1 fixes: what to do this sync for an entry with a timed-out
