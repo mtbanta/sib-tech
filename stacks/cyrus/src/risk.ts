@@ -94,6 +94,20 @@ export const OLD_LOOKUP_EVERY_MS = 30_000;
 // 5 minutes (part A, step 4), and once when it resolves (part C).
 export const STUCK_RETRY_FIRST_MS = 5_000;
 export const STUCK_RETRY_MAX_MS = 30_000;
+// Michael's decision of 2026-11-13 (item 2, first point): with the live updates down, an entry with a timed-out fresh stop is tried at
+// least every 10 seconds (5, then 10), within the request allowance.
+export const STUCK_RETRY_MAX_NO_STREAM_MS = 10_000;
+// Item 2 of 2026-11-13: while an entry's timed-out stop is known open and our cancel of it was accepted (or it shows pending cancel), no
+// sale is tried; its status is checked instead (one lookup by client id when the sync's list does not show it): every 10 seconds with the
+// live updates down, every 30 seconds with them up (the live update that it ended runs the sale at once). A sale try runs once it is known
+// to have ended. Requests of any other try leave TIMED_OUT_SALE_RESERVE of the allowance's minute free for that sale.
+export const TIMED_OUT_PROBE_NO_STREAM_MS = 10_000;
+export const TIMED_OUT_PROBE_STREAM_MS = 30_000;
+export const TIMED_OUT_PROBE_FAIL_MAX_MS = 60_000;
+export const TIMED_OUT_SALE_RESERVE = 10; // a sale try after a known end: about 10 requests (no cancel, no wait)
+// A sale try for an entry with a timed-out stop starts only when the allowance has room for a whole try in both windows (a try cut short
+// would spend requests without selling).
+export const TIMED_OUT_TRY_REQUESTS = 13; // at most: clock and positions 2, open orders 1, a cancel 1, two looks 4, re-read 1, sale 3, last look 1
 export const STUCK_ESCALATE_MS = 5 * 60_000;
 // Michael's choice of 2026-11-09 (after group 1 review round 1 of release 1 found that 8 or more symbols stuck at once could drain the
 // request reserve with their retries): the short retries of stuck entries share at most 40 Alpaca requests a minute and 15 in any 5
@@ -139,7 +153,10 @@ export class SyncMemory {
   // Release 1 of 2026-11-09: entries (client ids) whose cleanup sale could not sell their shares, with the retry and alert state.
   readonly stuck = new Map<string, StuckEntry>();
   // When each short retry of a stuck entry was charged against the allowance above (milliseconds).
+  // Since item 2 of 2026-11-13: one entry per request charged (an ordinary retry charges STUCK_RETRY_COST entries at once).
   readonly retrySpend: number[] = [];
+  // Whether the live order updates were connected at the start of the current sync (set by syncOrders; read by the backoff's cap).
+  streamLive = false;
   // Fix C of 2026-11-10: entries whose cleanup sale was sent but not seen filled, waiting for their closing line.
   readonly awaitingFill = new Map<string, AwaitingFill>();
   // Entries already logged as `late_notice` (once per entry: a stuck entry's retries are not new late notices).
@@ -157,6 +174,12 @@ export class SyncMemory {
   // its entry that was running then does not back off afterwards (it would undo the update's "sell now"): it is due again at once. This
   // fires once per stop end, because only an end at or after that try's start counts.
   readonly timedOutEndedAt = new Map<string, number>();
+  // Item 2 of 2026-11-13: per timed-out stop (client id), when its status is next checked, and when its cancel may next be sent again
+  // while it is known open (on the stuck backoff's steps: 5, 10, 20, then every 30 seconds).
+  // `probeFailed`: the last status check could not be read; until the next one the sale's tries go on as before (on the backoff).
+  // `probeFailDelayMs`: after a failed check the next one waits longer (doubling from the normal interval, at most a minute), so failed
+  // checks do not take the allowance from the sale's tries.
+  readonly timedOutCheck = new Map<string, { probeAt: number; resendAt: number; resendDelayMs: number; probeFailed: boolean; probeFailDelayMs: number }>();
 }
 
 // Ruling B (the worker's live update, onFreshStopUpdate): a timed-out fresh stop ended at Alpaca. Its entry's sale is due now (no new
@@ -242,21 +265,61 @@ async function freshStopLive(d: RiskDeps, f: FreshStop, listed: Order[], nowMs: 
 
 // Michael's choice of 2026-11-09: the earliest moment a short retry fits the allowance (now if it fits), and charge it if it does.
 export function takeRetryRoom(mem: SyncMemory, nowMs: number): { ok: true } | { ok: false; at: number } {
+  return retryRoomFor(mem, nowMs, STUCK_RETRY_COST, true);
+}
+
+// Michael's decision of 2026-11-13 (item 2, third point): the allowance counted in requests. `retrySpend` holds one time per request
+// charged; an ordinary stuck retry charges its flat STUCK_RETRY_COST at once (as before), a try for an entry with a timed-out fresh stop
+// charges each request as it is made. Room for n more: at most STUCK_RETRY_PER_MINUTE in any minute and STUCK_RETRY_PER_5S in any 5 seconds.
+// With `charge` false it only looks. Otherwise the earliest moment n more fit.
+export function retryRoomFor(mem: SyncMemory, nowMs: number, n: number, charge: boolean): { ok: true } | { ok: false; at: number } {
   const recent = mem.retrySpend.filter((t) => nowMs - t < 60_000);
   mem.retrySpend.splice(0, mem.retrySpend.length, ...recent);
-  const lastMinute = recent.length * STUCK_RETRY_COST;
   const last5s = recent.filter((t) => nowMs - t < 5_000);
-  if (lastMinute + STUCK_RETRY_COST <= STUCK_RETRY_PER_MINUTE && last5s.length * STUCK_RETRY_COST + STUCK_RETRY_COST <= STUCK_RETRY_PER_5S) {
-    mem.retrySpend.push(nowMs);
+  if (recent.length + n <= STUCK_RETRY_PER_MINUTE && last5s.length + n <= STUCK_RETRY_PER_5S) {
+    if (charge) for (let i = 0; i < n; i++) mem.retrySpend.push(nowMs);
     return { ok: true };
   }
-  // The next moment one more fits: when enough of the minute's charges, and of the 5 seconds' charges, have aged out.
-  const minuteSlots = Math.floor(STUCK_RETRY_PER_MINUTE / STUCK_RETRY_COST);
-  const fiveSlots = Math.floor(STUCK_RETRY_PER_5S / STUCK_RETRY_COST);
-  const byMinute = recent.length >= minuteSlots ? recent[recent.length - minuteSlots]! + 60_000 : nowMs;
-  const byFive = last5s.length >= fiveSlots ? last5s[last5s.length - fiveSlots]! + 5_000 : nowMs;
+  // The next moment n more fit: when enough of the minute's, and of the 5 seconds', requests have aged out (both lists are oldest first).
+  const byMinute = recent.length + n > STUCK_RETRY_PER_MINUTE ? recent[recent.length + n - STUCK_RETRY_PER_MINUTE - 1]! + 60_000 : nowMs;
+  const byFive = last5s.length + n > STUCK_RETRY_PER_5S ? last5s[last5s.length + n - STUCK_RETRY_PER_5S - 1]! + 5_000 : nowMs;
   return { ok: false, at: Math.max(byMinute, byFive, nowMs + 1) };
 }
+
+// Item 2 of 2026-11-13: the earliest moment the allowance has room for `minute` more in its minute and `five` more in its 5 seconds
+// (looks only). Waiting for that moment, not a fixed second, keeps the order sync from running more often while it waits (each sync is
+// requests too).
+function retryRoomAt(mem: SyncMemory, nowMs: number, minute: number, five: number): number {
+  const recent = mem.retrySpend.filter((t) => nowMs - t < 60_000);
+  const last5s = recent.filter((t) => nowMs - t < 5_000);
+  const byMinute = recent.length + minute > STUCK_RETRY_PER_MINUTE ? recent[Math.max(0, recent.length + minute - STUCK_RETRY_PER_MINUTE - 1)]! + 60_000 : nowMs;
+  const byFive = last5s.length + five > STUCK_RETRY_PER_5S ? last5s[Math.max(0, last5s.length + five - STUCK_RETRY_PER_5S - 1)]! + 5_000 : nowMs;
+  return Math.max(byMinute, byFive);
+}
+// The allowance's minute alone has room for n more (looks only).
+function retryRoomMinute(mem: SyncMemory, nowMs: number, n: number): boolean {
+  return mem.retrySpend.filter((t) => nowMs - t < 60_000).length + n <= STUCK_RETRY_PER_MINUTE;
+}
+// Item 2 of 2026-11-13: every timed-out stop of the entry is known to have ended (a live update, a status check, or the sync's list).
+const endedKnown = (mem: SyncMemory, entryClientOrderId: string): boolean => {
+  const stops = [...mem.timedOutStops].filter(([, e]) => e === entryClientOrderId).map(([stop]) => stop);
+  return stops.length > 0 && stops.every((stop) => mem.timedOutEndedAt.has(stop));
+};
+// Ruling B: true when the entry has a fresh stop that hit the 15 second limit.
+const hasTimedOut = (mem: SyncMemory, entryClientOrderId: string): boolean => [...mem.timedOutStops.values()].includes(entryClientOrderId);
+// Item 2 of 2026-11-13: the request allowance for a try of an entry with a timed-out stop (each request charged as it is made).
+function retryBudget(mem: SyncMemory, now: () => number, reserve = 0): { take(n: number): boolean; force(n: number): void } {
+  return {
+    // With a reserve: room for n more AND the reserve after them, in the minute (the 5 seconds' limit applies to the n alone).
+    take: (n) => (reserve === 0 || retryRoomMinute(mem, now(), n + reserve)) && retryRoomFor(mem, now(), n, true).ok,
+    force: (n) => {
+      const t = now();
+      for (let i = 0; i < n; i++) mem.retrySpend.push(t);
+    },
+  };
+}
+// The backoff's longest step: 30 seconds, or 10 for an entry with a timed-out stop while the live updates are down (item 2, first point).
+const backoffCap = (mem: SyncMemory, entryClientOrderId: string): number => (!mem.streamLive && hasTimedOut(mem, entryClientOrderId) ? STUCK_RETRY_MAX_NO_STREAM_MS : STUCK_RETRY_MAX_MS);
 const fallbackSync = new SyncMemory();
 
 // An entry whose stop is no longer live (cancelled or expired, not filled) while some of its shares are not sold yet: those shares
@@ -297,6 +360,7 @@ export interface SyncOptions {
 // Release A: `recheckAt` is the earliest moment a bare remainder (fix 1) reaches its grace time; the worker runs the next sync then.
 export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions = { protect: true }): Promise<{ unprotected: string[]; incomplete: boolean; recheckAt?: number }> {
   const mem = d.syncMemory ?? fallbackSync;
+  mem.streamLive = opts.streamLive === true;
   // Logging only (Michael's approval of 2026-11-10): what this sync did before it reached an entry noticed late.
   const syncStartMs = d.now().getTime();
   const prevSyncEndedAt = mem.lastSyncAt;
@@ -515,6 +579,16 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       if (held.has(s.symbol)) d.log?.("fresh_stop_gone", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: fresh.stopClientOrderId, status: fresh.status, msFromSent: nowMs - fresh.placedAt });
     }
     if (!hasLiveExit(o)) {
+      // Item 2 of 2026-11-13: an entry whose timed-out stop is known open with its cancel accepted or pending waits for that stop to end
+      // (status checks, no sale tries); one known to have ended is tried at once.
+      if (hasTimedOut(mem, s.clientOrderId)) {
+        const w = await timedOutWait(d, mem, s, listed.orders, d.now().getTime());
+        if (w !== null) {
+          unprotected.push(s.symbol);
+          recheckAt = recheckAt === undefined ? w : Math.min(recheckAt, w);
+          continue;
+        }
+      }
       const due = retryDue(mem, s.clientOrderId, d.now().getTime());
       if (due !== null) {
         // Part A, step 1: tried moments ago and stuck; it is tried again at `due` (or when the retry allowance has room), and the sync
@@ -593,7 +667,7 @@ const EPS_QTY = 1e-9;
 function backoffStuck(mem: SyncMemory, symbol: string, clientOrderId: string, nowMs: number, why: string): StuckEntry {
   const st = mem.stuck.get(clientOrderId) ?? { symbol, since: nowMs, nextAt: 0, delayMs: 0, alerted: false, escalated: false, lastTriedAt: nowMs, why: "" };
   st.lastTriedAt = nowMs;
-  st.delayMs = st.delayMs > 0 ? Math.min(st.delayMs * 2, STUCK_RETRY_MAX_MS) : STUCK_RETRY_FIRST_MS;
+  st.delayMs = st.delayMs > 0 ? Math.min(st.delayMs * 2, backoffCap(mem, clientOrderId)) : STUCK_RETRY_FIRST_MS;
   st.nextAt = nowMs + st.delayMs;
   if (!st.why) st.why = why;
   mem.stuck.set(clientOrderId, st);
@@ -604,7 +678,13 @@ function retryDue(mem: SyncMemory, clientOrderId: string, nowMs: number): number
   const st = mem.stuck.get(clientOrderId);
   if (!st || st.nextAt === 0) return null;
   if (st.nextAt > nowMs) return st.nextAt;
-  const room = takeRetryRoom(mem, nowMs);
+  // Item 2 of 2026-11-13: an entry with a timed-out stop is charged per request during its try, so here it needs room for a whole try
+  // (and, unless its stop is known to have ended, the reserve for the sale after that); an ordinary retry is charged its flat cost, as before.
+  const room = hasTimedOut(mem, clientOrderId)
+    ? endedKnown(mem, clientOrderId) || retryRoomMinute(mem, nowMs, TIMED_OUT_TRY_REQUESTS + TIMED_OUT_SALE_RESERVE)
+      ? retryRoomFor(mem, nowMs, TIMED_OUT_TRY_REQUESTS, false)
+      : { ok: false as const, at: Math.max(nowMs + 250, retryRoomAt(mem, nowMs, TIMED_OUT_TRY_REQUESTS + TIMED_OUT_SALE_RESERVE, TIMED_OUT_TRY_REQUESTS)) }
+    : takeRetryRoom(mem, nowMs);
   if (room.ok) return null;
   st.nextAt = room.at;
   return room.at;
@@ -683,6 +763,94 @@ async function settleAwaiting(d: RiskDeps, mem: SyncMemory, orders: Order[] | nu
   }
 }
 
+// Item 2 of 2026-11-13 (Michael's decision, the leftovers): what to do this sync for an entry with a timed-out fresh stop. Returns null to
+// go on to the sale (with the backoff and the allowance, as before), or the moment to look again while it waits. It waits only while the
+// stop is known open and our cancel of it was accepted (or it shows pending cancel): then the sale cannot sell the shares, so no sale try
+// is spent. Its status comes free from the sync's list when the list shows it; otherwise one lookup by client id (charged to the allowance,
+// leaving the reserve), every 10 seconds with the live updates down and every 30 with them up. Ended (cancelled, expired, rejected, or
+// unknown to Alpaca): noted (noteTimedOutStopEnded) and the sale is tried at once. A failed lookup: the sale goes on as before (its tries
+// on the backoff). While it waits, its cancel is sent again no more often than the stuck backoff's steps (5, 10, 20, then every 30 seconds).
+async function timedOutWait(d: RiskDeps, mem: SyncMemory, s: OrderRecord, listed: readonly Order[], nowMs: number): Promise<number | null> {
+  const st = mem.stuck.get(s.clientOrderId);
+  for (const [stop, entry] of mem.timedOutStops) {
+    if (entry !== s.clientOrderId || mem.timedOutEndedAt.has(stop)) continue;
+    const shown = listed.find((x) => x.clientOrderId === stop);
+    if (shown && !OPEN_STATUSES.has(shown.status)) {
+      // The sync's own list shows it ended (or filled: the shares are gone, and the sale finds nothing to sell).
+      noteTimedOutStopEnded(mem, stop, nowMs);
+      d.log?.("fresh_stop_timeout_ended", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: stop, status: shown.status, by: "order list" });
+      continue;
+    }
+    const noted = st?.restingStop?.stopClientOrderId === stop ? st.restingStop.cancel : undefined;
+    const waiting = shown ? shown.status === "pending_cancel" || mem.timedOutCancelAccepted.has(stop) : noted === "accepted" || noted === "pending";
+    if (!waiting) continue;
+    const chk = mem.timedOutCheck.get(stop) ?? { probeAt: 0, resendAt: nowMs + STUCK_RETRY_FIRST_MS, resendDelayMs: STUCK_RETRY_FIRST_MS, probeFailed: false, probeFailDelayMs: 0 };
+    mem.timedOutCheck.set(stop, chk);
+    let status = shown?.status;
+    let orderId = shown?.id;
+    if (!shown) {
+      // A failed check: the sale's tries go on (backoff, allowance) until the next check is due.
+      if (chk.probeAt > nowMs) {
+        if (chk.probeFailed) return null;
+        return chk.probeAt;
+      }
+      const budget = retryBudget(mem, () => d.now().getTime(), TIMED_OUT_SALE_RESERVE);
+      if (!budget.take(1)) return Math.max(nowMs + 250, retryRoomAt(mem, nowMs, 1 + TIMED_OUT_SALE_RESERVE, 1));
+      try {
+        try {
+          const x = await d.broker.findOrderByClientId(stop);
+          status = x ? x.status : "unknown_at_alpaca";
+          orderId = x?.id;
+        } catch (err) {
+          // The lookup by client id failed: Alpaca's open orders are the second way (one more request, charged; as at the 15 second
+          // limit). Not among them: taken as ended, and the sale is tried (it never sells shares a working stop holds, sells.ts).
+          d.log?.("fresh_stop_lookup_failed", { symbol: s.symbol, stopClientOrderId: stop, by: "status check", error: (err as Error).message.slice(0, 120) });
+          if (!budget.take(1)) throw err;
+          const x = (await d.broker.listOrders("open")).find((y) => y.clientOrderId === stop);
+          status = x ? x.status : "not in Alpaca's open orders";
+          orderId = x?.id;
+        }
+      } catch (err) {
+        d.log?.("fresh_stop_lookup_failed", { symbol: s.symbol, stopClientOrderId: stop, by: "status check, open orders", error: (err as Error).message.slice(0, 120) });
+        // Rule of 2026-11-13: the next check comes on the same schedule (never at the next sync); meanwhile the sale goes on as before.
+        chk.probeFailed = true;
+        const base = mem.streamLive ? TIMED_OUT_PROBE_STREAM_MS : TIMED_OUT_PROBE_NO_STREAM_MS;
+        chk.probeFailDelayMs = chk.probeFailDelayMs > 0 ? Math.min(chk.probeFailDelayMs * 2, TIMED_OUT_PROBE_FAIL_MAX_MS) : base;
+        chk.probeAt = d.now().getTime() + chk.probeFailDelayMs;
+        return null;
+      }
+      chk.probeFailed = false;
+      chk.probeFailDelayMs = 0;
+      d.log?.("fresh_stop_timeout_check", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: stop, status });
+      if (!OPEN_STATUSES.has(status)) {
+        noteTimedOutStopEnded(mem, stop, d.now().getTime());
+        continue;
+      }
+      chk.probeAt = d.now().getTime() + (mem.streamLive ? TIMED_OUT_PROBE_STREAM_MS : TIMED_OUT_PROBE_NO_STREAM_MS);
+      if (st) st.restingStop = { stopClientOrderId: stop, cancel: status === "pending_cancel" ? "pending" : "accepted" };
+    }
+    // Known open: our cancel again, at most on the backoff's steps (not while Alpaca shows it pending cancel).
+    if (status !== "pending_cancel" && orderId && chk.resendAt <= nowMs) {
+      const budget = retryBudget(mem, () => d.now().getTime(), TIMED_OUT_SALE_RESERVE);
+      if (budget.take(1)) {
+        try {
+          await d.broker.cancelOrder(orderId);
+          d.log?.("fresh_stop_timeout_cancel", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: stop, by: "status check", again: mem.timedOutCancelAccepted.has(stop) });
+          mem.timedOutCancelAccepted.add(stop);
+        } catch (err) {
+          d.log?.("fresh_stop_timeout_cancel_failed", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: stop, by: "status check", again: mem.timedOutCancelAccepted.has(stop), error: (err as Error).message.slice(0, 120) });
+          if (st) st.restingStop = { stopClientOrderId: stop, cancel: "refused" };
+        }
+        chk.resendDelayMs = Math.min(chk.resendDelayMs * 2, STUCK_RETRY_MAX_MS);
+        chk.resendAt = d.now().getTime() + chk.resendDelayMs;
+      }
+    }
+    const next = Math.min(shown ? nowMs + 10_000 : chk.probeAt, status !== "pending_cancel" ? chk.resendAt : Infinity);
+    return Math.max(next, nowMs + 250);
+  }
+  return null;
+}
+
 // Part C: the one line when a position that was reported stuck resolves (no mention). Nothing is posted for an entry never reported.
 // Michael's ruling B of 2026-11-12: a fresh stop still unclear 15 seconds after it was sent. The remainder is treated as unprotected:
 // the stop is looked up by its client id and, if Alpaca has it open, cancelled through the cleanup sale (which waits for Alpaca's cancel
@@ -694,7 +862,11 @@ async function freshStopTimeout(d: RiskDeps, day: DayRecord, mem: SyncMemory, s:
   mem.timedOutStops.set(f.stopClientOrderId, s.clientOrderId);
   let cancelId: string | null = f.orderId;
   let found: string = "lookup failed";
-  try {
+  // Item 2 of 2026-11-13: these lookups are charged to the stuck-retry allowance too; without room they are skipped (the sale below,
+  // also charged, still never sells shares a working stop holds).
+  const budget = retryBudget(mem, () => d.now().getTime());
+  if (!budget.take(1)) found = "not looked up (no room in the request allowance)";
+  else try {
     const x = await d.broker.findOrderByClientId(f.stopClientOrderId);
     found = x ? x.status : "unknown_at_alpaca";
     if (x) cancelId = OPEN_STATUSES.has(x.status) ? x.id : null;
@@ -702,7 +874,7 @@ async function freshStopTimeout(d: RiskDeps, day: DayRecord, mem: SyncMemory, s:
   } catch (err) {
     d.log?.("fresh_stop_lookup_failed", { symbol: f.symbol, error: (err as Error).message.slice(0, 120) });
     // The lookup by client id failed: Alpaca's open orders are a second way to find it (one more request, only here).
-    try {
+    if (budget.take(1)) try {
       const x = (await d.broker.listOrders("open")).find((y) => y.clientOrderId === f.stopClientOrderId);
       found = x ? x.status : "not in Alpaca's open orders";
       cancelId = x ? x.id : null;
@@ -719,7 +891,7 @@ async function freshStopTimeout(d: RiskDeps, day: DayRecord, mem: SyncMemory, s:
     st.alerted = true;
     st.why = "its fresh protective stop was not confirmed within 15 seconds";
     mem.stuck.set(s.clientOrderId, st);
-    const what = cancelId ? "I am cancelling that stop and selling" : found === "lookup failed" ? "Alpaca could not be asked about that stop, so I am selling" : "Alpaca does not hold that stop open, so I am selling";
+    const what = cancelId ? "I am cancelling that stop and selling" : found === "lookup failed" || found.startsWith("not looked up") ? "Alpaca could not be asked about that stop, so I am selling" : "Alpaca does not hold that stop open, so I am selling";
     await d.say("alerts", `**Michael: ${s.symbol}'s fresh protective stop for ${plural(left, "share")} was not confirmed within 15 seconds, so I treat ${left === 1 ? "it" : "them"} as unprotected.** ${what} ${left === 1 ? "it" : "them"} now, and will post again when ${left === 1 ? "it is" : "they are"} sold or gone.`, { mentionOwner: true });
   }
   return cleanupSale(d, day, mem, s, o, "missing", undefined, cancelId ? { alsoCancel: [cancelId], alsoCancelStops: [f.stopClientOrderId], alsoCancelBy: "15 second limit" } : {});
@@ -759,8 +931,25 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     }
     return { attempted: true, stuck: true, recheckAt: now };
   };
-  // A5: the fast sale has just looked the entry up itself, so it is not looked up a second time here.
-  if (!extra.fast) try {
+  // Michael's decision of 2026-11-13 (item 2, third point): every request of a try for an entry with a timed-out stop is charged to the
+  // stuck-retry allowance as it is made (40 a minute, 15 in 5 seconds), so these tries can never spend more. Out of room, the try sends
+  // nothing more and is due again when the allowance has room (no alert; the 5 minute alert goes by the clock).
+  const budget = hasTimedOut(mem, s.clientOrderId) ? retryBudget(mem, () => d.now().getTime(), endedKnown(mem, s.clientOrderId) ? 0 : TIMED_OUT_SALE_RESERVE) : undefined;
+  const outOfRoom = (): { attempted: true; stuck: true; recheckAt: number } => {
+    const now = d.now().getTime();
+    const reserve = endedKnown(mem, s.clientOrderId) ? 0 : TIMED_OUT_SALE_RESERVE;
+    const at = Math.max(now + 250, retryRoomAt(mem, now, TIMED_OUT_TRY_REQUESTS + reserve, TIMED_OUT_TRY_REQUESTS));
+    const st = mem.stuck.get(s.clientOrderId);
+    if (st) {
+      st.nextAt = Math.max(st.nextAt, at);
+      st.lastTriedAt = now;
+    }
+    d.log?.("timed_out_try_out_of_room", { symbol: s.symbol, clientOrderId: s.clientOrderId, retryInMs: at - now });
+    return { attempted: true, stuck: true, recheckAt: at };
+  };
+  // A5: the fast sale has just looked the entry up itself, so it is not looked up a second time here. Item 2 of 2026-11-13: nor a budgeted
+  // try (an entry with a timed-out stop, whose bracket exits ended long ago): the copy from this sync's own list or lookup is used.
+  if (!extra.fast && !budget) try {
     const fresh = await d.broker.findOrderByClientId(s.clientOrderId);
     if (fresh) o = fresh;
     else d.log?.("cleanup_lookup_empty", { symbol: s.symbol, clientOrderId: s.clientOrderId, kind });
@@ -795,7 +984,9 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     reason,
     tradeDate: day.tradeDate,
     only: [s.symbol],
-    maxRounds: extra.fast ? 1 : 3,
+    // Item 2 of 2026-11-13: a try charged per request (an entry with a timed-out stop) runs one round, so a whole try (about 8 requests
+    // when no cancel has to be waited out) fits the allowance's 15 in 5 seconds; the next try comes on the backoff.
+    maxRounds: extra.fast || budget ? 1 : 3,
     cancelIds,
     yieldToPriority: true,
     ownEntryOnly: { maxQty: { [s.symbol]: ownShares } },
@@ -803,6 +994,9 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     onSellSent: sent,
     ...(protectAt !== null ? { protectWithStop: { [s.symbol]: protectAt } } : {}),
     ...((extra.alsoCancel?.length ?? 0) > 0 ? { endOnCancelFail: true } : {}),
+    // Item 2 of 2026-11-13: a budgeted try waits half a second for Alpaca's cancel (a cancel usually lands in about 0.2 s), so a whole
+    // try (at most about 13 requests) fits the allowance's 15 in 5 seconds; after that the stop's status checks take over (timedOutWait).
+    ...(budget ? { requestBudget: budget, waitCancelMs: 500 } : {}),
     ...(extra.fast ? { waitForAlpacaCancel: true, waitCancelMs: FAST_LOST_EXIT_WAIT_MS } : {}),
   });
   const soldQty = r.sold.filter((x) => x.symbol === s.symbol).reduce((n, x) => n + x.qty, 0);
@@ -835,6 +1029,9 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   // Group 2, round 6: and only when that try's last look read both the open orders and the positions (`lastLookOk`); a look that failed
   // never saw the stop, so it cannot say the stop is gone.
   if (stuckBefore && !r.yielded && r.lastLookOk === true) delete stuckBefore.restingStop;
+  // Item 2 of 2026-11-13: a try that ran out of room in the request allowance still acts on what it saw (the branches below); with
+  // nothing to act on it ends stuck, on the backoff, and its next try waits for room (retryDue).
+  if (r.budgetOut) d.log?.("timed_out_try_out_of_room", { symbol: s.symbol, clientOrderId: s.clientOrderId, sold: soldQty, stage: "sale" });
   // A4: the remainder now has a fresh stop. Nothing is sold; the entry stays open until the stop fills or the close-out sells it.
   if (r.freshStop && r.freshStop.symbol === s.symbol) {
     const f = r.freshStop;
@@ -885,6 +1082,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     if (stopEndedDuringTry()) return dueNow(now);
     const acceptedBefore = mem.timedOutCancelAccepted.has(heldBy.clientOrderId);
     d.log?.("fresh_stop_timeout_still_open", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: heldBy.clientOrderId, status: heldBy.status, by: "sale" });
+    if (budget && !budget.take(1)) return outOfRoom(); // the cancel
     try {
       await d.broker.cancelOrder(heldBy.orderId);
       d.log?.("fresh_stop_timeout_cancel", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: heldBy.clientOrderId, by: "sale", again: acceptedBefore });
@@ -953,7 +1151,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   if (soldQty > 0 && soldQty < target - EPS_QTY) {
     // Fix A, the narrow case: the take-profit filled more before the sale's first look at the holding, so the recount could not see it.
     // One more look at the entry (one request, only here) says what was still its own.
-    try {
+    if (!budget || budget.take(1)) try {
       const again = await d.broker.findOrderByClientId(s.clientOrderId);
       const ownNow = again ? again.filledQty - exitFilledQty(again) : null;
       if (ownNow !== null && soldQty >= ownNow - EPS_QTY) {
@@ -1004,12 +1202,16 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   // ever falls back to the retry at every sync.
   const hasTimedOutStop = [...mem.timedOutStops.values()].includes(s.clientOrderId);
   const endedNow = hasTimedOutStop && stopEndedDuringTry();
-  if (endedNow) {
+  if (r.budgetOut && !endedNow) {
+    // Item 2 of 2026-11-13: cut short for lack of room in the request allowance: due again when a whole try fits (no backoff step).
+    const reserve = endedKnown(mem, s.clientOrderId) ? 0 : TIMED_OUT_SALE_RESERVE;
+    st.nextAt = Math.max(now + 250, retryRoomAt(mem, now, TIMED_OUT_TRY_REQUESTS + reserve, TIMED_OUT_TRY_REQUESTS));
+  } else if (endedNow) {
     // Group 1, round 5: the live update said the timed-out stop ended during this try: due again at once, not on the backoff.
     st.nextAt = 0;
     delete st.restingStop;
   } else if (hidden || timedOutCancel || hasTimedOutStop) {
-    st.delayMs = st.delayMs > 0 ? Math.min(st.delayMs * 2, STUCK_RETRY_MAX_MS) : STUCK_RETRY_FIRST_MS;
+    st.delayMs = st.delayMs > 0 ? Math.min(st.delayMs * 2, backoffCap(mem, s.clientOrderId)) : STUCK_RETRY_FIRST_MS;
     st.nextAt = now + st.delayMs;
   } else {
     // Held by open orders that are visible (a cancel still landing): tried again at the next sync, as before.
@@ -1022,7 +1224,9 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   const refusedStop = [...cancelOutcome].find(([, v]) => v === "refused")?.[0];
   if (refusedStop && !endedNow) st.restingStop = { stopClientOrderId: refusedStop, cancel: "refused" };
   const left = Math.max(0, target - soldQty) || ownShares - soldQty;
-  const why = hidden ? "Alpaca reports the shares as not free to sell, and no open order explains it" : (r.errors.at(-1) ?? "still held").slice(0, 120);
+  // Item 2 of 2026-11-13: an ending for lack of room in the request allowance is not the reason (the last meaningful one is kept).
+  const lastError = [...r.errors].reverse().find((e) => !e.startsWith("stopped: the request allowance"));
+  const why = hidden ? "Alpaca reports the shares as not free to sell, and no open order explains it" : lastError ? lastError.slice(0, 120) : r.budgetOut && st.why ? st.why : "still held";
   st.why = why;
   // Messaging only: a remainder the stack is trying to give a fresh stop (A4) is waiting to be protected, not only to be sold.
   const protecting = kind === "bare" && protectAt !== null;

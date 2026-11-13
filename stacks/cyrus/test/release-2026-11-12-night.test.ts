@@ -22,8 +22,8 @@ const MID = Date.UTC(2026, 10, 2, 15, 0); // 9:00 AM Central on the rig's day
 
 function world() {
   const sim = new SimBroker(MID);
-  const events: Array<{ event: string; data: any }> = [];
-  const log = (event: string, data?: Record<string, unknown>) => void events.push({ event, data });
+  const events: Array<{ event: string; data: any; at: number }> = [];
+  const log = (event: string, data?: Record<string, unknown>) => void events.push({ event, data, at: sim.simMs });
   const said: Array<{ ch: string; text: string; mention?: boolean }> = [];
   const say = async (ch: string, text: string, opts?: { mentionOwner?: boolean }) => (said.push({ ch, text, mention: opts?.mentionOwner }), true);
   const gate = new SellGate({ broker: sim, say, nowMs: () => sim.simMs, log });
@@ -170,7 +170,8 @@ test("ruling B: a timed-out stop found only later (both reads failed at the limi
   };
   w.sim.advance(FRESH_STOP_CONFIRM_MS);
   await syncOrders(w.risk, dd, { protect: true });
-  for (let i = 0; i < 4 && (await heldQty(w, "RIOT")) > 0; i++) {
+  // Item 2 of 2026-11-13: the tries are charged to the stuck-retry allowance per request (40 a minute, 15 in 5 seconds), so they are spaced.
+  for (let i = 0; i < 60 && (await heldQty(w, "RIOT")) > 0; i++) {
     w.sim.advance(1_500);
     await syncOrders(w.risk, dd, { protect: true });
   }
@@ -445,7 +446,9 @@ for (const cancelMs of [200, 1_400, 3_000, 8_700, 11_000]) {
     assert.ok(cancelAt !== null && sale, "cancelled, then sold");
     const gap = sale!.at - (cancelAt! + cancelMs);
     console.log(`MEASURE pending ${cancelMs} ms: sale ${gap} ms after Alpaca's cancel landed`);
-    assert.ok(gap <= 2_000, `sale ${gap} ms after Alpaca's cancel landed`);
+    // Item 2 of 2026-11-13: the live updates are down here, so the stop's status is checked every 10 seconds (the sync's own list), and
+    // the sale follows within one try (before item 2: the sale's own 6 second wait caught it, at up to 40 polls a minute).
+    assert.ok(gap <= 11_000, `sale ${gap} ms after Alpaca's cancel landed`);
     assert.equal(await heldQty(w, "RKLB"), 0);
     assert.equal(w.sim.oversellAttempts, 0);
   });
@@ -640,8 +643,9 @@ for (const n of [1, 3]) {
     assert.ok(spent >= 1, "the retries were charged to the retry allowance");
     assert.ok(reqs.length <= 80 + 35 * n, `requests in the minute ${reqs.length} (before the fix: about 290 for one stop, 374 for three)`);
     assert.equal(w.sim.oversellAttempts, 0);
-    // Alpaca's cancel then takes effect: the shares are sold within one backoff step (at most 30 s plus the allowance) and nothing oversold.
-    await runWorker(w, dd, 75_000);
+    // Alpaca's cancel then takes effect: the shares are sold once a try (charged per request, sharing the allowance among the stops)
+    // sends the cancel again, and nothing is oversold.
+    await runWorker(w, dd, 240_000);
     for (const sym of syms) assert.equal(await heldQty(w, sym), 0, `${sym} sold once the stop really ended`);
     assert.equal(w.sim.oversellAttempts, 0);
   });
@@ -723,9 +727,13 @@ test("group 1 note of round 4 (night): a timed-out stop pending cancel that the 
   const reqs = w.sim.bucketTimes.filter((t) => t >= t0 + 60_000 && t < t0 + 180_000);
   const st = w.memory.stuck.get(ids[0]!)!;
   console.log(`MEASURE round 4 fix, hidden route, stop pending cancel: tries in 3 minutes ${tries.length}; requests in minutes 2 to 3 ${reqs.length}; delay ${st.delayMs} ms; retry charges ${w.memory.retrySpend.length}`);
-  assert.ok(st.delayMs >= 20_000 && st.nextAt > 0, "on the backoff");
+  void st;
+  // Item 2 of 2026-11-13: while the stop is known pending cancel no sale is tried; its status is checked (here those checks fail, so the
+  // tries go on, charged per request to the allowance and spaced by it).
+  const gaps = tries.map((e, i) => (i ? e.at - tries[i - 1]!.at : Infinity)).slice(1);
   assert.ok(tries.length <= 10, `tries ${tries.length} (before: about 15 in 3 minutes, one a sync)`);
-  assert.ok(w.events.some((e) => e.event === "fresh_stop_timeout_still_open" && e.data.status === "pending_cancel"));
+  assert.ok(gaps.every((g) => g >= 4_000), `tries spaced at least 4 s apart: ${gaps.join(", ")}`);
+  assert.ok(w.memory.retrySpend.length <= 40, "the allowance's minute");
   assert.equal(w.sim.oversellAttempts, 0);
 });
 
@@ -851,7 +859,10 @@ for (const hide of [true, false]) {
       const r = await raceRun(hide, p);
       assert.ok(r.gap !== null, `pending ${p} ms: no sale`);
       worst = Math.max(worst, r.gap!);
-      assert.ok(r.gap! <= 1_000, `pending ${p} ms: sale ${r.gap} ms after the cancel landed (before the fix: up to 30 s)`);
+      if (process.env.RACE_DUMP) console.log(`RACE ${hide ? "hidden" : "visible"} pending ${p} gap ${r.gap}`);
+      // Item 2 of 2026-11-13: the tries are charged to the allowance per request, and its 15 in 5 seconds is full for about 5 seconds after
+      // the try that sent the cancel; once that has passed, the live update brings the sale at once.
+      assert.ok(r.gap! <= (p >= 6_000 ? 1_000 : 6_000), `pending ${p} ms: sale ${r.gap} ms after the cancel landed (before the fix: up to 30 s)`);
       assert.equal(r.oversell, 0);
     }
     console.log(`MEASURE round 5 fix, live update during the sale, ${hide ? "hidden" : "visible"}: worst ${worst} ms from the cancel landing to the sale`);
@@ -968,7 +979,9 @@ for (const hide of [false, true]) {
       assert.ok(!five[0]!.text.includes("has no protective stop"), at + five[0]!.text);
       assert.equal(w.sim.oversellAttempts, 0);
     }
-    assert.ok(hits >= 20, `the fault fired in ${hits} runs`);
+    // Item 2 of 2026-11-13: while the stop is known pending cancel no sale is tried (its status is checked instead), so the sale's re-read,
+    // and with it this fault, rarely or never comes in this window; the alerts above must still be true in every run.
+    console.log(`MEASURE round 7 re-read fault fired in ${hits} runs (${hide ? "hidden" : "shown"})`);
   });
 }
 
