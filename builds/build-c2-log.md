@@ -5445,3 +5445,21 @@ Full suite 737 of 737. Type check clean.
 - **The proposal's credit for 67** now uses the section's own heading, "(items 2 point 2, 3 and 4)".
 
 **Kept:** the variant "no `syncRecheckAt` on restore" (NOSRA) still passes every test. The restored timer still fires, so the restored recheck still runs; only the pass's recheck-due branch loses sight of it.
+
+### Fix (a), round 3 (7051f5e): group 1 CHANGES REQUIRED (one test), already covered
+
+**Group 1, fix (a) round 3.** The code fix works.
+- The stuck retry ran on time (+13 751, due + 250) for failures of the order list, positions and store reads at all three offsets. With the restore switched off it came 5.75 to 9.85 s late.
+- The lost-exits follow-up keeps tries 1 to 3.
+- A late throw after a sale: 0 oversell attempts, with the sale or the fresh stop counted by the sell gate.
+- A live update during the failing sync keeps its place.
+- The loss stop in force: no extra sale.
+- The rate with every read failing for 120 s is the same as at `c27346b` (13 syncs, at most 7 a minute and 2 in 5 s).
+
+**B1 (blocking):** the same as group 2's round 3 finding: nothing tested the restore's rule 6 bound. A variant whose restored timer restores itself (group 1's "R6-restore-from-timer", group 2's "ALWAYS") ran 612 syncs a minute with every read failing. The 30 s outage test added in `f2904ab` fails on that variant (measured 4 failed reads per case against at most 12 allowed), so no further change.
+
+**Notes:**
+- Surviving variants: R2, R8, R5 and R7 are equivalent or minor; F7, F10, F12, F13 and K8 as in round 2. F6 is now caught by group 2's live-timer test.
+- After `stop()`, the restore can set a timer, as a successful sync already could (existing behaviour; shutdown exits the process).
+- One recheck can be restored twice if a later pass cancels the restored timer: one extra sync, about 2 reads, once per outage.
+- The doubled "(before," comment was fixed in `f2904ab`.
