@@ -662,6 +662,13 @@ async function escalateIfDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string
     }
     return;
   }
+  // Group 1, round 7 note (messaging only): the entry has a timed-out stop that no look has shown open or ended (every try's look failed,
+  // and the sync's list does not show it). It may still rest at Alpaca, so the alert does not say there is no stop.
+  const unseenStop = [...mem.timedOutStops].some(([stop, entry]) => entry === clientOrderId && !mem.timedOutEndedAt.has(stop) && !(listed ?? []).some((x) => x.clientOrderId === stop));
+  if (unseenStop) {
+    await d.say("alerts", `**Michael: ${st.symbol} has had no confirmed protective stop for ${minutesText(now - st.since)}, and I have not been able to sell the shares.** Its fresh stop, not confirmed in time, may still be resting at Alpaca: my last tries did not see it either way. Please check ${st.symbol} in Alpaca's dashboard and close it there if needed. I keep trying.`, { mentionOwner: true });
+    return;
+  }
   const what = st.protecting ? "I still cannot protect or sell it" : "I still cannot sell it";
   await d.say("alerts", `**Michael: ${st.symbol} still has no protective stop after ${minutesText(now - st.since)}, and ${what}** (${st.why || "still held"}). Please close it in Alpaca's dashboard. I keep trying.`, { mentionOwner: true });
 }

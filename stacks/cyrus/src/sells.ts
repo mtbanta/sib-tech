@@ -581,7 +581,6 @@ export class Liquidator {
         if (this.d.now().getTime() - t0 > waitMs * 3) break; // a clock that moves much faster than the loop
       }
 
-      if (readOk) result.lastLookOk = true;
       // 3. Sell each symbol with an explicit quantity, through the sell gate (never more than is free).
       const hiddenThisRound = new Set<string>();
       let soldThisRound = 0;
@@ -592,6 +591,8 @@ export class Liquidator {
         let freshPositions: Position[] = [];
         try {
           freshPositions = await heldNow();
+          // Group 1 and group 2, round 7: only now has this round's look read the open orders AND the positions it acts on (reported only).
+          result.lastLookOk = true;
         } catch (err) {
           result.errors.push(`round ${round}: could not re-read positions: ${(err as Error).message.slice(0, 100)}`);
         }

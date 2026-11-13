@@ -937,3 +937,65 @@ for (const hide of [false, true]) {
     }
   });
 }
+
+// Group 1 and group 2, round 7: the sale's step 3 re-read of positions fails once near the 5 minute mark (its look never saw the stop).
+import { readFileSync } from "node:fs";
+const REREAD_LINE = readFileSync(new URL("../src/sells.ts", import.meta.url), "utf8").split("\n").findIndex((l) => l.includes("freshPositions = await heldNow();")) + 1;
+for (const hide of [false, true]) {
+  test(`group 1 and group 2, round 7 (night): a failed step 3 re-read of positions near the 5 minute mark never yields "no protective stop" while the timed-out stop rests at Alpaca (${hide ? "hidden from" : "shown in"} the sync's list, cancel pending)`, async () => {
+    assert.ok(REREAD_LINE > 0);
+    let hits = 0;
+    for (let y = 200_000; y <= 320_000; y += 4_000) {
+      const w = world();
+      const { dd } = await timedOutStops(w, ["RKLB"], hide);
+      w.sim.cancelMs = 10 * 60_000;
+      const t0 = w.sim.simMs;
+      let used = false;
+      const realPos = w.sim.listPositions.bind(w.sim);
+      w.sim.listPositions = async () => {
+        if (!used && w.sim.simMs - t0 >= y && (new Error().stack ?? "").includes(`sells.ts:${REREAD_LINE}:`)) {
+          used = true;
+          hits++;
+          throw new Error("positions timeout (test)");
+        }
+        return realPos();
+      };
+      await runWorker(w, dd, 6 * 60_000);
+      const five = fiveMinute(w);
+      const at = `y ${y / 1000} s: `;
+      assert.equal(five.length, 1, at + (five.map((m) => m.text).join(" | ") || "no 5 minute alert"));
+      assert.ok(five[0]!.text.includes("still resting at Alpaca"), at + five[0]!.text);
+      assert.ok(!five[0]!.text.includes("still has no protective stop"), at + five[0]!.text);
+      assert.equal(w.sim.oversellAttempts, 0);
+    }
+    assert.ok(hits >= 20, `the fault fired in ${hits} runs`);
+  });
+}
+
+test("group 1, round 7 note (night): a timed-out stop that no look has shown open or ended gets the hedged 5 minute alert (it may still rest at Alpaca), never \"no protective stop\"", async () => {
+  const w = world();
+  const { dd } = await timedOutStops(w, ["RKLB"], true);
+  w.sim.cancelMs = 10 * 60_000;
+  // Every positions read inside a sale fails from now on, so no try's look ever completes and no note is made.
+  let inSale = false;
+  const liq = w.risk.liquidator as any;
+  const realFlatten = liq.flatten.bind(liq);
+  liq.flatten = async (...a: any[]) => {
+    inSale = true;
+    try {
+      return await realFlatten(...a);
+    } finally {
+      inSale = false;
+    }
+  };
+  const realPos = w.sim.listPositions.bind(w.sim);
+  w.sim.listPositions = async () => {
+    if (inSale) throw new Error("positions timeout (test)");
+    return realPos();
+  };
+  await runWorker(w, dd, 6 * 60_000);
+  const five = fiveMinute(w);
+  assert.equal(five.length, 1, five.map((m) => m.text).join(" | ") || "no 5 minute alert");
+  assert.ok(five[0]!.text.includes("may still be resting at Alpaca"), five[0]!.text);
+  assert.ok(!five[0]!.text.includes("still has no protective stop"), five[0]!.text);
+});

@@ -4336,3 +4336,38 @@ Work on decision 1 started 9:13 AM Central on branch `release-2026-11-13-b` (fro
   - The worker's hook, driven while a sale runs, still records the end (group 1's round 6 wiring note).
   - Full suite 675 of 675. Type check clean.
 - **Measured with group 2's round 6 probe** (`scratchpad/probe/probe8.test.ts`, Q1 to Q7): 0 bad runs in every row. Before: Q7 hidden 10 of 34 per cancel state; Q7 visible 2 of 34; Q6 hidden 16 of 90.
+
+### Round 7 (b25de18): results and fixes
+
+- **Group 1, round 7: CHANGES REQUIRED.**
+  - The money side passes. `lastLookOk` only reports. Across 288 runs with random faults (5 to 30 percent on reads, cancels and sells), every broker call matched cf5e3ba. Skipping the end-of-sale alert changes no stuck state. Ruling B is otherwise unchanged (the round 6 probes gave the same figures).
+  - **Blocking:** `lastLookOk` was set before step 3's re-read of positions. So when that one re-read failed, the note was cleared and the false "no protective stop" alert came. Shown route 7 of 121, hidden route 1 of 121; with 40 s windows, 11 of 75 on each route. The same counts appear on cf5e3ba, so it was already there.
+  - Non-blocking:
+    - in 2 of 288 runs, a stop no look ever saw got the plain alert;
+    - during the mid-day close-out, the deferred alert can wait past one sync;
+    - the deploy timing against `load afternoon`.
+- **Group 2, round 7: CHANGES REQUIRED.** The same blocking finding by its own measure. With the last round's re-read failing, 20 to 23 of 51 per row; with every re-read in a window failing, 20 to 23 per row on 5 rows.
+  - Every other widened row was 0 bad: the first positions read, the clock, market closed mid-sale, give-way, open orders in the last round, and ordinary stuck sales.
+  - Non-blocking, for Michael: outside ruling B and already live on v21, a contrived fault pattern after a restart (positions reads alternating success and failure across 3 rounds) can make A4's recovery path post a false first alert. The 5 minute alert is never lost, but it can come up to about 25 s late.
+- **Fixes (round 8 commit):**
+  - `lastLookOk` is set only after step 3's re-read of positions succeeds (the fix both reviewers checked in scratch copies). It is still reported only.
+  - Messaging only: a timed-out stop that no look has shown open or ended now gets a hedged 5 minute alert: "**Michael: X has had no confirmed protective stop for 5 minutes, and I have not been able to sell the shares.** Its fresh stop, not confirmed in time, may still be resting at Alpaca: my last tries did not see it either way. Please check X in Alpaca's dashboard and close it there if needed. I keep trying."
+  - The briefs name all five alert kinds.
+- **Tests:**
+  - New: a failed step 3 re-read at 31 start times on both routes (the fault fired in at least 20 runs each), and the stop that no look ever saw. Two of the three fail on b25de18's code.
+  - Full suite 678 of 678. Type check clean.
+- **Measured:**
+  - Group 2's probe10 (R1 to R7) and probe8 (Q1 to Q7): 0 bad in every row.
+  - Group 1's 288-run random-fault probe: broker calls identical to cf5e3ba in all 288 runs. The alert truth tally, over 288 runs, against cf5e3ba and b25de18:
+
+    | Alert while… | cf5e3ba | b25de18 | Now |
+    | --- | --- | --- | --- |
+    | "no protective stop" while a stop was open | 34 | 14 | 0 |
+    | "no protective stop" while no stop was open (true) | 50 | 34 | 16 |
+    | "has ended at Alpaca" | 1 | 6 | 11 |
+    | "is still resting" with the stop open | 69 | 78 | 78 |
+    | "was still resting at my last try" | 64 | 86 | 101 |
+    | hedged "may still be resting" | none | none | 12 |
+
+    The 101 "was still resting at my last try" alerts are 86 with the stop open and 15 with it gone. The 12 hedged alerts are 2 with the stop open and 10 with it gone.
+  - No oversell.
