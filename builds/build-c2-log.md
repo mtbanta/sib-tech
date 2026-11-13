@@ -5285,3 +5285,17 @@ The same numbers come out on 2401f0b, so the residual predates the round 7 fix.
 - Scope is accounting only, nothing beyond Michael's request, no secrets.
 
 **State:** no version of the weekend build has passed both groups. Fly stays on release v21 (`a6b9fe9`). Nothing is deployed until Michael decides.
+
+## Michael's decisions after the round 8 STOP AND FLAG (2026-11-13), saved verbatim
+
+> Decisions:
+> 1. Fix (a): when the pass runs a recheck, it cancels that recheck's own timer.
+> 2. Stuck sale priority: keep as built.
+> 3. Charge give-back: keep as built (no change).
+> 4. Rounds: up to 8 more per group this weekend for this fix and any findings about it, same scope and stop conditions. Fix (a) is a new approach, so the "same finding after two fixes" count restarts from here.
+> 5. Fallback: if it has not passed both groups by Sunday 8:00 PM Central, build a version without the remainder recheck item and review it (up to 3 rounds per group), so the rest can ship Monday.
+> 6. Deploy before 7:30 AM Monday only if both groups pass. Post the "live" line saying what shipped.
+> For next week, proposal only: one shared request budget that every retry and recheck draws from, replacing per-feature allowances.
+> Never print any token or key.
+
+Round numbering from here: fix (a) rounds are numbered "fix (a), round 1" to "round 8" per group. The "same finding after two fixes" count restarts at fix (a).
