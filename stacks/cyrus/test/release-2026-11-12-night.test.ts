@@ -999,3 +999,37 @@ test("group 1, round 7 note (night): a timed-out stop that no look has shown ope
   assert.ok(five[0]!.text.includes("may still be resting at Alpaca"), five[0]!.text);
   assert.ok(!five[0]!.text.includes("still has no protective stop"), five[0]!.text);
 });
+
+for (const hide of [false, true]) {
+  test(`group 2, round 8 (night): after a complete look has seen the timed-out stop gone, the 5 minute alert never says it "may still be resting" (live updates off, the cancel lands, every market sale refused; ${hide ? "hidden from" : "shown in"} the sync's list)`, async () => {
+    let checked = 0;
+    for (let land = 20_000; land <= 300_000; land += 20_000) {
+      const w = world();
+      const statusAt: string[] = [];
+      const realSay = w.risk.say;
+      w.risk.say = async (ch: string, text: string, opts?: any) => {
+        if (opts?.mentionOwner) statusAt.push(String(w.sim.orders.find((o) => o.clientOrderId.startsWith("cyrus-p-"))?.status));
+        return realSay(ch, text, opts);
+      };
+      const { dd } = await timedOutStops(w, ["RKLB"], hide);
+      const before = w.said.length;
+      const statusBefore = statusAt.length;
+      w.sim.cancelMs = land;
+      w.sim.refuseSellIf = (s: any) => s.stopPrice === undefined;
+      await runWorker(w, dd, 7 * 60_000);
+      const alerts = w.said.slice(before).filter((m) => m.mention);
+      const statuses = statusAt.slice(statusBefore);
+      const five = alerts.map((m, i) => ({ m, status: statuses[i] })).filter((x) => /minute/.test(x.m.text) && !/within 15 seconds/.test(x.m.text) && !/with no protective stop since/.test(x.m.text));
+      assert.ok(five.length <= 1, `land ${land / 1000} s: ${five.length} alerts`);
+      for (const x of five) {
+        if (x.status === "canceled") {
+          checked++;
+          assert.ok(!x.m.text.includes("may still be resting"), `land ${land / 1000} s, stop canceled: ${x.m.text}`);
+          assert.ok(!x.m.text.includes("is still resting"), `land ${land / 1000} s, stop canceled: ${x.m.text}`);
+        }
+      }
+      assert.equal(w.sim.oversellAttempts, 0);
+    }
+    assert.ok(checked >= 10, `alerts with the stop already cancelled: ${checked}`);
+  });
+}

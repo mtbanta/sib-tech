@@ -157,6 +157,10 @@ export class SyncMemory {
   // its entry that was running then does not back off afterwards (it would undo the update's "sell now"): it is due again at once. This
   // fires once per stop end, because only an end at or after that try's start counts.
   readonly timedOutEndedAt = new Map<string, number>();
+  // Messaging only (group 2, round 8): timed-out stops (client ids) that a complete look since the timeout found absent (not open and not
+  // holding the shares, without an unexplained hold), or that Alpaca said at the limit it does not hold open. Read only by the 5 minute
+  // alert: such a stop never gets the hedged "may still be resting" wording.
+  readonly timedOutSeenAbsent = new Set<string>();
 }
 
 // Ruling B (the worker's live update, onFreshStopUpdate): a timed-out fresh stop ended at Alpaca. Its entry's sale is due now (no new
@@ -662,9 +666,10 @@ async function escalateIfDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string
     }
     return;
   }
-  // Group 1, round 7 note (messaging only): the entry has a timed-out stop that no look has shown open or ended (every try's look failed,
-  // and the sync's list does not show it). It may still rest at Alpaca, so the alert does not say there is no stop.
-  const unseenStop = [...mem.timedOutStops].some(([stop, entry]) => entry === clientOrderId && !mem.timedOutEndedAt.has(stop) && !(listed ?? []).some((x) => x.clientOrderId === stop));
+  // Group 1, round 7 note (messaging only): the entry has a timed-out stop that no look has shown open or ended: no live update said it
+  // ended, the sync's list does not show it, and no complete look since the timeout found it absent (group 2, round 8). It may still rest
+  // at Alpaca, so the alert does not say there is no stop.
+  const unseenStop = [...mem.timedOutStops].some(([stop, entry]) => entry === clientOrderId && !mem.timedOutEndedAt.has(stop) && !mem.timedOutSeenAbsent.has(stop) && !(listed ?? []).some((x) => x.clientOrderId === stop));
   if (unseenStop) {
     await d.say("alerts", `**Michael: ${st.symbol} has had no confirmed protective stop for ${minutesText(now - st.since)}, and I have not been able to sell the shares.** Its fresh stop, not confirmed in time, may still be resting at Alpaca: my last tries did not see it either way. Please check ${st.symbol} in Alpaca's dashboard and close it there if needed. I keep trying.`, { mentionOwner: true });
     return;
@@ -724,6 +729,8 @@ async function freshStopTimeout(d: RiskDeps, day: DayRecord, mem: SyncMemory, s:
     }
   }
   d.log?.("fresh_stop_timeout", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: f.stopClientOrderId, msFromSent: nowMs - f.placedAt, found, cancelling: cancelId !== null });
+  // Messaging only (group 2, round 8): Alpaca answered that it does not hold this stop open (not a failed read).
+  if (cancelId === null && found !== "lookup failed") mem.timedOutSeenAbsent.add(f.stopClientOrderId);
   // The stop filled after all: its shares are sold; the next sync closes the entry. Nothing to cancel or sell.
   if (found === "filled") return { attempted: false, stuck: false };
   const left = f.qty;
@@ -848,6 +855,17 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   // Group 2, round 6: and only when that try's last look read both the open orders and the positions (`lastLookOk`); a look that failed
   // never saw the stop, so it cannot say the stop is gone.
   if (stuckBefore && !r.yielded && r.lastLookOk === true) delete stuckBefore.restingStop;
+  // Messaging only (group 2, round 8): what this try's complete look saw of the entry's timed-out stops. Seen open or holding the shares:
+  // not absent. Not seen, and no unexplained hold (shares held that no visible order explains): absent.
+  if (!r.yielded && r.lastLookOk === true) {
+    const unexplainedHold = r.hiddenHold?.includes(s.symbol) === true;
+    for (const [stop, entry] of mem.timedOutStops) {
+      if (entry !== s.clientOrderId) continue;
+      const seen = r.freshStopStillOpen?.some((x) => x.clientOrderId === stop) === true || r.heldByFreshStop?.some((x) => x.clientOrderId === stop) === true;
+      if (seen) mem.timedOutSeenAbsent.delete(stop);
+      else if (!unexplainedHold) mem.timedOutSeenAbsent.add(stop);
+    }
+  }
   // A4: the remainder now has a fresh stop. Nothing is sold; the entry stays open until the stop fills or the close-out sells it.
   if (r.freshStop && r.freshStop.symbol === s.symbol) {
     const f = r.freshStop;

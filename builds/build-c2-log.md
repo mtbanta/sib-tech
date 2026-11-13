@@ -4371,3 +4371,36 @@ Work on decision 1 started 9:13 AM Central on branch `release-2026-11-13-b` (fro
 
     The 101 "was still resting at my last try" alerts are 86 with the stop open and 15 with it gone. The 12 hedged alerts are 2 with the stop open and 10 with it gone.
   - No oversell.
+
+### Round 8 (3bc494e): results and fixes
+
+- **Group 1, round 8: PASS.**
+  - The `lastLookOk` move only reports. The hedged branch is messaging only.
+  - The 288-run random-fault probe gave the same broker calls and the same events as both b25de18 and cf5e3ba. "No protective stop" while a stop was open: 0.
+  - B is otherwise unchanged since round 6. B on is safe for a mid-day deploy: the deploy check refuses on any position or any open order, and B's state is in memory only.
+  - Non-blocking: the hedge also fires after Alpaca said at the limit that it does not hold the stop, and the end-of-sale call has no list to check.
+- **Group 2, round 8: CHANGES REQUIRED.**
+  - Round 7's finding is fixed: probe10 and probe8 show 0 bad.
+  - **Blocking:** the hedged "may still be resting" alert replaced a true "no protective stop" after the stack's own complete looks had seen the stop gone. The case: live updates off, the cancel lands, every market sale refused. Hidden route 26 of 29 runs, visible route 2 of 29. b25de18 gave the true plain alert in all of them.
+  - Cause: the hedge checked only the live updates and the sync's list, never what the sale's looks saw. In the round 7 entry above, "a timed-out stop that no look has shown open or ended" was the intent, not what 3bc494e did. In group 1's tally, 10 of the 12 hedges came with the stop gone, taking over alerts that had been true.
+- **Fix (messaging only, round 9 commit):**
+  - `SyncMemory.timedOutSeenAbsent` is read only by the 5 minute alert. A timed-out stop is marked absent in two cases:
+    - a complete look since the timeout (not a give-way, with `lastLookOk` true) did not see it open or holding the shares, and no unexplained hold explained the shares;
+    - at the limit, Alpaca answered that it does not hold the stop open.
+  - A later look that sees the stop open removes the mark. The hedge leaves marked stops out.
+- **Tests:** new, the round 8 case on both routes (the cancel landing every 20 s from 20 to 300 s, sales refused, live updates off). Both fail on 3bc494e and pass now. Full suite 680 of 680. Type check clean.
+- **Measured:**
+  - Group 2's probe11 (H1 to H4), probe10 and probe8, run against the repo code: 0 bad in every row.
+    - H1: hedged with the stop gone, 0 on both routes, live updates on and off.
+    - H2: the hedge appears only with the stop open.
+  - Group 1's 288-run probe: broker calls and events identical to cf5e3ba in all 288 runs.
+
+    | Alert | Stop open | Stop gone |
+    | --- | --- | --- |
+    | "no protective stop" | 0 | 26 |
+    | "has ended at Alpaca" | 0 | 11 |
+    | "is still resting" | 78 | 0 |
+    | "was still resting at my last try" | 86 | 15 |
+    | hedged | 2 | 0 |
+
+  - No oversell.
