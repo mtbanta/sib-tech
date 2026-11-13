@@ -59,6 +59,9 @@ export const STORED_INFO_EVENTS = new Set([
   "fresh_stop_timeout",
   "fresh_stop_timeout_cancel",
   "fresh_stop_timeout_cancel_failed",
+  // Group 2, round 4 of the night release: a cancel of a timed-out stop the sale never sent, and a try that found that stop still open.
+  "fresh_stop_timeout_cancel_not_sent",
+  "fresh_stop_timeout_still_open",
   "fresh_stop_unclear_end",
 ]);
 

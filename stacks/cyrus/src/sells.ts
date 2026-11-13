@@ -245,6 +245,14 @@ export interface LiquidateResult {
   hiddenHold?: string[];
   // Ruling B (group 1, round 2 of the night release): a cancel this sale sent was not accepted (an error from Alpaca or no answer).
   cancelFailed?: boolean;
+  // Group 2, round 4 of the night release (read by the caller's log and alert): the order ids this sale sent a cancel for in an `only` sale
+  // (`cancelsTried`), and those Alpaca answered without an error (`cancelsAccepted`; "already filled or cancelled" counts as answered).
+  cancelsTried?: string[];
+  cancelsAccepted?: string[];
+  // Group 2, round 4 of the night release (reported only, nothing here acts on it): at the last round's look, a fresh stop of ours
+  // (cyrus-p-) still open that holds the shares of a symbol this sale could not sell, and that this sale was cancelling (named in
+  // `cancelIds`) or that shows pending cancel. The caller decides (ruling B: a timed-out stop whose cancel has not cleared).
+  freshStopStillOpen?: Array<{ symbol: string; clientOrderId: string; orderId: string; status: string }>;
   // Shares held per symbol at the first look and at the last look of this liquidation (release 1 of 2026-11-09: a cleanup sale of
   // one entry judges its own shares by the change, since a newer position on the same symbol may still be held).
   heldBefore?: Record<string, number>;
@@ -498,7 +506,9 @@ export class Liquidator {
             cancelled = true;
             cancelledInAttempt = true;
             steps.cancelsSentAt.push(stamp());
+            (result.cancelsTried ??= []).push(id);
             await this.d.broker.cancelOrder(id);
+            (result.cancelsAccepted ??= []).push(id);
             steps.cancelsAnsweredAt.push(stamp());
           }
         }
@@ -571,6 +581,7 @@ export class Liquidator {
       let soldThisRound = 0;
       const capThisRound = new Map<string, number>(); // fix A: the recounted shares per symbol in this round
       if (readOk) {
+        result.freshStopStillOpen = undefined; // what the last round's look saw (group 2, round 4 of the night release)
         this.d.gate.invalidate();
         let freshPositions: Position[] = [];
         try {
@@ -599,6 +610,9 @@ export class Liquidator {
             (result.heldByFreshStop ??= []).push({ symbol: p.symbol, clientOrderId: freshHolding.clientOrderId, orderId: freshHolding.id, qty: remaining(freshHolding), stopPrice: freshHolding.stopPrice, status: freshHolding.status });
             continue;
           }
+          // Reported only (the sale goes on exactly as before): a fresh stop of ours being cancelled still holds the shares.
+          const stillOpen = own && !(free > EPS) ? openOrders.find((x) => x.symbol === p.symbol && x.side === "sell" && x.clientOrderId.startsWith("cyrus-p-") && OPEN_STATUSES.has(x.status) && (x.status === "pending_cancel" || cancelIds.includes(x.id)) && remaining(x) >= p.qty - EPS) : undefined;
+          if (stillOpen) (result.freshStopStillOpen ??= []).push({ symbol: p.symbol, clientOrderId: stillOpen.clientOrderId, orderId: stillOpen.id, status: stillOpen.status });
           if (o.waitForAlpacaCancel && own && !(free > EPS)) {
             // A5: Alpaca kept the exits (it refused the cancel because the entry had filled): the position is protected, nothing to do.
             (result.exitsKept ??= []).push(p.symbol);

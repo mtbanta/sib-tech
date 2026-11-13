@@ -4182,7 +4182,7 @@ Work started 12:55 AM Central on branch `release-2026-11-12-night` (main merged 
   - "Alpaca accepted my cancel of it but still shows it working";
   - "Alpaca accepted my cancel of it but has not finished cancelling it" (shown as pending cancel);
   - "my cancel of it has not taken effect" (otherwise).
-  Tested to 5 minutes in all three cases. The live update that the stop ended clears the note.
+  Tested to 5 minutes in all three cases (at one start time each; see group 2, round 4 below). The live update that the stop ended clears the note.
 - **Group 2 non-blocking notes handled:**
   - `fresh_stop_timeout_cancel` and `_failed` are logged after the cancel was tried, on every route (`by`: `15 second limit`, `missing-exit sale` or `sale`; `again` on a repeat).
   - Both briefs say outright to leave out the outcome events of stops with `sentToAlpaca: false`, allow for a late or missing cancel after `fresh_stop_timeout`, and report timed-out stops whose cancel did not take effect at once, and any "still resting at Alpaca" alert.
@@ -4190,3 +4190,57 @@ Work started 12:55 AM Central on branch `release-2026-11-12-night` (main merged 
 - **Decision 5 (D, group 1):** the mid-day pause route of the deploy check now also needs `--michael-yes` while it is or may be market hours (always, on that route). His written approval of a specific mid-day fix counts as the yes for that fix only. CLAUDE.md's 2026-11-09 exception, the tool's header and the memory note say so. Tested.
 - **Decision 6:** the rule is in CLAUDE.md with Michael's words. The builder's reading of "limit" (a maximum number of tries, or a maximum rate, such as the allowance) is marked there for Michael to confirm.
 - Tests: `test/release-2026-11-12-night.test.ts`, 8 new tests (both routes with assertions on requests, rate-limit answers and oversell; the three alert wordings; B off; the live-update hook) and `test/midday.test.ts`. Full suite 662 of 662, type check clean.
+
+### Review of the round 3 fixes (73bcfd5)
+
+- **Group 1, round 4 (73bcfd5, rounds 4 to 6 allowed): (a) B on, CHANGES REQUIRED; (b) B off (`FRESH_STOP_LIMIT.on = false`), PASS.** Verdict (b) means Michael's split can deploy on this verdict if B fails. The reviewer compared B off with dd8af0e's `risk.ts`, `sells.ts` and `worker.ts`, then ran v20's own 630 tests against this commit with B off. 606 passed. The 24 failures are 18 secret-scan hook tests (they run only inside the git checkout), 1 test for decision 5 and 5 for E. None is a fresh-stop test, and no half-on part of B was found.
+  - **Blocking (1):** on the hidden route with the stop shown `pending_cancel` (the most common form of "accepted but still working"), `heldByFreshStop` leaves out `pending_cancel`. The try therefore fell to the stuck branch's "held by visible orders" path and was retried at every sync, uncharged. Measured with 75 a minute of routine traffic beside it: 1 stop, 116 requests a minute; 3 stops, 218 a minute, budget 0, 48 rate-limit answers (407c90b gave the same).
+  - Items 1 to 6 checked correct. The reviewer agrees the sale's own wait and the allowance are bounded under rule 6.
+  - **Non-blocking (for Michael):**
+    - On the visible route, 3 stops whose cancel stays pending give 216 requests a minute and 76 to 107 rate-limit answers with routine traffic beside. v20 has the same cost for 3 bare remainders whose take-profit cancel stays pending (164 and 215 a minute, 67 answers). Ruling B adds a new way to reach it.
+    - A try that waits out a pending cancel costs about 75 requests against the allowance's charge of 10.
+- **Group 2, round 4 (73bcfd5): CHANGES REQUIRED.**
+  - (1) On the visible route the false "no protective stop" alert still posted when the 5 minute mark fell inside a running sale (6 of 13 start times). The sale's final escalation had no list, and nothing marked the stop.
+  - (2) On the hidden route with the stop `pending_cancel`, the false alert posted every time (no `heldByFreshStop`).
+  - (3) `fresh_stop_timeout_cancel` ("accepted") was logged, and remembered as accepted, when no cancel was sent (the sale gave way to the loss stop's sale; market closed; positions unreadable).
+  - Non-blocking: PROJECT_STATE out of date; `again` set only on the hidden route; the visible route's refused cancel got the generic wording.
+- **Fixes (Michael's decision 1; group 1's part is money-touching and within it):**
+  - `Liquidator.run` (`src/sells.ts`) now reports, without acting on them:
+    - the cancels it sent (`cancelsTried`) and the ones Alpaca answered (`cancelsAccepted`);
+    - at the last round's look, a fresh stop of ours still open and holding the shares, that the sale was cancelling or that shows `pending_cancel` (`freshStopStillOpen`).
+  - In `cleanupSale` (`src/risk.ts`):
+    - When the entry's timed-out stop was still open at that look and nothing was sold, the try goes on the stuck backoff, charged to the allowance, and the stuck record notes the stop as resting (pending, accepted, refused or not sent). This applies on both routes and in any status.
+    - As group 1 suggested, the last stuck branch also uses the backoff whenever the entry has a timed-out stop at all.
+    - The cancel's outcome is logged as sent and accepted, sent and refused, or `fresh_stop_timeout_cancel_not_sent`. `again` is set on every route, and only an answered cancel is remembered as accepted.
+    - New stored events: `fresh_stop_timeout_cancel_not_sent` and `fresh_stop_timeout_still_open`.
+  - The alert's wording for the stop's state is now:
+    - "Alpaca shows it pending cancel but has not finished cancelling it";
+    - "Alpaca did not accept my last cancel of it";
+    - "Alpaca accepted my cancel of it but still shows it working";
+    - "my cancel of it has not taken effect".
+  - Briefs: the new events. Tries are counted, not requests.
+- **Tests:**
+  - The alert test now sweeps 8 start times (0 to 27 s) for each of 6 cases (visible or hidden; pending, accepted-but-working or refused). In every one: exactly one 5 minute alert, saying the stop rests at Alpaca, with the right state, never "no protective stop", and nothing sold on top.
+  - The hidden pending-cancel case is on the backoff: 8 tries in 3 minutes, delay 30 s, charged.
+  - A cancel never sent is logged as not sent and not remembered.
+  - Full suite 667 of 667, type check clean. (With group 1's added guard, the try at the 15 second limit that ends stuck is also followed by the backoff, never the next sync; one test steps past it.)
+- **Measured with the reviewer's round 4 probe** (run again on the final tree; same figures) (75 a minute of routine traffic beside it, bucket starting at 120):
+
+  | Route | Stop's status | Stops | Worst minute (requests) | Lowest budget | Rate-limit answers |
+  | --- | --- | --- | --- | --- | --- |
+  | Hidden | pending cancel | 1 | 86 | 104 | 0 |
+  | Hidden | pending cancel | 3 | 94 (before: 218) | 72 | 0 (before: 48) |
+  | Hidden | still `new` | 1 | 89 | not recorded | 0 |
+  | Hidden | still `new` | 3 | 95 | not recorded | 0 |
+  | Visible | any | 1 | 166 | 79 | 0 |
+  | Visible | any | 3 | 216 | not recorded | 76 to 107 |
+
+  The visible route is unchanged: that cost is the sale's own wait for a pending cancel (3 rounds of up to 6 s), the 2026-11-09 design that v20 shares, and it was not changed without Michael. No sale on top of a stop in any run.
+- **Rule 6 audit, for Michael (read only, nothing changed).** A read-only audit of `src/` listed the retries outside ruling B that lack a backoff or a limit. They predate the rule and are money-touching or worker plumbing, so they are listed, not changed:
+  - **Every sync, no backoff and no charge:** the stuck retry when visible open orders hold the shares (`cleanupSale`, ordinary sales, not timed-out stops).
+  - **The regular close-out retry:** every 20 s before the close, then every 5 minutes, with no request budget and no end time of its own.
+  - **Every 5 s pass while failing (database calls only):** the unsaved stop flag, the soon-writes, the not-flat save, the future-days reset, the lapse check and the stop-gap read.
+  - **Every 5 s pass while failing (Alpaca reads):** the carried-position scan, the screen, the daily summary, the morning posts and the limits request (paced by deadlines and budgets only).
+  - **Every pass if its cursor write fails:** the command poll's replay.
+  - **The two stream reconnects:** they back off 2 to 30 s, but the count resets on each subscribe.
+  - **The loss stop's retry:** backs off only after a rate-limit answer (rate-capped at 60 a minute).
