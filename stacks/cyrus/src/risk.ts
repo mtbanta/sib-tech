@@ -195,6 +195,8 @@ export class SyncMemory {
   // list clearing was logged.
   readonly liveLagTries = new Map<string, number>();
   readonly listClearLogged = new Set<string>();
+  // Logging only (group 2, round 5): when a sync last saw such a stop still open (a lower bound on the list's lag).
+  readonly liveLagLastOpen = new Map<string, number>();
   // Item 3 of 2026-11-13: the wait after a failed lookup of an entry missing from Alpaca's listing (per entry, doubling to a minute).
   readonly lookupFailDelay = new Map<string, number>();
   readonly lookupFailUntil = new Map<string, number>();
@@ -541,6 +543,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   for (const id of [...mem.listLagLogged]) if (!activeIds.has(id)) mem.listLagLogged.delete(id);
   for (const id of [...mem.liveLagTries.keys()]) if (!activeIds.has(id)) mem.liveLagTries.delete(id);
   for (const id of [...mem.listClearLogged]) if (!activeIds.has(id)) mem.listClearLogged.delete(id);
+  for (const id of [...mem.liveLagLastOpen.keys()]) if (!activeIds.has(id)) mem.liveLagLastOpen.delete(id);
   for (const id of [...mem.freshStops.keys()]) if (!activeIds.has(id)) dropFreshStop(d, mem, id, "its entry is no longer open", syncStartMs);
   for (const id of [...mem.stuck.keys()]) if (!activeIds.has(id)) await resolveStuck(d, mem, id, "no longer held");
   const midnight = etInstant(day.tradeDate, "00:00").getTime();
@@ -819,6 +822,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     if (bare.liveCancel) {
       const tries = (mem.liveLagTries.get(s.clientOrderId) ?? 0) + 1;
       mem.liveLagTries.set(s.clientOrderId, tries);
+      mem.liveLagLastOpen.set(s.clientOrderId, nowMs);
       if (nowMs - liveAt! < LIVE_LAG_WATCH_MS) {
         const due = nowMs + Math.min(500 * 2 ** (tries - 1), 4_000);
         recheckAt = recheckAt === undefined ? due : Math.min(recheckAt, due);
@@ -826,10 +830,12 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       }
       continue;
     }
-    // Logging only: the list now shows the stop ended, for an entry whose lag was logged: how long after the live report (the lag itself).
+    // Logging only: the list now shows the stop ended, for an entry whose lag was logged. The list's lag lies between `lagAtLeastMs` (the
+    // last sync that still saw the stop open) and `msFromLiveCancel` (this sync, the first that saw it ended); `syncsSawOpen` counts the
+    // syncs that saw it still open (the quick rechecks and any other sync).
     if (liveAt !== undefined && mem.listLagLogged.has(s.clientOrderId) && !mem.listClearLogged.has(s.clientOrderId)) {
       mem.listClearLogged.add(s.clientOrderId);
-      d.log?.("stop_cancel_list_cleared", { symbol: s.symbol, clientOrderId: s.clientOrderId, msFromLiveCancel: nowMs - liveAt, rechecks: mem.liveLagTries.get(s.clientOrderId) ?? 0 });
+      d.log?.("stop_cancel_list_cleared", { symbol: s.symbol, clientOrderId: s.clientOrderId, msFromLiveCancel: nowMs - liveAt, lagAtLeastMs: (mem.liveLagLastOpen.get(s.clientOrderId) ?? liveAt) - liveAt, syncsSawOpen: mem.liveLagTries.get(s.clientOrderId) ?? 0 });
     }
     const firstSeen = mem.bareSeen.get(s.clientOrderId) ?? nowMs;
     mem.bareSeen.set(s.clientOrderId, firstSeen);

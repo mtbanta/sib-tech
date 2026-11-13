@@ -1401,3 +1401,43 @@ test("item 2 of 2026-11-13 (afternoon): a refused market sale is still logged as
   await syncOrders(w.risk, dd, { protect: true });
   assert.ok(w.events.some((e) => e.event === "sell_failed" && e.data.symbol === "AAA"), "a refused market sale is logged");
 });
+
+// Group 2, round 5 of the weekend build: the list-clearing event's bounds, and the 30 second window of quick rechecks.
+async function lagRun(lagMs: number, runMs: number) {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "LUNR", 5, 12, 1);
+  w.sim.advance(5_000);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  const t0 = w.sim.simMs;
+  w.sim.partialTakeProfitListLag(id, 1, 12.08, lagMs);
+  w.memory.liveStopCancelled.set(id, t0);
+  const syncs: number[] = [];
+  while (w.sim.simMs < t0 + runMs && w.sim.stopLog.length === 0) {
+    syncs.push(w.sim.simMs - t0);
+    const r = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    const next = r.recheckAt !== undefined ? Math.max(w.sim.simMs + 100, Math.min(r.recheckAt, w.sim.simMs + 10_000)) : w.sim.simMs + 10_000;
+    w.sim.advanceTo(next);
+  }
+  return { w, syncs };
+}
+
+test("group 2, round 5 of the weekend build: the list-clearing event comes once per entry, and the list's real lag lies between its two bounds", async () => {
+  for (const lag of [2_000, 11_000, 29_000]) {
+    const { w } = await lagRun(lag, 60_000);
+    const cleared = w.events.filter((e) => e.event === "stop_cancel_list_cleared");
+    assert.equal(cleared.length, 1, `lag ${lag}: ${cleared.length} cleared events`);
+    const c = cleared[0]!.data;
+    assert.ok(c.lagAtLeastMs < lag && c.msFromLiveCancel >= lag, `lag ${lag}: between ${c.lagAtLeastMs} and ${c.msFromLiveCancel}`);
+    assert.ok(c.msFromLiveCancel - c.lagAtLeastMs <= 4_000, `lag ${lag}: bounds ${c.lagAtLeastMs} to ${c.msFromLiveCancel} within one recheck`);
+    assert.ok(c.syncsSawOpen >= 1);
+  }
+});
+
+test("group 1 note, round 5 of the weekend build: the quick rechecks stop 30 seconds after the live report (a limit); after that the regular syncs carry on", async () => {
+  const { syncs } = await lagRun(120_000, 90_000);
+  const quick = syncs.filter((t, i) => i > 0 && t - syncs[i - 1]! < 9_000);
+  const late = syncs.filter((t, i) => i > 0 && t > 31_000 + 4_000 && t - syncs[i - 1]! < 9_000);
+  assert.ok(quick.length >= 5, `quick rechecks within the window: ${syncs.join(", ")}`);
+  assert.equal(late.length, 0, `no quick recheck after the 30 s window: ${syncs.join(", ")}`);
+});

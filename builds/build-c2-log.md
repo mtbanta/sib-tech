@@ -4989,3 +4989,26 @@ Full suite 707 of 707. Type check clean.
 > Change: the remainder rechecks run at 0.5, 1, 2, then every 2 seconds (not 4), still for up to 30 seconds. They count against the stuck-retry request allowance, so many remainders at once can never exceed it. Do not change frozen commit e163089 while round 5 runs; make this change after round 5 reports, on top of its result, with its own review round. Update the expected-time table.
 
 Saved while round 5 runs on the frozen clone of e163089 (untouched). Built after round 5 reports.
+
+### Weekend build: group 2, round 5 (e163089) and fixes
+
+**Group 2, round 5: CHANGES REQUIRED.** `stop_cancel_list_cleared` does not measure the list's lag itself. Its `msFromLiveCancel` is the first sync that saw the list clear, an upper bound that is up to one recheck gap high (up to a regular sync gap after the 30 s window). `rechecks` counted every sync that saw the stop open, not only quick rechecks. No test covered the event. A correction to the round 4 entry above: "the list's real lag" there should read "an upper bound on the list's lag".
+
+Otherwise holding:
+- no message or alert during any lag, from 0.5 to 360 s;
+- each event once per entry;
+- the log's table matches the probe.
+
+Noted for group 1:
+- The 30 s window had no test (mutant `if (true)` survived).
+- An entry older than the 10 minute window can take up to 30 s longer past the window (45 s lag: fresh stop at 62 s against 52 s).
+- A very long lag is silent (no alert), as on v21.
+
+**Fixes (logging, briefs, tests):**
+- The event now carries `lagAtLeastMs` (the last sync that still saw the stop open) beside `msFromLiveCancel`, so the lag lies between the two. `syncsSawOpen` replaces `rechecks`.
+- The briefs say to report the range as a bound, not a measurement, and that no cleared event comes if the remainder was gone first.
+- New tests:
+  - one cleared event per entry, with the real lag between its bounds and the bounds within one recheck (lags 2, 11 and 29 s);
+  - the quick rechecks stop 30 s after the live report, then only regular syncs (it catches the `if (true)` mutant).
+
+Full suite 709 of 709. Type check clean.
