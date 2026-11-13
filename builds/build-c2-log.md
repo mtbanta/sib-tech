@@ -5413,8 +5413,8 @@ Measured by group 1 in the simulator: a stuck sale's retry came 5.75 s late (pas
 **Fix (`src/worker.ts`):**
 - The pass passes the time it cancelled to its sync (`restoreAt`).
 - If that sync throws before `syncOrders` returns (including the loss stop's read before it), the time is put back once as the recheck's own timer: `syncRecheckAt` if empty, `syncAt(restoreAt)`, and the mark. `syncAt` keeps its 250 ms slack (at least 100 ms from now), so the retry in the tests ran at due + 250.
-- A sync started by that timer carries no `restoreAt`, so a failure there puts nothing back. **Measured (group 2, fix (a) round 3; now a test):** with Alpaca's order list failing for 30 s and a recheck pending, the real code made 4 failing syncs against 3 at `53e367c` (one more per outage), and 3 against 3 with no recheck pending. A variant whose restored timer restored itself again failed every 100 ms (263 to 286 failed reads), which is why the test exists. Rule 6 holds: at most one restore per pass cancel. The tests enforce it since fix (a) rounds 4 to 6: in a 30 s order list outage at most 4 failed reads and at most 2 sync starts in 5 s (a stuck sale at offsets including the two-restore windows; a lagging remainder at offsets that lie ahead of the clock); over a 120 s outage of the sync's reads (stuck sale only) at most 8 syncs a minute and 2 in 5 s. The test asserts that each pass time lies ahead of the clock at setup.
-- So a failed pass sync now leads to one more failing sync and one more `background_failed` log row per outage. When the next pass lands in the 250 ms before the restored timer fires, there are two restores: that pass cancels the restored timer, its sync fails and restores again, then the timer fires and fails (windows -10 000 to -9 775 and -5 000 to -4 775 ms, group 1, fix (a) round 5). The second pass would run anyway, so only the second restored timer adds a failing sync: one more in the window too. Measured with a stuck sale in a 30 s order list outage, the setup running as labelled: 4 failed reads against 3 with no restore, and 2 sync starts in 5 s (group 1, fix (a) round 6). (Correction, group 1 round 6: the earlier "two more" and "3 starts within 750 ms" came from lag-setup rows whose pass time lay before the simulated clock, so the first pass ran 0.5 s before due and the outage was 20.6 or 25.6 s, not 30. In production two pass syncs 600 ms apart would need a pass held about 4.4 s in its own reads before its sync starts; that is group 1's reading, not measured.) Outside those windows group 2 measured none more with a stuck sale and the pass 6 to 16 s before due (round 4). Failed reads never went above 4 in a 30 s outage at any offset (group 1's sweep of a full 10 s cycle). In the lag cases that row comes 150 to 750 ms after the first, a near-duplicate. The Discord alert is not doubled, because `Worker.background` sends at most one per step every 5 minutes.
+- A sync started by that timer carries no `restoreAt`, so a failure there puts nothing back. **Measured (group 2, fix (a) round 3; now a test):** with Alpaca's order list failing for 30 s and a recheck pending, the real code made 4 failing syncs against 3 at `53e367c` (one more per outage), and 3 against 3 with no recheck pending. A variant whose restored timer restored itself again failed every 100 ms (263 to 286 failed reads), which is why the test exists. Rule 6 holds: at most one restore per pass cancel. The tests enforce it since fix (a) rounds 4 to 6: in a 30 s order list outage at most 4 failed reads and at most 2 sync starts in 5 s (a stuck sale at offsets including the two-restore windows; a lagging remainder at offsets that lie ahead of the clock); over a 120 s outage of the sync's reads (stuck sale only, offsets including -4 900 in the window) at most 8 syncs a minute and 2 in 5 s. Both tests assert that each pass time lies ahead of the clock at setup, and the 30 s test asserts that its window rows really get two restores (fix (a) round 7).
+- So a failed pass sync now leads to one more failing sync and one more `background_failed` log row per outage. When the next pass lands in the 250 ms before the restored timer fires, there are two restores: that pass cancels the restored timer, its sync fails and restores again, then the timer fires and fails (windows -10 000 to -9 775 and -5 000 to -4 775 ms, group 1, fix (a) round 5). The second pass would run anyway, so only the second restored timer adds a failing sync: one more in the window too. Measured with a stuck sale in a 30 s order list outage, the setup running as labelled: 4 failed reads against 3 with no restore, and 2 sync starts in 5 s (group 1, fix (a) round 6). (Correction, group 1 round 6: the earlier "two more" and "3 starts within 750 ms" came from lag-setup rows whose pass time lay before the simulated clock, so the first pass ran 0.5 s before due and the outage was 20.6 or 25.6 s, not 30. In production two pass syncs 600 ms apart would need a pass held about 4.4 s in its own reads before its sync starts; that is group 1's reading, not measured.) Outside those windows group 2 measured none more with a stuck sale and the pass 6 to 16 s before due (round 4). Failed reads never went above 4 in a 30 s outage at any offset (group 1's sweep of a full 10 s cycle). In the lag cases run as labelled that row comes 150 ms (pass +100) or 550 ms (pass -300) after the first, a near-duplicate (corrected in fix (a) round 7: the earlier "750" came from a lag row whose pass time lay before the clock). The Discord alert is not doubled, because `Worker.background` sends at most one per step every 5 minutes.
 - **Measured (group 2):** the restored timer's sync sets `lastSync` even when it fails, so after a 30 s outage the regular rhythm can shift one pass later. In the three pass timings measured, the first good sync and the stuck sale's next retry came 5 s later than at `53e367c` (for example +44 501 against +39 501), within one regular gap. At other timings group 2 measured no shift (round 4), so: 0 to 5 s later.
 - The follow-ups are unchanged: the restored timer's sync runs them when it succeeds.
 
@@ -5465,7 +5465,7 @@ Full suite 737 of 737. Type check clean.
 **Notes:**
 - Surviving variants (group 1's mutation run against the full suite): R2, R8, R5 and R7 are equivalent or minor; F7, F10, F12, F13 and K8 as in round 2. Group 1 reports F6 now caught by group 2's live-timer test.
 - After `stop()`, the restore can set a timer, as a successful sync already could (existing behaviour; shutdown exits the process).
-- One recheck can be restored twice if a later pass cancels the restored timer (only in a 250 ms window; group 1, fix (a) round 5). Measured by group 1 in round 6: in the 30 s outage, one more failed read than one restore; in the 120 s outage, 0 or 1 more sync and 26 failed reads either way.
+- One recheck can be restored twice if a later pass cancels the restored timer (only in a 250 ms window; group 1, fix (a) round 5). Measured (group 2, fix (a) round 7, a stuck sale run as labelled): in the 30 s order list outage, 4 failed reads against 3 with no restore, the same one more as a single restore; in the 120 s outage, 13 or 14 syncs and 26 or 28 failed reads (14 and 28 in the -5 000 window), against 13 and 26 with no restore.
 - The doubled "(before," comment was fixed in `f2904ab`.
 
 ### Fix (a), round 4 (5edb9e5): group 2 CHANGES REQUIRED (one log line), and fixes
@@ -5565,3 +5565,32 @@ If this finding returns after this fix, it will have survived two fixes, which i
 - Y8d is now caught (5 reads at stuck -4 900).
 - "Never above 4 failed reads" means at every offset swept.
 - "Group 2's round 4 timings had missed it" is dropped, since the log does not record those offsets.
+
+### Fix (a), round 7 (7879416): group 2 CHANGES REQUIRED (log figures from the past-clock setup), and fixes
+
+**Group 2, fix (a) round 7.** Group 2 checked its own round 6 lag rows: they had the same past-clock setup group 1 found in round 6. Lag at -10 000 started 9.5 s behind the clock, and lag at -5 000 4.5 s behind, so the first pass ran 0.5 s before due. Several log lines still presented figures from that setup as measured.
+
+**Corrections. Each figure below came from a lag row whose pass time lay before the simulated clock, so it does not describe the case its label names:**
+- **Group 2's round 6 entry ("Fix (a), round 6 (7a203aa): group 2"):**
+  - "two more with the lag setup at -10 000 ms (4 failed reads against 2)" and "one more at lag -5 000";
+  - "group 2's lag figure (3 starts in 5 s, no test covers it)", a sentence since removed;
+  - "3 starts within 750 ms in the lag case", under "Confirmed by group 2";
+  - "the round 5 figures", as confirmed;
+  - "never above 4 failed reads (204 cases in 100 ms steps)". About 96 of its 102 lag rows were past-clock. The claim holds on the 102 stuck rows: 47 at 3 reads, 55 at 4, none above 4.
+- **Group 1's round 5 entry ("Fix (a), round 5 (ee633b0)"):** B1's "4 failed reads against 2 with no restore", and "3 in the lag case at -4 900 and -9 900".
+- **The round 3 and round 4 entries:** "4 failed reads in each case" and "4 reads and 2 starts in all six cases" included the lag -4 000 row. That row ran 3.5 s behind the clock, with starts at 3 500 (restore) and then 4 250. The figures happen to be the same as the rows run as labelled, but that row was not the case its label names.
+- **The "150 to 750 ms" gap of the extra log row:** the 750 came from the same lag -4 000 row. Corrected above to 150 and 550 ms.
+- **The double-restore note** contradicted the measurements ("26 failed reads either way"). It is rewritten above with group 2's figures.
+
+**Test changes (fix (a) round 7; `src/` unchanged since `7051f5e`):**
+- The 30 s test's title says the window case is covered with a stuck sale.
+- It asserts that its window rows (-4 900 and -9 900) really get two restores. Measured: 2 there, 1 at every other row.
+- The 120 s test adds the -4 900 window row: 14 syncs, at most 7 a minute and 2 in 5 s, 28 failed reads.
+- The 120 s test also asserts that each pass time lies ahead of the clock.
+
+**Checked by group 2:**
+- the window edges on stuck rows;
+- the two restores at stuck -4 900 and -9 900;
+- 4 against 3 in the window, both with the restore switched off and at `53e367c`;
+- the rule 6 sentence and the test titles;
+- messages and briefs unchanged.

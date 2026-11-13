@@ -596,7 +596,7 @@ test("fix (a), round 2 (group 1): the time put back after a failed pass sync is 
 // Group 2, fix (a) round 3: the restore after a failed pass sync is bounded. With Alpaca's order list failing for 30 s and a recheck
 // pending, the real code makes one more failing sync than before the restore, also in the 250 ms two-restore window (see the build log,
 // "Fix (a), round 6 (7a203aa): group 1"); a variant whose restored timer restores itself again failed every 100 ms (263 to 286 failed reads).
-test("fix (a), rounds 3 to 6: with Alpaca's order list failing for 30 s and a recheck pending, the restore is bounded: at most 4 failed reads and at most 2 sync starts in 5 s, including when the next pass lands in the restored timer's 250 ms slack (two restores)", async () => {
+test("fix (a), rounds 3 to 7: with Alpaca's order list failing for 30 s and a recheck pending, the restore is bounded: at most 4 failed reads and at most 2 sync starts in 5 s, including (a stuck sale) when the next pass lands in the restored timer's 250 ms slack and two restores happen", async () => {
   const rows: string[] = [];
   for (const kind of ["stuck", "lag"] as const) {
     // Group 1, fix (a) round 5: -4 900 and -9 900 put the next pass inside the restored timer's 250 ms slack (two restores, each after its
@@ -641,15 +641,21 @@ test("fix (a), rounds 3 to 6: with Alpaca's order list failing for 30 s and a re
         return realList(...a);
       };
       const starts: number[] = [];
+      let restoring = 0; // pass syncs that carried a cancelled time to put back if they failed
       const realStart = wk.startSync.bind(wk);
       wk.startSync = (d: any, c: any, how: any = {}) => {
-        if (!wk.inflight.has("risk")) starts.push(sim.simMs);
+        if (!wk.inflight.has("risk")) {
+          starts.push(sim.simMs);
+          if (how.restoreAt !== undefined && sim.simMs < P + 30_000) restoring++;
+        }
         return realStart(d, c, how);
       };
       await driveTo(r, sim, P, P + 45_000);
       wk.stop?.();
       const most5s = Math.max(0, ...starts.map((a) => starts.filter((b) => b >= a && b < a + 5_000).length));
-      rows.push(`${kind}, pass ${off} ms from due: ${fails} failed order list reads in the 30 s outage, at most ${most5s} sync starts in 5 s`);
+      rows.push(`${kind}, pass ${off} ms from due: ${fails} failed order list reads in the 30 s outage, at most ${most5s} sync starts in 5 s, ${restoring} restore(s)`);
+      // Group 2, fix (a) round 7: the window rows must really get two restores (so a timing change cannot let them drift out unseen).
+      if (off === -4_900 || off === -9_900) assert.equal(restoring, 2, `${rows[rows.length - 1]}: the two-restore window`);
       assert.ok(fails >= 1 && fails <= 4, rows[rows.length - 1]!);
       assert.ok(most5s <= 2, rows[rows.length - 1]!);
     }
@@ -662,7 +668,7 @@ test("fix (a), rounds 3 to 6: with Alpaca's order list failing for 30 s and a re
 // (group 1's measurement). Bounds: at most 8 a minute and 2 in 5 s.
 test("fix (a), round 4 (group 1): with the sync's Alpaca reads (order lists, positions, lookups) failing for 120 s, syncs stay at most 8 a minute and 2 in 5 s (no restore loop for the length of the outage)", async () => {
   const rows: string[] = [];
-  for (const off of [-4_000, -300, 100]) {
+  for (const off of [-4_000, -300, 100, -4_900]) {
     const { sim, r } = await armedDay(true);
     const wk: any = r.worker;
     const mem = wk.syncMemory;
@@ -683,6 +689,7 @@ test("fix (a), round 4 (group 1): with the sync's Alpaca reads (order lists, pos
     await settle();
     const due = mem.stuck.get(id)?.nextAt ?? wk.syncRecheckAt;
     const P = due + off;
+    assert.ok(P >= sim.simMs, `${off}: the pass time lies ahead of the clock at setup`);
     if (off < 0) wk.lastSync = P - 10_000;
     let failed = 0;
     for (const m of ["listOrdersPaged", "listPositions", "findOrderByClientId", "listOrders"]) {
