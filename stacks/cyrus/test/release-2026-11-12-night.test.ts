@@ -569,3 +569,185 @@ test("ruling C: the index built from any store's list (the tests' memory store) 
   assert.equal(idx.forSymbol("X").length, 2);
   assert.equal(idx.hasSymbol("Z"), false);
 });
+
+// ---------------- Michael's decisions of 2026-11-13: the round 3 fixes ----------------
+import { FRESH_STOP_LIMIT } from "../src/risk.ts";
+
+// Stops placed with an unclear answer that Alpaca did take, timed out while hidden from every read (the 15 second limit), then the
+// sync's own "all" list hides them (`hide`) or shows them, and the sale's open-orders read shows them.
+async function timedOutStops(w: World, syms: string[], hide: boolean) {
+  const dd = await day(w);
+  const ids: string[] = [];
+  for (const [i, sym] of syms.entries()) ids.push(await hold(w, sym, 5, 20 + i, 1));
+  w.sim.advance(5_000);
+  for (const [i, id] of ids.entries()) w.sim.partialTakeProfit(id, 1, 20 + i + 0.08);
+  const ctl = hideAndFail(w);
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  ctl.openFails = true;
+  w.sim.advance(FRESH_STOP_CONFIRM_MS);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(w.events.filter((e) => e.event === "fresh_stop_timeout").length, syms.length);
+  ctl.openFails = false;
+  ctl.hide = hide;
+  const stopIds = new Set(w.sim.orders.filter((o) => o.clientOrderId.startsWith("cyrus-p-")).map((o) => o.id));
+  assert.equal(stopIds.size, syms.length);
+  return { dd, ids, stopIds };
+}
+const maxInWindow = (arr: number[], win: number) => Math.max(0, ...arr.map((t) => arr.filter((x) => x >= t && x < t + win).length));
+// Alpaca answers each cancel of these stops but keeps showing them working (status "new") until `untilMs`.
+function acceptedButStillWorking(w: World, stopIds: Set<string>, untilMs: number): number[] {
+  const realCancel = w.sim.cancelOrder.bind(w.sim);
+  const times: number[] = [];
+  w.sim.cancelOrder = async (id: string) => {
+    if (stopIds.has(id)) {
+      times.push(w.sim.simMs);
+      if (w.sim.simMs < untilMs) {
+        (w.sim as any).spend("safety");
+        return;
+      }
+    }
+    return realCancel(id);
+  };
+  return times;
+}
+
+for (const n of [1, 3]) {
+  test(`group 1, round 3 (night, Michael's decision 1 of 2026-11-13): ${n} timed-out stop(s) the sync's list does not show, whose accepted cancel does not clear for 60 s: only the first accepted cancel gets a look in a second, then the stuck backoff within the allowance; with routine traffic beside, no rate-limit answer`, async () => {
+    const w = world();
+    const syms = ["AAA", "BBB", "CCC"].slice(0, n);
+    const { dd, stopIds } = await timedOutStops(w, syms, true);
+    const t0 = w.sim.simMs;
+    const r0 = w.sim.rejected429;
+    // 75 requests a minute of routine traffic beside: the bucket refills at 200 - 75 and starts at 120 (the reviewer's probe).
+    w.sim.refillPerMinute = 125;
+    w.sim.tokens = 120;
+    w.sim.lowestTokens = 120;
+    const times = acceptedButStillWorking(w, stopIds, t0 + 60_000);
+    await runWorker(w, dd, 60_000);
+    const reqs = w.sim.bucketTimes.filter((t) => t >= t0 && t < t0 + 60_000);
+    const spent = w.memory.retrySpend.length;
+    console.log(`MEASURE round 3 fix, hidden route, accepted cancel held 60 s, ${n} stop(s): cancels ${times.length} (most in 5 s ${maxInWindow(times, 5_000)}); requests in the minute ${reqs.length}; lowest tokens ${Math.floor(w.sim.lowestTokens)} (from 120); rate-limit answers ${w.sim.rejected429 - r0}; retry charges ${spent}`);
+    assert.equal(w.sim.rejected429 - r0, 0, "no rate-limit answer");
+    assert.ok(w.sim.lowestTokens >= 30, `lowest tokens ${w.sim.lowestTokens}: before the fix, one stop drove it to 0`);
+    // Per stop: the first cancel, the look a second later (a second cancel), then the backoff: 5, 10, 20, 30 s apart. At most 6 in the minute.
+    assert.ok(times.length <= 6 * n, `cancels ${times.length}: at most 6 a stop in the minute (before the fix, about 15)`);
+    assert.ok(spent >= 1, "the retries were charged to the retry allowance");
+    assert.ok(reqs.length <= 80 + 35 * n, `requests in the minute ${reqs.length} (before the fix: about 290 for one stop, 374 for three)`);
+    assert.equal(w.sim.oversellAttempts, 0);
+    // Alpaca's cancel then takes effect: the shares are sold within one backoff step (at most 30 s plus the allowance) and nothing oversold.
+    await runWorker(w, dd, 75_000);
+    for (const sym of syms) assert.equal(await heldQty(w, sym), 0, `${sym} sold once the stop really ended`);
+    assert.equal(w.sim.oversellAttempts, 0);
+  });
+}
+
+test("group 1, round 3 (night, Michael's decision 1 of 2026-11-13): a timed-out stop the sync's list shows, whose accepted cancel stays pending 120 s: the sale that waited for it goes on the stuck backoff (not every sync), its outcome is logged after the cancel was tried, and it sells once the cancel lands", async () => {
+  const w = world();
+  const { dd, ids, stopIds } = await timedOutStops(w, ["RKLB"], false);
+  w.sim.cancelMs = 120_000;
+  const times: number[] = [];
+  const realCancel = w.sim.cancelOrder.bind(w.sim);
+  w.sim.cancelOrder = async (id: string) => {
+    if (stopIds.has(id)) times.push(w.sim.simMs);
+    return realCancel(id);
+  };
+  const t0 = w.sim.simMs;
+  w.sim.tokens = 200;
+  w.sim.lowestTokens = 200;
+  await runWorker(w, dd, 40_000);
+  const st = w.memory.stuck.get(ids[0]!);
+  assert.ok(st && st.delayMs > 0 && st.nextAt > 0, "on the backoff after a stuck try with a pending cancel (before: retried at every sync)");
+  const outcome = w.events.filter((e) => e.event === "fresh_stop_timeout_cancel" && e.data.by === "missing-exit sale");
+  assert.ok(outcome.length >= 1, "the cancel's outcome is logged by the sale");
+  await runWorker(w, dd, 140_000);
+  const reqs = w.sim.bucketTimes.filter((t) => t >= t0);
+  const sale = w.sim.sellLog.find((x) => x.symbol === "RKLB");
+  console.log(`MEASURE round 3 fix, visible route, cancel pending 120 s: sale tries ${w.events.filter((e) => e.event === "unprotected_position" && e.data.symbol === "RKLB").length}; requests most in a minute ${maxInWindow(reqs, 60_000)}; lowest tokens ${Math.floor(w.sim.lowestTokens)}; sale at ${sale ? Math.round((sale.at - t0) / 100) / 10 : null} s; oversell ${w.sim.oversellAttempts}`);
+  assert.ok(maxInWindow(reqs, 60_000) <= 170, `requests in a minute ${maxInWindow(reqs, 60_000)}`);
+  assert.equal(await heldQty(w, "RKLB"), 0);
+  assert.equal(w.sim.oversellAttempts, 0);
+});
+
+const RESTING = "still resting at Alpaca";
+for (const c of [
+  { name: "hidden from the sync's list, Alpaca refusing every cancel", hide: true, mode: "refused", want: "Alpaca has not accepted my cancel of it" },
+  { name: "hidden from the sync's list, Alpaca accepting each cancel but still showing the stop", hide: true, mode: "accepted", want: "Alpaca accepted my cancel of it but still shows it working" },
+  { name: "shown in the sync's list with its cancel pending", hide: false, mode: "pending", want: "Alpaca accepted my cancel of it but has not finished cancelling it" },
+] as const) {
+  test(`group 2, round 3 (night): the 5 minute alert tells the truth when the timed-out stop still rests at Alpaca (${c.name})`, async () => {
+    const w = world();
+    const { dd, stopIds } = await timedOutStops(w, ["RKLB"], c.hide);
+    if (c.mode === "refused") {
+      const realCancel = w.sim.cancelOrder.bind(w.sim);
+      w.sim.cancelOrder = async (id: string) => {
+        if (stopIds.has(id)) {
+          (w.sim as any).spend("safety");
+          throw new AlpacaError("internal error (test)", 500);
+        }
+        return realCancel(id);
+      };
+    } else if (c.mode === "accepted") acceptedButStillWorking(w, stopIds, Infinity);
+    else w.sim.cancelMs = 10 * 60_000;
+    await runWorker(w, dd, 5 * 60_000 + 20_000);
+    const five = w.said.filter((m) => m.mention && /after \d+ minute/.test(m.text));
+    assert.equal(five.length, 1, five.map((m) => m.text).join(" | ") || "no 5 minute alert");
+    assert.ok(five[0]!.text.includes(RESTING), five[0]!.text);
+    assert.ok(five[0]!.text.includes(c.want), five[0]!.text);
+    assert.ok(!five[0]!.text.includes("still has no protective stop"), five[0]!.text);
+    assert.equal(w.sim.oversellAttempts, 0);
+  });
+}
+
+test("Michael's decision 2 of 2026-11-13 (the split): with ruling B switched off, an unclear fresh stop is handled as on Fly release v20: no 15 second limit, no cancel, no sale on top, no alert, no 5 second lookups", async () => {
+  FRESH_STOP_LIMIT.on = false;
+  try {
+    const w = world();
+    const dd = await day(w);
+    const id = await hold(w, "WULF", 6, 9.5, 1);
+    w.sim.advance(5_000);
+    w.sim.partialTakeProfit(id, 2, 9.58);
+    const u = unclearStops(w, true); // Alpaca did take it, and cannot be asked
+    w.sim.advance(300);
+    await syncOrders(w.risk, dd, { protect: true });
+    assert.equal(w.memory.freshStops.get(id)!.status, "unclear");
+    assert.equal(w.memory.mustLook.has(id), false, "no 5 second lookups of an old entry");
+    await runWorker(w, dd, 60_000);
+    assert.equal(w.events.filter((e) => e.event.startsWith("fresh_stop_timeout")).length, 0, "no limit");
+    assert.equal(w.memory.timedOutStops.size, 0);
+    assert.equal(freshStops(w, "WULF").filter((o) => o.status === "new" || o.status === "accepted").length, 1, "the stop still rests at Alpaca, not cancelled");
+    assert.equal(await heldQty(w, "WULF"), 4, "nothing sold on top of it");
+    assert.equal(w.said.filter((m) => m.mention).length, 0, "no alert");
+    // As on v20: the sync's own list shows the stop working, so its symbol counts as having a working sell and is skipped (protected);
+    // nothing confirms it from the list (that confirmation is part of ruling B).
+    u.lookupsWork();
+    await runWorker(w, dd, 10_500);
+    assert.equal(w.memory.freshStops.get(id)?.status, "unclear");
+    assert.equal(await heldQty(w, "WULF"), 4);
+    assert.equal(w.sim.oversellAttempts, 0);
+  } finally {
+    FRESH_STOP_LIMIT.on = true;
+  }
+});
+
+test("group 1, round 3 (night): the live update that a timed-out stop ended clears its entry's backoff time and the resting-stop note, and runs the order sync at once (no wait for the backoff)", async () => {
+  const { rig } = await import("./rig.ts");
+  const r = rig({ orderStream: true });
+  const wk: any = r.worker;
+  wk.startOrderStream(D);
+  const mem: SyncMemory = wk.syncMemory;
+  const syncs: number[] = [];
+  wk.syncAt = (atMs: number) => void syncs.push(atMs);
+  mem.timedOutStops.set("cyrus-p-20261102-RKLB-x-s1", "cyrus-20261102-RKLB-1");
+  mem.stuck.set("cyrus-20261102-RKLB-1", { symbol: "RKLB", since: 0, nextAt: 9e15, delayMs: 30_000, alerted: true, escalated: false, lastTriedAt: 0, why: "x", restingStop: { stopClientOrderId: "cyrus-p-20261102-RKLB-x-s1", cancel: "accepted" } });
+  const hook = wk.orderHandler.d.onFreshStopUpdate;
+  hook({ clientOrderId: "cyrus-p-20261102-RKLB-x-s1", symbol: "RKLB", event: "new", status: "new", atMs: 0 });
+  assert.equal(mem.stuck.get("cyrus-20261102-RKLB-1")!.nextAt, 9e15, "an update that is not an end changes nothing");
+  assert.equal(syncs.length, 0);
+  hook({ clientOrderId: "cyrus-p-20261102-RKLB-x-s1", symbol: "RKLB", event: "canceled", status: "canceled", atMs: 0 });
+  const st = mem.stuck.get("cyrus-20261102-RKLB-1")!;
+  assert.equal(st.nextAt, 0, "the sale is due now");
+  assert.equal(st.restingStop, undefined, "the 5 minute alert no longer says the stop rests at Alpaca");
+  assert.equal(syncs.length, 1, "the order sync runs at once");
+  wk.endOrderStream?.();
+});

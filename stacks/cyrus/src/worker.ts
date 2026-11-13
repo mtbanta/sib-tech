@@ -1440,7 +1440,10 @@ export class Worker {
           const entry = this.syncMemory.timedOutStops.get(info.clientOrderId);
           if (entry && (info.event === "canceled" || info.event === "expired" || info.event === "rejected")) {
             const st = this.syncMemory.stuck.get(entry);
-            if (st) st.nextAt = 0;
+            if (st) {
+              st.nextAt = 0;
+              delete st.restingStop; // messaging only: the 5 minute alert no longer says the stop rests at Alpaca
+            }
             if (this.closingOut || this.liquidator.isLiquidating() || this.middayOwnsSelling) return;
             this.syncAt(this.d.now().getTime(), 0);
           }

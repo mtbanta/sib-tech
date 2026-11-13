@@ -173,7 +173,9 @@ export function retryAllowed(o: { room: number; estimate: number; governorBudget
 // The deploy check (tools/midday-deploy.mjs): every reason a market-hours deploy must not go ahead, from facts read beforehand. Empty
 // means it may go ahead. Pure, so it is tested without the network. Two routes; it may go ahead when either passes in full:
 //  - the mid-day pause (Michael's ruling of 2026-11-09): today's mid-day close-out finished flat, after it and before 1:30 PM (later only
-//    with --after-130), the pause on, before the close;
+//    with --after-130), the pause on, before the close; since Michael's decision 5 of 2026-11-13, also his written yes for this deploy
+//    (`michaelYes`), as on the own stop route (this route is always in market hours). His written approval of a mid-day fix counts as
+//    that yes for the deploy of that fix;
 //  - Michael's own stop (his rulings D of 2026-11-12, afternoon): the stop flag on from his `stop` or `flatten` (never the daily loss
 //    stop), at any time of day; during market hours only with his explicit yes for this deploy (`michaelYes`, where and when he wrote
 //    it), which is never inferred from `stop`, `flatten`, an earlier approval or a standing rule.
@@ -215,8 +217,14 @@ function pauseRouteRefusals(f: DeployFacts): string[] {
     if (f.day.closeAt && f.now >= f.day.closeAt) out.push("the market is closed: use a normal deploy");
   }
   if (!f.pause?.on) out.push("the mid-day pause is not on");
+  // Michael's decision 5 of 2026-11-13: in market hours this route also needs his written yes for this deploy.
+  if (mayBeMarketHours(f) && !hasMichaelYes(f)) out.push(MICHAEL_YES_REFUSAL);
   return out;
 }
+
+// Michael's rulings D of 2026-11-12 and 5 of 2026-11-13: the record of his written yes (where and when he wrote it) for this deploy.
+const hasMichaelYes = (f: DeployFacts): boolean => (f.michaelYes ?? "").trim().length >= MICHAEL_YES_MIN_CHARS;
+const MICHAEL_YES_REFUSAL = "it is or may be market hours: --michael-yes \"<where and when Michael wrote his yes for this deploy>\" is required, only after he has written it";
 
 // Group 1, round 1 of the night release: fail closed. The yes is required in market hours by the day record, while Alpaca's clock says
 // open, and whenever it cannot be told (no day record, a trading day without its open and close times, or Alpaca's clock unread).
@@ -232,7 +240,7 @@ function stopRouteRefusals(f: DeployFacts): string[] {
   const out: string[] = [];
   if (!f.stop?.on) out.push("the stop flag is not on");
   else if (f.stop.reason.startsWith("daily loss stop")) out.push("the stop flag is the daily loss stop, not Michael's own `stop` or `flatten`");
-  if (mayBeMarketHours(f) && (f.michaelYes ?? "").trim().length < MICHAEL_YES_MIN_CHARS) out.push("it is or may be market hours: --michael-yes \"<where and when Michael wrote his yes for this deploy>\" is required, only after he has written it");
+  if (mayBeMarketHours(f) && !hasMichaelYes(f)) out.push(MICHAEL_YES_REFUSAL);
   return out;
 }
 

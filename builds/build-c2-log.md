@@ -4157,3 +4157,36 @@ Review of the night release:
 > Never print any token or key.
 
 Work started 12:55 AM Central on branch `release-2026-11-12-night` (main merged in).
+
+### The round 3 fixes (Michael's decisions 1, 2, 5 and 6 of 2026-11-13), built 12:55 to about 2:00 AM
+
+- **Group 1 finding (decision 1, the fix as proposed):** a cancel of a timed-out fresh stop that Alpaca accepted but that has not cleared by the next look now goes on the stuck backoff (5, 10, 20, then every 30 seconds), each retry charged to the retry allowance (40 requests a minute, 15 in 5 seconds), on both routes. **Hidden route:** the sync's list does not show the stop, and the sale's own read finds it holding the shares (`cleanupSale`, the `heldByFreshStop` branch). Only the first accepted cancel of a stop gets a look one second later, and that look is due through the stuck record, so it is charged too. A later accepted cancel that still finds the stop holding goes on the backoff, like a refused one. Memory: `timedOutCancelAccepted` in `SyncMemory`. **Visible route:** the sync's list shows the stop and the entry's sale names it to cancel (`alsoCancel`). A stuck try now goes on the backoff whether Alpaca refused the cancel or accepted it and the stop still holds the shares. Before, an accepted cancel still pending was retried at every sync. A live update that the stop ended still clears the entry's retry time and runs the sync at once (`onFreshStopUpdate` in `worker.ts`, now tested).
+- **How each of B's loops is bounded (decision 6):**
+  - The 5 second lookups end at the 15 second limit.
+  - The cancel and sale retries are bounded by the stuck backoff, capped at 30 seconds, and by the retry allowance (40 a minute, 15 in 5 seconds).
+  - A sale's own wait for Alpaca's cancel is the 2026-11-09 design and is unchanged: at most 3 rounds of up to 6 seconds, polls easing from 250 to 800 ms, and a refused cancel ends the try at once (`endOnCancelFail`).
+- **Not changed, listed for Michael (outside B, money-touching):** the requests a single try really costs are more than the allowance charges for it. A refused cancel costs about 20 against the charge of 10; a try that waits out a pending cancel on the visible route costs about 75 (3 rounds of polls). The allowance therefore caps tries, not requests. The pre-2026-11-09 retry at every sync for an ordinary sale held by visible orders (not a timed-out stop) is also unchanged.
+- **Measured in the simulator** (the reviewer's round 3 probe, before and after, same machine):
+  - Hidden route, cancel accepted but the stop still shown working for 120 s:
+    - 1 stop: 291 requests in the worst minute before, 103 after;
+    - 3 stops: 374 before (75 rate-limit answers), 143 after (none).
+  - The same with 75 requests a minute of routine traffic beside, bucket starting at 120 (new test):
+    - 1 stop held 60 s: 103 requests, lowest budget 92;
+    - 3 stops held 60 s: 143 requests, lowest budget 41;
+    - no rate-limit answers (before: 0 tokens and 38 answers for one stop held 60 s).
+  - Visible route, cancel pending 120 s: the worst minute stays about 165 for 1 stop (the sale's own polls while it waits), with no rate-limit answers. The sale came 0.1 s after the cancel landed.
+  - Cost: with the live updates down, the sale after a hidden stop truly clears can come one backoff step later (up to 30 s, plus any wait for the allowance). With the live updates up, the update runs it at once.
+  - No sale on top of a stop in any case.
+- **Group 2 finding (truthful 5 minute alert, messaging only):** when the entry's timed-out stop is still working at Alpaca, the 5 minute alert now says so. The evidence is the sync's own list, or, on the hidden route, the last try's read (`StuckEntry.restingStop`, read only by the alert). The alert reads: "**Michael: X's fresh protective stop, not confirmed in time, is still resting at Alpaca after 5 minutes[ at my last try]; <cancel state>, so I still cannot sell the shares.** That stop may still protect them, but I no longer count on it. Please check X in Alpaca's dashboard and close it there if needed. I keep trying." The cancel state is one of:
+  - "Alpaca has not accepted my cancel of it" (refused);
+  - "Alpaca accepted my cancel of it but still shows it working";
+  - "Alpaca accepted my cancel of it but has not finished cancelling it" (shown as pending cancel);
+  - "my cancel of it has not taken effect" (otherwise).
+  Tested to 5 minutes in all three cases. The live update that the stop ended clears the note.
+- **Group 2 non-blocking notes handled:**
+  - `fresh_stop_timeout_cancel` and `_failed` are logged after the cancel was tried, on every route (`by`: `15 second limit`, `missing-exit sale` or `sale`; `again` on a repeat).
+  - Both briefs say outright to leave out the outcome events of stops with `sentToAlpaca: false`, allow for a late or missing cancel after `fresh_stop_timeout`, and report timed-out stops whose cancel did not take effect at once, and any "still resting at Alpaca" alert.
+- **The split (decision 2), made cheap:** one switch, `FRESH_STOP_LIMIT.on` in `src/risk.ts`, turns off ruling B's 15 second limit, its 5 second lookups and the confirmation from the order list. Off, an unclear fresh stop is handled as on v20 (tested): no cancel, no sale on top of it, no alert, no extra lookups. With the limit off, nothing fills `timedOutStops`, so every other part of B stays idle. The logging of time to confirm stays. A, C, D and E do not depend on it.
+- **Decision 5 (D, group 1):** the mid-day pause route of the deploy check now also needs `--michael-yes` while it is or may be market hours (always, on that route). His written approval of a specific mid-day fix counts as the yes for that fix only. CLAUDE.md's 2026-11-09 exception, the tool's header and the memory note say so. Tested.
+- **Decision 6:** the rule is in CLAUDE.md with Michael's words. The builder's reading of "limit" (a maximum number of tries, or a maximum rate, such as the allowance) is marked there for Michael to confirm.
+- Tests: `test/release-2026-11-12-night.test.ts`, 8 new tests (both routes with assertions on requests, rate-limit answers and oversell; the three alert wordings; B off; the live-update hook) and `test/midday.test.ts`. Full suite 662 of 662, type check clean.

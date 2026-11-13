@@ -1,5 +1,6 @@
 // The market-hours deploy (written in CLAUDE.md): Michael's ruling of 2026-11-09 (flat and paused at mid-day) and his ruling D of
-// 2026-11-12 (flat with his own stop on, at any time; during market hours only with his explicit yes for that deploy). This script
+// 2026-11-12 (flat with his own stop on, at any time). During market hours both routes need his explicit yes for that deploy (the
+// mid-day pause route since his decision 5 of 2026-11-13: his written approval of a mid-day fix counts as the yes for that fix). This script
 // checks every condition right before the deploy and refuses if any fails; only then it pauses the Healthchecks check (the worker's
 // next ping un-pauses it) and runs the Fly deploy.
 //
@@ -7,7 +8,8 @@
 //   node stacks/cyrus/tools/midday-deploy.mjs --dir <clean checkout>/stacks/cyrus --reviewed <commit> [--after-130]
 //        [--michael-yes "<where and when Michael wrote his yes for this deploy>"] [--check-only]
 // --michael-yes is passed ONLY after Michael has written an explicit yes for this specific deploy, in the builder's session or in
-// Discord `commands`; it is never inferred from `stop`, `flatten`, an earlier approval or a standing rule (Michael, 2026-11-12).
+// Discord `commands`; it is never inferred from `stop`, `flatten`, an earlier approval or a standing rule (Michael, 2026-11-12). The one
+// exception (Michael, 2026-11-13): his written approval of a specific mid-day fix is the yes for deploying that fix, and no other deploy.
 //
 // Reads only (paper Alpaca, the database in a read-only transaction) until every check has passed. Paper only.
 import { spawnSync } from "node:child_process";

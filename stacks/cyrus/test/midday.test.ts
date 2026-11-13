@@ -433,7 +433,7 @@ test("the start note tells a deploy (a new release) from a plain restart", async
 
 test("the deploy check refuses unless flat, paused, no positions or open orders, in the window, and on the reviewed commit", () => {
   const day = { isTradingDay: true, openAt: z("14:30:00"), closeAt: z("21:00:00"), phases: { [MIDDAY_PHASE]: z("16:31:00").toISOString(), middayFlat: "yes" } };
-  const ok: DeployFacts = { now: z("16:40:00"), day, pause: { ...emptyPause(), on: true }, positions: 0, openOrders: 0, afterOneThirtyAllowed: false, reviewedCommit: "abc1234", checkedOutCommit: "abc1234def5678", gitStatus: "" };
+  const ok: DeployFacts = { now: z("16:40:00"), day, pause: { ...emptyPause(), on: true }, positions: 0, openOrders: 0, afterOneThirtyAllowed: false, michaelYes: "Michael in the session, 11:02 AM: yes, deploy the mid-day fix", reviewedCommit: "abc1234", checkedOutCommit: "abc1234def5678", gitStatus: "" };
   assert.deepEqual(deployRefusals(ok), []);
   const has = (o: Partial<DeployFacts>, text: string) => assert.ok(deployRefusals({ ...ok, ...o }).some((r) => r.includes(text)), `${text}: ${deployRefusals({ ...ok, ...o }).join("; ")}`);
   has({ day: { ...day, phases: {} } }, "has not finished flat");
@@ -443,13 +443,13 @@ test("the deploy check refuses unless flat, paused, no positions or open orders,
   const resumed = { ...emptyPause(), on: false, resumedAt: z("16:35:00").toISOString(), resumedBy: "go" };
   const own = { on: true, reason: "owner command (flatten)" };
   const yes = "Michael in the session, 2:41 PM: yes, deploy e85039d now";
-  has({ pause: resumed, stop: own }, "own stop route: it is or may be market hours: --michael-yes");
+  has({ pause: resumed, stop: own, michaelYes: null }, "own stop route: it is or may be market hours: --michael-yes");
   // Group 1, round 1 of the night release: fail closed when it cannot be told whether it is market hours, or Alpaca's clock says open.
-  has({ pause: resumed, stop: own, day: null }, "own stop route: it is or may be market hours");
-  has({ pause: resumed, stop: own, day: { ...day, openAt: null, closeAt: null } as any }, "own stop route: it is or may be market hours");
-  has({ pause: resumed, stop: own, now: z("13:00:00"), alpacaOpen: true }, "own stop route: it is or may be market hours");
-  has({ pause: resumed, stop: own, now: z("13:00:00"), alpacaOpen: null }, "own stop route: it is or may be market hours");
-  assert.deepEqual(deployRefusals({ ...ok, now: z("13:00:00"), pause: resumed, stop: own, alpacaOpen: false }), [], "before the open, Alpaca's clock closed: no yes needed");
+  has({ pause: resumed, stop: own, michaelYes: null, day: null }, "own stop route: it is or may be market hours");
+  has({ pause: resumed, stop: own, michaelYes: null, day: { ...day, openAt: null, closeAt: null } as any }, "own stop route: it is or may be market hours");
+  has({ pause: resumed, stop: own, michaelYes: null, now: z("13:00:00"), alpacaOpen: true }, "own stop route: it is or may be market hours");
+  has({ pause: resumed, stop: own, michaelYes: null, now: z("13:00:00"), alpacaOpen: null }, "own stop route: it is or may be market hours");
+  assert.deepEqual(deployRefusals({ ...ok, now: z("13:00:00"), pause: resumed, stop: own, michaelYes: null, alpacaOpen: false }), [], "before the open, Alpaca's clock closed: no yes needed");
   assert.deepEqual(deployRefusals({ ...ok, pause: resumed, stop: own, day: null, michaelYes: yes }), [], "with his yes, a missing day record does not block");
   assert.deepEqual(deployRefusals({ ...ok, pause: resumed, stop: own, michaelYes: yes }), [], "market hours: his own stop plus his written yes");
   has({ pause: resumed, stop: own, michaelYes: "yes" }, "--michael-yes", );
@@ -460,8 +460,8 @@ test("the deploy check refuses unless flat, paused, no positions or open orders,
     assert.deepEqual(deployRefusals({ ...ok, pause: resumed, stop: own, michaelYes: yes, ...o }), [], JSON.stringify(o));
   }
   // Outside market hours (before the open, after the close, a day off) the own stop route needs no yes.
-  for (const t of ["13:00:00", "21:05:00"]) assert.deepEqual(deployRefusals({ ...ok, now: z(t), pause: resumed, stop: own }), [], t);
-  assert.deepEqual(deployRefusals({ ...ok, day: { ...day, isTradingDay: false }, pause: resumed, stop: own }), [], "a day off");
+  for (const t of ["13:00:00", "21:05:00"]) assert.deepEqual(deployRefusals({ ...ok, now: z(t), pause: resumed, stop: own, michaelYes: null }), [], t);
+  assert.deepEqual(deployRefusals({ ...ok, day: { ...day, isTradingDay: false }, pause: resumed, stop: own, michaelYes: null }), [], "a day off");
   // Never the daily loss stop; never a stop that is off; the common conditions still hold.
   has({ pause: resumed, stop: { on: true, reason: "daily loss stop: loss 510 dollars" }, michaelYes: yes }, "own stop route: the stop flag is the daily loss stop");
   has({ pause: resumed, stop: { on: false, reason: "owner command (resume)" }, michaelYes: yes }, "own stop route: the stop flag is not on");
@@ -469,7 +469,10 @@ test("the deploy check refuses unless flat, paused, no positions or open orders,
   has({ pause: resumed, stop: own, michaelYes: yes, openOrders: 1 }, "1 open order");
   has({ pause: resumed, stop: own, michaelYes: yes, reviewedCommit: "fff9999" }, "not the reviewed commit");
   has({ pause: resumed, stop: own, michaelYes: yes, gitStatus: " M x\n" }, "git status is not clean");
-  // The mid-day pause route (2026-11-09) is unchanged: no yes needed.
+  // Michael's decision 5 of 2026-11-13: the mid-day pause route also needs his written yes (it is always in market hours).
+  has({ stop: null, michaelYes: null }, "mid-day pause route: it is or may be market hours: --michael-yes");
+  has({ stop: null, michaelYes: "yes" }, "mid-day pause route: it is or may be market hours: --michael-yes");
+  assert.equal(deployRoute({ ...ok, michaelYes: null }), null, "no route without his yes in market hours");
   assert.deepEqual(deployRefusals({ ...ok, stop: null }), []);
   has({ positions: 1 }, "1 position");
   has({ openOrders: 2 }, "2 open order");
