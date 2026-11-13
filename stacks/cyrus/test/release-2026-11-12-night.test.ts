@@ -1046,3 +1046,107 @@ for (const hide of [false, true]) {
     assert.ok(checked >= 10, `alerts with the stop already cancelled: ${checked}`);
   });
 }
+
+// ---------------- weekend build, item 2 point 2: timed-out stops in the database, and the start-up protection check ----------------
+import { timedOutStopsKey } from "../src/risk.ts";
+
+test("item 2 (second point): a timed-out stop is written to the database; a failed write is retried on a backoff, not at every sync", async () => {
+  const w = world();
+  const realSet = w.store.setControl.bind(w.store);
+  let fails = 2;
+  const writes: number[] = [];
+  w.store.setControl = async (key: string, value: unknown) => {
+    if (key.startsWith("timed_out_stops:")) {
+      writes.push(w.sim.simMs);
+      if (fails-- > 0) throw new Error("database down (test)");
+    }
+    return realSet(key, value);
+  };
+  const { dd, ids } = await timedOutStops(w, ["RKLB"], true);
+  w.sim.cancelMs = 10 * 60_000;
+  await runWorker(w, dd, 60_000);
+  const saved = await w.store.getControl<{ stops: Array<[string, string]> }>(timedOutStopsKey(D));
+  assert.ok(saved && saved.stops.some(([, e]) => e === ids[0]), JSON.stringify(saved));
+  const gaps = writes.map((t, i) => (i ? t - writes[i - 1]! : Infinity)).slice(1);
+  assert.ok(writes.length >= 3 && gaps[0]! >= 4_900 && gaps[1]! >= 9_900, `writes at ${writes.join(", ")}`);
+});
+
+test("item 2 (second point): after a restart the stored timed-out stop is loaded and never taken as protection again; its shares are sold once its cancel lands", async () => {
+  const w = world();
+  const { dd, ids } = await timedOutStops(w, ["RKLB"], true);
+  w.sim.cancelMs = 20_000;
+  await runWorker(w, dd, 2_000);
+  assert.ok(await w.store.getControl(timedOutStopsKey(D)), "stored");
+  // A restart: the worker's memory is new.
+  const fresh = new SyncMemory();
+  w.risk.syncMemory = fresh;
+  await runWorker(w, dd, 90_000);
+  assert.ok([...fresh.timedOutStops.values()].includes(ids[0]!), "loaded from the database");
+  assert.ok(!w.events.some((e) => e.event === "fresh_stop_recovered" || e.event === "startup_fresh_stop_confirmed"), "never re-adopted");
+  assert.equal(await heldQty(w, "RKLB"), 0);
+  assert.equal(w.sim.oversellAttempts, 0);
+});
+
+async function restartedWith(status: "accepted" | "pending_cancel", entries: 1 | 2) {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "IREN", 5, 9, 1);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 1, 9.08);
+  await syncOrders(w.risk, dd, { protect: true }); // A4: a fresh stop for the 4 left
+  const stop = freshStops(w, "IREN")[0]!;
+  assert.ok(stop, "fresh stop placed");
+  if (entries === 2) {
+    const id2 = await hold(w, "IREN", 3, 9.1, 2);
+    void id2;
+  }
+  if (status === "pending_cancel") {
+    w.sim.cancelMs = 30_000;
+    await w.sim.cancelOrder(stop.id); // someone else's cancel (a restart forgot why): Alpaca shows it pending cancel
+  }
+  w.risk.syncMemory = new SyncMemory();
+  return { w, dd, id, stop };
+}
+
+test("item 2 (second point): start-up check: a fresh stop Alpaca shows working and covering the whole holding is confirmed; nothing is sold or said", async () => {
+  const { w, dd, id } = await restartedWith("accepted", 1);
+  await runWorker(w, dd, 30_000);
+  assert.ok(w.events.some((e) => e.event === "startup_fresh_stop_confirmed"));
+  assert.ok(w.risk.syncMemory.freshStops.has(id));
+  assert.equal(w.sim.sellLog.length, 0);
+  assert.equal(w.said.filter((m) => m.mention).length, 0);
+});
+
+test("item 2 (second point): start-up check: a fresh stop Alpaca shows pending cancel is not protection; it takes the B path and the shares are sold once the cancel lands, never on top of it", async () => {
+  const { w, dd, id } = await restartedWith("pending_cancel", 1);
+  await runWorker(w, dd, 90_000);
+  assert.ok(w.events.some((e) => e.event === "startup_fresh_stop_unconfirmed" && e.data.clientOrderId === id));
+  assert.equal(await heldQty(w, "IREN"), 0);
+  assert.equal(w.sim.oversellAttempts, 0);
+});
+
+test("item 2 (second point): start-up check: a symbol held by two open entries is left as it is (the fresh stop's entry is not known)", async () => {
+  const { w, dd } = await restartedWith("accepted", 2);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.ok(w.events.some((e) => e.event === "startup_protection_check"));
+  assert.ok(!w.events.some((e) => e.event === "startup_fresh_stop_unconfirmed" || e.event === "startup_fresh_stop_confirmed"));
+  assert.equal(w.risk.syncMemory.timedOutStops.size, 0);
+});
+
+test("item 2 (second point): a start-up check that cannot read Alpaca's open orders is retried on a backoff (5, 10, 20 s ...), not at every sync", async () => {
+  const { w, dd } = await restartedWith("accepted", 1);
+  const realPaged = w.sim.listOrdersPaged.bind(w.sim);
+  const tries: number[] = [];
+  w.sim.listOrdersPaged = async (...a: any[]) => {
+    if (a[0] === "open" && a[1] === "2000-01-01T00:00:00Z" && tries.length < 3 && new Error().stack?.includes("startupProtectionCheck")) {
+      tries.push(w.sim.simMs);
+      throw new Error("timeout (test)");
+    }
+    return (realPaged as any)(...a);
+  };
+  await runWorker(w, dd, 60_000);
+  const gaps = tries.map((t, i) => (i ? t - tries[i - 1]! : Infinity)).slice(1);
+  assert.equal(tries.length, 3, `tries at ${tries.join(", ")}`);
+  assert.ok(gaps[0]! >= 4_900 && gaps[1]! >= 9_900, `gaps ${gaps.join(", ")}`);
+  assert.ok(w.events.some((e) => e.event === "startup_protection_check"), "succeeds once Alpaca answers");
+});

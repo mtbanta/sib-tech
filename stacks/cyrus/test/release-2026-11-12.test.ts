@@ -617,7 +617,8 @@ test("finding 1, restart: a fresh-stopped remainder 11 minutes old, a new worker
   assert.ok(!w.said.some((m) => /confirm a (live )?protective stop/.test(m.text)), "no \'cannot confirm a protective stop\' alert");
   assert.equal(freshStopOrder(w, "IREN")!.status, "accepted", "the fresh stop is left resting");
   assert.ok(w.risk.syncMemory.freshStops.has(id), "remembered again");
-  assert.ok(w.events.some((e) => e.event === "fresh_stop_recovered"));
+  // Item 2 of 2026-11-13: with ruling B on, the start-up protection check confirms it (before, the sale path recovered it).
+  assert.ok(w.events.some((e) => e.event === "fresh_stop_recovered" || e.event === "startup_fresh_stop_confirmed"));
   assert.ok(used <= 110, `${used} requests in 5 minutes (the reviewer's probe found 266)`);
 });
 
