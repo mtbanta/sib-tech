@@ -4853,3 +4853,15 @@ Notes handled:
 - the overstated comments are corrected.
 
 Full suite 697 of 697. Type check clean.
+
+## Michael's additions to the weekend build (2026-11-13, afternoon), saved verbatim
+
+> Add to this weekend's build, inside the standing approval (same rules, up to 8 more rounds per group):
+> 1. The 11 to 16 second remainder misses: first log the stop's state as the quick check sees it. Then act when Alpaca's live update reports the stop's cancel as complete (not pending), and keep quick rechecks at about 0.5, 1 and 2 seconds as a backup, as lost exits already have. Test with the pending-cancel timing seen today. Report the expected time without a stop.
+> 2. A refused fresh stop is logged once, not also as a failed sale.
+> 3. The morning line's entry count shows refused entries separately.
+> 4. Log the time of each step inside a sync, so a slow sync like today's 11 seconds can be diagnosed.
+> Deploy before 7:30 AM Monday only if both groups pass. Never print any token or key.
+> Do not change frozen commit 4971548 while round 3 runs. Start these items after round 3 reports, on top of its result.
+
+Saved while round 3 runs on the frozen clone of 4971548 (untouched). These items start after round 3 reports.
