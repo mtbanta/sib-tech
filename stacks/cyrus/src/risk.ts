@@ -201,7 +201,7 @@ export const FRESH_STOP_CONFIRM_MS = 15_000;
 // (false), an unclear fresh stop is handled as on Fly release v20: looked up at each sync, never cancelled by a time limit, never sold on
 // top of. The time-to-confirm logging of a confirmed stop stays (logging only). The switch is `on` below (an object so the tests can
 // check both states; nothing in the worker changes it).
-export const FRESH_STOP_LIMIT = { on: true };
+export const FRESH_STOP_LIMIT = { on: false };
 
 // A fresh stop's status from the order list, a lookup or a live update. When it was "unclear", its time to confirm (from when it was
 // sent) is logged, so the share confirmed after 15 seconds can be reported (ruling B). "unknown_at_alpaca": Alpaca does not have it.
