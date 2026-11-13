@@ -4302,3 +4302,18 @@ Work started 12:55 AM Central on branch `release-2026-11-12-night` (main merged 
   - after the deploy: Alpaca flat, no open orders, no orders since;
   - the secret scan was clean on every commit.
 - "Live" line posted in Discord `commands` (HTTP 200): v21, ruling B off and why, A, C, D and E on, the account flat. Paper only.
+
+## Michael's decisions of 2026-11-13 (morning, after v21), saved verbatim
+
+> Decisions:
+> 1. B: fix the last alert, up to 3 more rounds per group. If it passes before the 10:30 mid-day pause, I will give my written yes in commands to deploy while flat and paused, so the afternoon tests B. Otherwise deploy after the close.
+> 2. Leftovers:
+>    - With live updates down, check every 10 seconds, not 30.
+>    - Store timed-out stop state in the database. At start-up, check every open position's protection at Alpaca, and treat any fresh stop not confirmed working as unprotected (the B path).
+>    - Put timed-out stop cancel retries under the stuck-retry request allowance, so total requests can never exceed Alpaca's limit.
+> 3. The retry rule: confirmed, a maximum number of tries or a maximum rate, always with backoff. Bring the older loops you found (the close-out retry, the database retries) into line in tonight's build.
+> 4. Load-day deadline: load on accepted until 8:15 AM Central; the screen runs at 8:15; Armed stays at 8:25. Confirm the screen reliably finishes in 10 minutes; if not, propose moving Armed to 8:28.
+> 5. Today: at the 10:30 pause I plan to send load afternoon (normal morning, E).
+> Items 2 to 4: tonight's build, group 1 and group 2, up to 3 rounds each, deploy before 7:30 AM Monday. Never print any token or key.
+
+Work on decision 1 started 9:13 AM Central on branch `release-2026-11-13-b` (from `main` at v21). Items 2 to 4 follow tonight on a separate branch.
