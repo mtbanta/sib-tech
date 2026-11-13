@@ -4630,3 +4630,44 @@ Notes handled:
 - Also changed in round 1's part, now listed: the restart test in `release-2026-11-12.test.ts` accepts `startup_fresh_stop_confirmed`.
 
 Full suite 694 of 694. Type check clean.
+
+### Weekend build: group 1, round 2 (8d08e2f) and fixes
+
+**Group 1, round 2: CHANGES REQUIRED.** Its round 1 findings are fixed, by its own probes:
+- syncs at most 22 a minute;
+- timed-out-stop requests at most 40 a minute and 15 in 5 s, counted at HTTP level inside the scope;
+- the client's scoped retries charged;
+- refused-cancel stops get checks.
+
+With B off, the code matches v21 apart from items 3 and 4. Three blocking findings, all in item 3. On paths that sell shares without a stop, the backoffs gave up more than the rule requires.
+1. **The regular close-out before the close.** The gaps grew 20, 40, then 60 s, so there was no try between 2:59:00 and the close. With sales accepted from 2:59:10 or 2:59:30 the position stayed held overnight without a stop; v21 was flat both times.
+2. **The mid-day and afternoon retries** grew even when they were selling. 40 positions were flat 305 s after Alpaca accepted again, against 105 s on v21.
+3. **The carried-position sale** was capped at 30 minutes. Accepted from minute 36: sold at minute 65, against 40 on v21. The count never reset within a day.
+
+Not blocking, for Michael:
+- the fault-case trade-off is the allowance's cost (at 80 and 30 the gaps roughly halve);
+- charging ordinary stuck retries to the allowance protects the request budget (rate-limit answers with 3 symbols: 0, against 460 on v21) at the cost of slower sales under refusals.
+
+Notes:
+- the start-up check's database read and Alpaca check were coupled;
+- a timed-out stop the sale re-adopted before the stored list loaded stayed adopted;
+- the stored list could be overwritten before it was read;
+- after the close, the first close-out gap counted the tries before the close;
+- a failed lookup's wait also held back an entry a live update had flagged;
+- the mid-day alert said "every 20 seconds".
+
+**Fixes:**
+1. In the last minute before the close the close-out tries every 20 s again. New tests: sales accepted from 20:59:10 and from 20:59:30 UTC end flat before the close. Both fail on 84e3ccf and pass now.
+2. `ProgressGap`: the mid-day and afternoon retries grow their wait only while tries sell nothing (20 s, then 40, at most 60), and go back to 20 s after a try that sold. The 40-position test now asserts flat within 150 s of Alpaca accepting again (v21: about 105 s).
+3. Carried-position sale: 1 minute, then 2, 4, at most 5 (v21's interval). The count starts again each day and whenever the account is flat.
+
+Notes handled:
+- the start-up check reads the stored list and checks Alpaca separately, each retried until it succeeds;
+- a loaded timed-out stop that was re-adopted is dropped as protection;
+- nothing is written before the stored list has been read;
+- the close-out counts its tries after the close separately;
+- a lookup flagged by a live update is not held back by a failed lookup's wait;
+- the mid-day alert says "20 seconds apart, longer while nothing sells, at most a minute";
+- the overstated comments are corrected.
+
+Full suite 697 of 697. Type check clean.

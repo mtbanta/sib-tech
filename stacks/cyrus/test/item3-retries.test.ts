@@ -2,7 +2,7 @@
 // retry loops the audit found, brought into line.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { RetryBackoff } from "../src/retry-backoff.ts";
+import { ProgressGap, RetryBackoff } from "../src/retry-backoff.ts";
 import { retryGapMs } from "../src/worker.ts";
 import { CommandProcessor } from "../src/commands.ts";
 import { NextSessionFinder, ensureDay } from "../src/morning.ts";
@@ -111,3 +111,38 @@ test("item 3 (group 2, round 2 of the weekend build): with the database down unt
   for (const t of ["22:10:00", "22:20:00", "22:30:00", "22:40:00", "22:50:00"]) await r.at(t);
   assert.ok((await r.store.getDay(D))!.phases.closeout, "written once the database is back, more than an hour after the close");
 });
+
+test("item 3 (group 1, round 2 of the weekend build): a close-out retry's wait grows only while tries sell nothing, and is back to 20 s after a try that sold", () => {
+  const g = new ProgressGap();
+  g.started(Infinity); // the first try
+  assert.equal(g.gapMs(20_000, 60_000, 40), 20_000, "after the first try");
+  g.started(40);
+  assert.equal(g.gapMs(20_000, 60_000, 30), 20_000, "it sold 10: back to 20 s");
+  g.started(30);
+  assert.equal(g.gapMs(20_000, 60_000, 30), 20_000, "nothing sold once");
+  g.started(30);
+  assert.equal(g.gapMs(20_000, 60_000, 30), 40_000, "nothing sold twice");
+  g.started(30);
+  assert.equal(g.gapMs(20_000, 60_000, 30), 60_000, "at most a minute");
+  g.started(30);
+  assert.equal(g.gapMs(20_000, 60_000, 20), 20_000, "sold again: 20 s");
+});
+
+for (const accept of ["20:59:10", "20:59:30"]) {
+  test(`item 3 (group 1, round 2 of the weekend build): a close-out whose sales Alpaca accepts only from ${accept} UTC still gets flat before the close (tries every 20 s in the last minute)`, async () => {
+    const { rig } = await import("./rig.ts");
+    const r = rig();
+    await r.at("13:30:00");
+    r.broker.clock = { ...r.broker.clock, isOpen: true };
+    r.broker.positions = [{ symbol: "AAA", qty: 5, marketValue: 500, avgEntryPrice: 100, unrealizedPl: 0 }];
+    await r.store.insertOrder({ clientOrderId: "cyrus-20261102-AAA-1", tradeDate: D, symbol: "AAA", qty: 5, referencePrice: 100, stopPrice: 98.5, status: "submitted", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: null });
+    let works = false;
+    r.broker.onSell = async () => { if (!works) throw new Error("rejected (test)"); };
+    const acceptMs = new Date(`2026-11-02T${accept}Z`).getTime();
+    for (let t = new Date("2026-11-02T20:55:00Z").getTime(); t < new Date("2026-11-02T21:00:00Z").getTime(); t += 5_000) {
+      works = t >= acceptMs;
+      await r.at(new Date(t).toISOString());
+    }
+    assert.ok((await r.store.getDay(D))!.phases.closeout, "flat (recorded) before the close");
+  });
+}

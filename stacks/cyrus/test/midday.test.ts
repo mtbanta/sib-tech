@@ -679,13 +679,16 @@ test("Michael's ruling on a mid-day close-out that cannot get flat: 40 positions
   assert.ok(!w.events.some((e) => e.e === "unprotected_position"), "the order sync's missing-exit check stood aside while the mid-day close-out owned the selling");
   // Alpaca accepts sales again
   sim.refuseSellsTimes = 0;
-  // Item 3 of 2026-11-13: the retries come 20, 40, then 60 seconds apart (each sells at most 10 of the 40), so up to about 400 s.
+  const acceptedAt = t;
+  // Item 3 of 2026-11-13 with group 1's round 2: the wait grows only while tries sell nothing, so selling resumes at once (v21: flat about
+  // 105 s after Alpaca accepted again).
   for (let k = 0; k < 80 && !(await r.store.getDay(D))!.phases[MIDDAY_PHASE]; k++) {
     t += 5000;
     await r.at(new Date(t).toISOString());
     await until(() => !midday(), 2000);
   }
   assert.ok((await r.store.getDay(D))!.phases[MIDDAY_PHASE], "flat in the end");
+  assert.ok(t - acceptedAt <= 150_000, `flat ${(t - acceptedAt) / 1000} s after Alpaca accepted sales again (v21: about 105 s)`);
   assert.equal((await sim.listPositions()).length, 0);
   assert.equal(sim.oversellAttempts, 0);
   assert.equal(r.said("alerts").filter((x) => x.includes("still NOT FLAT after 5 minutes")).length, 1, "still one 5 minute alert");

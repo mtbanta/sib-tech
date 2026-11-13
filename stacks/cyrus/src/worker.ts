@@ -23,7 +23,7 @@ import type { Settings } from "./config.ts";
 import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
-import { RetryBackoff } from "./retry-backoff.ts";
+import { ProgressGap, RetryBackoff } from "./retry-backoff.ts";
 import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, noteTimedOutStopEnded, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import type { SelfMonitor } from "./self-monitor.ts";
 import { SCREEN_MINUTES_BEFORE_OPEN, AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
@@ -197,6 +197,11 @@ export class Worker {
   private lastCarriedAttempt = 0;
   private carriedAttemptDate: string | null = null;
   private carriedAttempts = 0;
+  // Group 1, round 2 of the weekend build: the mid-day and afternoon close-out retries grow their wait only while they sell nothing.
+  private readonly middayProgress = new ProgressGap();
+  private readonly afternoonProgress = new ProgressGap();
+  // Close-out tries since the close (their own count: the tries before the close do not lengthen the first wait after it).
+  private closeoutAttemptsAfterClose = 0;
   private lastArmAttempt = 0;
   private lastArmAlert = 0;
   // True while any close-out (regular, carried-over or emergency) is running, so two never overlap.
@@ -1042,12 +1047,13 @@ export class Worker {
     // Release A, fix 3: only before the day's close-out time, and never once that day's close-out has started; from then on the
     // close-out and its retry alone sell (on 2026-11-04 both ran and each posted "Close-out done").
     const closeoutStarted = this.closeoutAttemptDate === date || Boolean(current.phases.closeout);
-    // Item 3 of 2026-11-13: tried again after 5 minutes, then 10, 20, at most every 30 (counted per day).
-    if (this.carriedAttemptDate !== date) {
+    // Item 3 of 2026-11-13, with group 1's round 2: tried again after 1 minute, then 2, 4, at most every 5 (v21's interval); the count starts
+    // again each day and whenever the account is flat (a later carried position starts from the first wait).
+    if (this.carriedAttemptDate !== date || !this.notFlat) {
       this.carriedAttemptDate = date;
       this.carriedAttempts = 0;
     }
-    const carriedGapMs = Math.min(5 * 60_000 * 2 ** Math.max(0, this.carriedAttempts - 1), 30 * 60_000);
+    const carriedGapMs = this.carriedAttempts === 0 ? 0 : Math.min(60_000 * 2 ** (this.carriedAttempts - 1), 5 * 60_000);
     if (this.notFlat && now >= day.openAt && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !closeoutStarted && !this.closingOut && now.getTime() - this.lastCarriedAttempt >= carriedGapMs) {
       this.lastCarriedAttempt = now.getTime();
       this.carriedAttempts++;
@@ -1057,13 +1063,14 @@ export class Worker {
     // The mid-day cycle (Michael, 2026-11-09): at 10:30 AM Central the pause goes on and the mid-day close-out sells everything, retried
     // every 20 seconds until flat, never from the regular close-out time on (that close-out takes over). Its own phase, never `closeout`.
     const mt = this.d.middayCycle === false ? null : middayTimes(current);
-    if (inSession && mt && current.phases.armed && now >= mt.pauseAt && !current.phases[MIDDAY_PHASE] && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !this.closingOut && !this.inflight.has("carried") && !this.inflight.has("midday") && now.getTime() - this.lastMiddayAttempt >= retryGapMs(MIDDAY_RETRY_MS, this.middayAttemptDate === date ? this.middayAttempts : 0)) {
+    if (inSession && mt && current.phases.armed && now >= mt.pauseAt && !current.phases[MIDDAY_PHASE] && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !this.closingOut && !this.inflight.has("carried") && !this.inflight.has("midday") && now.getTime() - this.lastMiddayAttempt >= (this.middayAttemptDate === date ? this.middayProgress.gapMs(MIDDAY_RETRY_MS, 60_000, this.middayLastRemaining.length) : 0)) {
       if (this.middayAttemptDate !== date) {
         this.middayAttemptDate = date;
         this.middayAttempts = 0;
         this.middayLastCost = null;
         this.middayNotFlatSince = null;
         this.middayLastRemaining = [];
+        this.middayProgress.reset();
       }
       const retry = this.middayAttempts > 0;
       // A retry's cost is estimated from the last try's charged cost, at most the minute's whole budget.
@@ -1072,6 +1079,7 @@ export class Worker {
         this.lastMiddayAttempt = now.getTime();
         // A retry sells at most MIDDAY_RETRY_SYMBOLS positions, in turn (the first retry takes the first ten left, and so on).
         const only = retry ? retrySymbols(this.middayLastRemaining, this.middayAttempts - 1) : null;
+        this.middayProgress.started(retry ? this.middayLastRemaining.length : Infinity);
         this.middayAttempts++;
         this.background("midday", () => this.middayPhase(date, current, mt.pauseAt, retry, only));
       }
@@ -1079,18 +1087,20 @@ export class Worker {
     // The close-out after the afternoon load window (Michael, 2026-11-12): when the window's 30 minutes are up (or the last entry comes
     // first), entries pause again and the mid-day close-out code sells everything, retried every 20 seconds within the same 60 requests
     // a minute and above the reserve, until flat. Never from the regular close-out time on (that close-out takes over). Its own phase.
-    if (afternoonCloseoutDue && !this.closingOut && !this.inflight.has("carried") && !this.inflight.has("midday") && now.getTime() - this.lastAfternoonAttempt >= retryGapMs(MIDDAY_RETRY_MS, this.afternoonAttemptDate === date ? this.afternoonAttempts : 0)) {
+    if (afternoonCloseoutDue && !this.closingOut && !this.inflight.has("carried") && !this.inflight.has("midday") && now.getTime() - this.lastAfternoonAttempt >= (this.afternoonAttemptDate === date ? this.afternoonProgress.gapMs(MIDDAY_RETRY_MS, 60_000, this.afternoonLastRemaining.length) : 0)) {
       if (this.afternoonAttemptDate !== date) {
         this.afternoonAttemptDate = date;
         this.afternoonAttempts = 0;
         this.afternoonLastCost = null;
         this.afternoonLastRemaining = [];
+        this.afternoonProgress.reset();
       }
       const retry = this.afternoonAttempts > 0;
       const estimate = Math.min(MIDDAY_RETRY_REQUESTS_PER_MINUTE, this.afternoonLastCost ?? MIDDAY_RETRY_REQUESTS_PER_MINUTE);
       if (!retry || retryAllowed({ room: this.middayBudget.room(now.getTime()), estimate, governorBudget: this.d.governor.budget(), reserve: this.d.governor.reserve() })) {
         this.lastAfternoonAttempt = now.getTime();
         const only = retry ? retrySymbols(this.afternoonLastRemaining, this.afternoonAttempts - 1) : null;
+        this.afternoonProgress.started(retry ? this.afternoonLastRemaining.length : Infinity);
         this.afternoonAttempts++;
         // The same background name as the mid-day close-out, so every guard that stands aside for it stands aside for this too.
         this.background("midday", () => this.afternoonCloseoutPhase(date, retry, only));
@@ -1116,16 +1126,21 @@ export class Worker {
     // Item 3 of 2026-11-13: before the close the retries come 20 s apart, then 40, then every 60; after the close (it only reports then, and
     // a try from 30 minutes on writes the phase) 5 minutes apart, then 10, then every 15, until the day ends. No hard end (group 2, round 2
     // of the weekend build): with the database down past the hour, the phase, and with it the daily summary, would never come.
+    // Group 1, round 2 of the weekend build: in the last minute before the close the tries come every 20 seconds again (the last chances to
+    // get flat before the shares, already without their stops, are held overnight); after the close the waits count the tries since the close.
     const attemptsToday = this.closeoutAttemptDate === date ? this.closeoutAttempts : 0;
-    const retryMs = now < day.closeAt ? retryGapMs(CLOSEOUT_RETRY_MS, attemptsToday, 60_000) : retryGapMs(5 * 60_000, Math.max(1, attemptsToday), 15 * 60_000);
+    const lastMinute = now >= addMinutes(day.closeAt, -1);
+    const retryMs = now < day.closeAt ? (lastMinute ? CLOSEOUT_RETRY_MS : retryGapMs(CLOSEOUT_RETRY_MS, attemptsToday, 60_000)) : retryGapMs(5 * 60_000, Math.max(1, this.closeoutAttemptsAfterClose), 15 * 60_000);
     if (now >= addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !current.phases.closeout && !this.closingOut && now.getTime() - this.lastCloseoutAttempt >= retryMs) {
       this.lastCloseoutAttempt = now.getTime();
       if (this.closeoutAttemptDate !== date) {
         this.closeoutAttemptDate = date;
         this.closeoutAttempts = 0;
+        this.closeoutAttemptsAfterClose = 0;
       }
       const path = this.closeoutAttempts === 0 ? "close-out" : "retry";
       this.closeoutAttempts++;
+      if (now >= day.closeAt) this.closeoutAttemptsAfterClose++;
       this.background("closeout", () => this.closeoutPhase(date, now >= addMinutes(day.closeAt!, 30), day.closeAt, path));
     }
     if (now >= addMinutes(day.closeAt, 5) && current.phases.closeout && !current.phases.summary) {
@@ -1703,7 +1718,7 @@ export class Worker {
     if (this.middayNotFlatSince === null) this.middayNotFlatSince = this.d.now().getTime();
     if (this.middayAlertDate !== date) {
       this.middayAlertDate = date;
-      await this.say("alerts", `**Michael: the mid-day close-out is NOT FLAT yet: ${result.remaining.length > 0 ? result.remaining.join(", ") : "the positions could not be listed"}.** New entries stay paused. I keep trying every 20 seconds within 60 Alpaca requests a minute. No deploy until the account is flat.`, { mentionOwner: true });
+      await this.say("alerts", `**Michael: the mid-day close-out is NOT FLAT yet: ${result.remaining.length > 0 ? result.remaining.join(", ") : "the positions could not be listed"}.** New entries stay paused. I keep trying (20 seconds apart, longer while nothing sells, at most a minute) within 60 Alpaca requests a minute. No deploy until the account is flat.`, { mentionOwner: true });
     }
   }
 

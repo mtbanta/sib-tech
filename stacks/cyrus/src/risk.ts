@@ -181,6 +181,7 @@ export class SyncMemory {
   readonly timedOutEndedAt = new Map<string, number>();
   // Item 3 of 2026-11-13: the wait after a failed lookup of an entry missing from Alpaca's listing (per entry, doubling to a minute).
   readonly lookupFailDelay = new Map<string, number>();
+  readonly lookupFailUntil = new Map<string, number>();
   // Item 2 of 2026-11-13: per timed-out stop (client id), when its status is next checked, and when its cancel may next be sent again
   // while it is known open (on the stuck backoff's steps: 5, 10, 20, then every 30 seconds).
   // `probeFailed`: the last status check could not be read (the next one waits on the backoff).
@@ -190,6 +191,10 @@ export class SyncMemory {
   // Item 2 of 2026-11-13, second point: the start-up protection check (once per process, retried on a backoff until it succeeds), and the
   // timed-out stops written to the database (control key `timed_out_stops:<date>`) so a restart keeps them.
   startupChecked = false;
+  // Group 1, round 2 of the weekend build: the stored list and Alpaca's check are done separately (a database down at a restart does not
+  // stop the check of Alpaca), and the stored list is never written before it has been read (it would be overwritten).
+  storedLoaded = false;
+  alpacaChecked = false;
   startupCheckAt = 0;
   startupDelayMs = 0;
   timedOutDirty = false;
@@ -210,45 +215,68 @@ const FAR_PAST_ISO = "2000-01-01T00:00:00Z";
 // entry's fresh stop; one Alpaca shows pending cancel is a timed-out stop (the B path: its cancel waited for, then the shares sold). Only a
 // symbol held by one open entry is checked (a fresh stop is placed only then, so the entry is known); a working stop covering part of the
 // holding is left as it is. Any later read showing a fresh stop working (the sync's list, the sale's own read) confirms it too, and a stop
-// pending cancel never counts as protection (syncOrders). A failure is retried on the backoff.
+// pending cancel does not count as a working sell in the sync's walk (syncOrders). A failure is retried on the backoff; the stored list
+// and Alpaca's check are done separately, and each is tried until it succeeds.
 async function startupProtectionCheck(d: RiskDeps, mem: SyncMemory, tradeDate: string, positions: readonly { symbol: string; qty: number }[], latestPerSymbol: ReadonlyMap<string, OrderRecord>, openEntries: ReadonlyMap<string, number>, nowMs: number): Promise<void> {
   if (mem.startupChecked || nowMs < mem.startupCheckAt) return;
-  try {
-    const stored = await d.store.getControl<{ stops?: Array<[string, string]> }>(timedOutStopsKey(tradeDate));
-    for (const [stop, entry] of stored?.stops ?? []) if (!mem.timedOutStops.has(stop)) mem.timedOutStops.set(stop, entry);
-    const open = await d.broker.listOrdersPaged("open", FAR_PAST_ISO, 5);
-    if (!open.complete) throw new Error("the list of open orders is longer than I can read");
-    let added = 0;
-    for (const p of positions) {
-      const entry = latestPerSymbol.get(p.symbol);
-      if (!entry || (openEntries.get(p.symbol) ?? 0) !== 1) continue;
-      for (const x of open.orders.filter((o) => o.symbol === p.symbol && o.side === "sell" && o.clientOrderId.startsWith("cyrus-p-"))) {
-        if (mem.timedOutStops.has(x.clientOrderId)) continue;
-        const covers = x.qty - x.filledQty >= p.qty - 1e-9;
-        const working = x.status !== "pending_cancel";
-        if (working && covers && !mem.freshStops.has(entry.clientOrderId)) {
-          mem.freshStops.set(entry.clientOrderId, { symbol: p.symbol, entryClientOrderId: entry.clientOrderId, stopClientOrderId: x.clientOrderId, orderId: x.id, qty: x.qty - x.filledQty, stopPrice: x.stopPrice ?? 0, placedAt: nowMs, status: x.status, lookedAt: nowMs });
-          d.log?.("startup_fresh_stop_confirmed", { symbol: p.symbol, clientOrderId: entry.clientOrderId, stopClientOrderId: x.clientOrderId, status: x.status });
-        } else if (!working) {
-          mem.timedOutStops.set(x.clientOrderId, entry.clientOrderId);
-          added++;
-          d.log?.("startup_fresh_stop_unconfirmed", { symbol: p.symbol, clientOrderId: entry.clientOrderId, stopClientOrderId: x.clientOrderId, status: x.status, coversHolding: covers });
+  let failed: string | null = null;
+  let storedCount = 0;
+  let added = 0;
+  if (!mem.storedLoaded) {
+    try {
+      const stored = await d.store.getControl<{ stops?: Array<[string, string]> }>(timedOutStopsKey(tradeDate));
+      for (const [stop, entry] of stored?.stops ?? []) {
+        if (!mem.timedOutStops.has(stop)) mem.timedOutStops.set(stop, entry);
+        // A timed-out stop the sale re-adopted before this read is not protection (ruling B: never taken as protection again).
+        for (const [e, f] of [...mem.freshStops]) if (f.stopClientOrderId === stop) mem.freshStops.delete(e);
+      }
+      storedCount = stored?.stops?.length ?? 0;
+      mem.storedLoaded = true;
+      if (mem.timedOutStops.size > storedCount) mem.timedOutDirty = true; // stops timed out before the read are written with the loaded ones
+    } catch (err) {
+      failed = `stored list: ${(err as Error).message.slice(0, 120)}`;
+    }
+  }
+  if (!mem.alpacaChecked) {
+    try {
+      const open = await d.broker.listOrdersPaged("open", FAR_PAST_ISO, 5);
+      if (!open.complete) throw new Error("the list of open orders is longer than I can read");
+      for (const p of positions) {
+        const entry = latestPerSymbol.get(p.symbol);
+        if (!entry || (openEntries.get(p.symbol) ?? 0) !== 1) continue;
+        for (const x of open.orders.filter((o) => o.symbol === p.symbol && o.side === "sell" && o.clientOrderId.startsWith("cyrus-p-"))) {
+          if (mem.timedOutStops.has(x.clientOrderId)) continue;
+          const covers = x.qty - x.filledQty >= p.qty - 1e-9;
+          const working = x.status !== "pending_cancel";
+          if (working && covers && !mem.freshStops.has(entry.clientOrderId)) {
+            mem.freshStops.set(entry.clientOrderId, { symbol: p.symbol, entryClientOrderId: entry.clientOrderId, stopClientOrderId: x.clientOrderId, orderId: x.id, qty: x.qty - x.filledQty, stopPrice: x.stopPrice ?? 0, placedAt: nowMs, status: x.status, lookedAt: nowMs });
+            d.log?.("startup_fresh_stop_confirmed", { symbol: p.symbol, clientOrderId: entry.clientOrderId, stopClientOrderId: x.clientOrderId, status: x.status });
+          } else if (!working) {
+            mem.timedOutStops.set(x.clientOrderId, entry.clientOrderId);
+            added++;
+            d.log?.("startup_fresh_stop_unconfirmed", { symbol: p.symbol, clientOrderId: entry.clientOrderId, stopClientOrderId: x.clientOrderId, status: x.status, coversHolding: covers });
+          }
         }
       }
+      if (added > 0) mem.timedOutDirty = true;
+      mem.alpacaChecked = true;
+    } catch (err) {
+      failed = `${failed ? `${failed}; ` : ""}Alpaca: ${(err as Error).message.slice(0, 120)}`;
     }
-    if (added > 0) mem.timedOutDirty = true;
-    mem.startupChecked = true;
-    d.log?.("startup_protection_check", { positions: positions.length, storedTimedOut: stored?.stops?.length ?? 0, unconfirmed: added });
-  } catch (err) {
-    mem.startupDelayMs = mem.startupDelayMs > 0 ? Math.min(mem.startupDelayMs * 2, START_RETRY_MAX_MS) : START_RETRY_FIRST_MS;
-    mem.startupCheckAt = nowMs + mem.startupDelayMs;
-    d.log?.("startup_protection_check_failed", { error: (err as Error).message.slice(0, 160), retryInMs: mem.startupDelayMs });
   }
+  if (failed === null) {
+    mem.startupChecked = true;
+    d.log?.("startup_protection_check", { positions: positions.length, storedTimedOut: storedCount, unconfirmed: added });
+    return;
+  }
+  mem.startupDelayMs = mem.startupDelayMs > 0 ? Math.min(mem.startupDelayMs * 2, START_RETRY_MAX_MS) : START_RETRY_FIRST_MS;
+  mem.startupCheckAt = nowMs + mem.startupDelayMs;
+  d.log?.("startup_protection_check_failed", { error: failed, retryInMs: mem.startupDelayMs, storedLoaded: mem.storedLoaded, alpacaChecked: mem.alpacaChecked });
 }
 
 // Item 2 of 2026-11-13: today's timed-out stops written to the database when they change; a failed write is retried on the backoff.
 async function persistTimedOutStops(d: RiskDeps, mem: SyncMemory, tradeDate: string, nowMs: number): Promise<void> {
-  if (!mem.timedOutDirty || nowMs < mem.persistAt) return;
+  if (!mem.timedOutDirty || nowMs < mem.persistAt || !mem.storedLoaded) return;
   try {
     await d.store.setControl(timedOutStopsKey(tradeDate), { stops: [...mem.timedOutStops] });
     mem.timedOutDirty = false;
@@ -514,6 +542,8 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     const age = s.createdAt ? nowMs - new Date(s.createdAt).getTime() : Infinity;
     if (!(s.status === "submitted" || s.status === "filled" || (s.status === "intent" && age > MISSING_INTENT_AGE_MS))) continue;
     if ((mem.notFoundUntil.get(s.clientOrderId) ?? 0) > nowMs) continue;
+    // A failed lookup's wait (item 3 of 2026-11-13) does not hold back an entry a live update has just flagged.
+    if ((mem.lookupFailUntil.get(s.clientOrderId) ?? 0) > nowMs && !mem.mustLook.has(s.clientOrderId)) continue;
     lookups++;
     mem.mustLook.delete(s.clientOrderId);
     try {
@@ -528,7 +558,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       // Item 3 of 2026-11-13 (Michael's retry rule): a lookup that failed waits 10 seconds, doubling to 60, before it is tried again.
       const delay = Math.min((mem.lookupFailDelay.get(s.clientOrderId) ?? 5_000) * 2, MISSING_RETRY_MS);
       mem.lookupFailDelay.set(s.clientOrderId, delay);
-      mem.notFoundUntil.set(s.clientOrderId, nowMs + delay);
+      mem.lookupFailUntil.set(s.clientOrderId, nowMs + delay);
       d.log?.("order_lookup_failed", { clientOrderId: s.clientOrderId, error: (err as Error).message.slice(0, 120), retryInMs: delay });
     }
   }
@@ -565,7 +595,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     const prev = latestPerSymbol.get(s.symbol);
     if (!prev || (s.createdAt ?? "") > (prev.createdAt ?? "") || ((s.createdAt ?? "") === (prev.createdAt ?? "") && s.clientOrderId > prev.clientOrderId)) latestPerSymbol.set(s.symbol, s);
   }
-  // Item 2 of 2026-11-13: the start-up protection check (ruling B on), and until it has succeeded no fresh stop counts as protection.
+  // Item 2 of 2026-11-13: the start-up protection check (ruling B on), once per process until it has succeeded.
   if (FRESH_STOP_LIMIT.on) {
     const openEntries = new Map<string, number>();
     for (const s of active) openEntries.set(s.symbol, (openEntries.get(s.symbol) ?? 0) + 1);
