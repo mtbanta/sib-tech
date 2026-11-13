@@ -322,8 +322,8 @@ test("fix (a), round 1 (group 2's note): a timer replaced by an earlier one drop
 });
 
 // Group 1, fix (a) round 1 (B1): an older recheck's own timer R1 is still pending when the regular pass runs. Since fix (a) round 1 that
-// pass cancels R1 itself (before, a newer recheck could land on R1 and R1 lost its own mark (before, the mark was lost and R1's sync ran uncharged: 47 and 52
-// real requests in the minute against 40). Group 1's probe, kept as a test: the older timer injected, 415 ms per read so the syncs take time.
+// pass cancels R1 itself. Before, a newer recheck could land on R1, R1 lost its own mark, and R1's sync ran uncharged: 47 and 52 real
+// requests in the minute against 40. Group 1's probe, kept as a test: the older timer injected, 415 ms per read so the syncs take time.
 async function olderOwn(PRE: number, N: number, lagMs: number, LAT: number, r1Off: number | null) {
   const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
   const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, bot: new FakeBot(), orderStream: true });
@@ -520,7 +520,7 @@ test("fix (a), round 2 (group 1): when the pass's sync fails (the order list rea
     const retry = sells.filter((x) => x > 5_000)[0];
     rows.push(`pass ${off} ms from due: retry due +${due - t0}, ran +${retry}`);
     assert.equal(armed, false, "the pass's sync failed");
-    assert.ok(retry !== undefined && retry - (due - t0) <= 350, rows[rows.length - 1]!);
+    assert.ok(retry !== undefined && retry - (due - t0) >= 250 && retry - (due - t0) <= 350, rows[rows.length - 1]!); // the timer's 250 ms slack kept
   }
   console.log("MEASURE failed pass sync\n" + rows.join("\n"));
 });
@@ -591,4 +591,56 @@ test("fix (a), round 2 (group 1): the time put back after a failed pass sync is 
   assert.equal(wk.eventSyncAt, due1, "the cancelled time is back");
   assert.equal(wk.recheckTimerAt, due1, "as the recheck's own timer");
   wk.stop?.();
+});
+
+// Group 2, fix (a) round 3: the restore after a failed pass sync is bounded. With Alpaca's order list failing for 30 s and a recheck
+// pending, the real code makes one more failing sync than before the restore (group 2 measured 4 failed syncs against 3); a variant whose
+// restored timer restores itself again failed every 100 ms (263 to 286 failed reads). Group 2's outage probe, kept as a test.
+test("fix (a), round 3 (group 2): with Alpaca's order list failing for 30 s, the restore adds at most one failing sync per pass (no retry every 100 ms)", async () => {
+  const rows: string[] = [];
+  for (const kind of ["stuck", "lag"] as const) {
+    for (const off of [-4_000, -300, 100]) {
+      const { sim, r } = await armedDay(true);
+      const wk: any = r.worker;
+      const mem = wk.syncMemory;
+      const id = clientOrderIdFor(D, "GE", 1);
+      await sim.submitEntry({ symbol: "GE", qty: 5, stopPrice: 11.87, takeProfitPrice: 12.08, referencePrice: 12, clientOrderId: id });
+      sim.fillEntry(id, 12);
+      await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "GE", qty: 5, referencePrice: 12, stopPrice: 11.87, takeProfitPrice: 12.08, status: "filled", alpacaOrderId: null, filledQty: 5, filledAvgPrice: 12, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+      await r.at("14:30:10");
+      const t0 = sim.simMs + 100;
+      r.setNow(iso(t0));
+      if (kind === "stuck") {
+        sim.refuseStops = true;
+        sim.refuseSellIf = (s: any) => s.symbol === "GE";
+        sim.partialTakeProfit(id, 1, 12.08);
+      } else {
+        sim.partialTakeProfitListLag(id, 1, 12.08, 15_000);
+        mem.liveStopCancelled.set(id, t0);
+        mem.mustLook.add(id);
+      }
+      wk.syncAt(t0, 0);
+      r.setNow(iso(t0 + 1));
+      await settle();
+      await settle();
+      await settle();
+      const due = kind === "stuck" ? (mem.stuck.get(id)?.nextAt ?? wk.syncRecheckAt) : (wk.syncRecheckAt ?? t0 + 9_000);
+      const P = due + off;
+      if (off < 0) wk.lastSync = P - 10_000;
+      let fails = 0;
+      const realList = (sim as any).listOrdersPaged.bind(sim);
+      (sim as any).listOrdersPaged = async (...a: any[]) => {
+        if (sim.simMs >= P && sim.simMs < P + 30_000) {
+          fails++;
+          throw new Error("order list read failed (test)");
+        }
+        return realList(...a);
+      };
+      await driveTo(r, sim, P, P + 45_000);
+      wk.stop?.();
+      rows.push(`${kind}, pass ${off} ms from due: ${fails} failed order list reads in the 30 s outage`);
+      assert.ok(fails >= 1 && fails <= 12, rows[rows.length - 1]!);
+    }
+  }
+  console.log("MEASURE 30 s outage\n" + rows.join("\n"));
 });

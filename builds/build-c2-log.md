@@ -5412,8 +5412,10 @@ Measured by group 1 in the simulator: a stuck sale's retry came 5.75 s late (pas
 
 **Fix (`src/worker.ts`):**
 - The pass passes the time it cancelled to its sync (`restoreAt`).
-- If that sync throws before `syncOrders` returns (including the loss stop's read before it), the time is put back once as the recheck's own timer: `syncRecheckAt` if empty, `syncAt(restoreAt)`, and the mark. It fires at once if already past.
-- A sync started by that timer carries no `restoreAt`, so a failure there puts nothing back: at most one restore per pass, every 5 s. That is no new retry loop (rule 6).
+- If that sync throws before `syncOrders` returns (including the loss stop's read before it), the time is put back once as the recheck's own timer: `syncRecheckAt` if empty, `syncAt(restoreAt)`, and the mark. `syncAt` keeps its 250 ms slack (at least 100 ms from now), so the retry in the tests ran at due + 250.
+- A sync started by that timer carries no `restoreAt`, so a failure there puts nothing back. **Measured (group 2, fix (a) round 3; now a test):** with Alpaca's order list failing for 30 s and a recheck pending, the real code made 4 failing syncs against 3 at `53e367c` (one more per outage), and 3 against 3 with no recheck pending. A variant whose restored timer restored itself again failed every 100 ms (263 to 286 failed reads), which is why the test exists. Rule 6 holds: at most one restore per pass cancel.
+- So a failed pass sync now leads to one more failing sync and one more `background_failed` log row per outage. In the lag cases that row comes 150 to 750 ms after the first, a near-duplicate. The Discord alert is not doubled, because `Worker.background` sends at most one per step every 5 minutes.
+- **Measured (group 2):** the restored timer's sync sets `lastSync` even when it fails, so after a 30 s outage the regular rhythm shifts one pass later. The first good sync and the stuck sale's next retry came 5 s later than at `53e367c` (for example +44 501 against +39 501), within one regular gap.
 - The follow-ups are unchanged: the restored timer's sync runs them when it succeeds.
 
 **New tests (`test/weekend-r8.test.ts`, group 1's Q5 and Q6 kept as tests; each fails on its mutant):**
@@ -5426,3 +5428,20 @@ Measured by group 1 in the simulator: a stuck sale's retry came 5.75 s late (pas
 - These mutants survive: F6, F7, F10, F12, F13, K6, K7, K8 and K9. F13 is equivalent through the real paths. K8 means the regular branch's charge give-back is untested, the safe direction.
 
 Full suite 737 of 737. Type check clean.
+
+### Fix (a), round 3 (7051f5e): group 2 CHANGES REQUIRED (the rule 6 statement and a test), and fixes
+
+**Group 2, fix (a) round 3:**
+1. "At most one restore per pass" was not labelled, and no test guarded it. A variant with no "once" bound passed every test while retrying every 100 ms.
+   - The statement is now labelled measured, with group 2's figures (above).
+   - A new test runs a 30 s order list outage with a stuck sale or a lagging remainder, at three pass timings. It measured 4 failed reads in each case and allows at most 12; it fails on the variant.
+   - The log now notes the extra `background_failed` row and the 5 s shift of the first good sync after an outage.
+
+**Non-blocking notes, done:**
+- The failed-sync test now asserts the retry keeps the timer's 250 ms slack (at least due + 250). The variant "restore with 0 slack" now fails it.
+- The garbled comment in the older-timer test is rewritten.
+- "It fires at once if already past" is replaced with what `syncAt` does.
+- **Two readings of "mark whatever is pending", reconciled:** group 1 measured request counts, where it only lets the pass cancel a timer (no extra requests). Group 2 measured protection timing, where the timer it cancels can be a live update's, whose sync then never runs. The second is why it is not acceptable, and the live-timer test fails on it.
+- **The proposal's credit for 67** now uses the section's own heading, "(items 2 point 2, 3 and 4)".
+
+**Kept:** the variant "no `syncRecheckAt` on restore" (NOSRA) still passes every test. The restored timer still fires, so the restored recheck still runs; only the pass's recheck-due branch loses sight of it.
