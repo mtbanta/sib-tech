@@ -49,6 +49,17 @@ export const STORED_INFO_EVENTS = new Set([
   "load_afternoon",
   "afternoon_closeout",
   "screen_not_tradable",
+  // Item 2 of 2026-11-13 (group 2, round 1 of the weekend build): the timed-out stop's status checks and end, a try cut short for lack of
+  // room in the request allowance, and the start-up protection check (rare, bounded by the allowance).
+  "fresh_stop_timeout_check",
+  "fresh_stop_timeout_ended",
+  "timed_out_try_out_of_room",
+  "liquidation_budget_out",
+  "startup_protection_check",
+  "startup_protection_check_failed",
+  "startup_fresh_stop_confirmed",
+  "startup_fresh_stop_unconfirmed",
+  "timed_out_stops_save_failed",
   // Item 4 of 2026-11-13: the morning screen's duration (now at 8:15 AM, 10 minutes before "Armed").
   "screen_done",
   // Group 2, round 1 (rare, part of the day's story): the afternoon window's failures and cancels.

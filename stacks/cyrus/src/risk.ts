@@ -812,7 +812,7 @@ async function escalateIfDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string
     seen = " Alpaca's order list now shows its fresh stop (not confirmed in time) ended.";
   } else if (noted) {
     const cancel = noted.cancel === "pending" ? "Alpaca showed it pending cancel" : noted.cancel === "refused" ? "Alpaca did not accept my last cancel of it" : noted.cancel === "accepted" || mem.timedOutCancelAccepted.has(noted.stopClientOrderId) ? "Alpaca had accepted my cancel of it but still showed it working" : "my cancel of it had not taken effect";
-    seen = ` At my last try its fresh stop (not confirmed in time) was still resting at Alpaca; ${cancel}.`;
+    seen = ` At my last check its fresh stop (not confirmed in time) was still resting at Alpaca; ${cancel}.`;
   }
   const what = st.protecting ? "protect or sell it" : "sell it";
   await d.say("alerts", `**Michael: I can't confirm a protective stop for ${st.symbol} after ${minutes}, and I have not been able to ${what} yet** (${st.why || "still held"}).${seen} I am checking, and I will sell it if it is still unconfirmed. Please check ${st.symbol} in Alpaca's dashboard and close it there if needed. I keep trying.`, { mentionOwner: true });
@@ -883,7 +883,7 @@ async function timedOutWait(d: RiskDeps, mem: SyncMemory, s: OrderRecord, listed
           // The lookup by client id failed: Alpaca's open orders are the second way (one more request, charged; as at the 15 second
           // limit). Not among them: taken as ended, and the sale is tried (it never sells shares a working stop holds, sells.ts).
           d.log?.("fresh_stop_lookup_failed", { symbol: s.symbol, stopClientOrderId: stop, by: "status check", error: (err as Error).message.slice(0, 120) });
-          if (!budget.take(1)) throw err;
+          if (!budget.take(1)) throw new Error(`${(err as Error).message.slice(0, 80)}; the open orders were not read (no room in the request allowance)`);
           const x = (await d.broker.listOrders("open")).find((y) => y.clientOrderId === stop);
           status = x ? x.status : "not in Alpaca's open orders";
           orderId = x?.id;
@@ -970,7 +970,7 @@ async function freshStopTimeout(d: RiskDeps, day: DayRecord, mem: SyncMemory, s:
     st.alerted = true;
     st.why = "its fresh protective stop was not confirmed within 15 seconds";
     mem.stuck.set(s.clientOrderId, st);
-    const what = cancelId ? "I am cancelling that stop and selling" : found === "lookup failed" || found.startsWith("not looked up") ? "Alpaca could not be asked about that stop, so I am selling" : "Alpaca does not hold that stop open, so I am selling";
+    const what = cancelId ? "I am cancelling that stop and selling" : found === "lookup failed" || found.startsWith("not looked up") ? "Alpaca could not be asked about that stop, so I am selling" : "Alpaca told me it does not hold that stop open, so I am selling";
     await d.say("alerts", `**Michael: ${s.symbol}'s fresh protective stop for ${plural(left, "share")} was not confirmed within 15 seconds, so I treat ${left === 1 ? "it" : "them"} as unprotected.** ${what} ${left === 1 ? "it" : "them"} now, and will post again when ${left === 1 ? "it is" : "they are"} sold or gone.`, { mentionOwner: true });
   }
   return cleanupSale(d, day, mem, s, o, "missing", undefined, cancelId ? { alsoCancel: [cancelId], alsoCancelStops: [f.stopClientOrderId], alsoCancelBy: "15 second limit" } : {});
@@ -1047,7 +1047,9 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   // A5: nothing is cancelled by the fast sale (the exits are Alpaca's to cancel, or to keep).
   // Ruling B of 2026-11-12: `alsoCancel`, a fresh stop that was not confirmed in time (cancelled here, and never counted as protection).
   const cancelIds = extra.fast ? [] : [...flattenLegs(o).filter((l) => l.side === "sell" && OPEN_STATUSES.has(l.status)).map((l) => l.id), ...(extra.alsoCancel ?? [])];
-  const reason = kind === "missing" ? "no live protective stop" : "stop cancelled after a partial take-profit";
+  // Michael's decision 2 of 2026-11-13 (group 2, round 1 of the weekend build): this reason reaches Discord in the sell gate's refusal
+  // alert, so it says only what the stack knows. Nothing branches on it.
+  const reason = kind === "missing" ? "protective stop not confirmed" : "stop cancelled after a partial take-profit";
   // Fix C of 2026-11-10: the client ids of this entry's sales, for the closing line when a sale is not seen filled yet.
   const saleIds: string[] = [];
   let firstSaleAt: number | null = null;
@@ -1319,7 +1321,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     const it = left === 1 ? "it" : "them";
     const tail = protecting ? `I keep trying and will post again when ${left === 1 ? "it has" : "they have"} a stop, ${left === 1 ? "is" : "are"} sold, or ${left === 1 ? "is" : "are"} gone.` : `I keep trying and will post again when ${left === 1 ? "it is" : "they are"} sold or gone.`;
     // Michael's decision 2 of 2026-11-13 (10:15 AM), messaging only: what the stack knows, true whether or not a stop rests at Alpaca.
-    await d.say("alerts", `**Michael: I can't confirm a protective stop for ${s.symbol}'s ${plural(left, "share")} (since ${centralClock(lostAt)}), and I could not ${protecting ? "protect or sell" : "sell"} ${it} yet** (${how}; ${why}). I am checking, and I will sell ${it} if still unconfirmed. ${tail}`, { mentionOwner: true });
+    await d.say("alerts", `**Michael: I can't confirm a protective stop for ${s.symbol}'s ${plural(left, "share")} (since ${centralClock(lostAt)}), and I could not ${protecting ? "protect or sell" : "sell"} ${it} yet** (${how}; ${why}). I am checking, and I will ${protecting ? "protect or sell" : "sell"} ${it} if still unconfirmed. ${tail}`, { mentionOwner: true });
     // Group 2, round 6 (messaging only): not after a try whose last look failed (it has no view of the stop); the next sync's own
     // escalation, which has the order list, decides then.
   } else if (r.lastLookOk === true) await escalateIfDue(d, mem, s.clientOrderId, r.heldAfter?.[s.symbol]); // messaging only: the holding this sale last saw, read only
