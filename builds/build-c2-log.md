@@ -4422,3 +4422,13 @@ Work on decision 1 started 9:13 AM Central on branch `release-2026-11-13-b` (fro
     - clear the mark on any later unexplained hold.
   - **Non-blocking, outside ruling B and probably on v21 too:** a fresh stop that Alpaca first reports unknown, then shows later (including after a restart), can get the false "no protective stop". This happened in 13 of 1500 standard runs, identically on b25de18, 3bc494e and 09eef3b.
 - **Outcome under Michael's decision 1 of 2026-11-13 (morning):** B failed group 2's last allowed round, so it does not deploy, neither at mid-day nor after the close. Fly keeps v21 (B off). Branch `release-2026-11-13-b` at 09eef3b stays unmerged. A further fix and rounds need Michael's approval.
+
+## Michael's decisions of 2026-11-13 (about 10:15 AM, after ruling B's round 9), saved verbatim
+
+> Decisions:
+> 1. Yes: tonight's build carries B's last fix with B switched on, together with items 2 to 4.
+> 2. Fix the alert wording at its root: the "no protective stop" alert (with B on and on v21) says only what the stack knows, e.g. "I can't confirm a protective stop for X; checking, and I will sell if still unconfirmed." It must be true whether or not a stop rests at Alpaca. This covers round 9's case and the v21 false alert (13 of 1,500 runs).
+> 3. Weekend standing approval: keep fixing and reviewing without asking me for each round, up to 8 more rounds per group, scope limited to B, items 2 to 4, and fixes for findings about them. Stop and ask only if a fix goes beyond that scope, a finding needs a decision on limits, accounts, paid plans or real money, or the same finding returns after two fixes. Deploy before 7:30 AM Monday only if group 1 and group 2 pass; post the "live" line.
+> Never print any token or key.
+
+The weekend build runs on branch `release-weekend-2026-11-16`, from `release-2026-11-13-b` (09eef3b plus logs, main merged in). Review rounds for this build are numbered 1 to 8 per group (Michael's decision 3).
