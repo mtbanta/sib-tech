@@ -5684,3 +5684,17 @@ Paper only. Research input for a human decision.
 > Never print any token or key.
 
 The redesign runs on branch `redesign-2026-11-14`, from `main` at `9155216` (Fly runs v22, code of `b1bd65c`). The design is `builds/c2-redesign-2026-11-14.md`. Nothing under `stacks/cyrus/src` changes until Michael approves it.
+
+## Michael's approval of the redesign (2026-11-14, about 5:00 PM), saved verbatim
+
+> Design approved with two changes:
+> A. The reserve exists for safety work. P1 tries (sales of shares without a confirmed stop, close-out retries, loss-stop re-sells) may go below the reserve of 80, down to a floor of 20. P2 tries (rechecks, lookups) stop at 80. This changes behaviour items 7 and 10 and decision 5.
+> B. The 2:55 close-out retry is budgeted, but from 2:58 PM Central it is never refused, so the account always gets flat before the close.
+> Decisions: 1) 60 a minute and 15 in any 5 seconds; 2) P1 before P2 with 20 kept for P1; 3) confirmed, no give-back; 4) first tries counted, never refused; 5) as in A; 6) all retries join, with B; 7) go live, v22 as the fallback; 8) budget first, loop second; 9) behaviour items 1 to 9 and 11 approved, with 7 and 10 changed by A and B.
+> Build with tests, group 1 and group 2 reviews, up to 8 rounds each this weekend. Log-only findings do not block. Deploy not before v22 has traded Monday morning: at the mid-day pause with my written yes in commands, otherwise Monday night.
+> Never print any token or key.
+
+Builder's reading of A and B, recorded in the design (`builds/c2-redesign-2026-11-14.md`, section 10, "As approved"):
+- P1 tries start only while Alpaca's remaining stays at or above 20 after the try; P2 tries at or above 80. Entries are unchanged (refused below 81). Decision 5's give-way rule (entries give way while a budgeted try waits on its floor) is kept for P2 only: a P1 try's floor of 20 is below the entries' 80, so entries never hold a P1 try back.
+- The 2:55 close-out's retry reserves against the minute like the other close-out retries until 2:58 PM Central; from 2:58 PM Central it is counted but never refused.
+- Review rounds for this build are numbered "redesign part 1, round n" and "redesign part 2, round n", up to 8 per group per part.
