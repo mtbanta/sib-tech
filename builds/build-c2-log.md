@@ -5671,3 +5671,16 @@ Paper only. Research input for a human decision.
 - **Discord since the close:** `commands` has the evening limits post for Monday (3:10 PM), the designed start note ("Worker started at 6:40 PM CT (paper): new release ...: a deploy"), and the "live" line. Nothing in `alerts`, so no Healthchecks down alert. There is no repeated limits post or summary.
 - **Monday 2026-11-16's day record:** status `pending`, with nothing decided yet. The suggested limits carry over from Friday: largest position 250 dollars, daily loss stop 500 dollars, 100 orders a minute, borrowing cap 1. The restart did not change it.
 - **Alpaca paper:** 0 positions and 0 open orders after the deploy.
+
+## Michael's request of 2026-11-14 (Saturday, about 4:30 PM): the redesign, saved verbatim
+
+> Read CLAUDE.md, PROJECT_STATE.md, the latest sections of builds/build-c2-log.md and builds/c2-proposal-shared-request-budget.md. Confirm in two lines you are caught up.
+>
+> Priority: finish this redesign this weekend, so the real trading strategy can follow. On its own branch:
+> 1. Turn the shared request budget proposal into a full design: one budget that every retry, recheck and safety sale draws from, and one event-driven loop that owns each position's protection (stop placed, confirmed, missing, replaced, sold), replacing the per-feature timers and allowances. Show what it removes, the request math at 150 orders a minute, and how each of this week's findings would be handled. Keep every standing rule in CLAUDE.md (retry limits and backoff, the sell-path checks, the deploy rules).
+> 2. Bring me the design for approval before building.
+> 3. After approval: build with tests, group 1 and group 2 reviews, up to 8 rounds each, using all the time available this weekend. Log-only findings do not block.
+> 4. Deploy: not before v22 has traded Monday morning. Target the Monday mid-day pause, with my written yes in commands, so the afternoon runs the redesign. Otherwise Monday night.
+> Never print any token or key.
+
+The redesign runs on branch `redesign-2026-11-14`, from `main` at `9155216` (Fly runs v22, code of `b1bd65c`). The design is `builds/c2-redesign-2026-11-14.md`. Nothing under `stacks/cyrus/src` changes until Michael approves it.
