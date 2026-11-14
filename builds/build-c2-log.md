@@ -5665,3 +5665,9 @@ Round numbering: fix (a) round 8 is the final round on `b1bd65c`; up to 3 more p
 - **"Live" line:** posted in `commands` (HTTP 200), saying what shipped.
 
 Paper only. Research input for a human decision.
+
+**Checks after the deploy (read-only, Friday 2026-11-13, about 6:55 PM CT):**
+- **Fly logs since 00:40 UTC:** the machine restarted on v22 and logged `worker_started` (`deploy: true`) at 00:40:34. The only warning is Fly's own network-interface notice at machine start ("could not enable checksum offload"). No error lines.
+- **Discord since the close:** `commands` has the evening limits post for Monday (3:10 PM), the designed start note ("Worker started at 6:40 PM CT (paper): new release ...: a deploy"), and the "live" line. Nothing in `alerts`, so no Healthchecks down alert. There is no repeated limits post or summary.
+- **Monday 2026-11-16's day record:** status `pending`, with nothing decided yet. The suggested limits carry over from Friday: largest position 250 dollars, daily loss stop 500 dollars, 100 orders a minute, borrowing cap 1. The restart did not change it.
+- **Alpaca paper:** 0 positions and 0 open orders after the deploy.
