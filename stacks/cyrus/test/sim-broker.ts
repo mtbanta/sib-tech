@@ -9,6 +9,7 @@
 // Time here is the simulation's own counter (`simMs`), moved by `sleep()` and `advance()`, not the test's wall clock.
 import { AlpacaError, type Account, type AccountConfig, type CalendarDay, type Clock, type EntryOrder, type Order, type Position, type SellOrder } from "../src/alpaca-trading.ts";
 import type { FullBroker } from "../src/broker.ts";
+import { chargeFromScope } from "../src/request-scope.ts";
 import { order } from "./helpers.ts";
 
 const OPEN = new Set(["new", "accepted", "pending_new", "partially_filled", "held", "pending_cancel"]);
@@ -54,6 +55,8 @@ export class SimBroker implements FullBroker {
   oversellAttempts = 0;
   sellLog: Array<{ symbol: string; qty: number; at: number }> = [];
   onRate: ((remaining: number) => void) | null = null;
+  // The redesign of 2026-11-14, part 1: told about every request as it is sent (the budget's per-tag statistics), like the real client.
+  onSend: ((path: string) => void) | null = null;
   private positionsMap = new Map<string, { qty: number; avg: number }>();
   private n = 0;
   constructor(startMs = 0) {
@@ -104,6 +107,9 @@ export class SimBroker implements FullBroker {
   private spend(kind: "read" | "safety" | "plain" = "read") {
     const attempts = kind === "plain" ? 1 : kind === "read" ? 3 : 8;
     for (let i = 0; i < attempts; i++) {
+      // Like the real client: every attempt is charged to the reservation of the scope it is made in.
+      chargeFromScope("/v2/sim");
+      this.onSend?.("/v2/sim");
       this.requests++;
       if (!this.bucketOn || this.tokens >= 1) {
         if (this.bucketOn) this.tokens -= 1;

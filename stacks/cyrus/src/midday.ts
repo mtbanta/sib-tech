@@ -14,9 +14,12 @@ export const MIDDAY_RESUME_UNTIL_MINUTES_AFTER_OPEN = 300;
 // The mid-day close-out never starts from this long before the close (the regular close-out's time; it takes over).
 export const MIDDAY_NOT_AFTER_MINUTES_BEFORE_CLOSE = 5;
 // A try that ends not flat is tried again at most this often (Michael's ruling of 2026-11-09: "Keep trying every 20 seconds, but only
-// within 60 Alpaca requests a minute (like the loss stop's retry), never below the reserve of 80").
+// within 60 Alpaca requests a minute (like the loss stop's retry), never below the reserve of 80"). Since the redesign of 2026-11-14
+// (part 1, Michael's approval with his change A) a retry is class P1 of the shared request budget (request-budget.ts): it reserves its
+// estimated cost (the last try's measured cost, at most CLOSEOUT_RETRY_MOST) against the budget's minute only (a close-out retry cannot
+// fit 15 in 5 seconds), down to 20 of Alpaca's remaining.
 export const MIDDAY_RETRY_MS = 20_000;
-export const MIDDAY_RETRY_REQUESTS_PER_MINUTE = 60;
+export const CLOSEOUT_RETRY_MOST = 60;
 // At most this many positions a retry (builder's choice, like the loss stop's retry cap of 15 requests a check): one round with 40
 // positions whose sales are refused costs about 130 requests (each refused sale reads the account again), so the retries sell a few
 // positions each, in turn, to stay inside 60 a minute.
@@ -143,31 +146,6 @@ export function blockedNext(o: { stop: { on: boolean; reason: string } | null; n
   if (o.stop?.on) return before ? `The stop flag is on: send \`resume\` to trade again before the ${before} pause; after the mid-day close-out, \`go\` resumes trading.` : "The stop flag is on: send `resume`, then `go`.";
   if (o.now >= o.lastEntryAt) return `No entries are left today (last entry ${centralClock(o.lastEntryAt)}).`;
   return null;
-}
-
-// The retries' request budget: a copy of the loss stop's (risk.ts, LossStopBudget), 60 requests in any 60 seconds.
-export class MiddayBudget {
-  private times: number[] = [];
-  private readonly perMinute: number;
-  constructor(perMinute = MIDDAY_RETRY_REQUESTS_PER_MINUTE) {
-    this.perMinute = perMinute;
-  }
-  used(nowMs: number): number {
-    this.times = this.times.filter((t) => nowMs - t < 60_000);
-    return this.times.length;
-  }
-  room(nowMs: number): number {
-    return this.perMinute - this.used(nowMs);
-  }
-  spend(nowMs: number, n = 1): void {
-    for (let i = 0; i < n; i++) this.times.push(nowMs);
-  }
-}
-
-// May a retry of the mid-day close-out start now? Only when the minute's budget has room for its estimated cost and Alpaca's request
-// budget stays at or above the reserve after it.
-export function retryAllowed(o: { room: number; estimate: number; governorBudget: number; reserve: number }): boolean {
-  return o.estimate <= o.room && o.governorBudget - o.estimate >= o.reserve;
 }
 
 // The deploy check (tools/midday-deploy.mjs): every reason a market-hours deploy must not go ahead, from facts read beforehand. Empty

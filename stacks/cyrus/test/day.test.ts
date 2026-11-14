@@ -200,9 +200,14 @@ test("a close-out that cannot get flat is retried, is not recorded as done, tell
   works = true;
   await r.at("20:56:00");
   assert.equal((await r.store.getDay(D))!.phases.closeout, undefined, "item 3 of 2026-11-13: the third try waits 40 seconds after the second");
-  await r.at("20:56:10"); // the retry goes through (the broker still says open)
+  // The redesign of 2026-11-14 (decision 6 with change B): the retry is a P1 try of the shared budget, reserving the last try's cost (49
+  // requests here) against the minute. The second try's 49 fill the minute until 20:56:30, so the third waits for room (not an attempt
+  // meanwhile); it is never refused from 2:58 PM Central.
+  await r.at("20:56:10");
+  assert.equal((await r.store.getDay(D))!.phases.closeout, undefined, "the retry waits for room in the shared budget's minute");
+  await r.at("20:56:30"); // the retry goes through (the broker still says open)
   assert.ok((await r.store.getDay(D))!.phases.closeout, "recorded once flat");
-  await r.at("20:56:20");
+  await r.at("20:56:40");
   assert.notEqual(r.pings.at(-1), "fail");
 });
 

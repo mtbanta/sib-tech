@@ -1,4 +1,5 @@
 // Test doubles for the broker and Discord, shared by the command, gate and day tests.
+import { chargeFromScope } from "../src/request-scope.ts";
 import type { Account, AccountConfig, CalendarDay, Clock, EntryOrder, Order, Position, SellOrder } from "../src/alpaca-trading.ts";
 import { AlpacaError } from "../src/alpaca-trading.ts";
 import type { FullBroker } from "../src/broker.ts";
@@ -31,7 +32,13 @@ export class FakeBroker implements FullBroker {
   onSell: ((s: SellOrder) => Promise<void>) | null = null;
   private n = 0;
 
+  // The redesign of 2026-11-14, part 1: like the real client, each call is charged to the reservation of the scope it is made in (the
+  // clock and the calendar are a separate bucket), and told to `onSend` (the budget's per-tag statistics).
+  onSend: ((path: string) => void) | null = null;
   private rec(fn: string, ...args: unknown[]) {
+    const path = fn === "getClock" ? "/v2/clock" : fn === "getCalendar" ? "/v2/calendar" : `/v2/${fn}`;
+    chargeFromScope(path);
+    this.onSend?.(path);
     this.calls.push({ fn, args });
     if (this.failOn.has(fn)) throw new Error(`${fn} failed (test)`);
   }

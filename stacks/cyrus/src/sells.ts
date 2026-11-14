@@ -128,21 +128,12 @@ export class SellGate {
     return this.read();
   }
 
-  // Pages the last fresh read of open orders took (0 when the cached view was used), for a caller's request allowance (item 2 of
-  // 2026-11-13). Reporting only.
-  private readPages = 0;
-  lastReadPages(): number {
-    return this.readPages;
-  }
   private async read(): Promise<{ positions: Position[]; open: Order[] }> {
     const t = this.nowMs();
-    this.readPages = 0;
     if (this.view && t - this.view.at < VIEW_MAX_AGE_MS) return this.view;
     // Open orders FIRST, then positions: a sell that fills between the two reads then shows up in both (the shares gone
     // from the position AND the sell still counted as open), so the gate errs toward refusing, never toward overselling.
-    this.readPages = 1;
     const listed = await this.d.broker.listOrdersPaged("open", FAR_PAST, 5);
-    this.readPages = Math.max(1, listed.pages ?? 1);
     if (!listed.complete) throw new Error("the list of open orders is longer than I can read, so I cannot count the sells already open");
     const positions = await this.d.broker.listPositions();
     this.view = { positions, open: listed.orders, at: t };
@@ -200,13 +191,8 @@ export interface LiquidateOptions {
   cancelIds?: string[];
   // Ruling B (group 1, round 2 of the night release), set only for a fresh stop that hit the 15 second limit: if a cancel this round is
   // not accepted, the attempt ends at once (no waiting and polling for a cancel that was not made); the order sync tries again on the
-  // stuck backoff within the retry allowance.
+  // stuck backoff within the shared request budget.
   endOnCancelFail?: boolean;
-  // Michael's decision of 2026-11-13 (item 2, third point): a request allowance for this sale. Before each request to Alpaca the sale asks
-  // `take(n)`; when it answers false the sale ends at once, sends nothing more, and reports `budgetOut` (like a give-way). `force(n)`
-  // records requests already made beyond what was taken (the extra pages of a paged read). Set only for an entry with a timed-out fresh
-  // stop (ruling B), so its tries can never spend more than the stuck-retry allowance.
-  requestBudget?: { take(n: number): boolean; force(n: number): void };
   // Release A, fix 2, set only by the close-out: from round 2 on, if every share still held is covered by a sell this stack
   // sent (client id cyrus-x-), stop and return those symbols as `working` instead of waiting out the remaining rounds.
   returnWhenOnlyOwnSells?: boolean;
@@ -273,8 +259,6 @@ export interface LiquidateResult {
   // so `freshStopStillOpen` and `heldByFreshStop` describe what Alpaca showed then. False when that round ended before such a look (a
   // failed read, a cancel that ended the try, the market closed).
   lastLookOk?: boolean;
-  // With `requestBudget`: the sale ended because the allowance had no room for its next request (nothing more was sent).
-  budgetOut?: boolean;
   // Shares held per symbol at the first look and at the last look of this liquidation (release 1 of 2026-11-09: a cleanup sale of
   // one entry judges its own shares by the change, since a newer position on the same symbol may still be held).
   heldBefore?: Record<string, number>;
@@ -364,12 +348,8 @@ export class Liquidator {
     return this.priorityPending > 0;
   }
 
-  // Pages the last open-orders read took (a request each), for the request allowance (item 2 of 2026-11-13).
-  private lastOpenPages = 1;
   private async openOrders(): Promise<Order[]> {
-    this.lastOpenPages = 1;
     const listed = await this.d.broker.listOrdersPaged("open", FAR_PAST, 5);
-    this.lastOpenPages = Math.max(1, listed.pages ?? 1);
     if (!listed.complete) throw new Error("the list of open orders is longer than I can read");
     return listed.orders;
   }
@@ -390,22 +370,6 @@ export class Liquidator {
       result.flat = false;
       result.errors.push("stopped: the daily loss stop's sale goes first and sells these shares");
       this.d.log?.("liquidation_yielded", { reason: o.reason, only: o.only ?? null });
-      return done();
-    };
-    // Item 2 of 2026-11-13: room in the request allowance for the next n requests (always true without one).
-    const budgetOk = (n: number): boolean => !o.requestBudget || o.requestBudget.take(n);
-    const extraPages = (): void => {
-      if (o.requestBudget && this.lastOpenPages > 1) o.requestBudget.force(this.lastOpenPages - 1);
-    };
-    const gateExtra = (): void => {
-      const pages = typeof this.d.gate.lastReadPages === "function" ? this.d.gate.lastReadPages() : 1;
-      if (o.requestBudget && pages > 1) o.requestBudget.force(pages - 1);
-    };
-    const budgetEnded = (): LiquidateResult => {
-      result.budgetOut = true;
-      result.flat = false;
-      result.errors.push("stopped: the request allowance has no room for the next request");
-      this.d.log?.("liquidation_budget_out", { reason: o.reason, only: o.only ?? null });
       return done();
     };
     let earlyWakes = 0;
@@ -463,7 +427,6 @@ export class Liquidator {
     for (let round = 1; round <= rounds; round++) {
       result.lastLookOk = false; // set true below only by this round's successful look (reported only)
       if (yieldNow()) return yielded();
-      if (!budgetOk(2)) return budgetEnded(); // the clock and the positions
       // Nothing is sent while the market is closed: a market sell then queues for the next open (and cancelling the
       // exits first would leave the position bare overnight). If the clock cannot be read, carry on.
       const clock = await this.d.broker.getClock().catch(() => null);
@@ -518,10 +481,8 @@ export class Liquidator {
       //    it would only start the same sale again.
       let cancelled = false;
       let onlyOwn = false;
-      if (!budgetOk(1)) return budgetEnded(); // the open orders
       try {
         const open = await this.openOrders();
-        extraPages();
         // Release A, fix 2 (the close-out only): every share still held is covered by a sell of ours that is working. Waiting out
         // the remaining rounds on it does nothing useful; the close-out waits for the fills itself, gently.
         if (o.returnWhenOnlyOwnSells && round >= 2 && positions.every((p) => ownOpenSellQty(open, p.symbol) >= p.qty - EPS)) onlyOwn = true;
@@ -549,7 +510,6 @@ export class Liquidator {
             ? [...new Set(round === 1 ? cancelIds : openOrderIds(others, targets).filter((id) => cancelIds.includes(id)))]
             : [...new Set([...openOrderIds(others, targets), ...(only ? cancelIds : [])])];
           for (const id of ids) {
-            if (!budgetOk(1)) return budgetEnded(); // the cancel
             cancelled = true;
             cancelledInAttempt = true;
             steps.cancelsSentAt.push(stamp());
@@ -585,11 +545,9 @@ export class Liquidator {
       let blindWaitDone = false;
       for (;;) {
         if (yieldNow()) return yielded();
-        if (!budgetOk(2)) return budgetEnded(); // the open orders and the positions
         let held: Position[] = [];
         try {
           openOrders = await this.openOrders();
-          extraPages();
           openReadAt = this.d.now().getTime();
           held = await heldNow();
         } catch (err) {
@@ -633,7 +591,6 @@ export class Liquidator {
         result.freshStopStillOpen = undefined; // what the last round's look saw (group 2, round 4 of the night release)
         this.d.gate.invalidate();
         let freshPositions: Position[] = [];
-        if (!budgetOk(1)) return budgetEnded(); // the re-read of positions
         try {
           freshPositions = await heldNow();
           // Group 1 and group 2, round 7: only now has this round's look read the open orders AND the positions it acts on (reported only).
@@ -682,18 +639,14 @@ export class Liquidator {
             // treats an open cyrus-x- sell as a sale of ours still working and leaves it alone, but must cancel a fresh stop like any exit.
             const sid = `cyrus-p-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-s${round}`;
             const sentAtMs = this.d.now().getTime();
-            if (!budgetOk(3)) return budgetEnded(); // the sell gate's read (open orders, positions) and the order
             const st = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: sid, reason: `${o.reason}, as a fresh stop`, stopPrice });
-            gateExtra();
             if (st.status === "sent") {
               result.freshStop = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, orderId: st.order.id, sentAtMs, answerMs: this.d.now().getTime() - sentAtMs };
               steps.sells.push({ symbol: p.symbol, qty: free, at: stamp() });
-              if (budgetOk(1)) {
-                try {
-                  result.heldAfter = Object.fromEntries((await heldNow()).map((x) => [x.symbol, x.qty]));
-                } catch {
-                  /* only for the record */
-                }
+              try {
+                result.heldAfter = Object.fromEntries((await heldNow()).map((x) => [x.symbol, x.qty]));
+              } catch {
+                /* only for the record */
               }
               result.remaining = [p.symbol];
               return done();
@@ -736,9 +689,7 @@ export class Liquidator {
             continue;
           }
           const id = `cyrus-x-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-${round}`;
-          if (!budgetOk(3)) return budgetEnded(); // the sell gate's read (open orders, positions) and the order
           const r = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: id, reason: o.reason });
-          gateExtra();
           if (r.status === "sent") {
             if (own) (result.ownTarget ??= {})[p.symbol] = (soldBy.get(p.symbol) ?? 0) + cap; // fix A: the recount at this sale
             soldBy.set(p.symbol, (soldBy.get(p.symbol) ?? 0) + free);
@@ -764,7 +715,6 @@ export class Liquidator {
       await pauseFor(symbols, 1_000);
     }
 
-    if (!budgetOk(1)) return budgetEnded(); // the last look at positions
     try {
       const left = await heldNow();
       result.flat = left.length === 0;

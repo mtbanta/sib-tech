@@ -279,25 +279,35 @@ test("the summary's bounded window: status all, nested, oldest first, after and 
   assert.equal(s2.complete, false, "it never claims completeness when it stopped early");
 });
 
-// Item 2 of 2026-11-13 (group 1, round 1 of the weekend build): inside a timed-out stop's try, the client's own retries are charged to the
-// stuck-retry allowance and stop when it has no room; outside that scope the client retries exactly as before.
+// Item 2 of 2026-11-13 (group 1, round 1 of the weekend build), and the redesign of 2026-11-14 (part 1): every request the client sends,
+// its own retries included, is charged to the reservation of the scope it is made in; a retry is sent only while the reservation has room
+// for it; outside a reservation the client retries exactly as before.
 import { inRequestScope } from "../src/request-scope.ts";
-test("item 2: the client's retries are charged inside a request scope and stop without room; outside a scope they are unchanged", async () => {
+test("item 2 and the redesign: every attempt is charged to the scope's reservation; retries stop when it has no room; outside a reservation they are unchanged", async () => {
   const down = () => json({ message: "down (test)" }, 503);
   const outside = fake([down(), down(), down()]);
   await assert.rejects(outside.client.findOrderByClientId("cyrus-p-x"));
   assert.equal(outside.calls.length, 3, "outside a scope: the first try and 2 retries, as before");
 
-  let room = 1;
-  const charged: number[] = [];
-  const budget = { take: (n: number) => (room >= n ? ((room -= n), charged.push(n), true) : false) };
+  const { Reservation, RequestBudget } = await import("../src/request-budget.ts");
+  const b = new RequestBudget({ now: () => 0 });
+  const two = b.tryReserve("P1", 2, { label: "test" }) as InstanceType<typeof Reservation>;
   const inside = fake([down(), down(), down()]);
-  await assert.rejects(inRequestScope(budget, () => inside.client.findOrderByClientId("cyrus-p-x")));
-  assert.equal(inside.calls.length, 2, "inside a scope with room for one retry: the first try and 1 retry");
-  assert.deepEqual(charged, [1]);
+  await assert.rejects(inRequestScope(two.scope(), () => inside.client.findOrderByClientId("cyrus-p-x")));
+  assert.equal(inside.calls.length, 2, "a reservation of 2: the first try and 1 retry");
+  assert.equal(two.used, 2, "both charged as they were sent");
+  two.end();
 
-  const noRoom = { take: () => false };
+  const one = b.tryReserve("P1", 1, { label: "test" }) as InstanceType<typeof Reservation>;
   const cancel = fake([down(), down(), down(), down(), down(), down()]);
-  await assert.rejects(inRequestScope(noRoom, () => cancel.client.cancelOrder("00000000-0000-0000-0000-000000000001")));
-  assert.equal(cancel.calls.length, 1, "a cancel with no room: no retry (before: up to 6 tries)");
+  await assert.rejects(inRequestScope(one.scope(), () => cancel.client.cancelOrder("00000000-0000-0000-0000-000000000001")));
+  assert.equal(cancel.calls.length, 1, "a cancel with no room left: no retry (before: up to 6 tries)");
+  assert.equal(one.used, 1);
+  one.end();
+
+  const first = b.first("test");
+  const counted = fake([down(), down(), down()]);
+  await assert.rejects(inRequestScope(first.scope("first"), () => counted.client.findOrderByClientId("cyrus-p-x")));
+  assert.equal(counted.calls.length, 3, "a first try: retried as before, and counted");
+  assert.equal(first.used, 3);
 });

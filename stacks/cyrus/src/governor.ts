@@ -60,6 +60,12 @@ export class Governor {
   private minuteLowestAboveReserve: number | null = null;
 
   private readonly scaleReserve: boolean;
+  // The redesign of 2026-11-14 (decision 5 with Michael's change A): true while a P2 try of the shared request budget has room in its
+  // minute but waits on its floor of 80; entries give way then (request-budget.ts `givingWay`). Unset: never.
+  private safetyHold: { givingWay(): boolean; noteGiveWayRefusal?(): void } | null = null;
+  setSafetyHold(h: { givingWay(): boolean; noteGiveWayRefusal?(): void } | null): void {
+    this.safetyHold = h;
+  }
 
   constructor(now: () => number = Date.now, opts: { scaleReserve?: boolean } = {}) {
     this.now = now;
@@ -145,6 +151,10 @@ export class Governor {
     if (!(cap >= 1)) return this.refuse("trades-per-minute limit is below 1");
     if (this.tradesInLastMinute() >= cap) return this.refuse(`trades-per-minute limit reached (${cap})`);
     if (!this.canSpend()) return this.refuse(`holding back for safety: Alpaca's request budget is down to ${Math.floor(this.budget())} (the last ${this.reserve()} are kept for the stop command, cancels and the close-out)`);
+    if (this.safetyHold?.givingWay()) {
+      this.safetyHold.noteGiveWayRefusal?.();
+      return this.refuse("holding back for a safety retry: a recheck is waiting for Alpaca's request budget to refill above the reserve");
+    }
     this.tradeTimes.push(this.now());
     this.peakTrades = Math.max(this.peakTrades, this.tradeTimes.length);
     return { ok: true };

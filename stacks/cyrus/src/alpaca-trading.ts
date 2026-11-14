@@ -4,7 +4,7 @@
 // Orders are safe to retry: each entry carries a client_order_id, and after any unclear failure the client
 // asks Alpaca whether that id already exists before it sends again.
 import { assertPaperHost, PAPER_TRADING_BASE_URL, type Settings } from "./config.ts";
-import { retryAllowedInScope } from "./request-scope.ts";
+import { chargeFromScope, retryAllowedInScope } from "./request-scope.ts";
 
 export class AlpacaError extends Error {
   readonly status: number;
@@ -162,6 +162,9 @@ export interface TradingClientOptions {
   retryDelayMs?: number;
   // Told about the rate-limit headers of every response (the governor listens).
   onRate?: (info: RateInfo) => void;
+  // The redesign of 2026-11-14, part 1 (statistics only): told just before every request is sent, with its path (the shared request
+  // budget counts requests per tag). Must not throw; an error in it is caught and ignored.
+  onSend?: (path: string) => void;
 }
 
 export class AlpacaTrading {
@@ -170,6 +173,7 @@ export class AlpacaTrading {
   private readonly fetchImpl: typeof fetch;
   private readonly retryDelayMs: number;
   private readonly onRate: ((info: RateInfo) => void) | undefined;
+  private readonly onSend: ((path: string) => void) | undefined;
 
   constructor(settings: Settings, options: TradingClientOptions = {}) {
     assertPaperHost(PAPER_TRADING_BASE_URL);
@@ -178,6 +182,7 @@ export class AlpacaTrading {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.retryDelayMs = options.retryDelayMs ?? 500;
     this.onRate = options.onRate;
+    this.onSend = options.onSend;
   }
 
   // One HTTP call. No retry here.
@@ -186,6 +191,14 @@ export class AlpacaTrading {
     const url = new URL(PAPER_TRADING_BASE_URL + path);
     assertPaperHost(url.toString());
     for (const [k, v] of Object.entries(query ?? {})) url.searchParams.set(k, v);
+    // The redesign of 2026-11-14, part 1: every request is charged to whoever asked (the reservation of the scope it is made in), at the
+    // moment it is sent: every attempt, this client's own retries included.
+    chargeFromScope(path);
+    try {
+      this.onSend?.(path);
+    } catch {
+      /* statistics must never break a request */
+    }
     const res = await this.fetchImpl(url, {
       method,
       headers: {
@@ -230,7 +243,7 @@ export class AlpacaTrading {
       } catch (err) {
         last = err;
         const retryable = !(err instanceof AlpacaError) || err.status === 429 || err.status >= 500;
-        // Item 2 of 2026-11-13: inside a timed-out stop's try, a retry is charged to its allowance (no room: no retry).
+        // Item 2 of 2026-11-13 and the redesign of 2026-11-14: inside a budgeted try, a retry is sent only while its reservation has room.
         if (!retryable || attempt === 2 || !retryAllowedInScope()) break;
         await sleep(this.retryDelayMs * 2 ** attempt);
       }
@@ -474,7 +487,7 @@ export class AlpacaTrading {
         if (existing) return existing;
         if (duplicate) throw err;
         // Not there: the first send did not land. Sending again with the same id cannot create two orders. (Inside a timed-out stop's try
-        // the second send is charged to its allowance; without room the outcome stays unclear to the caller.)
+        // the second send is sent only while its reservation has room; without room the outcome stays unclear to the caller.)
         if (!retryAllowedInScope()) return stillUnclear(err);
         try {
           return parseOrder((await this.once("POST", "/v2/orders", undefined, body)) as Json);

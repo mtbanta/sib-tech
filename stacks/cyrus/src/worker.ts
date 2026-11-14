@@ -39,7 +39,9 @@ import { computeDay, formatSummary, isSentEntry, type StopGapDay } from "./summa
 import { listDaySliced, summaryWindows } from "./summary-listing.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
 import { PAPER_ONLY } from "./discord.ts";
-import { MIDDAY_NOT_FLAT_ALERT_AFTER_MS, MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MIDDAY_RETRY_MS, MIDDAY_RETRY_REQUESTS_PER_MINUTE, MiddayBudget, blockedNext, lossPast, middayFlat, middayTimes, readHold, readPause, resumedByText, retryAllowed, retrySymbols, startupAction, updatePause } from "./midday.ts";
+import { CLOSEOUT_RETRY_MOST, MIDDAY_NOT_FLAT_ALERT_AFTER_MS, MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MIDDAY_RETRY_MS, blockedNext, lossPast, middayFlat, middayTimes, readHold, readPause, resumedByText, retrySymbols, startupAction, updatePause } from "./midday.ts";
+import { Reservation, RequestBudget, withReservation } from "./request-budget.ts";
+import { outsideScope } from "./request-scope.ts";
 import type { PingKind } from "./heartbeat.ts";
 
 export type Channel = "commands" | "trading" | "alerts";
@@ -83,6 +85,9 @@ export interface WorkerDeps {
   // The mid-day cycle (Michael, 2026-11-09) is on unless this is false. main.ts never sets it; only tests about something else, whose
   // simulated day crosses 10:30 AM Central, turn it off (the cycle itself is tested in test/midday.test.ts).
   middayCycle?: boolean;
+  // The redesign of 2026-11-14, part 1: the shared request budget (main.ts makes it, so the Alpaca client's `onSend` counts into it).
+  // Without one, the worker makes its own on its clock and the governor's estimate of Alpaca's remaining requests.
+  budget?: RequestBudget;
 }
 
 // The speed release, item 3: the order sync runs every 10 seconds on every day (it was 30 on a normal day, 10 on a load day). With the
@@ -119,16 +124,9 @@ export function remainderAlert(sales: Array<{ symbol: string; shares: number }>)
 const FLUSH_EVERY_MS = 60_000;
 // The close-out's first retry wait before the close (item 3 of 2026-11-13: then 40 s, at most 60, and 20 s again in the last minute).
 const CLOSEOUT_RETRY_MS = 20_000;
-// Item 2 of 2026-11-13: requests charged to the stuck-retry allowance in the last minute, and the most in any 5 seconds of that minute.
-// Group 2, round 3 of the weekend build: `log` keeps 70 seconds, so every 5 second window that ends inside the last minute is counted (a
-// burst across a minute boundary is not split between two rows).
-export function allowanceUse(log: readonly number[], nowMs: number): { lastMinute: number; most5s: number } {
-  const lastMinute = log.filter((t) => nowMs - t < 60_000).length;
-  const recent = log.filter((t) => nowMs - t < 65_000);
-  let most5s = 0;
-  for (const t of recent) most5s = Math.max(most5s, recent.filter((x) => x >= t && x < t + 5_000).length);
-  return { lastMinute, most5s };
-}
+// Michael's change B of 2026-11-14: from this long before the close (2:58 PM Central on a normal day) the 2:55 close-out's retry is
+// counted but never refused by the shared request budget, so the account always gets flat before the close.
+export const CLOSEOUT_NEVER_REFUSED_MS = 2 * 60_000;
 // Item 3 of 2026-11-13: the wait before the next try after `attempts` tries: `firstMs` after the first, doubling, at most `maxMs`.
 export function retryGapMs(firstMs: number, attempts: number, maxMs = 3 * firstMs): number {
   return attempts <= 1 ? firstMs : Math.min(firstMs * 2 ** (attempts - 1), maxMs);
@@ -266,10 +264,11 @@ export class Worker {
   private stopGapSaving = false;
   private eventSyncTimer: unknown = null;
   private eventSyncAt: number | null = null;
-  // Group 1, round 7 of the weekend build (accounting only): a timer that was still pending when the 5 second pass started a sync. When it
-  // fires, its sync is the leftover of a recheck the pass's sync already covered, and runs as one: it keeps the remainder recheck's charge
-  // instead of giving it back (syncOrders' `keepLagCharge`). This mark changes no timer (fix (a) below cancels a recheck's own timer).
-  private leftoverTimerAt: number | null = null;
+  // The redesign of 2026-11-14, part 1: the list-lag recheck's own timer (the sync asks for it in `SyncMemory.lagRecheck`). When it fires,
+  // a sync runs with a P2 reservation of the recheck's most requests in the shared budget, or, with no room, it waits for room (entries
+  // give way while it waits on the floor of 80) until the last lagging remainder's 30 second window ends.
+  private lagTimer: unknown = null;
+  private lagTimerAt: number | null = null;
   // Michael's fix (a) of 2026-11-13: the moment the pending timer was set for when a sync asked for a recheck (its `recheckAt`), carried
   // over when that timer is put off. When the 5 second pass runs that recheck itself, it cancels this timer, so no second sync repeats it.
   private recheckTimerAt: number | null = null;
@@ -301,9 +300,11 @@ export class Worker {
   private lastMiddayAttempt = 0;
   private middayAlertDate: string | null = null;
   // Michael's ruling of 2026-11-09 on a mid-day close-out that ends not flat: the first try is not held back; each retry (one round,
-  // every 20 seconds at most) runs only within 60 Alpaca requests a minute and never below the reserve. Each try's real cost is
-  // charged afterwards. One alert when a try first ends not flat, and one more if still not flat 5 minutes later.
-  private readonly middayBudget = new MiddayBudget();
+  // every 20 seconds at most) runs only with room in the shared request budget (the redesign of 2026-11-14: P1, its estimated cost against
+  // the minute, down to 20 of Alpaca's remaining). Each try's real cost is what it sent. One alert when a try first ends not flat, and one
+  // more if still not flat 5 minutes later.
+  readonly budget: RequestBudget;
+  private closeoutLastCost: number | null = null;
   private middayAttemptDate: string | null = null;
   private middayAttempts = 0;
   private middayLastCost: number | null = null;
@@ -322,6 +323,10 @@ export class Worker {
 
   constructor(deps: WorkerDeps) {
     this.d = deps;
+    this.budget = deps.budget ?? new RequestBudget({ now: () => deps.now().getTime(), remaining: () => deps.governor.budget(), log: (e, data) => deps.log?.("info", e, data) });
+    this.syncMemory.budget = this.budget;
+    this.lossMemory.budget = this.budget;
+    deps.governor.setSafetyHold?.(this.budget);
     this.sessions = new NextSessionFinder(deps.broker);
     this.view = new BrokerView(deps.broker, () => deps.now().getTime());
     this.sellGate = new SellGate({ broker: deps.broker, say: (c, t, o) => this.say(c, t, o), log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime() });
@@ -438,6 +443,7 @@ export class Worker {
       log: (e: string, data?: Record<string, unknown>) => this.d.log?.("info", e, data),
       onBareSale: (sale: { symbol: string; shares: number; takeProfit: number | null; atMs: number; clientOrderId?: string }) => this.stopGap.onSale(sale),
       onFreshStop: (x: { symbol: string; shares: number }) => this.stopGap.onFreshStop(x),
+      budget: this.budget,
       onRemainderSold: (symbol: string, shares: number) => void this.remainderSales.push({ symbol, shares }),
       onAccountRead: (account: { equity: number; cash: number }) => this.shadowEstimate(account),
       lateNoticeContext: (symbol: string) => this.lateNoticeContext(symbol),
@@ -528,12 +534,13 @@ export class Worker {
   }
 
   // Runs a long step in the background once; its finish is recorded in the database by the step itself.
-  private background(name: string, fn: () => Promise<void>): void {
-    if (this.inflight.has(name)) return;
+  // The redesign of 2026-11-14, part 1: it starts outside any request scope (request-scope.ts), so a timer or a try set up inside one never
+  // carries its scope into this new work. Returns whether it started.
+  private background(name: string, fn: () => Promise<void>): boolean {
+    if (!this.backgroundReady(name)) return false;
     const retry = this.stepRetry.get(name);
-    if (retry && !retry.due(this.d.now().getTime())) return;
     this.inflight.add(name);
-    fn()
+    outsideScope(() => fn())
       .then(() => retry?.succeeded())
       .catch((err) => {
         retry?.failed(this.d.now().getTime());
@@ -552,6 +559,14 @@ export class Worker {
         }
       })
       .finally(() => this.inflight.delete(name));
+    return true;
+  }
+
+  // Whether `background(name, ...)` would start now (not running, and not waiting out a failure's backoff).
+  private backgroundReady(name: string): boolean {
+    if (this.inflight.has(name)) return false;
+    const retry = this.stepRetry.get(name);
+    return !(retry && !retry.due(this.d.now().getTime()));
   }
 
   async tick(): Promise<boolean> {
@@ -1098,15 +1113,17 @@ export class Worker {
         this.middayProgress.reset();
       }
       const retry = this.middayAttempts > 0;
-      // A retry's cost is estimated from the last try's charged cost, at most the minute's whole budget.
-      const estimate = Math.min(MIDDAY_RETRY_REQUESTS_PER_MINUTE, this.middayLastCost ?? MIDDAY_RETRY_REQUESTS_PER_MINUTE);
-      if (!retry || retryAllowed({ room: this.middayBudget.room(now.getTime()), estimate, governorBudget: this.d.governor.budget(), reserve: this.d.governor.reserve() })) {
+      // A retry's cost is estimated from the last try's measured cost, at most CLOSEOUT_RETRY_MOST; it reserves that against the shared
+      // budget's minute (P1, down to 20 of Alpaca's remaining). The first try is a first try: never refused, counted.
+      const estimate = Math.min(CLOSEOUT_RETRY_MOST, this.middayLastCost ?? CLOSEOUT_RETRY_MOST);
+      const res = !this.backgroundReady("midday") ? null : retry ? this.budget.tryReserve("P1", estimate, { fiveSec: false, label: "mid-day close-out retry" }) : this.budget.first("mid-day close-out");
+      if (res instanceof Reservation) {
         this.lastMiddayAttempt = now.getTime();
         // A retry sells at most MIDDAY_RETRY_SYMBOLS positions, in turn (the first retry takes the first ten left, and so on).
         const only = retry ? retrySymbols(this.middayLastRemaining, this.middayAttempts - 1) : null;
         this.middayProgress.started(retry ? this.middayLastRemaining.length : Infinity);
         this.middayAttempts++;
-        this.background("midday", () => this.middayPhase(date, current, mt.pauseAt, retry, only));
+        if (!this.background("midday", () => withReservation(res, () => this.middayPhase(date, current, mt.pauseAt, retry, only, res), retry ? undefined : "first"))) res.end();
       }
     }
     // The close-out after the afternoon load window (Michael, 2026-11-12): when the window's 30 minutes are up (or the last entry comes
@@ -1122,14 +1139,15 @@ export class Worker {
         this.afternoonProgress.reset();
       }
       const retry = this.afternoonAttempts > 0;
-      const estimate = Math.min(MIDDAY_RETRY_REQUESTS_PER_MINUTE, this.afternoonLastCost ?? MIDDAY_RETRY_REQUESTS_PER_MINUTE);
-      if (!retry || retryAllowed({ room: this.middayBudget.room(now.getTime()), estimate, governorBudget: this.d.governor.budget(), reserve: this.d.governor.reserve() })) {
+      const estimate = Math.min(CLOSEOUT_RETRY_MOST, this.afternoonLastCost ?? CLOSEOUT_RETRY_MOST);
+      const res = !this.backgroundReady("midday") ? null : retry ? this.budget.tryReserve("P1", estimate, { fiveSec: false, label: "afternoon close-out retry" }) : this.budget.first("afternoon close-out");
+      if (res instanceof Reservation) {
         this.lastAfternoonAttempt = now.getTime();
         const only = retry ? retrySymbols(this.afternoonLastRemaining, this.afternoonAttempts - 1) : null;
         this.afternoonProgress.started(retry ? this.afternoonLastRemaining.length : Infinity);
         this.afternoonAttempts++;
         // The same background name as the mid-day close-out, so every guard that stands aside for it stands aside for this too.
-        this.background("midday", () => this.afternoonCloseoutPhase(date, retry, only));
+        if (!this.background("midday", () => withReservation(res, () => this.afternoonCloseoutPhase(date, retry, only, res), retry ? undefined : "first"))) res.end();
       }
     }
     // The second alert: still not flat 5 minutes after a try first ended not flat (once a day).
@@ -1156,17 +1174,36 @@ export class Worker {
     const attemptsToday = this.closeoutAttemptDate === date ? this.closeoutAttempts : 0;
     const lastMinute = now >= addMinutes(day.closeAt, -1);
     const retryMs = now < day.closeAt ? (lastMinute ? CLOSEOUT_RETRY_MS : retryGapMs(CLOSEOUT_RETRY_MS, attemptsToday, 60_000)) : retryGapMs(5 * 60_000, Math.max(1, this.closeoutAttemptsAfterClose), 15 * 60_000);
-    if (now >= addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !current.phases.closeout && !this.closingOut && now.getTime() - this.lastCloseoutAttempt >= retryMs) {
-      this.lastCloseoutAttempt = now.getTime();
+    if (now >= addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !current.phases.closeout && !this.closingOut && now.getTime() - this.lastCloseoutAttempt >= retryMs && this.backgroundReady("closeout")) {
       if (this.closeoutAttemptDate !== date) {
         this.closeoutAttemptDate = date;
         this.closeoutAttempts = 0;
         this.closeoutAttemptsAfterClose = 0;
+        this.closeoutLastCost = null;
       }
       const path = this.closeoutAttempts === 0 ? "close-out" : "retry";
-      this.closeoutAttempts++;
-      if (now >= day.closeAt) this.closeoutAttemptsAfterClose++;
-      this.background("closeout", () => this.closeoutPhase(date, now >= addMinutes(day.closeAt!, 30), day.closeAt, path));
+      // The redesign of 2026-11-14 (decision 6 with Michael's change B): a retry is class P1 of the shared request budget, reserving its
+      // estimated cost (the last try's measured cost, at most CLOSEOUT_RETRY_MOST) against the minute, down to 20 of Alpaca's remaining;
+      // from CLOSEOUT_NEVER_REFUSED_MS before the close (2:58 PM Central) it is counted but never refused. Refused, it is not an attempt:
+      // the next pass asks again. The first try is a first try (never refused, counted).
+      const force = now.getTime() >= day.closeAt.getTime() - CLOSEOUT_NEVER_REFUSED_MS;
+      const res = path === "retry" ? this.budget.tryReserve("P1", Math.min(CLOSEOUT_RETRY_MOST, this.closeoutLastCost ?? CLOSEOUT_RETRY_MOST), { fiveSec: false, force, label: "close-out retry" }) : this.budget.first("close-out");
+      if (res instanceof Reservation) {
+        this.lastCloseoutAttempt = now.getTime();
+        this.closeoutAttempts++;
+        if (now >= day.closeAt) this.closeoutAttemptsAfterClose++;
+        const closeAt = day.closeAt;
+        const started = this.background("closeout", () =>
+          withReservation(res, async () => {
+            try {
+              await this.closeoutPhase(date, now >= addMinutes(closeAt, 30), closeAt, path);
+            } finally {
+              this.closeoutLastCost = res.used;
+            }
+          }, path === "retry" ? undefined : "first"),
+        );
+        if (!started) res.end();
+      }
     }
     if (now >= addMinutes(day.closeAt, 5) && current.phases.closeout && !current.phases.summary) {
       this.background("summary", () => this.summaryPhase(date));
@@ -1177,12 +1214,14 @@ export class Worker {
   // Michael's next command. While a close-out is running, and from the close-out time on, the missing-exit check is switched off
   // and nothing is sold here: the close-out alone flattens the account. It is asked again just before each sale, so a close-out
   // that starts meanwhile switches it off. One at a time: a sync already running is never doubled.
-  private startSync(dayNow: DayRecord, closeAt: Date, how: { fromPass?: boolean; leftover?: boolean; restoreAt?: number } = {}): void {
-    if (this.inflight.has("risk")) return;
+  // The redesign of 2026-11-14, part 1: a sync started for the list-lag recheck runs inside its P2 reservation (`how.recheck`): every request
+  // it sends is counted as it is sent. Any other sync is routine.
+  private startSync(dayNow: DayRecord, closeAt: Date, how: { fromPass?: boolean; restoreAt?: number; recheck?: Reservation } = {}): void {
+    if (this.inflight.has("risk")) {
+      how.recheck?.end();
+      return;
+    }
     this.lastSync = this.d.now().getTime();
-    // Group 1, round 7 of the weekend build: the pass starts a sync while a timer is still pending; that timer will still fire after it.
-    if (how.fromPass && this.eventSyncTimer !== null) this.leftoverTimerAt = this.eventSyncAt;
-    const keepLagCharge = how.leftover === true;
     const risk = this.riskDeps();
     const protect = () => this.protectNow(closeAt);
     const streamLive = this.orderStreamLive();
@@ -1193,8 +1232,17 @@ export class Worker {
       try {
         const lossStopped = await this.lossStopInForce(dayNow.tradeDate);
         this.syncRecheckAt = null;
-        synced = await syncOrders(risk, dayNow, { protect: () => !lossStopped && protect(), streamLive, middayOwnsSelling: () => this.middayOwnsSelling, keepLagCharge });
+        const run = () => syncOrders(risk, dayNow, { protect: () => !lossStopped && protect(), streamLive, middayOwnsSelling: () => this.middayOwnsSelling });
+        synced = how.recheck ? await withReservation(how.recheck, run) : await run();
       } catch (err) {
+        // The redesign of 2026-11-14, part 1 (rule 6): a list-lag recheck whose sync failed is dropped, so it never fires again at once on a
+        // failing read; the regular sync carries on, and the next sync that still sees the list lag asks again (within its 30 s window).
+        if (how.recheck) {
+          how.recheck.end();
+          this.syncMemory.lagRecheck = undefined;
+          this.d.log?.("warn", "list_lag_recheck_failed", { error: (err as Error).message.slice(0, 120), next: "regular sync" });
+        }
+        this.armLagRecheck();
         // Fix (a), round 2 (group 1): the pass cancelled a recheck's own timer for this sync, and the sync failed before it could run that
         // recheck or ask for it again. The cancelled time is put back once, as the recheck's own timer (it fires at once if already past).
         // A sync started by that timer carries no `restoreAt`, so a failure there puts nothing back: at most one restore per pass.
@@ -1212,6 +1260,7 @@ export class Worker {
         // its own mark (fix (a), round 1, group 1: it may be an older recheck's own timer, which the pass must still cancel).
         if (this.eventSyncAt === synced.recheckAt) this.recheckTimerAt = synced.recheckAt;
       }
+      this.armLagRecheck();
       await this.lostExitsFollowUp(dayNow.tradeDate, synced.unprotected);
       await this.stopCancelFollowUp(dayNow.tradeDate);
       await sweepEntriesWhileStopped(risk);
@@ -1242,7 +1291,7 @@ export class Worker {
   // Michael's item 1 of 2026-11-13 (afternoon), the backup: after a sync, a remainder reported by the live update whose entry has no fresh
   // stop yet and is still open gets another sync, at most 3 more, 0.5, 1 and 2 seconds later, within 10 seconds of the report.
   // Michael's change of 2026-11-13 (evening): an entry whose order list any sync saw still showing the stop open (`liveLagTries`) is left
-  // to the sync's own quick rechecks, which are charged to the stuck-retry allowance, or, with no room or after their 30 seconds, to the
+  // to the sync's own quick rechecks, which run inside P2 reservations of the shared request budget, or, after their 30 seconds, to the
   // regular sync; the backup never adds uncharged syncs for it.
   private async stopCancelFollowUp(date: string): Promise<void> {
     if (this.stopCancelPending.size === 0) return;
@@ -1274,9 +1323,8 @@ export class Worker {
     if (this.eventSyncAt !== null && this.eventSyncAt <= atMs) return;
     if (this.eventSyncTimer) (this.d.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>)))(this.eventSyncTimer);
     this.eventSyncAt = atMs;
-    // A replaced timer's marks go with it (fix (a), and the leftover mark of group 1's round 7); the callers that mark set them after this.
+    // A replaced timer's mark goes with it (fix (a)); the callers that mark set it after this.
     this.recheckTimerAt = null;
-    this.leftoverTimerAt = null;
     this.syncTimerLog.setAt = this.d.now().getTime();
     this.syncTimerLog.setFor = atMs;
     const delay = Math.max(slackMs > 0 ? 100 : 0, atMs + slackMs - this.d.now().getTime());
@@ -1293,8 +1341,6 @@ export class Worker {
 
   private syncFromTimer(): void {
     const firedFor = this.eventSyncAt;
-    const leftover = firedFor !== null && firedFor === this.leftoverTimerAt;
-    if (leftover) this.leftoverTimerAt = null;
     const ownRecheck = firedFor !== null && firedFor === this.recheckTimerAt;
     this.recheckTimerAt = null;
     this.eventSyncTimer = null;
@@ -1306,14 +1352,56 @@ export class Worker {
       this.syncTimerLog.putOff++;
       this.syncTimerLog.lastPutOffAt = this.d.now().getTime();
       this.syncAt(this.d.now().getTime());
-      // Still the leftover, put off a moment (unless an earlier timer took its place).
-      if (leftover && this.eventSyncAt !== null) this.leftoverTimerAt = this.eventSyncAt;
       // Fix (a): still the recheck's own timer, put off a moment.
       if (ownRecheck && this.eventSyncAt !== null) this.recheckTimerAt = this.eventSyncAt;
       return;
     }
     this.syncTimerLog.putOff = 0;
-    this.startSync(s.day, s.closeAt, { leftover });
+    this.startSync(s.day, s.closeAt);
+  }
+
+  // The redesign of 2026-11-14, part 1: arms (or clears) the list-lag recheck's own timer from what the last sync asked for.
+  private armLagRecheck(at?: number): void {
+    const lr = this.syncMemory.lagRecheck;
+    const clear = (this.d.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>)));
+    if (!lr) {
+      if (this.lagTimer) clear(this.lagTimer);
+      this.lagTimer = null;
+      this.lagTimerAt = null;
+      this.budget.stopWaiting("list lag recheck");
+      return;
+    }
+    const when = Math.min(at ?? lr.dueAt, lr.until);
+    if (this.lagTimer && this.lagTimerAt === when) return;
+    if (this.lagTimer) clear(this.lagTimer);
+    this.lagTimerAt = when;
+    this.lagTimer = (this.d.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms)))(() => this.lagRecheckFired(), Math.max(0, when - this.d.now().getTime()));
+  }
+
+  // The list-lag recheck's timer fired: a sync with a P2 reservation of the recheck's most requests, if the budget has room; else it waits
+  // for room (not a backoff step: no request is made while it waits), until the last lagging remainder's 30 second window ends. Limit
+  // (rule 6): that window and the shared budget; backoff: the recheck's own steps (0.5, 1, then 2 s), set by the sync.
+  private lagRecheckFired(): void {
+    this.lagTimer = null;
+    this.lagTimerAt = null;
+    const s = this.sessionForSync;
+    const lr = this.syncMemory.lagRecheck;
+    const now = this.d.now().getTime();
+    if (!s || this.d.now() >= s.closeAt || !lr) return;
+    if (now >= lr.until) {
+      this.syncMemory.lagRecheck = undefined;
+      this.budget.stopWaiting("list lag recheck");
+      this.d.log?.("info", "list_lag_recheck_window_over", { next: "regular sync" });
+      return;
+    }
+    // A sync is running: it asks again (or clears the recheck) when it ends; this is only the fallback, a quarter second later.
+    if (this.inflight.has("risk")) return this.armLagRecheck(now + 250);
+    const r = this.budget.tryReserve("P2", lr.cost, { label: "list lag recheck", waitKey: "list lag recheck" });
+    if (!(r instanceof Reservation)) {
+      this.d.log?.("info", "timed_out_try_out_of_room", { stage: "list lag recheck", cost: lr.cost, why: r.why, roomInMs: r.at - now, next: r.at < lr.until ? "when the budget has room" : "regular sync" });
+      return this.armLagRecheck(r.at);
+    }
+    this.startSync(s.day, s.closeAt, { recheck: r });
   }
 
   // Decision 3's measurement: loads the day's saved totals once, settles the sales whose 5 seconds are over, and saves the totals.
@@ -1366,9 +1454,11 @@ export class Worker {
       ...(reserve ? { reserveThisMinute: reserve } : {}),
       viewEveryMs: this.orderStreamLive() ? VIEW_EVERY_MS : VIEW_EVERY_NO_STREAM_MS,
       ...(raw ? { rawUpdate: raw } : {}),
-      // Item 2 of 2026-11-13 (group 2, round 2 of the weekend build): the stuck-retry allowance's use, so each review can check it (at most 40
-      // in a minute and 15 in any 5 seconds): requests charged in the last minute, and the most in any 5 seconds of it.
-      stuckRetryAllowance: allowanceUse(this.syncMemory.retryLog, this.d.now().getTime()),
+      // The redesign of 2026-11-14, part 1: the shared request budget this minute: requests sent by tag (entries, first tries, P1, P2,
+      // routine, and the clock's separate bucket), tries granted and refused (and why), forced (the 2:55 retry from 2:58), overdrafts, the
+      // most budgeted requests in any minute and any 5 seconds (at most 60 and 15 unless forced or overdrawn), and entries refused while a
+      // P2 try waited on its floor.
+      requestBudget: this.budget.takeMinute(),
     };
   }
 
@@ -1790,18 +1880,16 @@ export class Worker {
   // alone (closeOut skips that for this path). The missing-exit check is off while it runs (protectNow). The first try is the full
   // close-out; a retry is ONE round of it without the wait for its own sells (the next retry looks again), which is how retries stay
   // inside 60 requests a minute. What Alpaca counted for each try is charged to the retries' budget afterwards.
-  private async middayPhase(date: string, day: DayRecord, pauseAt: Date, retry = false, only: string[] | null = null): Promise<void> {
+  private async middayPhase(date: string, day: DayRecord, pauseAt: Date, retry = false, only: string[] | null = null, res: Reservation | null = null): Promise<void> {
     const pause = await readPause(this.d.store, date);
     if (pause?.resumedAt) return; // already resumed today
     if (!pause?.on) await updatePause(this.d.store, date, { on: true, since: this.d.now().toISOString(), reason: "mid-day cycle" });
-    const before = this.d.governor.stats().requestsLastMinute;
     let result;
     try {
       result = await closeOut(this.closeoutDeps(), date, retry ? { alert: false, path: "midday", maxRounds: 1, waitForOwnSells: false, ...(only ? { onlySymbols: only } : {}) } : { alert: false, path: "midday" });
     } finally {
-      const cost = Math.max(0, this.d.governor.stats().requestsLastMinute - before);
-      this.middayBudget.spend(this.d.now().getTime(), cost);
-      this.middayLastCost = cost;
+      // What this try sent (counted as it was sent, in its reservation): the next retry's estimate.
+      if (res) this.middayLastCost = res.used;
     }
     if (result.flat) {
       await setPhase(this.d.store, date, MIDDAY_PHASE, this.d.now().toISOString(), { middayFlat: "yes" });
@@ -1821,21 +1909,18 @@ export class Worker {
   // then on), then the mid-day close-out code (path "midday": no `closeout` phase, no not-flat flag, the borrowing cap untouched, the
   // price stream kept). A retry is one round without the wait for its own sells, as for the mid-day close-out. When flat it writes its
   // own phase and says so; entries stay paused (no automatic return to normal trading).
-  private async afternoonCloseoutPhase(date: string, retry: boolean, only: string[] | null): Promise<void> {
+  private async afternoonCloseoutPhase(date: string, retry: boolean, only: string[] | null, res: Reservation | null = null): Promise<void> {
     const pause = await readPause(this.d.store, date);
     if (!pause?.on) {
       // The pause's start time stays the mid-day one (the summary and `status` name it); only the flag and the reason change.
       await updatePause(this.d.store, date, { on: true, since: pause?.since ?? this.d.now().toISOString(), reason: AFTERNOON_PAUSE_REASON });
       this.d.log?.("info", "afternoon_closeout", { date, step: "paused" });
     }
-    const before = this.d.governor.stats().requestsLastMinute;
     let result;
     try {
       result = await closeOut(this.closeoutDeps(), date, retry ? { alert: false, path: "midday", maxRounds: 1, waitForOwnSells: false, ...(only ? { onlySymbols: only } : {}) } : { alert: false, path: "midday" });
     } finally {
-      const cost = Math.max(0, this.d.governor.stats().requestsLastMinute - before);
-      this.middayBudget.spend(this.d.now().getTime(), cost);
-      this.afternoonLastCost = cost;
+      if (res) this.afternoonLastCost = res.used;
     }
     this.d.log?.("info", "afternoon_closeout", { date, step: retry ? "retry" : "first", flat: result.flat, remaining: result.remaining.length });
     if (result.flat) {

@@ -19,7 +19,7 @@ import { parseCommand } from "../src/morning.ts";
 import { recordStart } from "../src/start-note.ts";
 import { FakeBroker, FakeBot } from "./helpers.ts";
 import type { Signal } from "../src/strategy.ts";
-import { MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MiddayBudget, blockedNext, deployRefusals, deployRoute, emptyPause, type DeployFacts, goRefusal, middayHoldKey, middayKey, middayTimes, readHold, readPause, retryAllowed, retrySymbols, startupAction, updatePause, type MiddayPause } from "../src/midday.ts";
+import { MIDDAY_NOTE_PHASE, MIDDAY_PHASE, blockedNext, deployRefusals, deployRoute, emptyPause, type DeployFacts, goRefusal, middayHoldKey, middayKey, middayTimes, readHold, readPause, retrySymbols, startupAction, updatePause, type MiddayPause } from "../src/midday.ts";
 
 const until = async (cond: () => boolean | Promise<boolean>, n = 400) => {
   for (let i = 0; i < n && !(await cond()); i++) await settle();
@@ -357,13 +357,27 @@ test("`go` refusals as a rule: no cycle today, not flat yet, the daily loss stop
   assert.equal(blockedNext({ stop: { on: true, reason: "owner command (stop)" }, now, lastEntryAt: last }), "The stop flag is on: send `resume`, then `go`.");
   assert.equal(blockedNext({ stop: null, now: last, lastEntryAt: last }), "No entries are left today (last entry 2:00 PM CT).");
   assert.equal(blockedNext({ stop: null, now, lastEntryAt: last }), null);
-  assert.equal(retryAllowed({ room: 60, estimate: 50, governorBudget: 140, reserve: 80 }), true);
-  assert.equal(retryAllowed({ room: 40, estimate: 50, governorBudget: 200, reserve: 80 }), false, "the minute's budget");
-  assert.equal(retryAllowed({ room: 60, estimate: 50, governorBudget: 129, reserve: 80 }), false, "never below the reserve");
-  const b = new MiddayBudget();
-  b.spend(0, 45);
-  assert.equal(b.room(59_999), 15);
-  assert.equal(b.room(60_000), 60, "a minute later the spend has expired");
+});
+
+// The redesign of 2026-11-14 (Michael's change A): a mid-day close-out retry is a P1 try of the shared request budget, reserving its estimate
+// against the minute only (not the 5 seconds), down to a floor of 20 of Alpaca's remaining.
+test("the redesign of 2026-11-14: a close-out retry reserves its estimate against the shared budget's minute only, down to 20 remaining", async () => {
+  const { RequestBudget, Reservation } = await import("../src/request-budget.ts");
+  let t = 0;
+  let remaining = 140;
+  const b = new RequestBudget({ now: () => t, remaining: () => remaining });
+  const r = b.tryReserve("P1", 50, { fiveSec: false, label: "mid-day close-out retry" });
+  assert.ok(r instanceof Reservation, "50 fits the minute; the 5 seconds do not apply");
+  for (let i = 0; i < 45; i++) (r as any).charge("/v2/x");
+  (r as any).end();
+  const second = b.tryReserve("P1", 50, { fiveSec: false, label: "mid-day close-out retry" });
+  assert.ok(!(second instanceof Reservation) && second.why === "minute", "45 sent: 50 more does not fit the minute");
+  t = 60_000;
+  remaining = 69;
+  const low = b.tryReserve("P1", 50, { fiveSec: false, label: "mid-day close-out retry" });
+  assert.ok(!(low instanceof Reservation) && low.why === "floor", "69 - 50 is below the floor of 20");
+  remaining = 70;
+  assert.ok(b.tryReserve("P1", 50, { fiveSec: false, label: "mid-day close-out retry" }) instanceof Reservation, "70 - 50 is the floor of 20: allowed (below the reserve of 80, change A)");
 });
 
 // ---------------- the gate ----------------

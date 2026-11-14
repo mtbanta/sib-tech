@@ -5,7 +5,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Liquidator, SellGate, OPEN_STATUSES } from "../src/sells.ts";
-import { STUCK_ESCALATE_MS, STUCK_RETRY_COST, STUCK_RETRY_FIRST_MS, STUCK_RETRY_MAX_MS, STUCK_RETRY_PER_5S, STUCK_RETRY_PER_MINUTE, SyncMemory, syncOrders, takeRetryRoom } from "../src/risk.ts";
+import { STUCK_ESCALATE_MS, STUCK_RETRY_FIRST_MS, STUCK_RETRY_MAX_MS, STUCK_TRY_REQUESTS, SyncMemory, syncOrders } from "../src/risk.ts";
+import { BUDGET_PER_5S, BUDGET_PER_MINUTE, Reservation, RequestBudget } from "../src/request-budget.ts";
 import { MemoryStore } from "../src/store.ts";
 import { ensureDay } from "../src/morning.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
@@ -235,19 +236,39 @@ test("part B: once that entry's own share has filled, the cleanup sale stops loo
   assert.ok(w.sim.simMs - t0 <= 1_500, `${w.sim.simMs - t0} ms (3,000 without the stop)`);
 });
 
-test("Michael's retry allowance: 40 requests a minute and 15 in any 5 seconds, each short retry counted at 10; the next room is computed", () => {
-  assert.deepEqual([STUCK_RETRY_PER_MINUTE, STUCK_RETRY_PER_5S, STUCK_RETRY_COST], [40, 15, 10]);
-  const mem = new SyncMemory();
-  assert.deepEqual(takeRetryRoom(mem, 0), { ok: true });
-  assert.deepEqual(takeRetryRoom(mem, 1_000), { ok: false, at: 5_000 }, "a second retry inside 5 seconds waits for the 5 second room");
-  assert.deepEqual(takeRetryRoom(mem, 5_000), { ok: true });
-  assert.deepEqual(takeRetryRoom(mem, 10_000), { ok: true });
-  assert.deepEqual(takeRetryRoom(mem, 15_000), { ok: true });
-  assert.deepEqual(takeRetryRoom(mem, 20_000), { ok: false, at: 60_000 }, "four retries in the minute (40 requests): the fifth waits for the first to age out");
-  assert.deepEqual(takeRetryRoom(mem, 60_000), { ok: true });
+// The redesign of 2026-11-14, part 1: the stuck retries are P1 tries of the shared request budget (60 a minute, 15 in any 5 seconds), each
+// reserving STUCK_TRY_REQUESTS and counted at what it really sends.
+test("the redesign of 2026-11-14: the shared budget is 60 a minute and 15 in any 5 seconds; a stuck retry reserves 10; the next room is computed from what was sent", () => {
+  assert.deepEqual([BUDGET_PER_MINUTE, BUDGET_PER_5S, STUCK_TRY_REQUESTS], [60, 15, 10]);
+  let t = 0;
+  const b = new RequestBudget({ now: () => t });
+  const tryAt = (ms: number, send = 10): Reservation | { ok: false; at: number; why: string } => {
+    t = ms;
+    const r = b.tryReserve("P1", STUCK_TRY_REQUESTS, { label: "stuck retry" });
+    if (r instanceof Reservation) {
+      for (let i = 0; i < send; i++) r.charge("/v2/test");
+      r.end();
+    }
+    return r;
+  };
+  assert.ok(tryAt(0) instanceof Reservation);
+  const second = tryAt(1_000);
+  assert.ok(!(second instanceof Reservation) && second.at === 5_000 && second.why === "five", "a second retry inside 5 seconds waits for the 5 second room");
+  for (const ms of [5_000, 10_000, 15_000, 20_000, 25_000]) assert.ok(tryAt(ms) instanceof Reservation, `${ms}`);
+  const seventh = tryAt(30_000);
+  assert.ok(!(seventh instanceof Reservation) && seventh.at === 60_000 && seventh.why === "minute", "six retries in the minute (60 requests): the seventh waits for the first to age out");
+  assert.ok(tryAt(60_000) instanceof Reservation);
+  // What a try really sends is what counts: a retry that sent 3 leaves room for more in the same 5 seconds.
+  t = 0;
+  const b2 = new RequestBudget({ now: () => t });
+  const r1 = b2.tryReserve("P1", 10, { label: "stuck retry" }) as Reservation;
+  r1.charge("/v2/a"); r1.charge("/v2/b"); r1.charge("/v2/c");
+  assert.ok(!(b2.tryReserve("P1", 10, { label: "x" }) instanceof Reservation), "while it runs, its unused room is held");
+  r1.end();
+  assert.ok(b2.tryReserve("P1", 10, { label: "x" }) instanceof Reservation, "released when it ends: 3 + 10 fit in 15");
 });
 
-test("Michael's retry allowance in the sync: ten symbols stuck at once all get their first sale at once, then their retries never exceed 4 a minute or 1 in 5 seconds, and the bucket stays above the reserve", async () => {
+test("the shared budget in the sync (the redesign of 2026-11-14): ten symbols stuck at once all get their first sale at once, then their retries never take more than 60 requests a minute or 15 in 5 seconds (counted as sent), and the bucket stays above the reserve", async () => {
   const w = world();
   await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
   const day = (await w.store.getDay(D))!;
@@ -274,10 +295,11 @@ test("Michael's retry allowance in the sync: ten symbols stuck at once all get t
     seen = now;
   }
   assert.ok(tries.length >= 8, `retries still happen: ${tries.length} in 3 minutes`);
-  for (const t of tries) {
-    assert.ok(tries.filter((x) => x > t - 60_000 && x <= t).length <= 4, "at most 4 retries in any minute");
-    assert.ok(tries.filter((x) => x > t - 5_000 && x <= t).length <= 1, "at most 1 retry in any 5 seconds");
-  }
+  // Each retry reserves 10 (at most 1 starts in any 5 seconds) and is counted at what it really sends, so more than 6 can fit a minute.
+  for (const t of tries) assert.ok(tries.filter((x) => x > t - 5_000 && x <= t).length <= 1, "at most 1 retry in any 5 seconds");
+  const b = w.memory.budget!;
+  console.log(`MEASURE ten stuck: retries ${tries.length} in 3 minutes; P1 requests ${b.totals.P1}; most in a minute ${b.peak.minute}, in 5 s ${b.peak.five}`);
+  assert.ok(b.peak.minute <= 60 && b.peak.five <= 15, `the shared budget: at most ${b.peak.minute} a minute and ${b.peak.five} in 5 s`);
   assert.ok(w.sim.lowestTokens >= 80, `lowest bucket ${w.sim.lowestTokens}`);
   assert.equal(w.sim.rejected429, 0);
   assert.equal(mentions(w).length, 10, "one alert per position, no repeats");

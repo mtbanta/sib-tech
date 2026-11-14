@@ -23,6 +23,7 @@ import { CONTROL_NOT_FLAT, CONTROL_STOP, type NotFlatState, type OrderRecord, ty
 import { readPause, type MiddayPause } from "./midday.ts";
 import { dayOrderIndex, isActiveOrder } from "./order-index.ts";
 import type { Signal } from "./strategy.ts";
+import { inRequestScope } from "./request-scope.ts";
 import { centralTime, etDate, minutesBetween } from "./time.ts";
 
 // The refusal while the mid-day cycle has entries paused.
@@ -367,7 +368,8 @@ export class OrderGate {
 
     let sent;
     try {
-      sent = await this.d.broker.submitEntry({ symbol, qty: decision.qty, stopPrice: signal.stopPrice, takeProfitPrice: signal.takeProfitPrice, referencePrice: signal.price, clientOrderId, ...(limitPrice !== undefined ? { limitPrice } : {}) });
+      // Tagged as an entry for the shared request budget's statistics (the redesign of 2026-11-14); limited by the governor, as before.
+      sent = await inRequestScope({ tag: "entry" }, () => this.d.broker.submitEntry({ symbol, qty: decision.qty, stopPrice: signal.stopPrice, takeProfitPrice: signal.takeProfitPrice, referencePrice: signal.price, clientOrderId, ...(limitPrice !== undefined ? { limitPrice } : {}) }));
     } catch (err) {
       const reason = (err as Error).message.slice(0, 200);
       // Only a definite "no" from Alpaca (a local refusal, or a 4xx other than 429) means nothing was sent.

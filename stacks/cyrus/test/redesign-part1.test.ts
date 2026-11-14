@@ -1,0 +1,375 @@
+// The redesign of 2026-11-14, part 1: the shared request budget (request-budget.ts), the scope that says who asked (request-scope.ts), and
+// where the worker uses them (Michael's approval of 2026-11-14 with his changes A and B; builds/c2-redesign-2026-11-14.md, sections 3 and 10).
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { BUDGET_PER_5S, BUDGET_PER_MINUTE, GIVE_WAY_MAX_MS, P1_FLOOR, P1_KEEP, P2_FLOOR, Reservation, RequestBudget, withReservation } from "../src/request-budget.ts";
+import { currentTag, inRequestScope, outsideScope, requestScope, retryAllowedInScope } from "../src/request-scope.ts";
+import { Liquidator, SellGate } from "../src/sells.ts";
+import { SyncMemory, syncOrders } from "../src/risk.ts";
+import { MemoryStore } from "../src/store.ts";
+import { ensureDay } from "../src/morning.ts";
+import { clientOrderIdFor } from "../src/gate.ts";
+import { SAFETY_RESERVE } from "../src/governor.ts";
+import { SimBroker } from "./sim-broker.ts";
+import { FakeBroker } from "./helpers.ts";
+import { D, rig } from "./rig.ts";
+
+const granted = (r: unknown): r is Reservation => r instanceof Reservation;
+const sendN = (r: Reservation, n: number) => {
+  for (let i = 0; i < n; i++) r.charge("/v2/orders");
+};
+
+// ---------------- the budget's rules ----------------
+
+test("part 1: the sizes Michael approved (decisions 1, 2 and change A)", () => {
+  assert.deepEqual([BUDGET_PER_MINUTE, BUDGET_PER_5S, P1_KEEP, P1_FLOOR, P2_FLOOR], [60, 15, 20, 20, SAFETY_RESERVE]);
+  assert.equal(P2_FLOOR, 80);
+});
+
+test("part 1: the minute and the 5 seconds count what was sent plus what running tries still hold; a try's unused room is released when it ends", () => {
+  let t = 0;
+  const b = new RequestBudget({ now: () => t });
+  const a = b.tryReserve("P1", 15, { label: "a" });
+  assert.ok(granted(a));
+  assert.ok(!granted(b.tryReserve("P1", 1, { label: "b" })), "15 held in the 5 seconds: nothing more");
+  sendN(a, 4);
+  a.end();
+  assert.deepEqual(b.inUse(), { minute: 4, five: 4, reservedUnsent: 0, open: 0 });
+  const c = b.tryReserve("P1", 11, { label: "c" }) as Reservation;
+  assert.ok(granted(c), "4 sent + 11 = 15: fits");
+  t = 5_000;
+  assert.ok(!granted(b.tryReserve("P1", 5, { label: "d" })), "c, still running, holds 11 of the 5 seconds: 11 + 5 > 15");
+  assert.ok(granted(b.tryReserve("P1", 4, { label: "d" })), "11 + 4 = 15: fits");
+  (b as any).open.clear(); // the tries end without sending (their room released)
+  for (let i = 0; i < 3; i++) {
+    const r = b.tryReserve("P1", 15, { label: "e" }) as Reservation;
+    assert.ok(granted(r), `minute room ${i}`);
+    sendN(r, 15);
+    r.end();
+    t += 5_000;
+  }
+  // 4 + 45 sent: 11 left in the minute
+  const full = b.tryReserve("P1", 12, { label: "f" });
+  assert.ok(!granted(full) && full.why === "minute");
+  assert.ok(granted(b.tryReserve("P1", 11, { label: "g" })));
+});
+
+test("part 1: P2 may draw only while it leaves 20 of the minute for P1 (decision 2); P1 may use the whole minute", () => {
+  let t = 0;
+  const b = new RequestBudget({ now: () => t });
+  for (let i = 0; i < 4; i++) {
+    const r = b.tryReserve("P2", 10, { label: "recheck" }) as Reservation;
+    assert.ok(granted(r), `P2 try ${i}`);
+    sendN(r, 10);
+    r.end();
+    t += 5_000;
+  }
+  const p2 = b.tryReserve("P2", 1, { label: "recheck" });
+  assert.ok(!granted(p2) && p2.why === "class", "40 used: P2 stops (20 kept for P1)");
+  const p1 = b.tryReserve("P1", 15, { label: "stuck" });
+  assert.ok(granted(p1), "P1 still has its 20");
+});
+
+test("part 1 (change A): P1 tries start only while 20 stay after them; P2 tries while 80 stay; each refusal says when room returns", () => {
+  let t = 0;
+  let remaining = 95;
+  const b = new RequestBudget({ now: () => t, remaining: () => remaining });
+  assert.ok(granted(b.tryReserve("P2", 15, { label: "x" })), "95 - 15 = 80: P2 at its floor");
+  (b as any).open.clear();
+  remaining = 94;
+  const p2 = b.tryReserve("P2", 15, { label: "x" });
+  assert.ok(!granted(p2) && p2.why === "floor");
+  assert.equal(p2.at, 300, "1 short of the floor: about 0.3 s of Alpaca's refill (3.3 a second)");
+  remaining = 34;
+  const p1 = b.tryReserve("P1", 15, { label: "x" });
+  assert.ok(!granted(p1) && p1.why === "floor", "34 - 15 = 19: below P1's floor");
+  remaining = 35;
+  assert.ok(granted(b.tryReserve("P1", 15, { label: "x" })), "35 - 15 = 20: P1 at its floor");
+});
+
+test("part 1: room another running try holds counts against the floor too", () => {
+  const b = new RequestBudget({ now: () => 0, remaining: () => 60 });
+  assert.ok(granted(b.tryReserve("P1", 15, { label: "a", fiveSec: false })), "60 - 15 = 45");
+  assert.ok(granted(b.tryReserve("P1", 15, { label: "b", fiveSec: false })), "60 - 15 held - 15 = 30");
+  const c = b.tryReserve("P1", 15, { label: "c", fiveSec: false });
+  assert.ok(!granted(c) && c.why === "floor", "60 - 30 held - 15 = 15: below the floor of 20");
+});
+
+test("part 1: a close-out retry reserves against the minute only; others against both", () => {
+  const b = new RequestBudget({ now: () => 0 });
+  assert.ok(granted(b.tryReserve("P1", 40, { label: "close-out retry", fiveSec: false })), "40 fits the minute; the 5 seconds do not apply");
+  assert.ok(!granted(b.tryReserve("P1", 16, { label: "stuck" })), "16 never fits 15 in 5 seconds");
+});
+
+test("part 1 (change B): a forced try is granted whatever the room, and counted", () => {
+  let t = 0;
+  const b = new RequestBudget({ now: () => t, remaining: () => 0 });
+  const r = b.tryReserve("P1", 60, { label: "close-out retry", fiveSec: false, force: true });
+  assert.ok(granted(r));
+  sendN(r as Reservation, 70);
+  (r as Reservation).end();
+  const m = b.takeMinute();
+  assert.equal(m.forced, 1);
+  assert.equal(m.overdrafts, 10, "10 beyond its 60 reserved");
+  assert.equal(b.totals.P1, 70);
+});
+
+test("part 1: a try that sends more than it reserved is never stopped; the extra is counted, logged once, and later tries wait for it", () => {
+  let t = 0;
+  const logs: string[] = [];
+  const b = new RequestBudget({ now: () => t, log: (e) => void logs.push(e) });
+  const r = b.tryReserve("P1", 5, { label: "stuck" }) as Reservation;
+  sendN(r, 8);
+  r.end();
+  assert.equal(logs.filter((e) => e === "budget_overdraft").length, 1);
+  assert.equal(b.inUse().five, 8);
+  assert.ok(!granted(b.tryReserve("P1", 8, { label: "next" })), "8 + 8 > 15");
+  assert.ok(granted(b.tryReserve("P1", 7, { label: "next" })));
+});
+
+test("part 1: a request sent after its try ended is still counted, and logged", () => {
+  const logs: string[] = [];
+  const b = new RequestBudget({ now: () => 0, log: (e) => void logs.push(e) });
+  const r = b.tryReserve("P2", 2, { label: "x" }) as Reservation;
+  r.end();
+  r.charge("/v2/orders");
+  assert.equal(b.totals.P2, 1);
+  assert.ok(logs.includes("budget_sent_after_end"));
+});
+
+test("part 1: the clock and the calendar (a separate Alpaca bucket) are never charged", () => {
+  const b = new RequestBudget({ now: () => 0 });
+  const r = b.tryReserve("P1", 2, { label: "x" }) as Reservation;
+  r.charge("/v2/clock");
+  r.charge("/v2/calendar");
+  assert.equal(b.totals.P1, 0);
+  b.onSend("/v2/clock");
+  assert.equal(b.takeMinute().sent.clock, 1);
+});
+
+test("part 1: a refusal's time is when enough of the oldest requests leave the window", () => {
+  let t = 0;
+  const b = new RequestBudget({ now: () => t });
+  const a = b.tryReserve("P1", 10, { label: "a" }) as Reservation;
+  sendN(a, 10);
+  a.end();
+  t = 1_000;
+  const r = b.tryReserve("P1", 10, { label: "b" });
+  assert.ok(!granted(r) && r.why === "five" && r.at === 5_000, JSON.stringify(r));
+  t = 5_000;
+  assert.ok(granted(b.tryReserve("P1", 10, { label: "b" })));
+});
+
+test("part 1: a first try's counter is never refused and not part of the budgeted minute", () => {
+  const b = new RequestBudget({ now: () => 0, remaining: () => 0 });
+  const f = b.first("close-out");
+  sendN(f, 100);
+  assert.equal(f.used, 100);
+  assert.equal(b.totals.P1 + b.totals.P2, 0);
+  assert.ok(granted(b.tryReserve("P1", 0, { label: "x", force: true })));
+});
+
+test("part 1 (decision 5 with change A): the give-way lapses GIVE_WAY_MAX_MS after the last floor refusal, or when the try is granted", () => {
+  let t = 0;
+  let remaining = 82;
+  const b = new RequestBudget({ now: () => t, remaining: () => remaining });
+  assert.equal(b.givingWay(), false);
+  b.tryReserve("P2", 5, { label: "recheck", waitKey: "k" });
+  assert.equal(b.givingWay(), true);
+  remaining = 200;
+  assert.ok(granted(b.tryReserve("P2", 5, { label: "recheck", waitKey: "k" })));
+  assert.equal(b.givingWay(), false, "granted: no longer waiting");
+  remaining = 82;
+  b.tryReserve("P2", 5, { label: "recheck", waitKey: "k" });
+  t += GIVE_WAY_MAX_MS;
+  assert.equal(b.givingWay(), false, "lapsed");
+  b.tryReserve("P1", 70, { label: "x", waitKey: "p1" });
+  assert.equal(b.givingWay(), false, "a P1 refusal never makes entries give way");
+});
+
+// ---------------- who is asking ----------------
+
+test("part 1: the tag follows a call through the sell gate's and the liquidator's one-at-a-time queues, and each try's requests go to its own reservation", async () => {
+  const broker = new FakeBroker();
+  broker.clock = { ...broker.clock, isOpen: true };
+  broker.positions = [{ symbol: "AAA", qty: 5, marketValue: 500, avgEntryPrice: 100, unrealizedPl: 0 }, { symbol: "BBB", qty: 5, marketValue: 500, avgEntryPrice: 100, unrealizedPl: 0 }];
+  const seen: string[] = [];
+  broker.onSend = (path) => void (path.startsWith("/v2/clock") || seen.push(currentTag()));
+  const gate = new SellGate({ broker, say: async () => true });
+  const liquidator = new Liquidator({ broker, gate, now: () => new Date(0), sleep: async () => undefined });
+  const b = new RequestBudget({ now: () => 0 });
+  const p1 = b.tryReserve("P1", 60, { label: "a", fiveSec: false }) as Reservation;
+  const first = b.first("b");
+  // Two sales started together: the second waits its turn in the liquidator's queue, then runs in its own scope.
+  const one = withReservation(p1, () => liquidator.flatten({ reason: "a", tradeDate: D, only: ["AAA"], maxRounds: 1 }));
+  const two = withReservation(first, () => liquidator.flatten({ reason: "b", tradeDate: D, only: ["BBB"], maxRounds: 1 }), "first");
+  await Promise.all([one, two]);
+  assert.ok(p1.used > 0 && first.used > 0);
+  assert.equal(seen.filter((x) => x === "P1").length, p1.used, "every P1 request charged once, to the P1 try");
+  assert.equal(seen.filter((x) => x === "first").length, first.used, "every first-try request counted once, to the first try");
+  assert.equal(seen.filter((x) => x === "routine").length, 0, "nothing escaped its scope");
+});
+
+test("part 1: new work started with outsideScope never carries a try's scope, even from a timer set inside it", async () => {
+  const b = new RequestBudget({ now: () => 0 });
+  const r = b.tryReserve("P2", 2, { label: "x" }) as Reservation;
+  let inTimer = "";
+  let outside = "";
+  await requestScope.run(r.scope(), async () => {
+    await new Promise<void>((done) => setTimeout(() => ((inTimer = currentTag()), done()), 0));
+    outsideScope(() => void (outside = currentTag()));
+  });
+  assert.equal(inTimer, "P2", "a plain timer inherits the scope (why the worker starts new work outside it)");
+  assert.equal(outside, "routine");
+});
+
+test("part 1: the client's own retry is allowed while the reservation has room, and always outside a reservation", async () => {
+  assert.equal(retryAllowedInScope(), true);
+  const b = new RequestBudget({ now: () => 0 });
+  const r = b.tryReserve("P1", 1, { label: "x" }) as Reservation;
+  await inRequestScope(r.scope(), async () => {
+    assert.equal(retryAllowedInScope(), true);
+    r.charge("/v2/orders");
+    assert.equal(retryAllowedInScope(), false);
+  });
+  await inRequestScope({ tag: "first" }, async () => assert.equal(retryAllowedInScope(), true));
+});
+
+// ---------------- the worker ----------------
+
+test("part 1 (change B): the 2:55 close-out's retry waits for room in the shared budget until 2:58 PM Central, and from then it is never refused", async () => {
+  const r = rig();
+  await r.at("13:30:00");
+  r.broker.clock = { ...r.broker.clock, isOpen: true };
+  r.broker.positions = [{ symbol: "AAA", qty: 5, marketValue: 500, avgEntryPrice: 100, unrealizedPl: 0 }];
+  await r.store.insertOrder({ clientOrderId: "cyrus-20261102-AAA-1", tradeDate: D, symbol: "AAA", qty: 5, referencePrice: 100, stopPrice: 98.5, status: "submitted", alpacaOrderId: null, filledQty: null, filledAvgPrice: null, note: null });
+  r.broker.onSell = async () => {
+    throw new Error("rejected (test)");
+  };
+  await r.at("20:55:00"); // the first try (a first try: never refused)
+  const wk: any = r.worker;
+  const fill = () => {
+    // Something else used the whole minute just now.
+    const x = wk.budget.tryReserve("P1", 60, { label: "test: a full minute", fiveSec: false, force: true });
+    for (let i = 0; i < 60; i++) x.charge("/v2/test");
+    x.end();
+  };
+  fill();
+  const sellsAt = () => r.broker.count("submitSell");
+  const before = sellsAt();
+  await r.at("20:55:20");
+  await r.at("20:55:40");
+  assert.equal(sellsAt(), before, "before 2:58: refused while the minute is full (not an attempt)");
+  assert.equal(r.broker.count("submitSell"), before);
+  r.setNow("2026-11-02T20:57:30.000Z");
+  fill(); // the first fill has aged out; the minute is full again
+  const at = sellsAt();
+  await r.at("20:57:40");
+  await r.at("20:57:55");
+  assert.equal(sellsAt(), at, "still before 2:58 PM Central (20:58 UTC): refused");
+  await r.at("20:58:00");
+  assert.ok(sellsAt() > at, "from 2:58 PM Central: never refused");
+  assert.ok(wk.budget.takeMinute().forced >= 1);
+  r.worker.stop?.();
+});
+
+test("part 1: the worker hands its budget to the governor (entries give way) and wires it into its statistics", async () => {
+  const r = rig();
+  const wk: any = r.worker;
+  assert.equal(wk.syncMemory.budget, wk.budget);
+  assert.equal(wk.lossMemory.budget, wk.budget);
+  assert.equal((r.governor as any).safetyHold, wk.budget);
+  const stats = wk.minuteStats();
+  assert.ok(stats.requestBudget && "sent" in stats.requestBudget && "refused" in stats.requestBudget, JSON.stringify(stats.requestBudget));
+  assert.equal("stuckRetryAllowance" in stats, false, "the old allowance's statistics are gone");
+  r.worker.stop?.();
+});
+
+// ---------------- the oracle under random faults ----------------
+
+// Stuck sales (refused), remainders whose order list lags, and timed-out stops at once, with random faults on Alpaca's reads, for 5 minutes:
+// whatever happens, every request made in a P1 or P2 scope is charged exactly once (the simulated broker counts them by tag), no rate-limit
+// answer, no oversell, and the budgeted minute stays within 60 (and 15 in 5 seconds) apart from logged overdrafts.
+for (const rate of [0, 0.1, 0.3]) {
+  test(`part 1: under random faults (${rate * 100} percent of reads), charges equal the P1 and P2 requests sent, with no rate-limit answer and no oversell`, async () => {
+    const sim = new SimBroker(Date.UTC(2026, 10, 2, 15, 0));
+    const store = new MemoryStore();
+    const now = () => new Date(sim.simMs);
+    const logs: Array<{ e: string; d: any }> = [];
+    const log = (e: string, d?: Record<string, unknown>) => void logs.push({ e, d });
+    const gate = new SellGate({ broker: sim, say: async () => true, nowMs: () => sim.simMs, log });
+    const liquidator = new Liquidator({ broker: sim, gate, now, sleep: sim.sleep, log });
+    const memory = new SyncMemory();
+    const budget = new RequestBudget({ now: () => sim.simMs, remaining: () => sim.tokens, log });
+    memory.budget = budget;
+    const tagged: Record<string, number> = { entry: 0, first: 0, P1: 0, P2: 0, routine: 0 };
+    sim.onSend = () => void (tagged[currentTag()] = (tagged[currentTag()] ?? 0) + 1);
+    let seed = 7 + Math.round(rate * 100);
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+    for (const m of ["listOrdersPaged", "listPositions", "findOrderByClientId", "listOrders"] as const) {
+      const real = (sim as any)[m].bind(sim);
+      (sim as any)[m] = async (...a: any[]) => {
+        if (rnd() < rate) {
+          (sim as any).spend("plain");
+          throw new Error(`${m} failed (test)`);
+        }
+        return real(...a);
+      };
+    }
+    const risk: any = { broker: sim, store, now, say: async () => true, liquidator, syncMemory: memory, log, budget, onRemainderSold: () => undefined, onFreshStop: () => undefined };
+    await ensureDay({ store, broker: sim, now } as any, D);
+    const dd = (await store.getDay(D))!;
+    const hold = async (symbol: string, n: number, price: number) => {
+      const id = clientOrderIdFor(D, symbol, n);
+      await sim.submitEntry({ symbol, qty: 5, stopPrice: price - 0.13, takeProfitPrice: price + 0.08, referencePrice: price, clientOrderId: id });
+      sim.fillEntry(id, price);
+      await store.insertOrder({ clientOrderId: id, tradeDate: D, symbol, qty: 5, referencePrice: price, stopPrice: price - 0.13, takeProfitPrice: price + 0.08, status: "filled", alpacaOrderId: null, filledQty: 5, filledAvgPrice: price, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+      return id;
+    };
+    const stuck = ["AAA", "BBB", "CCC"];
+    const lagging = ["LUNR", "SMCI", "IREN"];
+    const ids: Record<string, string> = {};
+    for (const [i, s] of [...stuck, ...lagging].entries()) ids[s] = await hold(s, 1, 10 + i);
+    sim.advance(5_000);
+    sim.refuseStops = true;
+    sim.refuseSellIf = (x) => stuck.includes(x.symbol);
+    for (const s of stuck) sim.partialTakeProfit(ids[s]!, 1, 10.08);
+    const t0 = sim.simMs;
+    for (const [i, s] of lagging.entries()) {
+      sim.partialTakeProfitListLag(ids[s]!, 1, 13 + i + 0.08, 8_000 + i * 6_000);
+      memory.liveStopCancelled.set(ids[s]!, t0);
+    }
+    while (sim.simMs < t0 + 5 * 60_000) {
+      const lr = memory.lagRecheck;
+      let r: any = null;
+      try {
+        if (lr && sim.simMs >= lr.dueAt && sim.simMs < lr.until) {
+          const res = budget.tryReserve("P2", lr.cost, { label: "list lag recheck" });
+          if (granted(res)) {
+            try {
+              r = await withReservation(res, () => syncOrders(risk, dd, { protect: true, streamLive: true }));
+            } catch (err) {
+              memory.lagRecheck = undefined; // as the worker does after a failed recheck sync
+              throw err;
+            }
+          }
+        } else r = await syncOrders(risk, dd, { protect: true, streamLive: true });
+      } catch {
+        /* a failed sync: the next one comes on time */
+      }
+      const lr2 = memory.lagRecheck;
+      const next = Math.min(r?.recheckAt ?? Infinity, lr2 ? lr2.dueAt : Infinity, sim.simMs + 10_000);
+      sim.advanceTo(Math.max(sim.simMs + 100, next));
+    }
+    const over = logs.filter((x) => x.e === "budget_overdraft").length;
+    console.log(`MEASURE faults ${rate}: P1 ${budget.totals.P1} (sent ${tagged.P1}), P2 ${budget.totals.P2} (sent ${tagged.P2}), first ${tagged.first}, routine ${tagged.routine}; most budgeted ${budget.peak.minute} a minute, ${budget.peak.five} in 5 s; overdrafts ${over}; lowest tokens ${Math.floor(sim.lowestTokens)}; rate-limit answers ${sim.rejected429}`);
+    assert.equal(budget.totals.P1, tagged.P1, "every P1 request charged once");
+    assert.equal(budget.totals.P2, tagged.P2, "every P2 request charged once");
+    assert.equal(sim.rejected429, 0);
+    assert.equal(sim.oversellAttempts, 0);
+    // The cap holds for what tries reserve; a try that sends more than it reserved (an ordinary stuck retry whose sale is refused runs up to
+    // 3 rounds, about 26 requests, against the 10 it reserves) is never stopped halfway: its extra is counted and logged (design, 3.2).
+    assert.ok(budget.peak.minute <= 60 + budget.totals.overdraft && budget.peak.five <= 15 + budget.totals.overdraft, `at most ${budget.peak.minute} a minute and ${budget.peak.five} in 5 s, ${budget.totals.overdraft} overdrawn`);
+    if (budget.totals.overdraft === 0) assert.ok(budget.peak.minute <= 60 && budget.peak.five <= 15);
+  });
+}

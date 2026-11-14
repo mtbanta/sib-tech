@@ -9,6 +9,7 @@ import { decideLimits, decideLoad, limitLines, parseCommand, type NextSessionFin
 import { AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_AFTERNOON_PHASE, LOAD_MAX_POSITION_USD, LOAD_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, beforeLoadWindow, inAfternoonLoad, isLoadDay, loadLine, loadWindow, loadWindowRules } from "./load-mode.ts";
 import { CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import type { Liquidator, Say } from "./sells.ts";
+import { inRequestScope } from "./request-scope.ts";
 import { CONTROL_COMMAND_CURSOR, CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
 import { MAX_TRADES_PER_MINUTE, MAX_TRADES_PER_MINUTE_LOAD_DAY, MIN_MINUTES_BEFORE_CLOSE, describeLimits } from "./limits.ts";
 import { addMinutes, centralClock, dayWord, etDate, sessionPhase } from "./time.ts";
@@ -364,7 +365,8 @@ export class CommandProcessor {
           let remaining: string[] = [];
           let failed = false;
           try {
-            const r = await this.d.liquidator.flatten({ reason: "flatten command", tradeDate: etDate(now) });
+            // A first try of safety work (the redesign of 2026-11-14): counted by the shared request budget, never refused.
+            const r = await inRequestScope({ tag: "first" }, () => this.d.liquidator.flatten({ reason: "flatten command", tradeDate: etDate(now) }));
             flat = r.flat;
             remaining = r.remaining;
           } catch {
@@ -656,7 +658,11 @@ export class CommandProcessor {
   }
 
   // Cancels buy orders that have not filled at all. Protective stops of filled entries are left alone.
+  // A first try of safety work (the redesign of 2026-11-14): counted by the shared request budget, never refused.
   private async cancelUnfilledEntries(): Promise<number> {
+    return inRequestScope({ tag: "first" }, () => this.cancelUnfilledEntriesNow());
+  }
+  private async cancelUnfilledEntriesNow(): Promise<number> {
     const open = await this.d.broker.listOrders("open");
     let n = 0;
     for (const o of open) {

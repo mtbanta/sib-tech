@@ -17,6 +17,7 @@ import { OrderStream } from "./order-stream.ts";
 import { fetchUniverseWithNames } from "./universe.ts";
 import { CachingStore } from "./caching-store.ts";
 import { Governor } from "./governor.ts";
+import { RequestBudget } from "./request-budget.ts";
 import { shouldStoreEvent } from "./run-log.ts";
 import { FeedAlerter } from "./feed-alert.ts";
 import { Worker } from "./worker.ts";
@@ -31,7 +32,10 @@ const pool = makePool(settings.supabaseDbUrl!);
 // The cache sits in front of the database so the order gate does not wait on it for every decision (see caching-store.ts).
 const store = new CachingStore(new PgStore(pool));
 const governor = new Governor();
-const broker = new AlpacaTrading(settings, { onRate: (info) => governor.observe(info) });
+// The redesign of 2026-11-14, part 1: the shared request budget. The client counts every request it sends into it by tag (`onSend`), and
+// charges each one to the reservation of the scope it is made in (request-scope.ts).
+const budget = new RequestBudget({ remaining: () => governor.budget(), log: (event, fields) => logAndStore?.("info", event, fields) });
+const broker = new AlpacaTrading(settings, { onRate: (info) => governor.observe(info), onSend: (path) => budget.onSend(path) });
 const data = new AlpacaData(settings);
 const bot = new DiscordBot(settings, redact);
 
@@ -73,6 +77,7 @@ const worker = new Worker({
   now: () => new Date(),
   ping: (kind) => ping(settings.healthchecksPingUrl, kind),
   buildLiveList,
+  budget,
   selfMonitor: new SelfMonitor(),
   // Michael's standing requirement of 2026-11-11: `load afternoon` (fixed in the release of 2026-11-12). This one line is the switch:
   // false turns the command off again (it then answers that it is off and changes nothing).

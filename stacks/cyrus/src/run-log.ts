@@ -49,14 +49,12 @@ export const STORED_INFO_EVENTS = new Set([
   "load_afternoon",
   "afternoon_closeout",
   "screen_not_tradable",
-  // Item 2 of 2026-11-13 (group 2, round 1 of the weekend build): the timed-out stop's status checks and end, a try cut short for lack of
-  // room in the request allowance, and the start-up protection check (rare, bounded by the allowance). Since Michael's change of
-  // 2026-11-13 (evening), `timed_out_try_out_of_room` with stage "list lag recheck" can come once per sync while a lagging remainder is
-  // inside its 30 second window and the allowance has no room: bounded by how often syncs run, not by the allowance.
+  // Item 2 of 2026-11-13 (group 2, round 1 of the weekend build): the timed-out stop's status checks and end, a try that waited for room in
+  // the shared request budget (since the redesign of 2026-11-14: a timed-out stop's try, the 15 second limit, or the list-lag recheck's own
+  // timer, at most once per refusal, and the recheck at most until its 30 second window ends), and the start-up protection check.
   "fresh_stop_timeout_check",
   "fresh_stop_timeout_ended",
   "timed_out_try_out_of_room",
-  "liquidation_budget_out",
   "startup_protection_check",
   "startup_protection_check_failed",
   "startup_fresh_stop_confirmed",
@@ -87,6 +85,13 @@ export const STORED_INFO_EVENTS = new Set([
   "fresh_stop_timeout_cancel_not_sent",
   "fresh_stop_timeout_still_open",
   "fresh_stop_unclear_end",
+  // The redesign of 2026-11-14, part 1 (rare, for the reviews): a budgeted try that sent more than it reserved, a request sent after its try
+  // ended, a fresh-stop lookup skipped for lack of room, and a list-lag recheck dropped at the end of its window. Every refusal
+  // (`budget_refused`) stays in Fly's log only; the per-minute statistics (`governor_stats`, stored) count them.
+  "budget_overdraft",
+  "budget_sent_after_end",
+  "fresh_stop_lookup_skipped",
+  "list_lag_recheck_window_over",
 ]);
 
 export function shouldStoreEvent(level: "info" | "warn" | "error", event: string): boolean {

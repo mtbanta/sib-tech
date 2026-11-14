@@ -11,7 +11,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { AlpacaError } from "../src/alpaca-trading.ts";
 import { ensureDay } from "../src/morning.ts";
-import { enforceDailyLoss, LossStopMemory, LOSS_STOP_REQUESTS_PER_MINUTE, LOSS_STOP_RETRY_PER_CHECK } from "../src/risk.ts";
+import { enforceDailyLoss, LossStopMemory, LOSS_STOP_RETRY_PER_CHECK } from "../src/risk.ts";
+import { BUDGET_PER_MINUTE, P1_FLOOR } from "../src/request-budget.ts";
 import { Liquidator, SellGate } from "../src/sells.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
 import { SAFETY_RESERVE } from "../src/governor.ts";
@@ -102,17 +103,24 @@ test("the retry pauses after a rate-limit answer (10 seconds, then 20) and, sinc
   assert.equal(limited.broker.positions.length, 0, "and it sells once Alpaca has room");
 });
 
-test("the retry never spends Alpaca's safety reserve: with the governor at the reserve it sends nothing", async () => {
-  const p = await afterLossStop(["AAA"], { governor: { budget: () => SAFETY_RESERVE } });
-  await p.check();
-  assert.equal(p.broker.count("listPositions") + p.sells(), 0);
+// Michael's change A of 2026-11-14: the loss stop's re-sells are P1 tries of the shared request budget, which may go below the reserve of 80
+// down to a floor of 20 (each check reserves LOSS_STOP_RETRY_PER_CHECK first).
+test("the redesign of 2026-11-14 (change A): the retry may spend below the reserve of 80, down to a floor of 20; below that it sends nothing", async () => {
+  const at = await afterLossStop(["AAA"], { governor: { budget: () => SAFETY_RESERVE } });
+  await at.check();
+  assert.ok(at.broker.count("listPositions") + at.sells() > 0, "at the reserve of 80: a P1 try still goes (80 - 15 is above 20)");
+  const low = await afterLossStop(["AAA"], { governor: { budget: () => P1_FLOOR + LOSS_STOP_RETRY_PER_CHECK - 1 } });
+  await low.check();
+  assert.equal(low.broker.count("listPositions") + low.sells(), 0, "below the floor of 20 after the try: nothing sent");
 });
 
 test("the retry keeps inside its budget of 60 requests a minute, with 40 positions all refused, and every symbol gets its turn", async () => {
   const syms = Array.from({ length: 40 }, (_, i) => `S${String(i).padStart(2, "0")}`);
   const p = await afterLossStop(syms);
   p.broker.onSell = async () => { throw new AlpacaError("sell refused (test)", 403); };
-  const req = () => p.broker.calls.filter((c) => ["listPositions", "listOrdersPaged", "submitSell", "cancelOrder", "cancelAllOrders", "getAccount"].includes(c.fn)).length;
+  // The redesign of 2026-11-14: the equity check every 5 seconds is routine work (counted, not limited), so only the re-sells' requests
+  // are counted against the shared budget's minute.
+  const req = () => p.broker.calls.filter((c) => ["listPositions", "listOrdersPaged", "submitSell", "cancelOrder", "cancelAllOrders"].includes(c.fn)).length;
   const marks: number[] = [];
   // Item 3 of 2026-11-13: checks whose sales were all refused back off (5, 10, 20, then 30 seconds), so the turns take longer.
   for (let s = 0; s < 420; s += 5) {
@@ -125,7 +133,7 @@ test("the retry keeps inside its budget of 60 requests a minute, with 40 positio
   let worstCheck = 0;
   for (let i = 0; i + 12 < marks.length; i++) worst = Math.max(worst, marks[i + 12]! - marks[i]!); // 12 checks = 60 seconds
   for (let i = 0; i + 1 < marks.length; i++) worstCheck = Math.max(worstCheck, marks[i + 1]! - marks[i]!);
-  assert.ok(worst <= LOSS_STOP_REQUESTS_PER_MINUTE, `at most ${LOSS_STOP_REQUESTS_PER_MINUTE} in any minute (was ${worst})`);
+  assert.ok(worst <= BUDGET_PER_MINUTE, `at most ${BUDGET_PER_MINUTE} in any minute (was ${worst})`);
   assert.ok(worstCheck <= LOSS_STOP_RETRY_PER_CHECK, `at most ${LOSS_STOP_RETRY_PER_CHECK} in one check, spread over the minute (was ${worstCheck})`);
   const tried = new Set(p.broker.calls.filter((c) => c.fn === "submitSell").map((c) => (c.args[0] as { symbol: string }).symbol));
   assert.equal(tried.size, 40, "every symbol was tried");
@@ -204,7 +212,12 @@ test("40 positions and repeated refusals: total requests stay under Alpaca's lim
   console.log(`40-position refusal rehearsal: busiest minute ${worst} requests, lowest bucket ${Math.floor(sim.lowestTokens)}, rate-limit answers ${sim.rejected429}`);
   assert.equal(await stopIn(r.store), true, "the loss stop fired");
   assert.equal(sim.rejected429, 0, "Alpaca never answered 'too many requests'");
-  assert.ok(worst < 200, `under 200 in every minute (busiest ${worst})`);
+  // The redesign of 2026-11-14 (decision 4, change A): the loss stop's first sale is a first try, counted but no longer charged to the
+  // re-sells' budget, so the re-sells start about 10 s after it (before: a minute later) and the busiest 60 s rose from 180 to 226 here. What
+  // guards Alpaca's bucket is the floor: a P1 try starts only while at least 20 stay after it. Alpaca refills continuously (217 in 60 s
+  // without a refusal on 2026-11-06); the oracle is the simulated bucket: never a rate-limit answer, never below the floor.
+  assert.ok(sim.lowestTokens >= 20, `the bucket stayed at or above the floor of 20 (lowest ${Math.floor(sim.lowestTokens)})`);
+  assert.ok(worst < 240, `the busiest 60 s ${worst}`);
   assert.equal((await sim.listPositions()).length, 0, "the close-out got through: flat");
   assert.equal(sim.oversellAttempts, 0);
   assert.equal((await r.store.getDay(D))!.phases.closeout !== undefined, true, "close-out recorded");
