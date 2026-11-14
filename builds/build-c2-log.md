@@ -5620,3 +5620,15 @@ Not yet changed: "20.6 or 25.6 s" for group 2's rows, which group 1 measured as 
 - Fix (a)'s code was last changed in `7051f5e`. Group 1 found no code fault in rounds 3 to 7. Group 2 passed in round 5, on the same code.
 - Every blocking finding since round 4 has been in the tests' setup or the log's figures.
 - This round's verdict stops the build for Michael's decision.
+
+## Michael's decisions after the fix (a) round 7 STOP AND FLAG (2026-11-13, evening), saved verbatim
+
+> Decisions:
+> 1. Option 1: a final review round for both groups on commit b1bd65c. Up to 3 more rounds per group are approved if needed.
+> 2. From here, a finding about the build log or a test's label only (no code fault, no wrong behavior) does not block the deploy: record it and fix it after the deploy. A finding about code, behavior or a test that fails to test what it claims still blocks.
+> 3. Fallback stays: if it has not passed by Sunday 8:00 PM Central, build and review the version without the remainder recheck item.
+> 4. Deploy before 7:30 AM Monday only if both groups pass on code. Post the "live" line saying what shipped.
+> I will read the shared request budget proposal after this release.
+> Never print any token or key.
+
+Round numbering: fix (a) round 8 is the final round on `b1bd65c`; up to 3 more per group (rounds 9 to 11) if needed.
