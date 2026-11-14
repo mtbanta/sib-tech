@@ -5414,7 +5414,7 @@ Measured by group 1 in the simulator: a stuck sale's retry came 5.75 s late (pas
 - The pass passes the time it cancelled to its sync (`restoreAt`).
 - If that sync throws before `syncOrders` returns (including the loss stop's read before it), the time is put back once as the recheck's own timer: `syncRecheckAt` if empty, `syncAt(restoreAt)`, and the mark. `syncAt` keeps its 250 ms slack (at least 100 ms from now), so the retry in the tests ran at due + 250.
 - A sync started by that timer carries no `restoreAt`, so a failure there puts nothing back. **Measured (group 2, fix (a) round 3; now a test):** with Alpaca's order list failing for 30 s and a recheck pending, the real code made 4 failing syncs against 3 at `53e367c` (one more per outage), and 3 against 3 with no recheck pending. A variant whose restored timer restored itself again failed every 100 ms (263 to 286 failed reads), which is why the test exists. Rule 6 holds: at most one restore per pass cancel. The tests enforce it since fix (a) rounds 4 to 6: in a 30 s order list outage at most 4 failed reads and at most 2 sync starts in 5 s (a stuck sale at offsets including the two-restore windows; a lagging remainder at offsets that lie ahead of the clock); over a 120 s outage of the sync's reads (stuck sale only, offsets including -4 900 in the window) at most 8 syncs a minute and 2 in 5 s. Both tests assert that each pass time lies ahead of the clock at setup, and the 30 s test asserts that its window rows really get two restores (fix (a) round 7).
-- So a failed pass sync now leads to at most one more failing sync and one more `background_failed` log row per outage (group 1, fix (a) round 7, a stuck sale in a 30 s order list outage: one more with the pass at -4.75 to +0.1 s from due and in both windows; none at -9.75 to -5.25 s). When the next pass lands in the 250 ms before the restored timer fires, there are two restores: that pass cancels the restored timer, its sync fails and restores again, then the timer fires and fails (windows -10 000 to -9 775 and -5 000 to -4 775 ms, group 1, fix (a) round 5). The second pass would run anyway, so only the second restored timer adds a failing sync: one more in the window too. Measured with a stuck sale in a 30 s order list outage, the setup running as labelled: 4 failed reads against 3 with no restore, and 2 sync starts in 5 s (group 1, fix (a) round 6). (Correction, group 1 round 6: the earlier "two more" and "3 starts within 750 ms" came from lag-setup rows whose pass time lay before the simulated clock, so the first pass ran 0.5 s before due and the outage was 20.6 or 25.6 s, not 30. In production two pass syncs 600 ms apart would need a pass held about 4.4 s in its own reads before its sync starts; that is group 1's reading, not measured.) Outside those windows group 2 measured none more with a stuck sale and the pass 6 to 16 s before due (round 4); in the test's stuck setup only 6 to 10 s of that range lies ahead of the clock, and group 1 measured 3 against 3 at 6 to 9.75 s (round 7). Failed reads never went above 4 in a 30 s outage at the offsets swept, -10 s to +0.25 s from due (group 1; the lag half of its round 5 sweep mostly ran with the pass before the clock). At +0.5 to +1.25 s the test's counter sees 7 (6 with no restore), because a sync that started before the outage reads into it; that is not a restore loop (group 1, round 7). In the lag cases run as labelled that row comes 150 ms (pass +100) or 550 ms (pass -300) after the first, a near-duplicate (corrected in fix (a) round 7: the earlier "750" came from a lag row whose pass time lay before the clock). The Discord alert is not doubled, because `Worker.background` sends at most one per step every 5 minutes.
+- So a failed pass sync now leads to at most one more failing sync and one more `background_failed` log row per outage (group 1, fix (a) round 7, a stuck sale in a 30 s order list outage: one more with the pass at -4.75 to +0.1 s from due and in both windows; none at -9.75 to -5.25 s). When the next pass lands in the 250 ms before the restored timer fires, there are two restores: that pass cancels the restored timer, its sync fails and restores again, then the timer fires and fails (windows -10 000 to -9 775 and -5 000 to -4 775 ms, group 1, fix (a) round 5). The second pass would run anyway, so only the second restored timer adds a failing sync: one more in the window too. Measured with a stuck sale in a 30 s order list outage, the setup running as labelled: 4 failed reads against 3 with no restore, and 2 sync starts in 5 s (group 1, fix (a) round 6). (Correction, group 1 round 6: the earlier "two more" and "3 starts within 750 ms" came from lag-setup rows whose pass time lay before the simulated clock, so the first pass ran 0.5 s before due and the outage was 20.6 or 25.6 s in the test's rows at -9 900 and -4 900 (20.5 or 25.5 s in group 2's probe rows at -10 000 and -5 000), not 30. In production two pass syncs 600 ms apart would need a pass held about 4.4 s in its own reads before its sync starts; that is group 1's reading, not measured.) Outside those windows group 2 measured none more with a stuck sale and the pass 6 to 16 s before due (round 4); in the test's stuck setup only 6 to 10 s of that range lies ahead of the clock, and group 1 measured 3 against 3 at 6 to 9.75 s (round 7). Failed reads never went above 4 in a 30 s outage at the offsets swept, -10 s to +0.25 s from due (group 1; the lag half of its round 5 sweep mostly ran with the pass before the clock). At +0.5 to +1.25 s the test's counter sees 7 (6 with no restore), because a sync that started before the outage reads into it; that is not a restore loop (group 1, round 7). In the lag cases run as labelled that row comes 150 ms (pass +100) or 550 ms (pass -300) after the first, a near-duplicate (corrected in fix (a) round 7: the earlier "750" came from a lag row whose pass time lay before the clock). The Discord alert is not doubled, because `Worker.background` sends at most one per step every 5 minutes.
 - **Measured (group 2):** the restored timer's sync sets `lastSync` even when it fails, so after a 30 s outage the regular rhythm can shift one pass later. In the three pass timings measured, the first good sync and the stuck sale's next retry came 5 s later than at `53e367c` (for example +44 501 against +39 501), within one regular gap. At other timings group 2 measured no shift (round 4), so: 0 to 5 s later.
 - The follow-ups are unchanged: the restored timer's sync runs them when it succeeds.
 
@@ -5605,7 +5605,7 @@ If this finding returns after this fix, it will have survived two fixes, which i
 
 **Its four findings, all in the log, and where each stands:**
 1. **The double-restore note was wrong in both halves.** Its 120 s figure came from group 1's round 5 three-read harness. Rewritten in `843c3d8` (made while round 7 ran) with the four-read figures: 13 and 26 in the -10 s window, 14 and 28 in the -5 s window, against 13 and 26 with one restore or none. The 30 s half is 4 with two restores, the same as one restore near due, against 3 with no restore.
-2. **Group 2's round 6 lag figures were left uncorrected.** They are corrected in `843c3d8`'s round 7 correction section, which names each one and says why the 120 s lag figure was removed.
+2. **Group 2's round 6 lag figures were left uncorrected.** They are corrected in `843c3d8`'s round 7 correction section, which names each one; the 120 s lag figure ("3 starts in 5 s") is listed there as a sentence since removed.
 3. **"150 to 750 ms":** corrected in `843c3d8` to 150 and 550 ms.
 4. **"One more failing sync per outage"** contradicted "none more". Corrected after this round to "at most one more", with group 1's ranges.
 
@@ -5614,7 +5614,7 @@ If this finding returns after this fix, it will have survived two fixes, which i
 - the "6 to 16 s" note says only 6 to 10 s lies ahead of the clock in the test's setup.
 - (The 120 s ahead-of-clock assert was added in `843c3d8`.)
 
-Not yet changed: "20.6 or 25.6 s" for group 2's rows, which group 1 measured as 20.5 and 25.5 s.
+"20.6 or 25.6 s" is right for the test's rows at -9 900 and -4 900; group 2's probe rows at -10 000 and -5 000 had 20.5 and 25.5 s. The window sentence names both since the deploy.
 
 **Where the build stands:**
 - Fix (a)'s code was last changed in `7051f5e`. Group 1 found no code fault in rounds 3 to 7. Group 2 passed in round 5, on the same code.
@@ -5632,3 +5632,36 @@ Not yet changed: "20.6 or 25.6 s" for group 2's rows, which group 1 measured as 
 > Never print any token or key.
 
 Round numbering: fix (a) round 8 is the final round on `b1bd65c`; up to 3 more per group (rounds 9 to 11) if needed.
+
+### Fix (a), round 8 (b1bd65c): group 1 PASS, group 2 PASS. Deployed as Fly release v22
+
+**Group 1, fix (a) round 8: PASS.** It found no fault in code or behaviour, and no test that fails to test what it claims.
+- Fix (a)'s pieces are correct in every state probed.
+- Rule 6 holds: two restores only in the two 250 ms windows (128 stuck rows).
+- No stuck sale's retry is pushed past its time.
+- Of 15 new mutants of fix (a), 14 are killed; the survivor behaves the same as the real code.
+- Of the 45 rebuilt remainder-recheck mutants, the kill counts are the same or higher.
+- Nothing in the rest of the release since v21 is open as a code fault.
+- Checks 2, 7 and 10 are clear.
+
+**Group 2, fix (a) round 8: PASS,** reviewing the whole release since v21.
+- Mentions: every path that mentioned Michael still does.
+- The ruling B wording holds, and there are no posts during a list lag (lags of 0.5 to 360 s).
+- The morning line and help text are correct.
+- Every event the briefs name is stored, with the fields the briefs name.
+- Rule 6 holds on the non-money loops. There are no dashes in anything posted.
+
+**Non-blocking (log and labels; fixed after the deploy under Michael's decision 2):**
+- the 30 s test's comment now cites the round 7 entry;
+- its row text counts "pass syncs carrying a time to put back";
+- the outage lengths name their setup (20.6 or 25.6 s in the test's rows; 20.5 or 25.5 s in group 2's probe rows);
+- group 1's round 7 finding 2 wording.
+
+**Deploy (Friday 2026-11-13, after the close):**
+- **Merge:** `release-weekend-2026-11-16` fast-forwarded to `main` at `2dbdb9c`. Its code is identical to `b1bd65c` (`git diff b1bd65c 2dbdb9c -- stacks/cyrus` is empty).
+- **Before the deploy:** Alpaca paper had 0 positions and 0 open orders.
+- **Deploy:** from a clean clone, Fly release **v22**, complete at 00:40:23 UTC (6:40 PM CT). The worker's start was recorded in the database at 00:40:33 UTC.
+- **Ships with:** ruling B ON (`FRESH_STOP_LIMIT = { on: true }`), `loadAfternoon` on.
+- **"Live" line:** posted in `commands` (HTTP 200), saying what shipped.
+
+Paper only. Research input for a human decision.

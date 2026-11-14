@@ -6,7 +6,23 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**BUILD C2: FLY KEEPS RELEASE V21 (RULING B OFF). RULING B'S FIX DID NOT PASS: GROUP 1 PASSED ROUND 9, GROUP 2 STOPPED IT IN ROUND 9 (THE LAST ALLOWED), SO NO MID-DAY DEPLOY AND NONE AFTER THE CLOSE WITHOUT MICHAEL. TONIGHT'S BUILD (MICHAEL'S ITEMS 2 TO 4) IS NEXT, FOR A DEPLOY BEFORE 7:30 AM MONDAY.** As of November 13, 2026 (about 10:10 AM Central).
+**BUILD C2: FLY RUNS RELEASE V22, THE WEEKEND BUILD WITH RULING B ON. DEPLOYED FRIDAY 2026-11-13, 6:40 PM CENTRAL, WHILE FLAT, AFTER BOTH REVIEW GROUPS PASSED (FIX (A) ROUND 8).** As of 2026-11-13, evening.
+- **v22:** `main` `2dbdb9c`, code of `b1bd65c`. On top of v21:
+  - ruling B ON, with the root wording "I can't confirm a protective stop";
+  - item 2: the stuck-retry allowance counted in requests, timed-out stop state stored with a start-up check, timed-out tries budgeted;
+  - item 3: backoffs and limits on the older retry loops (the standing rule);
+  - item 4: the screen at 8:15;
+  - Michael's afternoon items 1 to 4: remainders acted on from the live cancel report, a refused fresh stop logged once, refused entries in the morning line, slow syncs logged;
+  - the evening change: rechecks 0.5, 1, then every 2 s for up to 30 s, charged to the allowance;
+  - fix (a): the pass cancels a recheck's own timer, on both branches when no sync runs, and puts it back once if its sync fails.
+  - `load afternoon` stays on.
+- **Checks at the deploy:** Alpaca flat with no open orders; machine on v22, its start recorded at 00:40:33 UTC; secret scan clean on every commit; the "live" line posted in `commands`.
+- **Open for Michael:**
+  - the shared request budget proposal (`builds/c2-proposal-shared-request-budget.md`), to read after this release;
+  - Monday's daily and mid-day reviews will measure the list lag (`stop_cancel_list_cleared`), the allowance and `sync_slow` on Fly.
+- Details: `builds/build-c2-log.md`, from "Michael's decisions after the round 8 STOP AND FLAG". Paper only. Research input for a human decision.
+
+Earlier entry, superseded by the paragraph above: **BUILD C2: FLY KEEPS RELEASE V21 (RULING B OFF). RULING B'S FIX DID NOT PASS: GROUP 1 PASSED ROUND 9, GROUP 2 STOPPED IT IN ROUND 9 (THE LAST ALLOWED), SO NO MID-DAY DEPLOY AND NONE AFTER THE CLOSE WITHOUT MICHAEL. TONIGHT'S BUILD (MICHAEL'S ITEMS 2 TO 4) IS NEXT, FOR A DEPLOY BEFORE 7:30 AM MONDAY.** As of November 13, 2026 (about 10:10 AM Central).
 - **Branch `release-2026-11-13-b` (09eef3b, unmerged).** B switched on, plus four rounds of fixes to the alert wording. Group 1 passed rounds 8 and 9 (broker calls identical in 288 random-fault runs).
 - **Group 2's last finding:** a mark meaning "a look found the stop absent" can be wrong or go stale. This needs Alpaca to report shares held that no visible order explains (as on 2026-11-09). The 5 minute alert then says "no protective stop" while the stop still rests. The suggested fix is messaging only.
 - **Michael's items for tonight** (saved verbatim in the C2 log, "Michael's decisions of 2026-11-13 (morning, after v21)"):
