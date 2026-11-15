@@ -826,7 +826,7 @@ function inlineLoop(ctx: WalkCtx): ProtectionHooks {
     },
     wake: (_id, at, kind, extra = {}) => {
       if (kind === "protect") return ask(ctx, at);
-      const gap = at - ctx.nowMs;
+      const gap = at - ctx.d.now().getTime();
       ctx.lag.gap = ctx.lag.gap === undefined ? gap : Math.min(ctx.lag.gap, gap);
       ctx.lag.until = Math.max(ctx.lag.until, extra.untilMs ?? 0);
       ctx.lag.lookups += extra.extraRequests ?? 0;
@@ -949,7 +949,9 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
       // no room the recheck waits for room (the loop's list-lag wake) until the last lagging remainder's 30 second window ends.
       const gap = Math.min(500 * 2 ** (tries - 1), LIVE_LAG_RECHECK_MAX_MS);
       // A list-lag wake (a lookup by id at the look for an entry older than the order list's window; its 30 s window).
-      ctx.loop.wake(id, nowMs + gap, "lag", { extraRequests: createdMs(s) < fromMs ? 1 : 0, untilMs: liveAt! + LIVE_LAG_WATCH_MS });
+      // Group 1, round 1 of part 2: timed from now (after the look's reads), as v22 and part 1 timed the recheck from the sync's end, so the
+      // steps stay 0.5, 1, then 2 s apart however long the reads take.
+      ctx.loop.wake(id, d.now().getTime() + gap, "lag", { extraRequests: createdMs(s) < fromMs ? 1 : 0, untilMs: liveAt! + LIVE_LAG_WATCH_MS });
       mem.mustLook.add(s.clientOrderId);
     }
     return;

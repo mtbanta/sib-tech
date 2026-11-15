@@ -5891,3 +5891,22 @@ Notes: the Monday test's title overstated ("gets its fresh stop meanwhile": it i
 - Notes done: idle looks (outside the session) are not counted; a dropped list-lag wake ends its give-way at once (`onLagDropped`); the Monday test's title; the weak assertion; the stale comments (`src/risk.ts`, `src/worker.ts`).
 
 Full suite 782 of 782. Type check clean.
+
+### Redesign part 2, round 1 (b58994e): group 1 CHANGES REQUIRED, and fixes
+
+**Group 1, redesign part 2, round 1: CHANGES REQUIRED** (no flag: checks 2, 7 and 10 clean; the sell gate unchanged; `isLiquidatingOthers` is within design 4.3's text but section 7 does not list it, so it is named to Michael below).
+1. **Looks could starve the regular 10 s sync.** A look held "risk" without setting `lastSync`, and nothing started the regular sync when the look ended, so a pass that landed during a look skipped it until the next pass, and this could repeat. Hand-held looks: no regular sync in 65 s. With natural wakes (lagging remainders, a modelled read latency): longest gap between regular syncs 15 to 30 s at 1 s reads and 35 to 40 s at 2 s reads, against 10 s with no looks (the latency is a model; `sync_slow` would measure it). Before part 2 a recheck was itself a full sync, so nothing went unwalked.
+2. **List-lag steps were timed from before the reads** (`nowMs + gap` in `protectEntry`), so with 1 to 2 s reads the 0.5, 1 and 2 s steps fell due as soon as the look ended (v22 and part 1 timed them from the sync's end; approved item 2 says "at the same steps").
+3. **Two race guards had no test:** the busy skip at the top of `protectEntry` and the stand-aside re-ask inside the actions (mutations removing them passed the whole suite).
+
+Notes: the Monday test overstated (fixed after group 2's round 1); `isLiquidatingOthers` also changes the live-update guards and the fast sale case (an A4 remainder's own take-profit cancel raises `onExitsLost` during its own action, one routine look after it ends; a walk can queue a second cleanup while a fast sale waits, caught by `coveredByOwnSale` and the sell gate); a stale decision after an action ended is benign (probed); a later protection wake merged into an earlier list-lag wake makes the look routine (it heals itself); follow-ups advance every pending entry after a subset look (as v22's syncs did); the `only` guard on escalations untested; two test labels; the retired `weekend-r8` properties only partly carried over (no test of a lost-exits follow-up after a failed look; at most 3 failed reads in any 5 s measured in the 120 s outage); the "risk" put-off spins every 250 ms with no requests.
+
+**Fixes:**
+- **1:** the regular sync goes first. A look that finds it due starts it and waits a quarter second (its wakes kept), and a look that ends with it due starts it (`Worker.look`). New test: looks back to back (a wake every half second) with every order-list read taking 2 s, for 60 s: the regular sync still starts, the longest gap at most 15.5 s. It fails without the priority.
+- **2:** the list-lag wake is timed from the moment the walk reaches the entry (after the reads), and the inline loop the same. New test: with 1.5 s reads, the wake is at least 0.45 s after the reads ended. It fails timed from before the reads.
+- **3:** a worker test that while an entry's action runs, a sync's walk sends no status check or cancel for its timed-out stop and leaves its record alone (fails without the busy skip); a test that a close-out starting between the decision and its action stops the action, so no sale reaches Alpaca (fails without the re-ask).
+- Notes done: the two test labels; the unused promise.
+
+**For Michael (beyond items 1 to 3 as written, inside design 4.3's text):** one position's own cleanup sale (the loop's, or the fast sale) no longer makes protection stand aside for the other positions; they wait their turn in the one-at-a-time sale queue. A whole-account liquidation (a close-out, `flatten`, the loss stop's sale, a carried sale) still does. A held sale therefore still delays other positions' sales and fresh stops in that queue; only the order sync is freed.
+
+Full suite 786 of 786. Type check clean.

@@ -1775,6 +1775,7 @@ async function workerLag() {
   const dd = (await r.store.getDay(D))!;
   const closeAt = new Date(MID + 3 * 3600_000);
   wk.sessionForSync = { day: dd, closeAt };
+  wk.lastSync = sim.simMs; // a regular sync just ran (since part 2's round 1 it goes first whenever it is due)
   const mem = wk.syncMemory;
   const t0 = sim.simMs;
   sim.partialTakeProfitListLag(id, 1, 12.08, 15_000);
@@ -2128,17 +2129,25 @@ test("redesign part 2: in the worker, list-lag looks run inside P2 reservations,
   r.setNow(new Date(sim.simMs).toISOString());
   await settle();
   await settle();
-  const lastSync = wk.lastSync;
   const lag = [...wk.loop.pendingWakes()].find(([, w]: any) => w.kind === "lag");
   assert.ok(lag, "the look saw the lag and asked for a list-lag look");
-  for (let i = 0; i < 10 && wk.loop.nextLookAt() !== null; i++) {
+  // Looks never reset the regular sync's clock (regular syncs may run beside them when due; they go first).
+  let resets = 0;
+  const realLook = wk.look.bind(wk);
+  wk.look = async (...a: any[]) => {
+    const before = wk.lastSync;
+    const out = await realLook(...a);
+    if (out.outcome === "done" && wk.lastSync !== before) resets++;
+    return out;
+  };
+  for (let i = 0; i < 20 && wk.loop.nextLookAt() !== null; i++) {
     r.setNow(new Date(wk.loop.nextLookAt()).toISOString());
     await settle();
     await settle();
   }
   assert.ok(mem.budget.totals.P2 > 0, "list-lag looks ran (P2)");
   assert.equal(mem.budget.totals.P2, tagged.P2, "charged exactly the P2 requests they sent");
-  assert.equal(wk.lastSync, lastSync, "looks never reset the regular sync's clock");
+  assert.equal(resets, 0, "looks never reset the regular sync's clock");
   const p2 = mem.budget.totals.P2;
   await run({}); // a regular sync
   assert.equal(mem.budget.totals.P2, p2, "a regular sync is routine");
@@ -2155,12 +2164,12 @@ test("redesign part 2: in the worker, a list-lag look with no room waits for roo
   const filler = mem.budget.tryReserve("P1", 60, { fiveSec: false, label: "test: a full minute", force: true });
   for (let i = 0; i < 60; i++) filler.charge("/v2/test");
   filler.end();
-  const reqs = sim.requests;
+  const p2 = mem.budget.totals.P2;
   for (let i = 0; i < 30 && wk.loop.nextLookAt() !== null && sim.simMs < t0 + 31_000; i++) {
     r.setNow(new Date(Math.min(wk.loop.nextLookAt(), t0 + 31_000)).toISOString());
     await settle();
   }
-  assert.equal(sim.requests, reqs, "no request while it waited for room");
+  assert.equal(mem.budget.totals.P2, p2, "no list-lag request while it waited for room (regular syncs may run beside it)");
   r.setNow(new Date(t0 + 31_000).toISOString());
   await settle();
   assert.equal([...wk.loop.pendingWakes().values()].some((w: any) => w.kind === "lag"), false, "dropped at the end of its window");
@@ -2175,10 +2184,20 @@ test("redesign part 2: in the worker, a look whose reads fail keeps its wakes an
     if (level === "warn") warns.push(e);
     return realLog?.(level, e, data);
   };
-  const tries: number[] = [];
+  const tries: number[] = []; // the looks' reads only (regular syncs may run beside them when due)
+  let inLook = false;
+  const realLookFn = wk.look.bind(wk);
+  wk.look = async (...a: any[]) => {
+    inLook = true;
+    try {
+      return await realLookFn(...a);
+    } finally {
+      inLook = false;
+    }
+  };
   const realList = (sim as any).listOrdersPaged.bind(sim);
   (sim as any).listOrdersPaged = async () => {
-    tries.push(sim.simMs);
+    if (inLook) tries.push(sim.simMs);
     throw new Error("order list read failed (test)");
   };
   wk.loop.wake("cyrus-20261102-LUNR-1", sim.simMs, "protect");

@@ -1260,6 +1260,12 @@ export class Worker {
   private async look(ids: ReadonlySet<string>, kind: WakeKind, extraRequests: number, untilMs = Infinity): Promise<{ outcome: "busy" | "done" | "failed" | "idle" } | { outcome: "wait"; retryAt: number }> {
     const s = this.sessionForSync;
     if (!s || this.d.now() >= s.closeAt) return { outcome: "idle" };
+    // Group 1, round 1 of part 2: the regular sync (the record of truth, every 10 s) goes first. When it is due, it starts now and the look
+    // waits a quarter second (its wakes kept), so looks can never crowd it out.
+    if (this.d.now().getTime() - this.lastSync >= SYNC_EVERY_MS) {
+      this.startSync(s.day, s.closeAt);
+      return { outcome: "busy" };
+    }
     if (!this.backgroundReady("risk")) return { outcome: "busy" };
     let res: Reservation | null = null;
     if (kind === "lag") {
@@ -1292,6 +1298,8 @@ export class Worker {
     } finally {
       res?.end();
       this.inflight.delete("risk");
+      // A regular sync that fell due while this look ran (its pass found "risk" held) starts now.
+      if (this.d.now().getTime() - this.lastSync >= SYNC_EVERY_MS && this.sessionForSync && this.d.now() < this.sessionForSync.closeAt) this.startSync(this.sessionForSync.day, this.sessionForSync.closeAt);
     }
   }
 

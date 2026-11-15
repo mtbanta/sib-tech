@@ -97,7 +97,7 @@ test("part 2, the loop: one action per entry at a time; a wake that comes while 
   assert.deepEqual(w.looks.map((l) => l.ids), [["A"]], "looked at once the action ended");
 });
 
-test("part 2, the loop: a look put off by a running sync comes a quarter second later; one that waits for room comes when room returns; neither drops a wake asked for meanwhile", async () => {
+test("part 2, the loop: a look put off by a running sync comes a quarter second later; one that waits for room comes when room returns; both keep their wakes", async () => {
   const w = loopWorld();
   let n = 0;
   w.setNext(() => (++n === 1 ? { outcome: "busy" } : n === 2 ? { outcome: "wait", retryAt: 5_000 } : { outcome: "done" }));
@@ -194,16 +194,25 @@ test("part 2, the worker: a stuck sale's retry runs at its time in a look of the
   const st = wk.syncMemory.stuck.get(id);
   assert.ok(st && st.nextAt > sim.simMs, "stuck, with a retry time");
   const due = st.nextAt;
+  wk.lastSync = sim.simMs; // a regular sync just ran (it goes first when due; here it is not)
   const lastSync = wk.lastSync;
   const looks: number[] = [];
   const realLook = wk.look.bind(wk);
-  wk.look = async (ids: any, kind: any, extra: any) => (looks.push(sim.simMs), realLook(ids, kind, extra));
+  wk.look = async (ids: any, kind: any, extra: any, until: any) => (looks.push(sim.simMs), realLook(ids, kind, extra, until));
+  // The regular sync's clock moves only when a regular sync starts, and only when one was due (10 s since the last); a look never moves it.
+  const early: number[] = [];
+  const realStart = wk.startSync.bind(wk);
+  wk.startSync = (d: any, c: any) => {
+    if (wk.backgroundReady("risk") && sim.simMs - wk.lastSync < 10_000) early.push(sim.simMs);
+    return realStart(d, c);
+  };
   const before = sells.length;
   r.setNow(iso(due));
   for (let i = 0; i < 6; i++) await settle();
   assert.deepEqual(looks, [due], "one look, at the retry's time");
   assert.ok(sells.length > before, "the retry tried to sell");
-  assert.equal(wk.lastSync, lastSync, "the regular sync's clock was not reset");
+  assert.deepEqual(early, [], "no regular sync was started before it was due");
+  assert.ok(wk.lastSync === lastSync || wk.lastSync - lastSync >= 10_000, "the regular sync's clock moved only by a regular sync that was due");
   r.worker.stop?.();
 });
 
@@ -269,18 +278,14 @@ test("part 2, the worker: a look for one entry does not touch the others (no fal
   r.worker.stop?.();
 });
 
-test("part 2, the worker: one entry's own cleanup sale does not stop the loop from deciding for another entry, but a close-out or flatten does", async () => {
+test("part 2, the worker: one entry's own cleanup sale does not stop the loop from deciding for another entry, but a whole-account liquidation (here a flatten) does", async () => {
   const { r } = await armedDay();
   const wk: any = r.worker;
   const closeAt = new Date(Date.UTC(2026, 10, 2, 21, 0));
-  let release!: () => void;
-  const held = new Promise<void>((x) => (release = x));
   const own = wk.liquidator.flatten({ reason: "remainder", tradeDate: D, only: ["AAA"], ownEntryOnly: { maxQty: { AAA: 1 } }, maxRounds: 1 });
-  void held;
   assert.equal(wk.protectNow(closeAt), true, "a one-entry cleanup sale running: the others are still decided");
   const other = wk.liquidator.flatten({ reason: "flatten command", tradeDate: D, maxRounds: 1 });
   assert.equal(wk.protectNow(closeAt), false, "a whole-account liquidation: the loop stands aside");
-  release();
   await Promise.allSettled([own, other]);
   assert.equal(wk.protectNow(closeAt), true);
   r.worker.stop?.();
@@ -462,4 +467,132 @@ test("part 2: a list-lag look refused again and again stores timed_out_try_out_o
   assert.equal(events[0]?.next, "regular sync");
   assert.equal(wk.loop.pendingWakes().has(id), false, "dropped: its window ends before room returns");
   r.worker.stop?.();
+});
+
+// Group 1, round 1 of the redesign (part 2), finding 1: looks never crowd out the regular 10 second sync (the record of truth). Looks that
+// take 2 s each (slow reads) and come back to back for 60 s; the regular sync still starts at least every 10 to 15 s.
+test("part 2 (group 1, round 1): with slow looks back to back, the regular sync still starts every 10 s or so", async () => {
+  const { sim, r } = await armedDay();
+  const wk: any = r.worker;
+  const id = await holdOne(sim, r, "GE");
+  await r.at("14:30:10");
+  const realPaged = (sim as any).listOrdersPaged.bind(sim);
+  (sim as any).listOrdersPaged = async (...a: any[]) => {
+    await sim.sleep(2_000); // every order-list read takes 2 s
+    return realPaged(...a);
+  };
+  const regular: number[] = [];
+  const realStart = wk.startSync.bind(wk);
+  wk.startSync = (d: any, c: any) => {
+    if (wk.backgroundReady("risk")) regular.push(sim.simMs);
+    return realStart(d, c);
+  };
+  const t0 = sim.simMs;
+  let nextPass = t0 + 5_000;
+  let nextWake = t0;
+  while (sim.simMs < t0 + 60_000) {
+    if (sim.simMs >= nextWake) {
+      wk.loop.wake(id, sim.simMs, "protect"); // a wake every half second: looks back to back
+      nextWake = sim.simMs + 500;
+    }
+    if (sim.simMs >= nextPass) {
+      await r.at(iso(sim.simMs));
+      nextPass += 5_000;
+    } else r.setNow(iso(sim.simMs + 250));
+    for (let i = 0; i < 4; i++) await settle();
+  }
+  const gaps = regular.slice(1).map((t, i) => t - regular[i]!);
+  assert.ok(regular.length >= 4, `regular syncs ran: ${regular.map((t) => t - t0).join(", ")}`);
+  assert.ok(Math.max(...gaps) <= 15_500, `longest gap between regular syncs ${Math.max(...gaps)} ms`);
+  r.worker.stop?.();
+});
+
+// Finding 2: the list-lag steps are counted from after the look's reads (as v22 and part 1 counted from the sync's end), however long the
+// reads take.
+test("part 2 (group 1, round 1): with slow reads, a list-lag wake is asked for at least 0.5 s after the look's reads ended", async () => {
+  const { sim, r } = await armedDay(true);
+  const wk: any = r.worker;
+  const id = await holdOne(sim, r, "LUNR");
+  await r.at("14:30:10");
+  const realPaged = (sim as any).listOrdersPaged.bind(sim);
+  let readEnd = 0;
+  (sim as any).listOrdersPaged = async (...a: any[]) => {
+    await sim.sleep(1_500);
+    const out = await realPaged(...a);
+    readEnd = sim.simMs;
+    return out;
+  };
+  sim.partialTakeProfitListLag(id, 1, 12.08, 15_000);
+  wk.syncMemory.liveStopCancelled.set(id, sim.simMs);
+  wk.lastSync = sim.simMs;
+  const out = await wk.look(new Set([id]), "protect", 0, Infinity);
+  assert.equal(out.outcome, "done");
+  const w = wk.loop.pendingWakes().get(id);
+  assert.ok(w && w.kind === "lag", "a list-lag wake was asked for");
+  assert.ok(w.at - readEnd >= 450, `due ${w.at - readEnd} ms after the reads ended (the first step is 0.5 s)`);
+  r.worker.stop?.();
+});
+
+// Finding 3: the busy skip. While an entry's action runs, a sync's walk does nothing for it: no timed-out stop status check or cancel, no
+// fresh-stop lookup, its fresh stop kept.
+test("part 2 (group 1, round 1): while an entry's action runs, the walk sends no check or cancel for it and keeps its fresh stop", async () => {
+  const { sim, r } = await armedDay();
+  const wk: any = r.worker;
+  const id = await holdOne(sim, r, "RKLB");
+  await r.at("14:30:10");
+  for (const l of sim.orders.find((o: any) => o.clientOrderId === id)!.legs) await sim.cancelOrder(l.id);
+  sim.advance(2_000);
+  const mem = wk.syncMemory;
+  const stop = "cyrus-p-20261102-RKLB-x-s1";
+  mem.timedOutStops.set(stop, id);
+  mem.stuck.set(id, { symbol: "RKLB", since: sim.simMs, nextAt: 0, delayMs: 0, alerted: true, escalated: false, lastTriedAt: sim.simMs, why: "x", restingStop: { stopClientOrderId: stop, cancel: "accepted" } });
+  let release!: () => void;
+  const held = new Promise<void>((x) => (release = x));
+  await wk.loop.act(id, "test: a running try", async () => void (await held));
+  const lookups: string[] = [];
+  const realFind = sim.findOrderByClientId.bind(sim);
+  sim.findOrderByClientId = async (cid: string) => (lookups.push(cid), realFind(cid));
+  let cancels = 0;
+  const realCancel = sim.cancelOrder.bind(sim);
+  sim.cancelOrder = async (oid: string) => (cancels++, realCancel(oid));
+  wk.lastSync = 0;
+  await r.at(iso(sim.simMs + 100)); // a regular sync walks while the action runs
+  for (let i = 0; i < 6; i++) await settle();
+  assert.equal(lookups.filter((x) => x === stop).length, 0, "no status check of its timed-out stop");
+  assert.equal(cancels, 0, "no cancel sent");
+  assert.ok(mem.stuck.has(id), "its record left alone");
+  release();
+  for (let i = 0; i < 6; i++) await settle();
+  r.worker.stop?.();
+});
+
+// Finding 3: the stand-aside rules are asked again just before an action starts. Here the decision sees protection allowed, and a close-out
+// starts before the action (the second ask says no): nothing is sold.
+test("part 2 (group 1, round 1): a close-out that starts between the decision and its action stops the action (no sale reaches Alpaca)", async () => {
+  const { syncOrders, SyncMemory } = await import("../src/risk.ts");
+  const { Liquidator, SellGate } = await import("../src/sells.ts");
+  const { MemoryStore } = await import("../src/store.ts");
+  const { ensureDay } = await import("../src/morning.ts");
+  const sim = new SimBroker(Date.UTC(2026, 10, 2, 15, 0));
+  const store = new MemoryStore();
+  const now = () => new Date(sim.simMs);
+  await ensureDay({ store, broker: sim, now } as any, D);
+  const dd = (await store.getDay(D))!;
+  const id = clientOrderIdFor(D, "AAA", 1);
+  await sim.submitEntry({ symbol: "AAA", qty: 5, stopPrice: 9.87, takeProfitPrice: 10.08, referencePrice: 10, clientOrderId: id });
+  sim.fillEntry(id, 10);
+  await store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "AAA", qty: 5, referencePrice: 10, stopPrice: 9.87, takeProfitPrice: 10.08, status: "filled", alpacaOrderId: null, filledQty: 5, filledAvgPrice: 10, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+  for (const l of sim.orders.find((o) => o.clientOrderId === id)!.legs) await sim.cancelOrder(l.id);
+  sim.advance(20_000);
+  const gate = new SellGate({ broker: sim, say: async () => true, nowMs: () => sim.simMs });
+  const liquidator = new Liquidator({ broker: sim, gate, now, sleep: sim.sleep });
+  let asks = 0;
+  const protect = () => ++asks === 1; // the decision: allowed; the action's own ask: a close-out has started
+  const acts: Array<() => Promise<unknown>> = [];
+  const loop = { busy: () => false, act: async (_id: string, _l: string, run: () => Promise<unknown>) => void acts.push(run), wake: () => undefined };
+  await syncOrders({ broker: sim, store, now, say: async () => true, liquidator, syncMemory: new SyncMemory() } as any, dd, { protect, loop } as any);
+  assert.equal(acts.length, 1, "the decision handed one action to the loop");
+  await acts[0]!();
+  assert.ok(asks >= 2, "asked again before the action");
+  assert.equal(sim.sellLog.length, 0, "no sale reached Alpaca");
 });
