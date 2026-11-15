@@ -5787,3 +5787,13 @@ Full suite 761 of 761. Type check clean.
 2. **B3's remaining part:** P2 lookups stop at 80 (change A). While first tries hold Alpaca's remaining below 80 (Thursday 2026-11-12: below 80 for 16 minutes, lowest 65), an unclear fresh stop's lookups cannot run, and the 15 second limit then cancels a stop Alpaca may hold and sells the remainder. Options: (i) keep (P2 at 80); (ii) the unclear fresh stop's lookups become P1 (floor 20; it is about shares without a confirmed stop); (iii) only the last lookup before the 15 second limit is P1.
 
 Full suite 765 of 765. Type check clean.
+
+### Redesign part 1: the B3 fix checked against a real bucket (builder's check, after group 1's round 1)
+
+The B3 test pinned Alpaca's remaining with a function. Rerun with the simulated bucket itself as the budget's remaining, entries taking every request above 80 until they give way: the fix starved. Each refused lookup brought the next sync forward, that sync's own reads (the order list and positions, routine work) spent the refill first, and the lookup was refused again: 21 lookups skipped in 22 syncs about 0.7 s apart, and the 15 second limit fired. A rule 6 gap too (no backoff, bounded only by the 15 s limit).
+
+**Fix (inside the approval, scheduling only):** the next try waits until the budget has room for the lookup plus the sync's reads (`roomFor("P2", 1 + pages + 1)`), and at least 0.5, 1, 2, then 4 s after refusals in a row (`FreshStop.lookWaits`; reset by a lookup that runs). Measured in the same setup: syncs at 2.5, 4.0 and 5.0 s after the stop was sent, confirmed at 5.0 s, the limit never fired, nothing sold. New test with the real bucket (it failed before the fix).
+
+**For Michael's question 2 (B3's remaining part):** this works only because entries give way. When first tries hold the bucket below 80 (Thursday 2026-11-12, lowest 65 for 16 minutes), nothing approved lets a P2 lookup run, and the 15 second limit then cancels a stop Alpaca may hold and sells (option ii, the unclear stop's lookups as P1 with the floor of 20, is the cure).
+
+Full suite 766 of 766. Type check clean.
