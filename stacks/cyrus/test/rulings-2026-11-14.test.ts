@@ -411,3 +411,57 @@ test("Michael's answer (rechecks leave room): with the order list lagging throug
   assert.equal(wk.budget.totals.overdraft, 0);
   r.worker.stop?.();
 });
+
+// Group 2, rulings round 3 (finding 2): the hold from below and its length. While a waiting stuck retry holds P2 back, P2 is granted up to 35
+// of the minute and 5 in the 5 seconds (one above each is refused); the hold is set to exactly those values when a retry of 10 under its 45
+// is refused with P2 in the way, and it ends at the later of 2.5 s after the refusal and the time room may return plus 0.5 s.
+test("rulings round 3: a refused stuck retry sets the hold to 35 of the minute and 5 in the 5 seconds, ending at the later of 2.5 s and its room time plus 0.5 s", () => {
+  let t = 0;
+  const b: any = new RequestBudget({ now: () => t });
+  for (let i = 0; i < 6; i++) {
+    t = 36_000 + i * 800; // six P2 requests in the last 5 seconds
+    const r = b.tryReserve("P2", 1, { label: "list lag recheck" }) as Reservation;
+    r.charge("/v2/test");
+    r.end();
+  }
+  t = 40_100;
+  const retry = b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP });
+  assert.ok(!(retry instanceof Reservation) && retry.why === "five", "6 + 10 passes 15 in the 5 seconds");
+  assert.equal(b.retryWaitRoom, 35);
+  assert.equal(b.retryWaitFive, 5);
+  assert.equal(b.retryWaitUntil, Math.max(t + 2_500, retry.at + 500), "the hold's end");
+  const p2 = b.tryReserve("P2", 1, { label: "list lag recheck" });
+  assert.ok(!(p2 instanceof Reservation) && p2.why === "five", "P2 held to 5 in the 5 seconds (6 already)");
+  t = b.retryWaitUntil;
+  assert.ok(b.roomFor("P2", 1).ok, "the hold has ended: P2 has its 15 in the 5 seconds again");
+});
+
+test("rulings round 3: while the hold is in force, P2 is granted at 34 of the minute and at 4 in the 5 seconds, and refused one above each", () => {
+  const t = 100_000;
+  const mk = () => {
+    const b: any = new RequestBudget({ now: () => t });
+    b.retryWaitUntil = t + 10_000;
+    b.retryWaitRoom = 35;
+    b.retryWaitFive = 5;
+    return b;
+  };
+  const fill = (b: any, n: number, atMs: number, fiveSec: boolean) => {
+    const r = b.tryReserve("P1", n, { label: "other P1 work", fiveSec, force: true }) as Reservation;
+    for (let i = 0; i < n; i++) r.charge("/v2/test");
+    r.end();
+    void atMs;
+  };
+  // the minute: 34 used (sent more than 5 s ago, so the 5 seconds are empty)
+  const bm = mk();
+  const realNow = bm.nowMs.bind(bm);
+  bm.nowMs = () => t - 30_000;
+  fill(bm, 34, t - 30_000, false);
+  bm.nowMs = realNow;
+  assert.ok(bm.roomFor("P2", 1, false).ok, "35 of the minute: granted");
+  assert.ok(!bm.roomFor("P2", 2, false).ok, "36: refused");
+  // the 5 seconds: 4 used just now
+  const bf = mk();
+  fill(bf, 4, t, true);
+  assert.ok(bf.roomFor("P2", 1).ok, "5 in the 5 seconds: granted");
+  assert.ok(!bf.roomFor("P2", 2).ok, "6: refused");
+});
