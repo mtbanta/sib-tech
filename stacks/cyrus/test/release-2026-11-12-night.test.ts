@@ -2379,3 +2379,46 @@ test("Michael's ruling 2 of 2026-11-14 (group 1's probe S3): with P2's share of 
   other.end();
 });
 
+
+// Group 2, rulings round 1 (B1): an unclear fresh stop's lookup (P1 since Michael's ruling 2) refused for room is still a bounded retry
+// with a growing wait: its skip is stored once per wait with the reason, few syncs come for it, and the 15 second limit fires on time with
+// the no-room wording. A confirmed stop's periodic lookup stays P2 (refused at Alpaca's remaining of 80).
+for (const how of ["floor", "minute"] as const) {
+  test(`rulings round 1 (B1): an unclear fresh stop's lookup refused on the ${how === "floor" ? "floor of 20" : "budget's minute"}: one stored skip with its reason, few syncs, and the 15 second limit on time`, async () => {
+    const { w, dd, id, box } = await unclearLookup();
+    let filler: any = null;
+    if (how === "floor") box.remaining = 20;
+    else filler = w.memory.budget!.tryReserve("P1", 60, { label: "other P1 work", fiveSec: false });
+    const placedAt = w.memory.freshStops.get(id)!.placedAt;
+    let r: any = { recheckAt: w.sim.simMs + 100 };
+    let syncs = 0;
+    while (w.sim.simMs < placedAt + 20_000 && !w.events.some((e) => e.event === "fresh_stop_timeout")) {
+      w.sim.advanceTo(Math.max(w.sim.simMs + 100, Math.min(r.recheckAt ?? Infinity, w.sim.simMs + 10_000)));
+      r = await syncOrders(w.risk, dd, { protect: true });
+      syncs++;
+    }
+    const skips = w.events.filter((e) => e.event === "fresh_stop_lookup_skipped");
+    assert.equal(skips.length, 1, "stored once for the wait");
+    assert.equal(skips[0]!.data.why, how);
+    assert.equal(skips[0]!.data.status, "unclear");
+    assert.ok(syncs <= 8, `few syncs (the wait grows): ${syncs}`);
+    const t = w.events.find((e) => e.event === "fresh_stop_timeout");
+    assert.ok(t, "the 15 second limit fired");
+    assert.ok(t!.data.msFromSent >= FRESH_STOP_CONFIRM_MS && t!.data.msFromSent < FRESH_STOP_CONFIRM_MS + 1_500, `on time: ${t!.data.msFromSent} ms`);
+    assert.equal(t!.data.found, "not looked up (no room in the request budget)");
+    filler?.end();
+  });
+}
+
+test("rulings round 1 (B1): a confirmed fresh stop's periodic lookup stays P2: with Alpaca's remaining at 80 it is skipped (an unclear one runs)", async () => {
+  const { w, dd, id, box } = await unclearLookup();
+  const f = w.memory.freshStops.get(id)!;
+  f.status = "accepted";
+  f.lookedAt = 0; // due for its periodic lookup (the live updates are down)
+  box.remaining = 80;
+  await syncOrders(w.risk, dd, { protect: true });
+  const skip = w.events.find((e) => e.event === "fresh_stop_lookup_skipped");
+  assert.ok(skip, "skipped");
+  assert.equal(skip!.data.why, "floor");
+  assert.equal(skip!.data.status, "accepted");
+});

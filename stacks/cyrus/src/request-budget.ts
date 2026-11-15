@@ -4,7 +4,8 @@
 // give-back).
 //
 //  - Budgeted work (class P1: sales of shares without a confirmed stop, the timed-out stop's tries, checks and cancels, the close-out
-//    retries, the loss stop's re-sells; class P2: the list-lag rechecks and the fresh-stop lookups) shares at most BUDGET_PER_MINUTE
+//    retries, the loss stop's re-sells, an unclear fresh stop's lookup since Michael's ruling 2 of 2026-11-14; class P2: the list-lag rechecks
+//    and a confirmed fresh stop's periodic lookup; ordinary stuck retries stop at 45, `minuteCap`) shares at most BUDGET_PER_MINUTE
 //    requests in any 60 seconds and BUDGET_PER_5S in any 5 seconds. P2 may draw only while it leaves P1_KEEP of the minute for P1.
 //  - A budgeted try asks for its whole room before it starts (`tryReserve`, its most requests). It starts only when the minute (and,
 //    unless it is a close-out retry, the 5 seconds) has room, its class leaves P1 its share, and Alpaca's remaining requests stay at or
@@ -42,9 +43,12 @@ export interface ReserveOptions {
   force?: boolean;
   // What the try is, for the log.
   label: string;
-  // A P2 try that will be tried again when room returns (the list-lag recheck, an unclear fresh stop's lookup): while it waits on its floor,
-  // entries give way.
+  // A P2 try that will be tried again when room returns (the list-lag recheck): while it waits on its floor, entries give way.
   waitKey?: string;
+  // Michael's answer of 2026-11-14 (night) on rulings 1 and 2: a lower ceiling on the budgeted minute for this try (an ordinary stuck retry:
+  // STUCK_RETRY_MINUTE_CAP, 45), so the rest of the 60 stays for urgent work (unclear fresh-stop lookups, the 15 second limit's try, timed-out
+  // stop checks, close-out retries). Refused above it as "class" (its share of the minute).
+  minuteCap?: number;
   // The Alpaca client's own retries inside this try stop when its reservation has no room left (only a timed-out stop's tries, checks and
   // cancels, Michael's item 2 of 2026-11-13). Any other try is never stopped halfway (design 3.2): its extra requests are counted.
   limitRetries?: boolean;
@@ -163,7 +167,7 @@ export class RequestBudget {
     const size = Math.max(0, Math.ceil(n));
     const fiveSec = opts.fiveSec !== false;
     if (!opts.force) {
-      const refusal = this.refusal(cls, size, fiveSec, now);
+      const refusal = this.refusal(cls, size, fiveSec, now, 0, opts.minuteCap);
       if (refusal) {
         this.minute.refused[refusal.why]++;
         if (cls === "P2" && refusal.why === "floor" && opts.waitKey) this.floorWaits.set(opts.waitKey, now + GIVE_WAY_MAX_MS);
@@ -183,17 +187,17 @@ export class RequestBudget {
 
   // Looks only: would `tryReserve` grant this now? (For scheduling.) `routineAhead`: routine requests that will be sent first from the same
   // Alpaca bucket (the reads of the sync that comes for the try), counted against the floor only (group 2, round 2 of the redesign).
-  roomFor(cls: BudgetClass, n: number, fiveSec = true, routineAhead = 0): { ok: true } | Refusal {
-    return this.refusal(cls, Math.max(0, Math.ceil(n)), fiveSec, this.nowMs(), routineAhead) ?? { ok: true };
+  roomFor(cls: BudgetClass, n: number, fiveSec = true, routineAhead = 0, minuteCap?: number): { ok: true } | Refusal {
+    return this.refusal(cls, Math.max(0, Math.ceil(n)), fiveSec, this.nowMs(), routineAhead, minuteCap) ?? { ok: true };
   }
 
-  private refusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead = 0): Refusal | null {
+  private refusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead = 0, minuteCap?: number): Refusal | null {
     const u = this.usage(now);
-    const cap = cls === "P1" ? BUDGET_PER_MINUTE : BUDGET_PER_MINUTE - P1_KEEP;
+    const cap = Math.min(cls === "P1" ? BUDGET_PER_MINUTE : BUDGET_PER_MINUTE - P1_KEEP, minuteCap ?? Infinity);
     const at: number[] = [];
     let why: Refusal["why"] | null = null;
     if (u.minute + u.unsentMinute + n > cap) {
-      why = cls === "P2" && u.minute + u.unsentMinute + n <= BUDGET_PER_MINUTE ? "class" : "minute";
+      why = u.minute + u.unsentMinute + n <= BUDGET_PER_MINUTE ? "class" : "minute";
       at.push(this.agedOutAt(u.minute + u.unsentMinute + n - cap, 60_000, now, u.unsentMinute));
     }
     if (fiveSec && u.five + u.unsentFive + n > BUDGET_PER_5S) {

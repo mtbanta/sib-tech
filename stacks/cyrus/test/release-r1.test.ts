@@ -158,7 +158,9 @@ test("part A and C, Monday's IONQ case (with Michael's ruling 1 of 2026-11-14): 
     last = r.recheckAt!;
   }
   assert.ok(gaps.slice(0, 10).every((g) => g >= 2 && g <= 3), `within a few seconds while there is room: ${gaps.slice(0, 10).join(", ")}`);
-  assert.ok(gaps.every((g) => g >= 2 && g <= STUCK_RETRY_MAX_MS / 1000), `never sooner than 2 s, never longer than the budget's minute needs: ${gaps.join(", ")}`);
+  // Michael's answer of 2026-11-14 (night): ordinary stuck retries stop at 45 of the budget's 60 a minute, so after about 11 tries of this
+  // size the next waits until the minute has room under 45 again (about 33 s here); never sooner than 2 s, never longer than a minute.
+  assert.ok(gaps.every((g) => g >= 2 && g <= 60), `never sooner than 2 s, never longer than the budget's minute needs: ${gaps.join(", ")}`);
   const long = gaps.filter((g) => g > 3);
   assert.ok(long.length > 0 && long.length < gaps.length / 8, `a longer wait only when the minute is used (${long.length} of ${gaps.length})`);
   assert.equal(mentions(w).length, 2, "the first alert and one after 5 minutes, nothing in between");

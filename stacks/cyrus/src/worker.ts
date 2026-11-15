@@ -325,7 +325,7 @@ export class Worker {
     deps.governor.setSafetyHold?.(this.budget);
     this.loop = new ProtectionLoop({ now: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}), ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {}), look: (ids, kind, extra, until) => this.look(ids, kind, extra, until), log: (e, data) => deps.log?.("info", e, data), onActionFailed: (id, label, err) => this.protectionActionFailed(id, label, err), onLagDropped: () => this.lagWaitOver(), roomAt: (need) => {
       // Group 1, round 4 of part 2: asked locally (no request): when the shared budget would grant that try with the look's reads ahead of it.
-      const r = this.budget.roomFor(need.cls, need.n, true, need.reads);
+      const r = this.budget.roomFor(need.cls, need.n, true, need.reads, need.minuteCap);
       return r.ok ? null : r.at;
     } });
     this.sessions = new NextSessionFinder(deps.broker);

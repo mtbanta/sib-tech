@@ -9,8 +9,9 @@
 //    then (`look`: the reads the order sync makes, for those entries only, and their decisions), coalesced. A look never resets the regular
 //    10 second sync. Live updates wake the entry they are about.
 //  - A wake that comes while the entry's action runs is kept, and looked at when the action ends.
-//  - Rule 6 (every retry loop has a limit and a backoff): each wake comes from a schedule that has both (the stuck backoff 5, 10, 20, 30 s
-//    within the shared budget; the timed-out stop's checks; the unclear stop's lookups within its 15 s; the list-lag steps 0.5, 1, 2 s within
+//  - Rule 6 (every retry loop has a limit and a backoff): each wake comes from a schedule that has both (an ordinary stuck retry 2 s after
+//    its last try, then as soon as the shared budget has room, within the budget's cap and at most 45 a minute, Michael's ruling 1 of
+//    2026-11-14 and his answer after it; a timed-out stop's tries on their backoff within the shared budget; the timed-out stop's checks; the unclear stop's lookups within its 15 s; the list-lag steps 0.5, 1, 2 s within
 //    30 s; the follow-ups' 3 tries within 10 s). A look that fails keeps its wakes and waits 1 s, doubling to 10 s; a look that cannot start
 //    because a sync runs is put off a quarter second (no request is made meanwhile).
 // It sends nothing itself and decides nothing about an order: the decisions and the actions are the walk's and the sale's, as before.
@@ -23,6 +24,8 @@ export interface RoomNeed {
   cls: "P1" | "P2";
   n: number;
   reads: number;
+  // A lower ceiling on the budgeted minute for this try (an ordinary stuck retry: 45, Michael's answer of 2026-11-14, night).
+  minuteCap?: number;
 }
 
 export interface ProtectionHooks {
