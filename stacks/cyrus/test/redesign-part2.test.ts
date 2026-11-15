@@ -630,3 +630,146 @@ test("part 2 (part 1, round 4): a list-lag look refused on its floor keeps entri
   assert.equal(wk.lagWaits, 0);
   r.worker.stop?.();
 });
+
+// Group 2, round 2 of part 2 (finding A): the other two single-resolution guards. The stuck entry's record is closed elsewhere (as the live
+// updates do when an exit fill leaves the symbol flat) while its own action's sale answer is slow; the regular sync meanwhile finds no open
+// entry at all (the first branch), or another open entry but not this one (the "not active" sweep). One line, from the action.
+for (const other of [false, true]) {
+  test(`part 2 (group 2, round 2): a stuck entry whose record is closed elsewhere while its own action runs gets exactly one resolution line (${other ? "another entry still open" : "no open entry left"})`, async () => {
+    const { sim, r } = await armedDay();
+    const wk: any = r.worker;
+    const id = await holdOne(sim, r, "GE");
+    if (other) await holdOne(sim, r, "LUNR");
+    await r.at("14:30:10");
+    for (const l of sim.orders.find((o: any) => o.clientOrderId === id)!.legs) await sim.cancelOrder(l.id);
+    sim.advance(15_000);
+    wk.syncMemory.stuck.set(id, { symbol: "GE", since: sim.simMs - 120_000, nextAt: 0, delayMs: 0, alerted: true, escalated: false, lastTriedAt: sim.simMs - 30_000, why: "x" });
+    sim.sellFillDelayMs = 0;
+    const realSell = sim.submitSell.bind(sim);
+    let release!: () => void;
+    const slow = new Promise<void>((x) => (release = x));
+    let sent = false;
+    sim.submitSell = async (x: any) => {
+      const o = await realSell(x);
+      if (x.symbol === "GE" && !sent) {
+        sent = true;
+        await slow;
+      }
+      return o;
+    };
+    const said0 = r.bot.posts.length;
+    wk.loop.wake(id, sim.simMs, "protect");
+    for (let i = 0; i < 10 && !sent; i++) {
+      r.setNow(iso(sim.simMs + 250));
+      for (let k = 0; k < 6; k++) await settle();
+    }
+    assert.ok(sent && wk.loop.busy(id), "the action is running with its sale sent");
+    await r.store.updateOrder(id, { closedAt: new Date(sim.simMs).toISOString() }); // closed elsewhere
+    sim.advance(100);
+    wk.lastSync = 0;
+    await r.at(iso(sim.simMs + 100)); // the regular sync: GE is no longer an open entry
+    for (let i = 0; i < 6; i++) await settle();
+    release();
+    for (let i = 0; i < 20; i++) {
+      r.setNow(iso(sim.simMs + 200));
+      await settle();
+    }
+    const lines = r.bot.posts.slice(said0).map((p: any) => p.text).filter((t: string) => t.includes("GE"));
+    assert.equal(lines.length, 1, `one line: ${lines.join(" | ")}`);
+    r.worker.stop?.();
+  });
+}
+
+// Group 2, round 2 of part 2 (finding A, rule 6): an action that throws, with its entry woken every half second: the loop's backoff (5 s,
+// doubling to 30 s) paces the tries, not the regular sync.
+test("part 2 (group 2, round 2): an action that throws while its entry is woken every 0.5 s is tried again only after 5, 10, then 20 s", async () => {
+  const { sim, r } = await armedDay();
+  const wk: any = r.worker;
+  const id = await holdOne(sim, r, "GE");
+  await r.at("14:30:10");
+  for (const l of sim.orders.find((o: any) => o.clientOrderId === id)!.legs) await sim.cancelOrder(l.id);
+  sim.advance(15_000);
+  const tries: number[] = [];
+  wk.liquidator.flatten = async () => {
+    tries.push(sim.simMs);
+    throw new Error("database write failed (test)");
+  };
+  const t0 = sim.simMs;
+  while (sim.simMs < t0 + 45_000) {
+    wk.loop.wake(id, sim.simMs, "protect");
+    r.setNow(iso(sim.simMs + 500));
+    await settle();
+    await settle();
+  }
+  const gaps = tries.slice(1).map((t, i) => t - tries[i]!);
+  assert.ok(tries.length >= 4 && tries.length <= 5, `tries: ${tries.map((t) => t - t0).join(", ")}`);
+  assert.ok(gaps[0]! >= 5_000 && gaps[1]! >= 10_000 && gaps[2]! >= 20_000, `growing waits: ${gaps.join(", ")}`);
+  r.worker.stop?.();
+});
+
+// Group 2, round 2 of part 2 (finding A, "never past its window", and finding B): the list-lag give-way ends when its wake is dropped and no
+// other list-lag wake is left; it does not end while another list-lag look still waits on its floor (a second window, or a protection look
+// for another entry), and its out-of-room event is stored once for that wait.
+async function lagWorld() {
+  const { sim, r } = await armedDay();
+  const wk: any = r.worker;
+  const a = await holdOne(sim, r, "LUNR");
+  const b = await holdOne(sim, r, "GE");
+  await r.at("14:30:10");
+  const events: any[] = [];
+  const realLog = wk.d.log;
+  wk.d.log = (level: string, e: string, data: any) => {
+    if (e === "timed_out_try_out_of_room" && data?.stage === "list lag recheck") events.push(data);
+    return realLog?.(level, e, data);
+  };
+  wk.lastSync = sim.simMs; // no regular sync due during the test's first seconds
+  wk.budget.remaining = () => 60; // room for a list-lag look is several seconds away
+  const step = async (at: number) => {
+    r.setNow(iso(at));
+    await settle();
+    await settle();
+  };
+  return { sim, r, wk, a, b, events, step };
+}
+
+test("part 2 (group 2, round 2): a list-lag wake dropped at its window's end with no other list-lag wake left ends the give-way at once", async () => {
+  const { sim, r, wk, a, step } = await lagWorld();
+  const t0 = sim.simMs;
+  wk.loop.wake(a, t0, "lag", { untilMs: t0 + 3_000 }); // room only after its window
+  await step(t0);
+  assert.equal(wk.loop.pendingWakes().has(a), false, "dropped: its window ends before room returns");
+  assert.equal(wk.budget.givingWay(), false, "nothing waits: entries are back");
+  r.worker.stop?.();
+});
+
+test("part 2 (group 2, round 2, B): two list-lag wakes due together, windows of 3 s and 20 s: when the first is dropped, entries keep giving way for the second until its next look", async () => {
+  const { sim, r, wk, a, b, events, step } = await lagWorld();
+  const t0 = sim.simMs;
+  wk.loop.wake(a, t0, "lag", { untilMs: t0 + 3_000 });
+  wk.loop.wake(b, t0, "lag", { untilMs: t0 + 20_000 });
+  await step(t0);
+  assert.equal(wk.loop.pendingWakes().has(a), false, "the 3 s one is dropped");
+  assert.equal(wk.loop.pendingWakes().get(b)?.kind, "lag", "the 20 s one still waits");
+  const next = wk.loop.nextLookAt();
+  assert.ok(next - t0 > 4_000, `its next look is more than 4 s away (${next - t0} ms)`);
+  await step(t0 + 3_500);
+  assert.equal(wk.budget.givingWay(), true, "entries still give way for the second (past the first window's end)");
+  assert.equal(events.length, 1, "one wait, one stored event");
+  r.worker.stop?.();
+});
+
+test("part 2 (group 2, round 2, B): a protection look for another entry does not end a list-lag look's wait on its floor; the wait stores one event", async () => {
+  const { sim, r, wk, a, b, events, step } = await lagWorld();
+  const t0 = sim.simMs;
+  wk.loop.wake(a, t0, "lag", { untilMs: t0 + 20_000 });
+  await step(t0);
+  const next = wk.loop.nextLookAt();
+  assert.ok(next - t0 > 4_000, `its next look is more than 4 s away (${next - t0} ms)`);
+  wk.loop.wake(b, t0 + 1_000, "protect");
+  await step(t0 + 1_000);
+  await step(t0 + 2_500);
+  assert.equal(wk.budget.givingWay(), true, "entries still give way while the list-lag look waits");
+  await step(next);
+  assert.equal(events.length, 1, `stored once for the wait (${events.length})`);
+  r.worker.stop?.();
+});

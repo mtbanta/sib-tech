@@ -323,11 +323,7 @@ export class Worker {
     this.syncMemory.budget = this.budget;
     this.lossMemory.budget = this.budget;
     deps.governor.setSafetyHold?.(this.budget);
-    this.loop = new ProtectionLoop({ now: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}), ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {}), look: (ids, kind, extra, until) => this.look(ids, kind, extra, until), log: (e, data) => deps.log?.("info", e, data), onActionFailed: (id, label, err) => this.protectionActionFailed(id, label, err), onLagDropped: () => {
-      // Part 1, group 2 round 4: the wait ended (its window), so the next one stores its out-of-room event afresh.
-      this.lagWaits = 0;
-      this.budget.stopWaiting("list lag recheck");
-    } });
+    this.loop = new ProtectionLoop({ now: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}), ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {}), look: (ids, kind, extra, until) => this.look(ids, kind, extra, until), log: (e, data) => deps.log?.("info", e, data), onActionFailed: (id, label, err) => this.protectionActionFailed(id, label, err), onLagDropped: () => this.lagWaitOver() });
     this.sessions = new NextSessionFinder(deps.broker);
     this.view = new BrokerView(deps.broker, () => deps.now().getTime());
     this.sellGate = new SellGate({ broker: deps.broker, say: (c, t, o) => this.say(c, t, o), log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime() });
@@ -1242,11 +1238,6 @@ export class Worker {
     });
   }
 
-  // The redesign of 2026-11-14, part 2: one look of the protection loop for the entries that are due: the reads the order sync makes, for
-  // those entries only, and their decisions (risk.ts `syncOrders` with `only`). One at a time with the regular sync (both are "risk"); it
-  // never resets the regular sync's 10 seconds. A look only for list-lag rechecks runs inside a P2 reservation of its cost (the order list's
-  // pages as the last sync read them, the positions, and a lookup per older entry), as in part 1; any other look is routine work, as the
-  // sync it replaces was. Without room it waits for room (entries give way meanwhile).
   // Group 2, round 1 of the redesign (part 2): an action of the loop that threw is logged at error level and alerted, at most once every 5
   // minutes (as a failed "risk" step was before part 2); the loop waits 5 s, doubling to 30 s, before acting on that entry again.
   private protectionActionFailed(id: string, label: string, err: unknown): void {
@@ -1261,6 +1252,20 @@ export class Worker {
     }
   }
 
+  // The list-lag wait is over only when no list-lag wake is left in the loop (one dropped window or a protection look for another entry does
+  // not end it while another list-lag look still waits on its floor; group 2, round 2 of part 2): its out-of-room event is then stored
+  // afresh next time (part 1, group 2 round 4), and entries stop giving way for it.
+  private lagWaitOver(): void {
+    for (const w of this.loop.pendingWakes().values()) if (w.kind === "lag") return;
+    this.lagWaits = 0;
+    this.budget.stopWaiting("list lag recheck");
+  }
+
+  // The redesign of 2026-11-14, part 2: one look of the protection loop for the entries that are due: the reads the order sync makes, for
+  // those entries only, and their decisions (risk.ts `syncOrders` with `only`). One at a time with the regular sync (both are "risk"); it
+  // never resets the regular sync's 10 seconds. A look only for list-lag rechecks runs inside a P2 reservation of its cost (the order list's
+  // pages as the last sync read them, the positions, and a lookup per older entry), as in part 1; any other look is routine work, as the
+  // sync it replaces was. Without room it waits for room (entries give way meanwhile).
   private async look(ids: ReadonlySet<string>, kind: WakeKind, extraRequests: number, untilMs = Infinity): Promise<{ outcome: "busy" | "done" | "failed" | "idle" } | { outcome: "wait"; retryAt: number }> {
     const s = this.sessionForSync;
     if (!s || this.d.now() >= s.closeAt) return { outcome: "idle" };
@@ -1298,12 +1303,9 @@ export class Worker {
         await this.lostExitsFollowUp(s.day.tradeDate, synced.unprotected);
         await this.stopCancelFollowUp(s.day.tradeDate);
       });
-      // A protection look that served list-lag wakes ended their wait too (a lag look's grant already did): the count starts afresh and
-      // entries stop giving way for it (part 1, group 2 round 4).
-      if (kind !== "lag" && this.lagWaits > 0) {
-        this.lagWaits = 0;
-        this.budget.stopWaiting("list lag recheck");
-      }
+      // A protection look may have served list-lag wakes (a lag look's grant already ended its wait): the wait is over if no list-lag wake
+      // is left (part 1, group 2 round 4; group 2, round 2 of part 2).
+      if (kind !== "lag") this.lagWaitOver();
       return { outcome: "done" };
     } catch (err) {
       this.d.log?.("warn", kind === "lag" ? "list_lag_recheck_failed" : "protection_look_failed", { error: (err as Error).message.slice(0, 120), entries: ids.size, next: "a look again after the loop's wait (1 s, doubling to 10 s)" });

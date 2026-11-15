@@ -34,9 +34,11 @@ export interface LoopDeps {
   clearTimer?: (handle: unknown) => void;
   // Runs one look for these entries. "busy": a sync or look is running (put off a quarter second); "wait": no room in the shared budget for
   // a list-lag look (tried again at `retryAt`); "failed": the look's reads failed; "done": it ran.
-  // "idle": outside the session, nothing read (not counted). `untilMs`: the earliest end of the due list-lag wakes' windows.
+  // "idle": outside the session, nothing read (not counted). `untilMs`: the latest end of the due list-lag wakes' windows (the look waits for
+  // room while any of them can still use it; group 2, round 2 of part 2, as part 1's timer did).
   look: (ids: ReadonlySet<string>, kind: WakeKind, extraRequests: number, untilMs: number) => Promise<{ outcome: "busy" | "done" | "failed" | "idle" } | { outcome: "wait"; retryAt: number }>;
-  // Told when a list-lag wake is dropped (its window ended): the worker ends its give-way at once.
+  // Told when a list-lag wake is dropped (its window ended), once the loop's other wakes are back in place: the worker ends its give-way when
+  // no list-lag wake is left (`pendingWakes`).
   onLagDropped?: (id: string) => void;
   log?: (event: string, data?: Record<string, unknown>) => void;
   // Told when an action throws (the worker logs it at error level and alerts, at most once every 5 minutes; group 2, round 1).
@@ -187,7 +189,8 @@ export class ProtectionLoop implements ProtectionHooks {
     if (due.size === 0) return this.arm();
     const kind: WakeKind = [...due.values()].every((w) => w.kind === "lag") ? "lag" : "protect";
     const extra = [...due.values()].reduce((n, w) => n + (w.kind === "lag" ? w.extra : 0), 0);
-    const until = Math.min(...[...due.values()].map((w) => w.until));
+    const lagEnds = [...due.values()].filter((w) => w.kind === "lag").map((w) => w.until);
+    const until = lagEnds.length > 0 ? Math.max(...lagEnds) : Infinity;
     const ids = new Set(due.keys());
     // Taken out before the look, so a wake asked for during it (a follow-up, a stuck retry's next time) is kept; put back (the earlier of the
     // two) if the look did not run.
@@ -219,15 +222,18 @@ export class ProtectionLoop implements ProtectionHooks {
       // No room in the shared budget for a list-lag look: when room may return (entries give way meanwhile, decision 5 with change A).
       this.minute.waitedForRoom++;
       const retryAt = Math.max(r.retryAt, this.d.now() + 1);
-      // A list-lag wake whose window ends before room returns is dropped now (the regular sync carries on).
+      // A list-lag wake whose window ends before room returns is dropped now (the regular sync carries on); the worker is told once the
+      // others are back in place, so it sees any list-lag wake still waiting (group 2, round 2 of part 2).
+      const dropped: string[] = [];
       for (const [id, w] of due) {
         if (w.kind === "lag" && retryAt >= w.until) {
           due.delete(id);
+          dropped.push(id);
           this.d.log?.("list_lag_recheck_window_over", { clientOrderId: id, next: "regular sync" });
-        this.d.onLagDropped?.(id);
         }
       }
       putBack(() => retryAt);
+      for (const id of dropped) this.d.onLagDropped?.(id);
       return this.arm();
     }
     if (r.outcome === "failed") {
