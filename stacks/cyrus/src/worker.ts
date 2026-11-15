@@ -1285,7 +1285,7 @@ export class Worker {
         // or the regular sync when the 30 s window ends first (the loop then drops it).
         if (++this.lagWaits === 1) this.d.log?.("info", "timed_out_try_out_of_room", { stage: "list lag recheck", cost, why: r.why, roomInMs: r.at - this.d.now().getTime(), next: r.at < untilMs ? "when the budget has room" : "regular sync" });
         // Decision 5 as changed by A (part 1, round 4): entries give way while it waits on its floor, through to its next look (the loop
-        // looks again at `retryAt`), never past the earliest lag window's end; a refusal for another reason ends the give-way (the budget).
+        // looks again at `retryAt`), never past the latest due lag window's end; a refusal for another reason ends the give-way (the budget).
         if (r.why === "floor") this.budget.extendWait("list lag recheck", Math.min(r.at + 500, untilMs));
         return { outcome: "wait", retryAt: r.at };
       }

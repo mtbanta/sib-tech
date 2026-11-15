@@ -815,6 +815,12 @@ for (const reason of ["close-out", "flatten command"]) {
       }
       return realSell(x);
     };
+    const yieldedTo = new Map<string, string>();
+    const realLog = wk.d.log;
+    wk.d.log = (level: string, e: string, data: any) => {
+      if (e === "unprotected_position_yielded") yieldedTo.set(data.symbol, data.to);
+      return realLog?.(level, e, data);
+    };
     for (const id of ids) wk.loop.wake(id, sim.simMs, "protect");
     for (let i = 0; i < 20 && !(heldSent && wk.liquidator.running >= 4); i++) {
       r.setNow(iso(sim.simMs + 100));
@@ -823,6 +829,7 @@ for (const reason of ["close-out", "flatten command"]) {
     assert.ok(heldSent && liq.running >= 4, `four cleanup sales asked for, the first one's sell held (${liq.running})`);
     const runningSymbol = sent.find((x) => x.own)!.symbol;
     asked = true;
+    const said0 = r.bot.posts.length;
     const whole = wk.liquidator.flatten({ reason, tradeDate: D, maxRounds: 1 });
     release();
     for (let i = 0; i < 60; i++) {
@@ -833,6 +840,17 @@ for (const reason of ["close-out", "flatten command"]) {
     const ownAfter = sent.filter((x) => x.own && x.afterAsk && x.symbol !== runningSymbol);
     assert.equal(ownAfter.length, 0, `no queued cleanup sale sent anything after the ask: ${ownAfter.map((x) => x.symbol).join(", ")}`);
     for (const s of syms) assert.equal(sim.heldQty(s), 0, `${s} sold by the ${reason}`);
+    // Group 2, round 3 of part 2: the stood-aside sales say nothing to Michael (no "I can't confirm a protective stop" alert, no "no longer
+    // held" line for shares the whole-account sale sold); only the running one's own line is posted, and each stood-aside one is logged as
+    // standing aside for a sale of the whole account.
+    for (let i = 0; i < 20; i++) {
+      r.setNow(iso(sim.simMs + 1_000));
+      await settle();
+    }
+    const posts = r.bot.posts.slice(said0).map((p: any) => p.text).filter((t: string) => syms.some((x) => t.includes(x)));
+    assert.ok(posts.every((t: string) => t.includes(runningSymbol) && !syms.some((x) => x !== runningSymbol && t.includes(x))), `only ${runningSymbol}'s own line: ${posts.join(" | ")}`);
+    assert.ok(posts.length <= 1, `at most one line: ${posts.join(" | ")}`);
+    for (const s of syms.filter((x) => x !== runningSymbol)) assert.equal(yieldedTo.get(s), "a sale of the whole account (stood aside at its turn)", `${s} logged as standing aside`);
     r.worker.stop?.();
   });
 }
