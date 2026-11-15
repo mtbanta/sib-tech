@@ -1936,3 +1936,92 @@ test("redesign part 1: in the worker, a list-lag recheck whose sync fails is dro
   (sim as any).listOrdersPaged = realList;
   r.worker.stop?.();
 });
+
+// Group 1, round 1 of the redesign (part 1), B4: the lagging remainder's entry closes while no other entry is open, so the next sync returns
+// early. Its recheck must not stay asked for (before: the worker's timer fired at once after every sync until the window ended).
+test("redesign part 1 (group 1, round 1, B4): a sync that returns early (no open entry) or fails leaves no list-lag recheck to fire again", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "LUNR", 5, 12, 1);
+  w.sim.advance(5_000);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  w.sim.partialTakeProfitListLag(id, 1, 12.08, 15_000);
+  w.memory.liveStopCancelled.set(id, w.sim.simMs);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.ok(w.memory.lagRecheck, "a recheck is asked for");
+  await w.store.updateOrder(id, { closedAt: new Date(w.sim.simMs).toISOString() }); // the entry closed (its shares are gone)
+  w.sim.advance(600);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.equal(w.memory.lagRecheck, undefined, "the early return dropped it");
+  // A failing sync drops it too.
+  const id2 = await hold(w, "SMCI", 5, 30, 1);
+  w.sim.advance(5_000);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  w.sim.partialTakeProfitListLag(id2, 1, 30.08, 15_000);
+  w.memory.liveStopCancelled.set(id2, w.sim.simMs);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.ok(w.memory.lagRecheck);
+  const realPaged = w.sim.listOrdersPaged.bind(w.sim);
+  w.sim.listOrdersPaged = async () => {
+    throw new Error("order list read failed (test)");
+  };
+  await assert.rejects(syncOrders(w.risk, dd, { protect: true, streamLive: true }));
+  assert.equal(w.memory.lagRecheck, undefined, "a failed sync dropped it");
+  w.sim.listOrdersPaged = realPaged;
+});
+
+// Group 1, round 1 of the redesign (part 1), B3: an unclear fresh stop that Alpaca does hold, while Alpaca's remaining sits at the P2 floor
+// of 80 (a load window's level). Its lookup waits for room: entries give way, the bucket refills, and the next look comes as soon as room
+// returns (before: skipped until the next sync, so the 15 second limit fired on a stop Alpaca held, cancelled it and sold).
+test("redesign part 1 (group 1, round 1, B3): an unclear fresh stop's lookup waits on its floor with entries giving way, and looks again as soon as room returns; the stop is confirmed and nothing is sold", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "WULF", 6, 9.5, 1);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 2, 9.58);
+  let remaining = 80;
+  w.memory.budget = new RequestBudget({ now: () => w.sim.simMs, remaining: () => remaining });
+  const realSubmit = w.sim.submitSell.bind(w.sim);
+  w.sim.submitSell = async (x: any) => {
+    if (x.stopPrice !== undefined) {
+      await realSubmit(x); // Alpaca took it
+      throw new AlpacaError("outcome unclear (test)", 502);
+    }
+    return realSubmit(x);
+  };
+  const realPaged = w.sim.listOrdersPaged.bind(w.sim);
+  w.sim.listOrdersPaged = async (...a: any[]) => {
+    const r: any = await (realPaged as any)(...a);
+    return { ...r, orders: r.orders.filter((o: any) => !o.clientOrderId.startsWith("cyrus-p-")) }; // the list does not show it yet
+  };
+  w.sim.advance(300);
+  const sentAt = w.sim.simMs;
+  let r: any = await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(w.memory.freshStops.get(id)?.status, "unclear");
+  let gaveWay = false;
+  while (w.sim.simMs < sentAt + 20_000 && w.memory.freshStops.get(id)?.status === "unclear") {
+    // Entries gave way and the bucket refilled above the floor for one second only (busy again after): the look must come then.
+    remaining = w.sim.simMs >= sentAt + 3_000 && w.sim.simMs < sentAt + 4_000 ? 95 : 80;
+    const next = Math.max(w.sim.simMs + 100, Math.min(r.recheckAt ?? Infinity, w.sim.simMs + 10_000));
+    w.sim.advanceTo(next);
+    r = await syncOrders(w.risk, dd, { protect: true });
+    if (w.sim.simMs < sentAt + 3_000) gaveWay ||= w.memory.budget.givingWay();
+  }
+  assert.ok(w.events.some((e) => e.event === "fresh_stop_lookup_skipped"), "a lookup found no room at 80");
+  const f = w.memory.freshStops.get(id);
+  assert.ok(f && f.status !== "unclear", `confirmed by a lookup once there was room (${f?.status})`);
+  assert.ok(w.events.find((e) => e.event === "fresh_stop_confirmed")!.at - sentAt < FRESH_STOP_CONFIRM_MS, "before the 15 second limit");
+  assert.equal(w.events.filter((e) => e.event === "fresh_stop_timeout").length, 0, "the limit never fired");
+  assert.equal(w.sim.sellLog.filter((x) => x.symbol === "WULF").length, 0, "nothing sold");
+  assert.ok(gaveWay, "entries gave way while it waited");
+});
+
+test("redesign part 1 (group 1, round 1, B3): while an unclear fresh stop's lookup waits on its floor, entries give way", async () => {
+  let t = 0;
+  const b = new RequestBudget({ now: () => t, remaining: () => 80 });
+  const r = b.tryReserve("P2", 1, { label: "fresh stop lookup", waitKey: "fresh stop lookup cyrus-p-x" });
+  assert.ok(!(r instanceof Reservation) && r.why === "floor");
+  assert.equal(b.givingWay(), true);
+  t += 2_000;
+  assert.equal(b.givingWay(), false, "lapses 2 s after its last refusal");
+});

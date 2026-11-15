@@ -42,6 +42,9 @@ export interface ReserveOptions {
   label: string;
   // A P2 try that will be tried again when room returns (the list-lag recheck): while it waits on its floor, entries give way.
   waitKey?: string;
+  // The Alpaca client's own retries inside this try stop when its reservation has no room left (only a timed-out stop's tries, checks and
+  // cancels, Michael's item 2 of 2026-11-13). Any other try is never stopped halfway (design 3.2): its extra requests are counted.
+  limitRetries?: boolean;
 }
 
 export class Reservation implements ScopeReservation {
@@ -54,7 +57,9 @@ export class Reservation implements ScopeReservation {
   readonly size: number;
   readonly label: string;
   readonly fiveSec: boolean;
-  constructor(budget: RequestBudget, cls: BudgetClass | null, size: number, label: string, fiveSec: boolean) {
+  readonly limitRetries: boolean;
+  constructor(budget: RequestBudget, cls: BudgetClass | null, size: number, label: string, fiveSec: boolean, limitRetries = false) {
+    this.limitRetries = limitRetries;
     this.budget = budget;
     this.cls = cls;
     this.size = size;
@@ -68,6 +73,9 @@ export class Reservation implements ScopeReservation {
   }
   roomLeft(): number {
     return this.cls === null ? Infinity : Math.max(0, this.size - this.used);
+  }
+  retryRoomLeft(): number {
+    return this.limitRetries ? this.roomLeft() : Infinity;
   }
   // Room reserved and not yet used (counted against the budget while the try runs).
   unsent(): number {
@@ -115,6 +123,8 @@ export class RequestBudget {
   // seconds (forced and overdrawn requests included).
   readonly totals = { P1: 0, P2: 0, overdraft: 0 };
   readonly peak = { minute: 0, five: 0 };
+  // When each request beyond its try's reservation was sent (the last 10 minutes; statistics and tests).
+  readonly overdraftAt: number[] = [];
 
   constructor(opts: { now?: () => number; remaining?: () => number; log?: (event: string, data?: Record<string, unknown>) => void } = {}) {
     this.nowMs = opts.now ?? Date.now;
@@ -159,7 +169,7 @@ export class RequestBudget {
       }
     } else this.minute.forced++;
     if (opts.waitKey) this.floorWaits.delete(opts.waitKey);
-    const r = new Reservation(this, cls, size, opts.label, fiveSec);
+    const r = new Reservation(this, cls, size, opts.label, fiveSec, opts.limitRetries === true);
     this.open.add(r);
     this.minute.granted++;
     return r;
@@ -225,6 +235,8 @@ export class RequestBudget {
         r.overdraft++;
         this.minute.overdrafts++;
         this.totals.overdraft++;
+        this.overdraftAt.push(now);
+        while (this.overdraftAt.length > 0 && now - this.overdraftAt[0]! >= 10 * 60_000) this.overdraftAt.shift();
         if (r.overdraft === 1) this.log?.("budget_overdraft", { cls: r.cls, label: r.label, reserved: r.size, path });
       }
       if (r.ended) {

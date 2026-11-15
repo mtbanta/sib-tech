@@ -168,7 +168,7 @@ test("when the loss stop's one-round sale leaves sells still filling, it says so
 
 // Michael's test: 40 open positions, the loss stop fires, every sale is refused until the close-out, and every retry is refused
 // all day. Alpaca's simulated bucket (200 a minute, 429 above it) must never be reached and the close-out must end flat.
-test("40 positions and repeated refusals: total requests stay under Alpaca's limit, no rate-limit answer, and the close-out gets through", { timeout: 120_000 }, async () => {
+test("40 positions and repeated refusals: Alpaca's bucket never below the floor of 20, no rate-limit answer, and the close-out gets through", { timeout: 120_000 }, async () => {
   const START = Date.UTC(2026, 10, 1, 22, 0); // before the evening approval: the worker runs on the simulator's clock
   const CLOSEOUT = Date.UTC(2026, 10, 2, 20, 55);
   const sim = new SimBroker(START);

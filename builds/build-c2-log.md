@@ -5762,3 +5762,28 @@ Paper only. Research input for a human decision.
 - `startSync` ends a recheck's reservation whenever `background()` does not start; `stop()` clears the recheck's timer.
 
 Full suite 761 of 761. Type check clean.
+
+### Redesign part 1, round 1 (436e91e): group 1 STOP AND FLAG MICHAEL, and fixes
+
+**Group 1, redesign part 1, round 1: STOP AND FLAG MICHAEL**, for one reason: a change beyond Michael's approval (his rule of 2026-11-03), B1 below. Checks 2, 7 and 10 are clean. Under the standing rule of 2026-11-11 a STOP AND FLAG that is not under checks 2, 7 or 10 stops the build only in the last allowed round, so the builder reverted B1 to the approved design, fixed B4 and the part of B3 inside the approval, and flagged Michael on what needs him (below).
+
+- **B1 (beyond the approval):** `retryAllowedInScope` refused the Alpaca client's own retries (after a 429 or a 5xx) once a reservation's room was used, in every budgeted try: stuck retries, the loss stop's re-sells and every close-out retry, the forced 2:55 retry included (a probe: a forced reservation of 1 sent 1 call where v22 sent 12). Michael's item 2 of 2026-11-13 limited only a timed-out stop's tries, checks and cancels, and design 3.2 says a try is never stopped halfway.
+- **B2 (Michael's choice, the builder's item 1):** the cap is overdrawn by ordinary stuck retries (54/27, 71/26 and 55/19 a minute and in 5 s at 0, 10 and 30 percent faults), and the test allowed the whole run's overdrafts on top; its "charged once" check could not see retries run outside a reservation (mutant M6, stuck retries run as first tries, passed the fault tests).
+- **B3:** an unclear fresh stop's P2 lookup had no give-way and was skipped until the next sync. With Alpaca's remaining pinned at 80, 3 lookups were skipped, the 15 second limit fired, cancelled a stop Alpaca held, sold the remainder, and alerted Michael. At 82 or 200 it was confirmed and nothing sold. Mutant M7 (lookups unbudgeted) passed the whole suite.
+- **B4 (rule 6):** when no entry was open, `syncOrders` returned early without clearing `SyncMemory.lagRecheck`, so the worker's timer, set for a time already past, started another recheck sync at once after each sync until the window ended (50 syncs with a frozen clock; 0 Alpaca requests, a database read each).
+
+**Non-blocking:** safety outcomes hold (the sell gate unchanged, no oversell, close-outs flat, the loss stop sells, the forced 2:55 retry enforced); the list-lag timer is within the approval; a reservation could leak if a log line threw between `retryDue` and `inTry` (low risk; left, a note); `outsideScope` untested (M2); `Worker.stop` did not clear the recheck timer (fixed before this round reported); the 40-position test's title; the half-day reading of 2:58 and the loss stop's earlier re-sells are for Michael to see.
+
+**Fixes:**
+- **B1, reverted to the approval:** a reservation limits the client's retries only when made with `limitRetries` (a timed-out stop's tries, its status checks, its cancel sent again, the 15 second limit's look and first try: Michael's item 2). Every other try is never stopped halfway; its extra requests are counted (`retryRoomLeft`). Tests: the client retries a forced close-out retry's cancel all 6 times as before, counted (an overdraft); a timed-out stop's reservation still stops its retries.
+- **B4:** every sync drops the recheck at its start; the walk asks again at its end. A sync that returns early or fails leaves none. New test (both cases).
+- **B3, inside the approval:** an unclear fresh stop's lookup that finds no room makes entries give way (a `waitKey` per stop) and is tried again as soon as room may return (`FreshStop.lookRoomAt`, never after the 15 second limit), instead of at the next sync. New test: remaining at 80 except for one second: the lookup came in that second, the stop was confirmed before 15 s, the limit never fired, nothing was sold, entries gave way meanwhile (it fails without the fix).
+- **B2's oracle:** the fault test now counts the cap from the simulated broker's own times of every P1 or P2 request, allowing only the overdrafts sent in the same window (`RequestBudget.overdraftAt`); and every sale of a stuck symbol after its first try must be tagged P1. Mutant M6 now fails three fault tests. Measured (window less its own overdrafts): 22 a minute and 12 in 5 s at 0 percent faults, 41 and 14 at 10, 43 and 15 at 30.
+- **M2:** a test that background work started from inside a P2 try runs outside any scope (fails without `outsideScope`).
+- The 40-position test's title.
+
+**Flagged to Michael (needs him):**
+1. **B2:** option (a), (b) or (c) for an ordinary stuck retry's overdraft (with B1 reverted the client's retries add to it: 75 a minute and 28 in 5 s budgeted at 10 percent faults).
+2. **B3's remaining part:** P2 lookups stop at 80 (change A). While first tries hold Alpaca's remaining below 80 (Thursday 2026-11-12: below 80 for 16 minutes, lowest 65), an unclear fresh stop's lookups cannot run, and the 15 second limit then cancels a stop Alpaca may hold and sells the remainder. Options: (i) keep (P2 at 80); (ii) the unclear fresh stop's lookups become P1 (floor 20; it is about shares without a confirmed stop); (iii) only the last lookup before the 15 second limit is P1.
+
+Full suite 765 of 765. Type check clean.

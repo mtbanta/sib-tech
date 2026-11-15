@@ -14,8 +14,10 @@ export type Tag = "entry" | "first" | "P1" | "P2" | "routine";
 export interface ScopeReservation {
   // Called once for each request sent inside the scope (every attempt, the client's own retries included).
   charge(path: string): void;
-  // Requests the reservation still has room for (Infinity for a first try, which is never limited).
-  roomLeft(): number;
+  // Further attempts the Alpaca client may send when it retries a request inside this scope: the room left only in a try whose client
+  // retries are limited (a timed-out stop's tries, checks and cancels, item 2 of 2026-11-13); Infinity in every other try (design 3.2: a try
+  // is never stopped halfway; its extra requests are counted).
+  retryRoomLeft(): number;
 }
 
 export interface Scope {
@@ -39,11 +41,12 @@ export function currentTag(): Tag {
   return requestScope.getStore()?.tag ?? "routine";
 }
 
-// True when the Alpaca client may send one more attempt of a request it is retrying: always outside a reservation, and inside one only
-// while the reservation has room for it (the attempt is then charged when it is sent, like any other request).
+// True when the Alpaca client may send one more attempt of a request it is retrying: always, except inside a try whose client retries are
+// limited (a timed-out stop's work), and there only while its reservation has room (group 1, round 1 of the redesign). Every attempt is
+// charged when it is sent, like any other request.
 export function retryAllowedInScope(): boolean {
   const r = requestScope.getStore()?.reservation;
-  return !r || r.roomLeft() >= 1;
+  return !r || r.retryRoomLeft() >= 1;
 }
 
 // Runs `fn` inside `scope` (or plainly, in whatever scope is current, when none is given).

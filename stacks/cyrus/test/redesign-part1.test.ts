@@ -223,15 +223,22 @@ test("part 1: new work started with outsideScope never carries a try's scope, ev
   assert.equal(outside, "routine");
 });
 
-test("part 1: the client's own retry is allowed while the reservation has room, and always outside a reservation", async () => {
+test("part 1 (group 1, round 1): the client's own retry is limited only inside a timed-out stop's work, while its reservation has room; never elsewhere", async () => {
   assert.equal(retryAllowedInScope(), true);
   const b = new RequestBudget({ now: () => 0 });
-  const r = b.tryReserve("P1", 1, { label: "x" }) as Reservation;
+  const r = b.tryReserve("P1", 1, { label: "timed-out stop check", limitRetries: true }) as Reservation;
   await inRequestScope(r.scope(), async () => {
     assert.equal(retryAllowedInScope(), true);
     r.charge("/v2/orders");
     assert.equal(retryAllowedInScope(), false);
   });
+  r.end();
+  const s = b.tryReserve("P1", 1, { label: "stuck retry" }) as Reservation;
+  await inRequestScope(s.scope(), async () => {
+    s.charge("/v2/orders");
+    assert.equal(retryAllowedInScope(), true, "a stuck retry is never stopped halfway");
+  });
+  s.end();
   await inRequestScope({ tag: "first" }, async () => assert.equal(retryAllowedInScope(), true));
 });
 
@@ -303,7 +310,19 @@ for (const rate of [0, 0.1, 0.3]) {
     const budget = new RequestBudget({ now: () => sim.simMs, remaining: () => sim.tokens, log });
     memory.budget = budget;
     const tagged: Record<string, number> = { entry: 0, first: 0, P1: 0, P2: 0, routine: 0 };
-    sim.onSend = () => void (tagged[currentTag()] = (tagged[currentTag()] ?? 0) + 1);
+    const budgetedAt: number[] = []; // the simulated broker's own times of every P1 or P2 request (the oracle's count, section 8)
+    sim.onSend = () => {
+      const tag = currentTag();
+      tagged[tag] = (tagged[tag] ?? 0) + 1;
+      if (tag === "P1" || tag === "P2") budgetedAt.push(sim.simMs);
+    };
+    const sellTags = new Map<string, Array<{ tag: string; at: number }>>(); // per symbol, the tag and time of each sell sent for it
+    const realSell = sim.submitSell.bind(sim);
+    sim.submitSell = async (x: any) => {
+      sellTags.set(x.symbol, [...(sellTags.get(x.symbol) ?? []), { tag: currentTag(), at: sim.simMs }]);
+      return realSell(x);
+    };
+    const firstTryEnd = new Map<string, number>(); // when each stuck entry's first try ended (its stuck record was made)
     let seed = 7 + Math.round(rate * 100);
     const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
     for (const m of ["listOrdersPaged", "listPositions", "findOrderByClientId", "listOrders"] as const) {
@@ -354,6 +373,7 @@ for (const rate of [0, 0.1, 0.3]) {
             }
           }
         } else r = await syncOrders(risk, dd, { protect: true, streamLive: true });
+        for (const sym of stuck) if (!firstTryEnd.has(sym) && memory.stuck.has(ids[sym]!)) firstTryEnd.set(sym, memory.stuck.get(ids[sym]!)!.since);
       } catch {
         /* a failed sync: the next one comes on time */
       }
@@ -367,10 +387,32 @@ for (const rate of [0, 0.1, 0.3]) {
     assert.equal(budget.totals.P2, tagged.P2, "every P2 request charged once");
     assert.equal(sim.rejected429, 0);
     assert.equal(sim.oversellAttempts, 0);
-    // The cap holds for what tries reserve; a try that sends more than it reserved (an ordinary stuck retry whose sale is refused runs up to
-    // 3 rounds, about 26 requests, against the 10 it reserves) is never stopped halfway: its extra is counted and logged (design, 3.2).
-    assert.ok(budget.peak.minute <= 60 + budget.totals.overdraft && budget.peak.five <= 15 + budget.totals.overdraft, `at most ${budget.peak.minute} a minute and ${budget.peak.five} in 5 s, ${budget.totals.overdraft} overdrawn`);
-    if (budget.totals.overdraft === 0) assert.ok(budget.peak.minute <= 60 && budget.peak.five <= 15);
+    // Section 8's oracle, from the simulated broker's own times: budgeted requests in any 60 s at most 60, and in any 5 s at most 15, apart from
+    // requests a try sent beyond its reservation in that same window (an ordinary stuck retry whose sale is refused runs up to 3 rounds,
+    // about 26 requests, against the 10 it reserves; design 3.2, Michael's choice pending). Close-out retries do not run here.
+    const overIn = (from: number, to: number) => budget.overdraftAt.filter((t) => t >= from && t < to).length;
+    let worstMinute = 0;
+    let worstFive = 0;
+    for (const t of budgetedAt) {
+      worstMinute = Math.max(worstMinute, budgetedAt.filter((x) => x >= t && x < t + 60_000).length - overIn(t, t + 60_000));
+      worstFive = Math.max(worstFive, budgetedAt.filter((x) => x >= t && x < t + 5_000).length - overIn(t, t + 5_000));
+    }
+    console.log(`MEASURE faults ${rate}: from the broker's own counts, less the overdrafts in each window: at most ${worstMinute} a minute and ${worstFive} in 5 s`);
+    assert.ok(worstMinute <= 60 && worstFive <= 15, `at most ${worstMinute} a minute and ${worstFive} in 5 s beyond the overdrafts`);
+    // Every sale of a stuck symbol after its first try ended is a retry: tagged P1, never a first try or routine work (group 1, round 1,
+    // mutant M6: retries run unbudgeted, as first tries). Each sale is a first try's or a P1 retry's.
+    let retrySales = 0;
+    for (const sym of stuck) {
+      const sales = sellTags.get(sym) ?? [];
+      assert.ok(sales.every((x) => x.tag === "first" || x.tag === "P1"), `${sym}: ${sales.map((x) => x.tag).join(",")}`);
+      const end = firstTryEnd.get(sym);
+      if (end === undefined) continue;
+      const later = sales.filter((x) => x.at > end);
+      assert.ok(later.every((x) => x.tag === "P1"), `${sym}: every sale after its first try (${end - t0} ms) is P1: ${sales.map((x) => `${x.tag}@${x.at - t0}`).join(",")}`);
+      retrySales += later.length;
+    }
+    // At 30 percent faults on every read a retry rarely reaches its sale (a try reads about 6 times), so it is required below that only.
+    if (rate < 0.3) assert.ok(retrySales > 0, "the stuck sales were retried");
   });
 }
 
@@ -405,4 +447,26 @@ test("part 1 (group 2, round 1): entries refused while a P2 recheck waits on its
   await gate.flush();
   assert.equal(writes, 1, "one counted row at the flush");
   assert.equal(broker.count("submitEntry"), 0);
+});
+
+// Group 1, round 1 of the redesign (mutant M2): work the worker starts in the background (the order sync, the close-outs) starts outside
+// any scope, even when it is started from inside a budgeted try (for example a timer set during one).
+test("part 1 (group 1, round 1, M2): the worker's background work starts outside any scope, even when started from inside a try", async () => {
+  const r = rig();
+  const wk: any = r.worker;
+  const b = new RequestBudget({ now: () => 0 });
+  const res = b.tryReserve("P2", 2, { label: "list lag recheck" }) as Reservation;
+  let tag = "";
+  await requestScope.run(res.scope(), async () => {
+    let done!: () => void;
+    const finished = new Promise<void>((x) => (done = x));
+    wk.background("test-task", async () => {
+      tag = currentTag();
+      done();
+    });
+    await finished;
+  });
+  res.end();
+  assert.equal(tag, "routine", "the background task did not inherit the P2 scope");
+  r.worker.stop?.();
 });

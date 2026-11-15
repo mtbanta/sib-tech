@@ -291,19 +291,29 @@ test("item 2 and the redesign: every attempt is charged to the scope's reservati
 
   const { Reservation, RequestBudget } = await import("../src/request-budget.ts");
   const b = new RequestBudget({ now: () => 0 });
-  const two = b.tryReserve("P1", 2, { label: "test" }) as InstanceType<typeof Reservation>;
+  // Group 1, round 1 of the redesign: only a timed-out stop's tries, checks and cancels limit the client's retries (item 2 of 2026-11-13).
+  const two = b.tryReserve("P1", 2, { label: "test", limitRetries: true }) as InstanceType<typeof Reservation>;
   const inside = fake([down(), down(), down()]);
   await assert.rejects(inRequestScope(two.scope(), () => inside.client.findOrderByClientId("cyrus-p-x")));
-  assert.equal(inside.calls.length, 2, "a reservation of 2: the first try and 1 retry");
+  assert.equal(inside.calls.length, 2, "a timed-out stop's reservation of 2: the first try and 1 retry");
   assert.equal(two.used, 2, "both charged as they were sent");
   two.end();
 
-  const one = b.tryReserve("P1", 1, { label: "test" }) as InstanceType<typeof Reservation>;
+  const one = b.tryReserve("P1", 1, { label: "test", limitRetries: true }) as InstanceType<typeof Reservation>;
   const cancel = fake([down(), down(), down(), down(), down(), down()]);
   await assert.rejects(inRequestScope(one.scope(), () => cancel.client.cancelOrder("00000000-0000-0000-0000-000000000001")));
-  assert.equal(cancel.calls.length, 1, "a cancel with no room left: no retry (before: up to 6 tries)");
+  assert.equal(cancel.calls.length, 1, "a timed-out stop's cancel with no room left: no retry (before item 2: up to 6 tries)");
   assert.equal(one.used, 1);
   one.end();
+
+  // Any other budgeted try (a stuck retry, the loss stop's re-sell, a close-out retry, the forced 2:55 retry) is never stopped halfway: the
+  // client retries as before, and every attempt is counted (design 3.2).
+  const p1 = b.tryReserve("P1", 1, { label: "close-out retry", fiveSec: false, force: true }) as InstanceType<typeof Reservation>;
+  const sells = fake([down(), down(), down(), down(), down(), down()]);
+  await assert.rejects(inRequestScope(p1.scope(), () => sells.client.cancelOrder("00000000-0000-0000-0000-000000000001")));
+  assert.equal(sells.calls.length, 6, "a forced close-out retry's cancel: all 6 tries, as before");
+  assert.equal(p1.used, 6, "all counted (5 beyond its reservation: an overdraft)");
+  p1.end();
 
   const first = b.first("test");
   const counted = fake([down(), down(), down()]);
