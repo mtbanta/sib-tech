@@ -327,7 +327,10 @@ export class Worker {
     this.sessions = new NextSessionFinder(deps.broker);
     this.view = new BrokerView(deps.broker, () => deps.now().getTime());
     this.sellGate = new SellGate({ broker: deps.broker, say: (c, t, o) => this.say(c, t, o), log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime() });
-    this.liquidator = new Liquidator({ broker: deps.broker, gate: this.sellGate, now: deps.now, sleep: deps.sleep, log: (e, data) => deps.log?.("info", e, data), waitEvent: (symbols, ms) => this.waitEvent(symbols, ms) });
+    this.liquidator = new Liquidator({ broker: deps.broker, gate: this.sellGate, now: deps.now, sleep: deps.sleep, log: (e, data) => deps.log?.("info", e, data), waitEvent: (symbols, ms) => this.waitEvent(symbols, ms), ownSalesMayRun: () => {
+      const s = this.sessionForSync;
+      return !s || this.protectNow(s.closeAt);
+    } });
     // The load window's 5 second cancels are part of entering (tagged as entries for the shared request budget's statistics).
     this.entryExpiry = new EntryExpiry({ cancelOrder: (id) => inRequestScope({ tag: "entry" }, () => deps.broker.cancelOrder(id)), wasFilled: (id) => this.orderHandler?.wasFilled(id) ?? false, log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}) });
     this.commands = new CommandProcessor({
@@ -1732,8 +1735,9 @@ export class Worker {
 
   // A5 of 2026-11-12: the fast sale of an entry that filled as its cancel reached Alpaca. Not while a close-out, the mid-day close-out or
   // a carried-position sale runs, nor from the close-out time on, nor while the daily loss stop is in force (they sell it themselves);
-  // only the newest open entry of its symbol (the order sync's rule). Another sale running does not stop it: it waits its turn in the
-  // one-at-a-time sell path. Never throws.
+  // only the newest open entry of its symbol (the order sync's rule). Another one-entry sale running does not stop it: it waits its turn in
+  // the one-at-a-time sell path, and stands aside at its turn if a sale of the whole account was asked for, a close-out step owns selling
+  // or the close-out time has come (part 2 of the redesign, `Liquidator.run`). Never throws.
   private async fastLostExit(clientOrderId: string, symbol: string, fillAtMs: number): Promise<void> {
     try {
       const s = this.sessionForSync;

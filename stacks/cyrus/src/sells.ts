@@ -242,9 +242,10 @@ export interface LiquidateResult {
   working?: string[];
   steps?: LiquidateSteps;
   // Only with yieldToPriority: the sale stopped early because the daily loss stop's sale goes first, or (with `ownEntryOnly`) it stood
-  // aside at its turn, before any request, because a sale of the whole account was asked for (`stoodAside`).
+  // aside at its turn, before any request (`stoodAside`): a sale of the whole account was asked for ("whole account"), or a close-out step
+  // owns selling or the close-out time has come ("close-out").
   yielded?: boolean;
-  stoodAside?: boolean;
+  stoodAside?: "whole account" | "close-out";
   // Only with endWhenHiddenHold: the symbols held with no open order visible when the attempt ended early (part A, step 1).
   hiddenHold?: string[];
   // Ruling B (group 1, round 2 of the night release): a cancel this sale sent was not accepted (an error from Alpaca or no answer).
@@ -302,6 +303,10 @@ export interface LiquidatorDeps {
   // wait for a cancel or a fill ends at the event; the timed look stays as the backstop. Without it (or with the stream down) this is
   // a plain pause.
   waitEvent?: (symbols: ReadonlySet<string>, ms: number) => Promise<boolean>;
+  // The redesign of 2026-11-14, part 2 (group 1, round 3; design 4.3, "from the close-out time, and while the 2:55 close-out, the mid-day
+  // close-out or the afternoon close-out owns selling: no selling action"): the worker's own stand-aside rule (false from the close-out
+  // time, and while a close-out, mid-day or carried step owns selling), asked when a one-entry cleanup sale's turn comes.
+  ownSalesMayRun?: () => boolean;
 }
 
 // At most MAX_EARLY_WAKES early wake-ups in one liquidation, so a burst of updates cannot turn the waits into a run of extra looks (5
@@ -442,12 +447,16 @@ export class Liquidator {
     // a one-entry cleanup sale whose turn in this queue comes while a sale of the whole account (a close-out, `flatten`, the loss stop's
     // sale, a carried-position sale) is asked for or running stands aside before sending, cancelling or reading anything; that sale sells
     // these shares. A cleanup sale already running when one is asked for carries on (as in v22), except for the loss stop (item 6).
-    if (o.ownEntryOnly && this.runningOthers > 0) {
+    // Group 1, round 3: also from the close-out time (2:55) and while a close-out, mid-day or carried step owns selling (the worker's rule),
+    // so a sale whose turn comes between 2:55:00 and the close-out's own ask does not run ahead of it either (v22's sync started no
+    // cleanup from 2:55:00).
+    const standAside: LiquidateResult["stoodAside"] | null = !o.ownEntryOnly ? null : this.runningOthers > 0 ? "whole account" : this.d.ownSalesMayRun?.() === false ? "close-out" : null;
+    if (standAside) {
       result.yielded = true;
-      result.stoodAside = true;
+      result.stoodAside = standAside;
       result.flat = false;
-      result.errors.push("stood aside: a sale of the whole account was asked for and sells these shares");
-      this.d.log?.("liquidation_stood_aside", { reason: o.reason, only: o.only ?? null });
+      result.errors.push(standAside === "whole account" ? "stood aside: a sale of the whole account was asked for and sells these shares" : "stood aside: the close-out owns selling (or its time has come) and sells these shares");
+      this.d.log?.("liquidation_stood_aside", { reason: o.reason, only: o.only ?? null, for: standAside });
       return done();
     }
     for (let round = 1; round <= rounds; round++) {
