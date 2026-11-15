@@ -5815,3 +5815,18 @@ The fresh-stop half was already fixed in `53706cb` ("the B3 fix checked against 
 **Non-blocking, done:** a test of `mostCappedIn5s`; its comment ("or was forced" cannot happen); the four-offset test's title (5.5 s); the daily and mid-day briefs' `timed_out_try_out_of_room` line (the recheck's own fields); the alert variant that could not appear folded into "could not be asked"; design 10.1 and PROJECT_STATE updated. On the log's tag audit: the counts listed were the close-out's 81 of 84 asks (3 mid-day close-out asks unlisted); about 2,448 more came from tests calling the liquidator or sell gate directly; group 2 ran the worker-level tests one by one and found none from the worker.
 
 Full suite 771 of 771. Type check clean.
+
+### Redesign part 1, round 2 (910cf3f): group 1 CHANGES REQUIRED, and fixes
+
+**Group 1, redesign part 1, round 2: CHANGES REQUIRED** (no flag: checks 2, 7 and 10 clean, nothing beyond the approval). Round 1's B1 (the client's retries: 12 calls again for forced reservations of 1, 3 and 60, as on v22; the `limitRetries` sites match v22's), B4 (mutant N1 caught) and the oracle (N6 caught by three fault tests and the ten-stuck test) are fixed; group 2's 15 second split (N7), the give-way reason (N11) and `outsideScope` (N9) are covered; no reservation leaks at the end of the fault runs.
+
+- **B1 (the same as group 2's round 2 blocker):** at 910cf3f the unclear stop's retry when room returns brought a full routine sync forward about every half second, whose reads spent the refill; group 1's probe (the builder's B3 test with `remaining` from the simulated bucket, starts 82, 79 and 76, live updates on and off, no other traffic): 18 to 21 syncs, 62 to 68 requests, 16 to 19 refusals, the limit fired and sold; round 1's code: 3 syncs, confirmed. Fixed in `53706cb` and `d062fad` (above). **Group 1's own probe, rerun on the current code: all six cases confirmed with 3 syncs and 20 requests, nothing sold, entries giving way 2.9 to 4.7 s.**
+- **B2 (check 9):** two wirings had no test that fails without them: the carried-position retry as a P1 try (mutant N8; N12, the `end()` when `background()` declines, is unreachable after `backgroundReady`), and Michael's item 2 limit on the client's retries at its call sites (mutant N4; the simulated broker never asked `retryAllowedInScope`).
+- **On the items with Michael:** item 1 accurately described (75 and 28; 22/12, 41/14, 43/15 reproduce). Item 2 incomplete at 910cf3f (option (i) failed even in the quiet case); since `53706cb`/`d062fad` the quiet case is confirmed, and the flagged case proper remains (other traffic or first tries holding remaining below 80).
+
+**Fixes (tests):**
+- A worker test: the carried-position sale's first try is a first try; with the minute full its retry is refused and not counted as an attempt; when it runs its sells are P1; no reservation left open. Fails on mutant N8.
+- Two tests with a simulated broker that retries the way the real client does (asking `retryAllowedInScope` before each retry): the 15 second limit's lookup stops at its reservation of 2 while the earlier 5 s lookups make all 3 tries; an ordinary stuck retry's sale makes all 8 sends past its reservation. Each fails on its mutant (all `limitRetries` off; a stuck retry limited).
+- A test that the entry sweep while stopped is counted as a first try (N10).
+
+Full suite 775 of 775. Type check clean.
