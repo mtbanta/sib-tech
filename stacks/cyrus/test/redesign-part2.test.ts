@@ -994,7 +994,7 @@ for (const when of ["2:55", "mid-day pause", "mid-day step", "carried step", "st
 // waits locally (no request) and makes a look only once its try would have room. Before: each refused retry re-read the order list and the
 // positions every 0.5 to 4 s with no end (group 1 measured 470 s below 80 left, 280 s below 20, and 49 rate-limit answers; v22 never below
 // 120). Now: no rate-limit answer, and Alpaca's remaining never below 80.
-test("part 2 (group 1, round 4, B1): 30 stuck sales held 8 s at Alpaca for 12 minutes: retries waiting for room make no reads; no rate-limit answer, remaining never below 80", async () => {
+test("part 2 (group 1, round 4, B1): 30 stuck sales held 8 s at Alpaca for 12 minutes: retries waiting for room wait locally; no rate-limit answer, remaining never below 80", async () => {
   const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
   const bot = new FakeBot();
   const holds: Array<{ until: number; res: () => void }> = [];
@@ -1116,4 +1116,83 @@ test("part 2 (group 1, round 4): a room wake makes no look until the budget has 
   await to(12_000);
   assert.equal(looks.length, 2, "a forgotten room wake makes no look");
   loop.stop();
+});
+
+// Group 2, round 5 of part 2 (note 1): each room wait the round 4 fix covers hands the loop what its try will ask for, so the loop waits for
+// that room locally: a stuck retry's backoff wait and its wait for room; a retry refused at its action's start (the act path); a timed-out
+// stop's status check refused for room; the 15 second limit's first try refused for room.
+async function roomWorld() {
+  const { syncOrders, SyncMemory, STUCK_TRY_REQUESTS, TIMED_OUT_CHECK_REQUESTS, TIMED_OUT_TRY_REQUESTS } = await import("../src/risk.ts");
+  const { Liquidator, SellGate } = await import("../src/sells.ts");
+  const { MemoryStore } = await import("../src/store.ts");
+  const { ensureDay } = await import("../src/morning.ts");
+  const { RequestBudget } = await import("../src/request-budget.ts");
+  const sim = new SimBroker(Date.UTC(2026, 10, 2, 15, 0));
+  const store = new MemoryStore();
+  const now = () => new Date(sim.simMs);
+  await ensureDay({ store, broker: sim, now } as any, D);
+  const dd = (await store.getDay(D))!;
+  const id = clientOrderIdFor(D, "AAA", 1);
+  await sim.submitEntry({ symbol: "AAA", qty: 5, stopPrice: 9.87, takeProfitPrice: 10.08, referencePrice: 10, clientOrderId: id });
+  sim.fillEntry(id, 10);
+  await store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "AAA", qty: 5, referencePrice: 10, stopPrice: 9.87, takeProfitPrice: 10.08, status: "filled", alpacaOrderId: null, filledQty: 5, filledAvgPrice: 10, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+  for (const l of sim.orders.find((o) => o.clientOrderId === id)!.legs) await sim.cancelOrder(l.id);
+  sim.advance(20_000);
+  const mem = new SyncMemory();
+  const box = { remaining: 200 };
+  mem.budget = new RequestBudget({ now: () => sim.simMs, remaining: () => box.remaining });
+  const gate = new SellGate({ broker: sim, say: async () => true, nowMs: () => sim.simMs });
+  const liquidator = new Liquidator({ broker: sim, gate, now, sleep: sim.sleep });
+  const wakes: Array<{ at: number; room?: any }> = [];
+  const acts: Array<{ label: string; run: () => Promise<any> }> = [];
+  const loop = { busy: () => false, act: async (_id: string, label: string, run: () => Promise<any>) => void acts.push({ label, run }), wake: (_id: string, at: number, _k: string, extra: any = {}) => void wakes.push({ at, room: extra.room }) };
+  const sync = () => syncOrders({ broker: sim, store, now, say: async () => true, liquidator, syncMemory: mem } as any, dd, { protect: true, loop } as any);
+  return { sim, id, mem, box, wakes, acts, sync, STUCK_TRY_REQUESTS, TIMED_OUT_CHECK_REQUESTS, TIMED_OUT_TRY_REQUESTS };
+}
+
+test("part 2 (group 2, round 5): a stuck retry's backoff wait and its wait for room are room wakes with what the retry will ask for", async () => {
+  const w = await roomWorld();
+  w.mem.stuck.set(w.id, { symbol: "AAA", since: w.sim.simMs - 60_000, nextAt: w.sim.simMs + 5_000, delayMs: 5_000, alerted: true, escalated: false, lastTriedAt: w.sim.simMs - 5_000, why: "x" } as any);
+  await w.sync();
+  assert.deepEqual(w.wakes.at(-1)?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2 }, "its backoff wait");
+  w.mem.stuck.get(w.id)!.nextAt = w.sim.simMs - 1;
+  w.box.remaining = 25; // no room for the retry's 10
+  await w.sync();
+  assert.deepEqual(w.wakes.at(-1)?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2 }, "its wait for room");
+  assert.equal(w.acts.length, 0, "no action without room");
+});
+
+test("part 2 (group 2, round 5): a retry refused at its action's start (room gone since the decision) returns a room wake through the act path", async () => {
+  const w = await roomWorld();
+  w.mem.stuck.set(w.id, { symbol: "AAA", since: w.sim.simMs - 60_000, nextAt: w.sim.simMs - 1, delayMs: 5_000, alerted: true, escalated: false, lastTriedAt: w.sim.simMs - 5_000, why: "x" } as any);
+  await w.sync();
+  assert.equal(w.acts.length, 1, "decided with room");
+  w.box.remaining = 25; // gone before the action starts
+  const sells0 = w.sim.sellLog.length;
+  const r = await w.acts[0]!.run();
+  assert.deepEqual(r?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2 });
+  assert.ok(r?.recheckAt > w.sim.simMs);
+  assert.equal(w.sim.sellLog.length, sells0, "nothing sold");
+});
+
+test("part 2 (group 2, round 5): a timed-out stop's status check refused for room is a room wake with the check's two requests", async () => {
+  const w = await roomWorld();
+  w.mem.timedOutStops.set("cyrus-p-test-AAA", w.id);
+  // Its cancel was accepted, and the list does not show the stop: the entry waits for the stop to end (status checks, no sale tries).
+  w.mem.stuck.set(w.id, { symbol: "AAA", since: w.sim.simMs - 60_000, nextAt: 0, delayMs: 5_000, alerted: true, escalated: false, lastTriedAt: w.sim.simMs - 5_000, why: "x", restingStop: { stopClientOrderId: "cyrus-p-test-AAA", cancel: "accepted" } } as any);
+  w.mem.timedOutCheck.set("cyrus-p-test-AAA", { probeAt: 0, resendAt: w.sim.simMs + 60_000, resendDelayMs: 5_000, probeFailed: false, probeFailDelayMs: 0 });
+  w.box.remaining = 15; // no room for the check
+  await w.sync();
+  assert.deepEqual(w.wakes.at(-1)?.room, { cls: "P1", n: w.TIMED_OUT_CHECK_REQUESTS, reads: 2 });
+  assert.equal(w.acts.length, 0);
+});
+
+test("part 2 (group 2, round 5): the 15 second limit's first try refused for room returns a room wake with the try's requests", async () => {
+  const w = await roomWorld();
+  w.mem.freshStops.set(w.id, { symbol: "AAA", entryClientOrderId: w.id, stopClientOrderId: "cyrus-p-test-AAA", orderId: null, qty: 5, stopPrice: 9.87, placedAt: w.sim.simMs - 16_000, status: "unclear", lookedAt: w.sim.simMs - 16_000 });
+  await w.sync();
+  assert.deepEqual(w.acts.map((a) => a.label), ["15 second limit"]);
+  w.box.remaining = 30; // room for the limit's look (2), not for its try (13)
+  const r = await w.acts[0]!.run();
+  assert.deepEqual(r?.room, { cls: "P1", n: w.TIMED_OUT_TRY_REQUESTS, reads: 2 });
 });

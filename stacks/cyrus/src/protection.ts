@@ -298,7 +298,7 @@ export class ProtectionLoop implements ProtectionHooks {
     this.arm();
   }
 
-  // When the next look is due (null when none), for the statistics and tests.
+  // When the loop next fires (null when none): a look, or a room wake's local check (group 1, round 4), for the statistics and tests.
   nextLookAt(): number | null {
     return this.earliest();
   }
