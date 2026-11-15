@@ -773,3 +773,111 @@ test("part 2 (group 2, round 2, B): a protection look for another entry does not
   assert.equal(events.length, 1, `stored once for the wait (${events.length})`);
   r.worker.stop?.();
 });
+
+// Group 1, round 2 of part 2 (B1; design 4.3, "while the 2:55 close-out, the mid-day close-out or the afternoon close-out owns selling: no
+// selling action"): four positions with no exits; the loop's four cleanup sales are queued in the one-at-a-time sale queue, the first one's
+// sell held at Alpaca. A sale of the whole account is asked for: the queued cleanup sales stand aside at their turn (nothing sent), only the
+// one already running carries on, and the whole-account sale runs next. Before: each queued sale ran ahead of it (group 1 measured the 2:55
+// close-out held for minutes and bracketed positions still held at 3:00).
+for (const reason of ["close-out", "flatten command"]) {
+  test(`part 2 (group 1, round 2, B1): loop cleanup sales queued before a ${reason} stand aside at their turn; only the running one carries on`, async () => {
+    const { sim, r } = await armedDay();
+    const wk: any = r.worker;
+    const syms = ["QXA", "QXB", "QXC", "QXD"];
+    const ids: string[] = [];
+    for (const s of syms) ids.push(await holdOne(sim, r, s));
+    await r.at("14:30:10");
+    for (const id of ids) for (const l of sim.orders.find((o: any) => o.clientOrderId === id)!.legs) await sim.cancelOrder(l.id);
+    sim.advance(15_000);
+    wk.lastSync = sim.simMs; // no regular sync during the test
+    const liq: any = wk.liquidator;
+    let current: any = null;
+    const realRun = liq.run.bind(liq);
+    liq.run = async (o: any) => {
+      current = o;
+      try {
+        return await realRun(o);
+      } finally {
+        current = null;
+      }
+    };
+    const realSell = sim.submitSell.bind(sim);
+    let release!: () => void;
+    const held = new Promise<void>((x) => (release = x));
+    let heldSent = false;
+    let asked = false;
+    const sent: Array<{ symbol: string; own: boolean; afterAsk: boolean }> = [];
+    sim.submitSell = async (x: any) => {
+      sent.push({ symbol: x.symbol, own: !!current?.ownEntryOnly, afterAsk: asked });
+      if (!heldSent && current?.ownEntryOnly) {
+        heldSent = true;
+        await held; // Alpaca holds the first cleanup sale's sell
+      }
+      return realSell(x);
+    };
+    for (const id of ids) wk.loop.wake(id, sim.simMs, "protect");
+    for (let i = 0; i < 20 && !(heldSent && wk.liquidator.running >= 4); i++) {
+      r.setNow(iso(sim.simMs + 100));
+      for (let k = 0; k < 6; k++) await settle();
+    }
+    assert.ok(heldSent && liq.running >= 4, `four cleanup sales asked for, the first one's sell held (${liq.running})`);
+    const runningSymbol = sent.find((x) => x.own)!.symbol;
+    asked = true;
+    const whole = wk.liquidator.flatten({ reason, tradeDate: D, maxRounds: 1 });
+    release();
+    for (let i = 0; i < 60; i++) {
+      r.setNow(iso(sim.simMs + 250));
+      await settle();
+    }
+    await whole;
+    const ownAfter = sent.filter((x) => x.own && x.afterAsk && x.symbol !== runningSymbol);
+    assert.equal(ownAfter.length, 0, `no queued cleanup sale sent anything after the ask: ${ownAfter.map((x) => x.symbol).join(", ")}`);
+    for (const s of syms) assert.equal(sim.heldQty(s), 0, `${s} sold by the ${reason}`);
+    r.worker.stop?.();
+  });
+}
+
+// Group 1, round 2 of part 2 (B2): the same second ask inside the other two actions: a bare remainder's sale (A4, its stop cancelled while
+// its take-profit rests) and an unclear fresh stop's 15 second limit. A close-out starts between the decision and the action: nothing is
+// sent (no sale, no fresh stop, no cancel, no look).
+for (const which of ["remainder", "15 second limit"] as const) {
+  test(`part 2 (group 1, round 2, B2): a close-out that starts between the decision and the ${which} action stops it (nothing reaches Alpaca)`, async () => {
+    const { syncOrders, SyncMemory } = await import("../src/risk.ts");
+    const { Liquidator, SellGate } = await import("../src/sells.ts");
+    const { MemoryStore } = await import("../src/store.ts");
+    const { ensureDay } = await import("../src/morning.ts");
+    const sim = new SimBroker(Date.UTC(2026, 10, 2, 15, 0));
+    const store = new MemoryStore();
+    const now = () => new Date(sim.simMs);
+    await ensureDay({ store, broker: sim, now } as any, D);
+    const dd = (await store.getDay(D))!;
+    const id = clientOrderIdFor(D, "AAA", 1);
+    await sim.submitEntry({ symbol: "AAA", qty: 5, stopPrice: 9.87, takeProfitPrice: 10.08, referencePrice: 10, clientOrderId: id });
+    sim.fillEntry(id, 10);
+    await store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "AAA", qty: 5, referencePrice: 10, stopPrice: 9.87, takeProfitPrice: 10.08, status: "filled", alpacaOrderId: null, filledQty: 5, filledAvgPrice: 10, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+    const legs = sim.orders.find((o) => o.clientOrderId === id)!.legs;
+    const mem = new SyncMemory();
+    if (which === "remainder") {
+      for (const l of legs) if (l.type === "stop") await sim.cancelOrder(l.id); // the take-profit still rests
+    } else {
+      for (const l of legs) await sim.cancelOrder(l.id);
+      mem.freshStops.set(id, { symbol: "AAA", entryClientOrderId: id, stopClientOrderId: "cyrus-p-test-AAA", orderId: null, qty: 5, stopPrice: 9.87, placedAt: sim.simMs, status: "unclear", lookedAt: sim.simMs });
+    }
+    sim.advance(20_000);
+    const gate = new SellGate({ broker: sim, say: async () => true, nowMs: () => sim.simMs });
+    const liquidator = new Liquidator({ broker: sim, gate, now, sleep: sim.sleep });
+    let asks = 0;
+    const protect = () => ++asks === 1;
+    const acts: Array<{ label: string; run: () => Promise<unknown> }> = [];
+    const loop = { busy: () => false, act: async (_id: string, label: string, run: () => Promise<unknown>) => void acts.push({ label, run }), wake: () => undefined };
+    await syncOrders({ broker: sim, store, now, say: async () => true, liquidator, syncMemory: mem } as any, dd, { protect, loop } as any);
+    assert.deepEqual(acts.map((a) => a.label), [which], "the decision handed this action to the loop");
+    const req0 = sim.requests;
+    const sells0 = sim.sellLog.length;
+    await acts[0]!.run();
+    assert.ok(asks >= 2, "asked again before the action");
+    assert.equal(sim.sellLog.length, sells0, "no sale or fresh stop reached Alpaca");
+    assert.equal(sim.requests, req0, "nothing sent at all (no cancel, no look)");
+    assert.equal(mem.timedOutStops.size, 0, "no stop timed out");
+  });
+}

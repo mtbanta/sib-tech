@@ -241,8 +241,10 @@ export interface LiquidateResult {
   // Only with returnWhenOnlyOwnSells: the symbols still held whose every share is covered by a working sell of ours.
   working?: string[];
   steps?: LiquidateSteps;
-  // Only with yieldToPriority: the sale stopped early because the daily loss stop's sale goes first.
+  // Only with yieldToPriority: the sale stopped early because the daily loss stop's sale goes first, or (with `ownEntryOnly`) it stood
+  // aside at its turn, before any request, because a sale of the whole account was asked for (`stoodAside`).
   yielded?: boolean;
+  stoodAside?: boolean;
   // Only with endWhenHiddenHold: the symbols held with no open order visible when the attempt ended early (part A, step 1).
   hiddenHold?: string[];
   // Ruling B (group 1, round 2 of the night release): a cancel this sale sent was not accepted (an error from Alpaca or no answer).
@@ -435,6 +437,19 @@ export class Liquidator {
       return result;
     };
 
+    // The redesign of 2026-11-14, part 2 (group 1, round 2; design 4.3, "while the 2:55 close-out, the mid-day close-out or the afternoon
+    // close-out owns selling: no selling action", unchanged from v22, where the order sync stood aside while any liquidation was asked for):
+    // a one-entry cleanup sale whose turn in this queue comes while a sale of the whole account (a close-out, `flatten`, the loss stop's
+    // sale, a carried-position sale) is asked for or running stands aside before sending, cancelling or reading anything; that sale sells
+    // these shares. A cleanup sale already running when one is asked for carries on (as in v22), except for the loss stop (item 6).
+    if (o.ownEntryOnly && this.runningOthers > 0) {
+      result.yielded = true;
+      result.stoodAside = true;
+      result.flat = false;
+      result.errors.push("stood aside: a sale of the whole account was asked for and sells these shares");
+      this.d.log?.("liquidation_stood_aside", { reason: o.reason, only: o.only ?? null });
+      return done();
+    }
     for (let round = 1; round <= rounds; round++) {
       result.lastLookOk = false; // set true below only by this round's successful look (reported only)
       if (yieldNow()) return yielded();
