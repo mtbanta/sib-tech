@@ -27,7 +27,8 @@ export const BUDGET_PER_5S = 15;
 export const P1_KEEP = 20;
 export const P1_FLOOR = 20;
 export const P2_FLOOR = SAFETY_RESERVE;
-// A P2 try refused on its floor counts as waiting (entries give way) until it is granted, or at most this long after its last refusal.
+// A P2 try refused on its floor counts as waiting (entries give way) until it is granted, or this long after its last refusal unless its
+// caller extends the wait to its next try (`extendWait`: the fresh-stop lookup and the list-lag recheck, bounded by their own limits).
 export const GIVE_WAY_MAX_MS = 2_000;
 const REFILL_PER_MS = ALPACA_REQUESTS_PER_MINUTE / 60_000;
 
@@ -40,7 +41,8 @@ export interface ReserveOptions {
   force?: boolean;
   // What the try is, for the log.
   label: string;
-  // A P2 try that will be tried again when room returns (the list-lag recheck): while it waits on its floor, entries give way.
+  // A P2 try that will be tried again when room returns (the list-lag recheck, an unclear fresh stop's lookup): while it waits on its floor,
+  // entries give way.
   waitKey?: string;
   // The Alpaca client's own retries inside this try stop when its reservation has no room left (only a timed-out stop's tries, checks and
   // cancels, Michael's item 2 of 2026-11-13). Any other try is never stopped halfway (design 3.2): its extra requests are counted.
@@ -164,6 +166,9 @@ export class RequestBudget {
       if (refusal) {
         this.minute.refused[refusal.why]++;
         if (cls === "P2" && refusal.why === "floor" && opts.waitKey) this.floorWaits.set(opts.waitKey, now + GIVE_WAY_MAX_MS);
+        // Group 2, round 4 of the redesign: refused for another reason (the minute, the 5 seconds, P2's share), entries giving way would not
+        // help, so a floor wait it had is dropped (decision 5: entries give way only while a P2 try waits on the 80).
+        else if (opts.waitKey) this.floorWaits.delete(opts.waitKey);
         this.log?.("budget_refused", { cls, n: size, label: opts.label, why: refusal.why, roomInMs: refusal.at - now });
         return refusal;
       }

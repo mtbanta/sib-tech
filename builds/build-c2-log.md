@@ -5850,3 +5850,25 @@ Full suite 775 of 775. Type check clean.
 - Notes done: the stale comments; the test title; PROJECT_STATE. Left for Michael: "I will cancel that stop" when the stop's id is not kept (group 2's note).
 
 Full suite 780 of 780. Type check clean.
+
+### Redesign part 1, round 4 (0cb64fb): group 1 and group 2 CHANGES REQUIRED, and fixes
+
+**Group 2, round 4: CHANGES REQUIRED.**
+- **1 (events):** `Worker.lagWaits` was reset only when a recheck was granted or its window ended, not when a wait ended because the list caught up or the recheck failed, so a second wait stored no `timed_out_try_out_of_room`.
+- **2 (gate):** `freshStopLive` stretched the give-way after any refusal (the minute, P2's share, the 5 seconds), holding entries back with Alpaca's remaining at 200.
+- Notes: mutants E2 to E6 and C1 survive (each only lengthens a bounded hold); stale comments (`GIVE_WAY_MAX_MS`, `waitKey`, "250 ms" against 500, an indent near `endLookWait` in `syncOrders`); the wait key written twice (risk.ts and worker.ts); the briefs' `givingWayRefusals` wording; the design's 10.1 to mention the longer give-way; the round 3 log's "re-arms within 0.3 s" is not general.
+
+**Group 1, round 4: CHANGES REQUIRED** (no flag; a slip in the round 3 fix, inside the approval). Round 3's B1 and B2 confirmed fixed (probes G and G2 at 2 a second: confirmed, nothing sold, entries back for 0 ms; mutants Q5, Q6, Q13, E1 and L2 caught). No reservation leaks.
+- **B1:** the same defect as group 2's item 2. Probe S2: after one floor refusal and remaining back at 200, entries were held 11.3 s on a class refusal (40 P1 sends in the minute) and 5.5 s on a five refusal (round 3: 300 ms each). Asked: extend only on a floor refusal, end the wait on any other refusal, a test for the class or five case, a test that the hold never passes the 15 second limit (mutant E2 survived), optionally end the wait in `freshStopTimeout`.
+- **Item 2 for Michael, incomplete:** (a) probe S3: with P2's share of the minute used by 40 P1 requests and remaining at 200, the lookups were refused three times and the 15 second limit cancelled a stop Alpaca held and sold WULF 4 (the builder's fault test measured 41 to 43 budgeted requests a minute at 10 to 30 percent faults, so this is reachable); option (ii) cures it too, (iii) only for the last lookup; (b) "other traffic" includes the stack's own syncs' reads (a sync every second fails from 1.5 a second). Under option (ii) the lookup's give-way becomes dead code.
+- Notes: mutants E3 to E7, L1 and L3 survive (bounded holds, or events); the wait key written twice; `freshStopTimeout` and the stored-stops load deleted fresh stops without ending the wait; group 1's mutation script ran in group 2's scratch folder (rv5) at about 19:06 and may have spoiled group 2's mutant results there from 19:06 to 19:08 (Q5 at least); rule 6 holds (the lookup bounded by the 15 second limit with 0.5, 1, 2, 4 s waits; the extension sends nothing).
+
+**Fixes:**
+- **The give-way only on the floor (group 1 B1, group 2 item 2):** `RequestBudget.tryReserve` ends a try's floor wait when the same try is refused for any other reason, and `freshStopLive` extends the wait only after a refusal on the floor. The 15 second limit ends the lookup's wait (`freshStopTimeout`), and so does the stored-stops load. New tests: a floor wait ended by a five refusal and not brought back by `extendWait`; an unclear fresh stop's lookup refused on P2's share after a floor refusal leaves entries free; the give-way ends at the 15 second limit even before the sync at the limit runs (fails on E2); the limit's own look starts with entries free although the floor refusal's base wait ran to 16 s (fails without the new `endLookWait`).
+- **The list-lag count (group 2 item 1):** reset when the wait ends by the list catching up or a failed recheck. New test: two waits, each stored once (fails without the reset).
+- **The list-lag recheck's give-way (decision 5, "while it waits"):** a recheck refused on its floor keeps entries giving way through to its next try, never past its 30 s window, as the fresh-stop lookup does (the round 3 log's "re-arms within 0.3 s" held only for the near-80 cases tested). New test (fails without it).
+- Notes done: the stale comments, the indent, one wait-key helper (`lookWaitKey`, used by the worker), the briefs' `givingWayRefusals`, the design's 10.1, PROJECT_STATE's item 2 text with group 1's (a) and (b).
+- Mutation check of the new tests: each fix's mutant fails at least one test, except the stored-stops load's `endLookWait` (a start-up path; the hold it leaves is bounded by 2 s or the 15 second limit).
+- Group 1's directory clash passed on to group 2's round 5 (rerun any mutants from rv5).
+
+Full suite 786 of 786. Type check clean.

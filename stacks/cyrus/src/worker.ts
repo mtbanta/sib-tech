@@ -24,7 +24,7 @@ import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
 import { ProgressGap, RetryBackoff } from "./retry-backoff.ts";
-import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, noteTimedOutStopEnded, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
+import { BARE_GRACE_MS, lookWaitKey, enforceDailyLoss, fastLostExitSale, LossStopMemory, noteTimedOutStopEnded, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import type { SelfMonitor } from "./self-monitor.ts";
 import { SCREEN_MINUTES_BEFORE_OPEN, AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
 import { BusyPlaceholder } from "./strategy.ts";
@@ -1394,6 +1394,7 @@ export class Worker {
       if (this.lagTimer) clear(this.lagTimer);
       this.lagTimer = null;
       this.lagTimerAt = null;
+      this.lagWaits = 0; // group 2, round 4: the wait ended (the list caught up, or the recheck failed); the next one counts afresh
       this.budget.stopWaiting("list lag recheck");
       return;
     }
@@ -1427,6 +1428,8 @@ export class Worker {
     if (!(r instanceof Reservation)) {
       // Stored once per wait (the first refusal in a row); later refusals are counted in the per-minute statistics (group 2, round 3).
       if (++this.lagWaits === 1) this.d.log?.("info", "timed_out_try_out_of_room", { stage: "list lag recheck", cost: lr.cost, why: r.why, roomInMs: r.at - now, next: r.at < lr.until ? "when the budget has room" : "regular sync" });
+      // Decision 5 as changed by A: entries give way while it waits on its floor, through to its next try (never past its 30 s window).
+      if (r.why === "floor") this.budget.extendWait("list lag recheck", Math.min(r.at + 500, lr.until));
       return this.armLagRecheck(r.at);
     }
     this.lagWaits = 0;
@@ -1758,7 +1761,7 @@ export class Worker {
         // Ruling B of 2026-11-12: a stop that was unclear gets its time to confirm logged here too.
         settleFreshStop((e, data) => this.d.log?.("info", e, data), f, info.status, "live update", this.d.now().getTime());
         // Group 1, round 3 of the redesign: a stop no longer unclear ends the give-way its lookup was waiting with.
-        if (f.status !== "unclear") this.budget.stopWaiting(`fresh stop lookup ${f.stopClientOrderId}`);
+        if (f.status !== "unclear") this.budget.stopWaiting(lookWaitKey(f));
         if (info.event === "canceled" || info.event === "expired" || info.event === "rejected") {
           this.d.log?.("info", "fresh_stop_ended", { symbol: info.symbol, stopClientOrderId: info.clientOrderId, event: info.event });
           if (this.closingOut || this.liquidator.isLiquidating() || this.middayOwnsSelling) return;
