@@ -501,3 +501,36 @@ test("group 1, rulings round 3 (case B): a P2 burst keeps the retry out on the 5
   assert.ok(!p2.ok && p2.why === "five", "P2 may not take 6 of the 5 seconds back while the retry waits");
   assert.ok(b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP }) instanceof Reservation, "the retry gets in");
 });
+
+// Group 2, rulings round 5: each refused look of the retry renews the hold. On the loop's real look times (the retry looks again at each
+// refusal's `at`), urgent work arriving between its looks moves its next look past the first hold's end; the second refused look renews the
+// hold past that, so P2 cannot take the room in the gap, and the retry gets in at its next look.
+test("rulings round 5: a refused look of a waiting stuck retry renews the hold past its first end, so P2 cannot take the room in the gap, and the retry gets in", () => {
+  let t = 0;
+  const b: any = new RequestBudget({ now: () => t });
+  for (let i = 0; i < 6; i++) {
+    t = 36_000 + i * 800;
+    const r = b.tryReserve("P2", 1, { label: "list lag recheck" }) as Reservation;
+    r.charge("/v2/t");
+    r.end();
+  }
+  t = 40_100;
+  const a1 = b.roomFor("P1", 10, true, 0, STUCK_RETRY_MINUTE_CAP);
+  assert.ok(!a1.ok && a1.why === "five");
+  const end1 = b.retryWaitUntil;
+  t = 40_900;
+  const urgent = b.tryReserve("P1", 3, { label: "15 second limit lookup" }) as Reservation;
+  assert.ok(urgent instanceof Reservation);
+  for (let i = 0; i < 3; i++) urgent.charge("/v2/u");
+  urgent.end();
+  t = a1.at;
+  const a2 = b.roomFor("P1", 10, true, 0, STUCK_RETRY_MINUTE_CAP);
+  assert.ok(!a2.ok && a2.why === "five", "refused again");
+  assert.ok(a2.at > end1, "its next look falls after the first hold's end");
+  assert.ok(b.retryWaitUntil >= a2.at + 500, `renewed past its next look (${b.retryWaitUntil - end1} ms past the first end)`);
+  t = end1 + 100;
+  const p2 = b.tryReserve("P2", 4, { label: "list lag recheck" });
+  assert.ok(!(p2 instanceof Reservation), "P2 cannot take the room in the gap");
+  t = a2.at;
+  assert.ok(b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP }) instanceof Reservation, "the retry gets in at its next look");
+});

@@ -42,7 +42,7 @@ These are estimates. They assume each refused try takes about 1.5 s in the sale 
 **How to read these:**
 
 - **They are averages.** For one stuck position, tries come in bursts. Today the measured pattern is 5, 5, 5, then about 45 s: four tries, then a wait for the minute to free. Under option 1 it would be about 15 tries 2 s apart, then a wait of up to about 30 s.
-- **The model matches today's tests only without other low-priority work running.** It says 75 s for 5 stuck positions; with no list-lag rechecks the tests measured 65 to 105 s (v22: 125 to 171 s). Under steady low-priority demand stuck positions take turns unevenly: with 2 stuck up to about 106 s, with 4 stuck 98 to 171 s, with 5 stuck 101 to 257 s (group 1's measurement; balanced over an hour). The proposal's options would shorten those in the same proportion as the averages.
+- **The model matches today's tests only without other low-priority work running.** It says 75 s for 5 stuck positions; with no list-lag rechecks the tests measured 65 to 105 s (the earlier release v22, in its own test of 5 stuck positions: 125 to 171 s). Under steady low-priority demand stuck positions take turns unevenly: with 2 stuck up to about 106 s, with 4 stuck 98 to 171 s, with 5 stuck 101 to 257 s (group 1's rulings round 3 sweep; its round 4 sweep on the same code gave 101 to 125 s with 5 stuck; balanced over an hour). The proposal's options would shorten those in the same proportion as the averages.
 - **A sale Alpaca holds is slower.** On 2026-11-02 Alpaca held some sales up to 16 s. While Alpaca holds each sale, the one-at-a-time queue sets the wait instead: about N times the hold. With 8 s holds that is about 8, 40 and 80 s, under every option.
 
 ## What each risks
