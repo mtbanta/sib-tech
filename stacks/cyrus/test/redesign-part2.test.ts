@@ -618,6 +618,8 @@ test("part 2 (part 1, round 4): a list-lag look refused on its floor keeps entri
   assert.ok(next !== null && next - t0 > 2_500, `its next look is more than 2.5 s away (${next === null ? null : next - t0} ms)`);
   r.setNow(iso(t0 + 2_200));
   assert.equal(wk.budget.givingWay(), true, "entries still give way after 2 s, through to the next look");
+  const waitEnds: number = wk.budget.floorWaits.get("list lag recheck");
+  assert.ok(waitEnds <= next + 500 && waitEnds <= t0 + 20_000, `the wait ends by the next look and within the window (${waitEnds - t0} ms)`);
   // A protection wake for the same entry: the look that serves it is not a lag look, and it ends the wait.
   wk.budget.remaining = realRemaining;
   wk.loop.wake(id, sim.simMs, "protect");

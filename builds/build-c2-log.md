@@ -5926,7 +5926,7 @@ Notes: the Monday test overstated (fixed after group 2's round 1); `isLiquidatin
 - **The list-lag count (group 2 item 1):** reset when the wait ends by the list catching up or a failed recheck. New test: two waits, each stored once (fails without the reset).
 - **The list-lag recheck's give-way (decision 5, "while it waits"):** a recheck refused on its floor keeps entries giving way through to its next try, never past its 30 s window, as the fresh-stop lookup does (the round 3 log's "re-arms within 0.3 s" held only for the near-80 cases tested). New test (fails without it).
 - Notes done: the stale comments, the indent, one wait-key helper (`lookWaitKey`, used by the worker), the briefs' `givingWayRefusals`, the design's 10.1, PROJECT_STATE's item 2 text with group 1's (a) and (b).
-- Mutation check of the new tests: each fix's mutant fails at least one test, except the stored-stops load's `endLookWait` (a start-up path; the hold it leaves is bounded by 2 s or the 15 second limit).
+- Mutation check of the new tests: each fix's mutant fails at least one test, except the stored-stops load's `endLookWait` (a start-up path; the hold it leaves is bounded by 2 s or the 15 second limit) and the two `why === "floor"` checks (in `freshStopLive` and the list-lag recheck), which change nothing while `tryReserve` drops the wait on any other refusal (a second guard; corrected after group 2's round 5 note).
 - Group 1's directory clash passed on to group 2's round 5 (rerun any mutants from rv5).
 
 Full suite 786 of 786. Type check clean.
@@ -5937,3 +5937,17 @@ Part 1's round 4 fixes (the give-way only on the floor, the 15 second limit endi
 - the out-of-room count (`lagWaits`) resets when a lag wake is dropped at its window's end, and when a protection look serves the lag wakes (a lag look's grant already reset it); that protection look also ends the give-way;
 - a lag look refused on its floor keeps entries giving way through to the loop's next look (`retryAt` plus 500 ms), never past the earliest due lag window's end.
 Tests: part 2's once-per-wait test no longer resets the count by hand and checks the second wait is stored too; a new test for the floor give-way through to the next look and its end by a protection look. Each of the three ports fails a test when removed. Part 1's two worker list-lag tests (round 3's and round 4's) do not apply to part 2 (no timer) and are left out of its test file.
+
+### Redesign part 1, round 5 (c414720): group 1 PASS, group 2 PASS
+
+**Group 2, round 5: PASS.** Its round 4 items fixed (mutants M1, M2, M6 and M8 caught). The list-lag give-way through to the next try read as inside decision 5 as changed by A. Notes: PROJECT_STATE stale; the round 4 log overstated the mutation check (the two `why === "floor"` checks survive, harmlessly); the list-lag test's last assertion did arithmetic on the test's own values (M9, M10 survived); surviving mutants M7 and M14 to M17 each bounded; the briefs' "never while the minute or the 5 seconds are used up" holds at each refusal, the stretched wait being judged again at the next try. Checks 2, 7 and 8 clean.
+
+**Group 1, round 5: PASS.** B1 fixed: probe S2 rerun, entries held 0 ms on a class or five refusal with remaining at 200 (round 4: 11.3 s and 5.5 s); mutant N3 and E2 caught. The list-lag give-way is inside the approval (the 2 s lapse was the builder's figure, not Michael's) and bounded: probes L1 to L5 (a sync seeing the list caught up clears it at once; with remaining at 0 entries were back by 29.6 s against the window's end at 29.5 s; a class refusal frees entries at once). Within those bounds a stretched wait is predicted, not checked live, until the next try plus 0.5 s. Item 2 reproduced again (probe S3) and PROJECT_STATE's wording found accurate. Notes: N6, N9, N10 (the list-lag bounds and its `stopWaiting` on clear) survived; N2 and the worker's floor check change nothing; N4 a start-up path. Checks 2, 7, 8 and 10 clean (the only trading host is `PAPER_TRADING_HOST`).
+
+**After the pass (tests and wording only, no code change):** the list-lag test now checks the budget's own record of the wait (it ends by the next try plus 0.5 s and within the window); a new test that a sync seeing the list caught up ends the give-way at once and the wait is capped at the window. N6, N9 and N10 each fail a test now. The round 4 log's mutation sentence corrected; PROJECT_STATE updated.
+
+Michael's two open items stand. Part 1's code is the reviewed `c414720`; an answer that changes code gets its own review round.
+
+### Redesign part 2: part 1's round 5 record merged forward (136dc07)
+
+Part 1's tests and wording after its round 5 pass merged into part 2. Its two worker list-lag tests use part 1's timer, which part 2 does not have, and are left out of part 2's test file; part 2's own list-lag test now also checks the budget's record of the wait (it ends by the loop's next look plus 0.5 s and within the lag window).
