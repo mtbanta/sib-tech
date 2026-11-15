@@ -666,11 +666,9 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     }
   }
   mark("alerts");
-  // Michael's change of 2026-11-13 (evening): one recheck sync serves every remainder whose list still lags; it is charged once.
-  let lagRecheckGap: number | undefined;
-  let lagLookups = 0;
-  let lagUntil = 0;
+  // Michael's change of 2026-11-13 (evening): one recheck sync serves every remainder whose list still lags (gathered in `ctx.lag`).
   const walk = [...active.filter((s) => !shortRetry(s)), ...active.filter(shortRetry).sort((a, b) => mem.stuck.get(a.clientOrderId)!.lastTriedAt - mem.stuck.get(b.clientOrderId)!.lastTriedAt)];
+  const ctx: WalkCtx = { d, day, mem, opts, nowMs, listed, held, heldQty, latestPerSymbol, sellingSymbols, lookedUp, listAgeMs, fromMs, createdMs, lateNotice, timedCleanup, unprotected, lag: { until: 0, lookups: 0 } };
   for (const s of walk) {
     const o = byClientId.get(s.clientOrderId);
     if (!o) continue;
@@ -709,160 +707,17 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       await resolveStuck(d, mem, s.clientOrderId, "no longer held");
       continue;
     }
-    const protectNow = typeof opts.protect === "function" ? opts.protect() : opts.protect;
-    // Group 1 review, round 1 (messaging): an entry reported stuck that is no longer the newest on its symbol gets its resolution line.
-    if (latestPerSymbol.get(s.symbol)?.clientOrderId !== s.clientOrderId) await resolveStuck(d, mem, s.clientOrderId, `a newer ${s.symbol} position took over, and I watch that one now`);
-    if (!protectNow || latestPerSymbol.get(s.symbol)?.clientOrderId !== s.clientOrderId || sellingSymbols.has(s.symbol)) continue;
-    // A4: a remainder protected by its fresh stop is left alone while that stop can still execute. Once the stop is gone (cancelled,
-    // expired or rejected by anyone but our own sale) and the shares are still held, the missing-exit check below sells them, as before.
-    const fresh = mem.freshStops.get(s.clientOrderId);
-    if (fresh) {
-      // Only while it covers the whole holding (group 1 review, round 2).
-      const covering = held.has(s.symbol) && fresh.qty >= (heldQty.get(s.symbol) ?? 0) - 1e-9;
-      // Michael's ruling B of 2026-11-12: still unclear 15 seconds after it was sent (as known before this sync's look): unprotected. The
-      // look at the limit is part of cancelling it (freshStopTimeout), not a late confirmation.
-      if (FRESH_STOP_LIMIT.on && covering && fresh.status === "unclear" && nowMs - fresh.placedAt >= FRESH_STOP_CONFIRM_MS) {
-        const t = await freshStopTimeout(d, day, mem, s, o, fresh, nowMs);
-        if (t.attempted) unprotected.push(s.symbol);
-        if (t.recheckAt !== undefined) recheckAt = recheckAt === undefined ? t.recheckAt : Math.min(recheckAt, t.recheckAt);
-        continue;
-      }
-      if (covering && (await freshStopLive(d, mem, fresh, listed.orders, nowMs, opts.streamLive === true))) {
-        if (FRESH_STOP_LIMIT.on && fresh.status === "unclear") {
-          // Still unclear: looked up again within 5 seconds, and the sync runs at the 15 second limit (the entry is looked up at that
-          // sync too, even if it is older than the 10 minute list).
-          // Group 1, round 1 of the redesign (B3): a lookup that found no room is tried again as soon as room may return.
-          const roomAt = fresh.lookRoomAt !== undefined ? Math.max(nowMs + 250, fresh.lookRoomAt) : Infinity;
-          const due = Math.min(nowMs + FRESH_STOP_UNCLEAR_LOOKUP_MS, roomAt, fresh.placedAt + FRESH_STOP_CONFIRM_MS);
-          recheckAt = recheckAt === undefined ? due : Math.min(recheckAt, due);
-          mem.mustLook.add(s.clientOrderId);
-        }
-        continue;
-      }
-      dropFreshStop(d, mem, s.clientOrderId, held.has(s.symbol) ? "it no longer covers the holding" : "the shares are no longer held", nowMs);
-      if (held.has(s.symbol)) d.log?.("fresh_stop_gone", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: fresh.stopClientOrderId, status: fresh.status, msFromSent: nowMs - fresh.placedAt });
-    }
-    if (!hasLiveExit(o)) {
-      // Item 2 of 2026-11-13: an entry whose timed-out stop is known open with its cancel accepted or pending waits for that stop to end
-      // (status checks, no sale tries); one known to have ended is tried at once.
-      if (hasTimedOut(mem, s.clientOrderId)) {
-        const w = await timedOutWait(d, mem, s, listed.orders, d.now().getTime());
-        if (w !== null) {
-          unprotected.push(s.symbol);
-          recheckAt = recheckAt === undefined ? w : Math.min(recheckAt, w);
-          continue;
-        }
-      }
-      const due = retryDue(d, mem, s.clientOrderId, d.now().getTime());
-      if ("wait" in due) {
-        // Part A, step 1: tried moments ago and stuck; it is tried again at `due` (or when the shared request budget has room), and the
-        // sync carries on with the others.
-        unprotected.push(s.symbol);
-        recheckAt = recheckAt === undefined ? due.wait : Math.min(recheckAt, due.wait);
-        continue;
-      }
-      d.log?.("unprotected_position", { symbol: s.symbol, clientOrderId: s.clientOrderId, listAgeMs: listAgeMs() });
-      const endedAt = flattenLegs(o).filter((l) => l.side === "sell" && !OPEN_STATUSES.has(l.status)).map((l) => l.canceledAt ?? l.updatedAt ?? "").filter((x) => Number.isFinite(Date.parse(x))).sort().at(-1) ?? null;
-      lateNotice(s, "missing", endedAt);
-      // Ruling B: a timed-out fresh stop of this entry still shown working is cancelled by this sale (which waits for Alpaca's cancel).
-      const timedOutShown = listed.orders.filter((x) => mem.timedOutStops.get(x.clientOrderId) === s.clientOrderId && OPEN_STATUSES.has(x.status));
-      const timedOutIds = timedOutShown.map((x) => x.id);
-      // Group 2, round 3 (logging only): the cancel's outcome is logged by the sale after it was tried (cleanupSale), not here before it.
-      const c = await inTry(d, mem, due.go, "missing-exit sale", () => timedCleanup(d, day, mem, s, o, "missing", undefined, timedOutIds.length > 0 ? { alsoCancel: timedOutIds, alsoCancelStops: timedOutShown.map((x) => x.clientOrderId) } : {}));
-      if (c.attempted) unprotected.push(s.symbol);
-      if (c.recheckAt !== undefined) recheckAt = recheckAt === undefined ? c.recheckAt : Math.min(recheckAt, c.recheckAt);
-      continue;
-    }
-    // Release A, fix 1: the take-profit is still open (so the check above passes) but the stop is gone and shares are left.
-    const liveAt = mem.liveStopCancelled.get(s.clientOrderId);
-    const bare = held.has(s.symbol) ? bareRemainder(o, liveAt) : null;
-    // Michael's item 1 of 2026-11-13 (afternoon), logging first: what this sync's list showed for a stop the live update reported cancelled.
-    if (liveAt !== undefined && !mem.listLagLogged.has(s.clientOrderId)) {
-      const leg = stopLeg(o);
-      if (leg && OPEN_STATUSES.has(leg.status)) {
-        mem.listLagLogged.add(s.clientOrderId);
-        d.log?.("stop_cancel_list_lag", { symbol: s.symbol, clientOrderId: s.clientOrderId, listStatus: leg.status, msFromLiveCancel: nowMs - liveAt, foundBy: lookedUp.has(s.clientOrderId) ? "lookup" : "listing", listAgeMs: listAgeMs() });
-      }
-    }
-    if (!bare) {
-      mem.bareSeen.delete(s.clientOrderId);
-      continue;
-    }
-    // Group 2, round 4 of the weekend build: while the list still shows the stop open, the sale is not started (the sell gate counts that
-    // stop, so the sale would wait inside this sync, up to about 22 s, and every entry after it would wait too). The sync is run again soon
-    // instead: 0.5 s, then 1, then every 2 s (Michael, 2026-11-13 evening), for up to LIVE_LAG_WATCH_MS after the live report, each charged
-    // run by the worker inside a P2 reservation of the shared request budget (rule 6: the 30 s window and the budget, and these steps); the sale
-    // then starts in the first sync after the list clears. After that window the regular syncs carry on.
-    if (bare.liveCancel) {
-      const tries = (mem.liveLagTries.get(s.clientOrderId) ?? 0) + 1;
-      mem.liveLagTries.set(s.clientOrderId, tries);
-      mem.liveLagLastOpen.set(s.clientOrderId, nowMs);
-      if (nowMs - liveAt! < LIVE_LAG_WATCH_MS) {
-        // Michael's change of 2026-11-13 (evening): every 2 s after the first steps; since the redesign of 2026-11-14 each recheck runs inside
-        // a P2 reservation of its cost (the sync's order list, its positions and this entry's lookup), so many remainders at once can never exceed it. With
-        // no room the recheck waits for room (the worker's own timer) until the last lagging remainder's 30 second window ends.
-        const gap = Math.min(500 * 2 ** (tries - 1), LIVE_LAG_RECHECK_MAX_MS);
-        lagRecheckGap = lagRecheckGap === undefined ? gap : Math.min(lagRecheckGap, gap);
-        lagUntil = Math.max(lagUntil, liveAt! + LIVE_LAG_WATCH_MS);
-        if (createdMs(s) < fromMs) lagLookups++; // looked up by id at the recheck (older than the order list's window)
-        mem.mustLook.add(s.clientOrderId);
-      }
-      continue;
-    }
-    // Logging only: the list now shows the stop ended, for an entry whose lag was logged. The list's lag lies between `lagAtLeastMs` (the
-    // last sync that still saw the stop open) and `msFromLiveCancel` (this sync, the first that saw it ended); `syncsSawOpen` counts the
-    // syncs that saw it still open (the quick rechecks and any other sync).
-    if (liveAt !== undefined && mem.listLagLogged.has(s.clientOrderId) && !mem.listClearLogged.has(s.clientOrderId)) {
-      mem.listClearLogged.add(s.clientOrderId);
-      d.log?.("stop_cancel_list_cleared", { symbol: s.symbol, clientOrderId: s.clientOrderId, msFromLiveCancel: nowMs - liveAt, lagAtLeastMs: (mem.liveLagLastOpen.get(s.clientOrderId) ?? liveAt) - liveAt, syncsSawOpen: mem.liveLagTries.get(s.clientOrderId) ?? 0 });
-    }
-    const firstSeen = mem.bareSeen.get(s.clientOrderId) ?? nowMs;
-    mem.bareSeen.set(s.clientOrderId, firstSeen);
-    const cancelTime = bare.stop.canceledAt ?? (bare.liveCancel ? new Date(liveAt!).toISOString() : (bare.stop.updatedAt ?? null));
-    const parsed = cancelTime ? Date.parse(cancelTime) : NaN;
-    // Alpaca's own cancel time, never later than this worker's first sight of it (a clock that runs behind cannot add wait).
-    const since = Number.isFinite(parsed) ? Math.min(parsed, firstSeen) : firstSeen;
-    if (nowMs - since < BARE_GRACE_MS) {
-      const due = since + BARE_GRACE_MS;
-      recheckAt = recheckAt === undefined ? due : Math.min(recheckAt, due);
-      // Group 1 review, round 2: the sync at the grace time must look this entry up again, even if it is older than the 10 minute read.
-      mem.mustLook.add(s.clientOrderId);
-      continue;
-    }
-    const stuckDue = retryDue(d, mem, s.clientOrderId, d.now().getTime());
-    if ("wait" in stuckDue) {
-      // Part A, step 1: tried moments ago and stuck; it is tried again then (or when the shared request budget has room), and the sync
-      // carries on with the others.
-      unprotected.push(s.symbol);
-      recheckAt = recheckAt === undefined ? stuckDue.wait : Math.min(recheckAt, stuckDue.wait);
-      continue;
-    }
-    d.log?.("bare_remainder", { symbol: s.symbol, clientOrderId: s.clientOrderId, shares: bare.shares, stopCancelledAt: cancelTime, listAgeMs: listAgeMs() });
-    lateNotice(s, "bare", cancelTime, { firstSeenAgoMs: d.now().getTime() - firstSeen });
-    const tp = flattenLegs(o).find((l) => l.side === "sell" && l.type === "limit");
-    // Decision 3 of 2026-11-06: the measurement starts the moment Alpaca accepts the sale, so it sees the sale's fill and the prints
-    // after it (before, it was told only after the sale had filled, and 99 of 103 sales went unmeasured).
-    const onSellSent = (x: { symbol: string; qty: number; clientOrderId: string; atMs: number }) => {
-      if (x.symbol !== s.symbol) return;
-      try {
-        d.onBareSale?.({ symbol: x.symbol, shares: x.qty, takeProfit: tp?.limitPrice ?? null, atMs: x.atMs, clientOrderId: x.clientOrderId });
-      } catch {
-        /* a measurement must never break the sync */
-      }
-    };
-    const c = await inTry(d, mem, stuckDue.go, "remainder", () => timedCleanup(d, day, mem, s, o, "bare", onSellSent, { stopPrice: bare.stop.stopPrice ?? s.stopPrice, stopCancelledAt: cancelTime }));
-    if (c.attempted) unprotected.push(s.symbol);
-    if (c.recheckAt !== undefined) recheckAt = recheckAt === undefined ? c.recheckAt : Math.min(recheckAt, c.recheckAt);
-    if (!c.stuck) mem.bareSeen.delete(s.clientOrderId);
+    await protectEntry(ctx, s, o);
   }
   // The redesign of 2026-11-14, part 1: the quick recheck is asked of the worker with its most requests (the order list's pages and the
   // positions as this sync read them, plus a lookup per lagging entry older than the list's window). The worker runs it on its own timer as
   // a sync with a P2 reservation of that size, so it is charged when it runs, at what it really sends (nothing ahead, nothing to give
   // back). With no room it waits for room (entries give way while it waits on the floor of 80), until the last lagging remainder's 30
   // second window ends; after that the regular sync carries on.
-  if (lagRecheckGap !== undefined) {
+  if (ctx.recheckAt !== undefined) recheckAt = recheckAt === undefined ? ctx.recheckAt : Math.min(recheckAt, ctx.recheckAt);
+  if (ctx.lag.gap !== undefined) {
     const t = d.now().getTime();
-    mem.lagRecheck = { dueAt: t + lagRecheckGap, cost: Math.max(1, listed.pages) + 1 + lagLookups, until: lagUntil };
+    mem.lagRecheck = { dueAt: t + ctx.lag.gap, cost: Math.max(1, listed.pages) + 1 + ctx.lag.lookups, until: ctx.lag.until };
   } else mem.lagRecheck = undefined;
   mark("walk");
   if (!listed.complete) d.log?.("order_list_incomplete", { since, pages: listed.pages });
@@ -872,6 +727,184 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   if (totalMs >= SLOW_SYNC_MS) d.log?.("sync_slow", { totalMs, steps, active: active.length, listed: listed.orders.length, pages: listed.pages, cleanups: cleanupsThisSync, cleanupMs: cleanupMsThisSync, olderLookups: lookedUp.size, streamLive: opts.streamLive === true });
   mem.lastSyncAt = d.now().getTime();
   return { unprotected, incomplete: !listed.complete, ...(recheckAt !== undefined ? { recheckAt } : {}) };
+}
+
+// What the order sync's walk knows when it comes to an entry's protection (the redesign of 2026-11-14, part 2, step 1: the walk's reads and
+// its decision for one entry are apart, with no change in behaviour). `unprotected`, the earliest recheck asked for and the list-lag recheck
+// are gathered here for the sync's result.
+interface WalkCtx {
+  d: RiskDeps;
+  day: DayRecord;
+  mem: SyncMemory;
+  opts: SyncOptions;
+  nowMs: number;
+  listed: { orders: Order[]; pages: number; complete: boolean };
+  held: ReadonlySet<string>;
+  heldQty: ReadonlyMap<string, number>;
+  latestPerSymbol: ReadonlyMap<string, OrderRecord>;
+  sellingSymbols: ReadonlySet<string>;
+  lookedUp: ReadonlySet<string>;
+  listAgeMs: () => number;
+  fromMs: number;
+  createdMs: (o: OrderRecord) => number;
+  lateNotice: (s: OrderRecord, kind: "missing" | "bare", cancelledAt: string | null, extra?: Record<string, unknown>) => void;
+  timedCleanup: (...args: Parameters<typeof cleanupSale>) => ReturnType<typeof cleanupSale>;
+  unprotected: string[];
+  recheckAt?: number;
+  lag: { gap?: number; until: number; lookups: number };
+}
+const ask = (ctx: WalkCtx, at: number): void => {
+  ctx.recheckAt = ctx.recheckAt === undefined ? at : Math.min(ctx.recheckAt, at);
+};
+
+// The walk's decision for one entry that has shares and is not closed: whether it needs a sale, a fresh stop, a check, a recheck, or nothing.
+async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<void> {
+  const { d, day, mem, opts, nowMs, listed, held, heldQty, latestPerSymbol, sellingSymbols, lookedUp, listAgeMs, fromMs, createdMs, lateNotice, timedCleanup } = ctx;
+  const protectNow = typeof opts.protect === "function" ? opts.protect() : opts.protect;
+  // Group 1 review, round 1 (messaging): an entry reported stuck that is no longer the newest on its symbol gets its resolution line.
+  if (latestPerSymbol.get(s.symbol)?.clientOrderId !== s.clientOrderId) await resolveStuck(d, mem, s.clientOrderId, `a newer ${s.symbol} position took over, and I watch that one now`);
+  if (!protectNow || latestPerSymbol.get(s.symbol)?.clientOrderId !== s.clientOrderId || sellingSymbols.has(s.symbol)) return;
+  // A4: a remainder protected by its fresh stop is left alone while that stop can still execute. Once the stop is gone (cancelled,
+  // expired or rejected by anyone but our own sale) and the shares are still held, the missing-exit check below sells them, as before.
+  const fresh = mem.freshStops.get(s.clientOrderId);
+  if (fresh) {
+    // Only while it covers the whole holding (group 1 review, round 2).
+    const covering = held.has(s.symbol) && fresh.qty >= (heldQty.get(s.symbol) ?? 0) - 1e-9;
+    // Michael's ruling B of 2026-11-12: still unclear 15 seconds after it was sent (as known before this sync's look): unprotected. The
+    // look at the limit is part of cancelling it (freshStopTimeout), not a late confirmation.
+    if (FRESH_STOP_LIMIT.on && covering && fresh.status === "unclear" && nowMs - fresh.placedAt >= FRESH_STOP_CONFIRM_MS) {
+      const t = await freshStopTimeout(d, day, mem, s, o, fresh, nowMs);
+      if (t.attempted) ctx.unprotected.push(s.symbol);
+      if (t.recheckAt !== undefined) ask(ctx, t.recheckAt);
+      return;
+    }
+    if (covering && (await freshStopLive(d, mem, fresh, listed.orders, nowMs, opts.streamLive === true))) {
+      if (FRESH_STOP_LIMIT.on && fresh.status === "unclear") {
+        // Still unclear: looked up again within 5 seconds, and the sync runs at the 15 second limit (the entry is looked up at that
+        // sync too, even if it is older than the 10 minute list).
+        // Group 1, round 1 of the redesign (B3): a lookup that found no room is tried again as soon as room may return.
+        const roomAt = fresh.lookRoomAt !== undefined ? Math.max(nowMs + 250, fresh.lookRoomAt) : Infinity;
+        const due = Math.min(nowMs + FRESH_STOP_UNCLEAR_LOOKUP_MS, roomAt, fresh.placedAt + FRESH_STOP_CONFIRM_MS);
+        ask(ctx, due);
+        mem.mustLook.add(s.clientOrderId);
+      }
+      return;
+    }
+    dropFreshStop(d, mem, s.clientOrderId, held.has(s.symbol) ? "it no longer covers the holding" : "the shares are no longer held", nowMs);
+    if (held.has(s.symbol)) d.log?.("fresh_stop_gone", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: fresh.stopClientOrderId, status: fresh.status, msFromSent: nowMs - fresh.placedAt });
+  }
+  if (!hasLiveExit(o)) {
+    // Item 2 of 2026-11-13: an entry whose timed-out stop is known open with its cancel accepted or pending waits for that stop to end
+    // (status checks, no sale tries); one known to have ended is tried at once.
+    if (hasTimedOut(mem, s.clientOrderId)) {
+      const w = await timedOutWait(d, mem, s, listed.orders, d.now().getTime());
+      if (w !== null) {
+        ctx.unprotected.push(s.symbol);
+        ask(ctx, w);
+        return;
+      }
+    }
+    const due = retryDue(d, mem, s.clientOrderId, d.now().getTime());
+    if ("wait" in due) {
+      // Part A, step 1: tried moments ago and stuck; it is tried again at `due` (or when the shared request budget has room), and the
+      // sync carries on with the others.
+      ctx.unprotected.push(s.symbol);
+      ask(ctx, due.wait);
+      return;
+    }
+    d.log?.("unprotected_position", { symbol: s.symbol, clientOrderId: s.clientOrderId, listAgeMs: listAgeMs() });
+    const endedAt = flattenLegs(o).filter((l) => l.side === "sell" && !OPEN_STATUSES.has(l.status)).map((l) => l.canceledAt ?? l.updatedAt ?? "").filter((x) => Number.isFinite(Date.parse(x))).sort().at(-1) ?? null;
+    lateNotice(s, "missing", endedAt);
+    // Ruling B: a timed-out fresh stop of this entry still shown working is cancelled by this sale (which waits for Alpaca's cancel).
+    const timedOutShown = listed.orders.filter((x) => mem.timedOutStops.get(x.clientOrderId) === s.clientOrderId && OPEN_STATUSES.has(x.status));
+    const timedOutIds = timedOutShown.map((x) => x.id);
+    // Group 2, round 3 (logging only): the cancel's outcome is logged by the sale after it was tried (cleanupSale), not here before it.
+    const c = await inTry(d, mem, due.go, "missing-exit sale", () => timedCleanup(d, day, mem, s, o, "missing", undefined, timedOutIds.length > 0 ? { alsoCancel: timedOutIds, alsoCancelStops: timedOutShown.map((x) => x.clientOrderId) } : {}));
+    if (c.attempted) ctx.unprotected.push(s.symbol);
+    if (c.recheckAt !== undefined) ask(ctx, c.recheckAt);
+    return;
+  }
+  // Release A, fix 1: the take-profit is still open (so the check above passes) but the stop is gone and shares are left.
+  const liveAt = mem.liveStopCancelled.get(s.clientOrderId);
+  const bare = held.has(s.symbol) ? bareRemainder(o, liveAt) : null;
+  // Michael's item 1 of 2026-11-13 (afternoon), logging first: what this sync's list showed for a stop the live update reported cancelled.
+  if (liveAt !== undefined && !mem.listLagLogged.has(s.clientOrderId)) {
+    const leg = stopLeg(o);
+    if (leg && OPEN_STATUSES.has(leg.status)) {
+      mem.listLagLogged.add(s.clientOrderId);
+      d.log?.("stop_cancel_list_lag", { symbol: s.symbol, clientOrderId: s.clientOrderId, listStatus: leg.status, msFromLiveCancel: nowMs - liveAt, foundBy: lookedUp.has(s.clientOrderId) ? "lookup" : "listing", listAgeMs: listAgeMs() });
+    }
+  }
+  if (!bare) {
+    mem.bareSeen.delete(s.clientOrderId);
+    return;
+  }
+  // Group 2, round 4 of the weekend build: while the list still shows the stop open, the sale is not started (the sell gate counts that
+  // stop, so the sale would wait inside this sync, up to about 22 s, and every entry after it would wait too). The sync is run again soon
+  // instead: 0.5 s, then 1, then every 2 s (Michael, 2026-11-13 evening), for up to LIVE_LAG_WATCH_MS after the live report, each charged
+  // run by the worker inside a P2 reservation of the shared request budget (rule 6: the 30 s window and the budget, and these steps); the sale
+  // then starts in the first sync after the list clears. After that window the regular syncs carry on.
+  if (bare.liveCancel) {
+    const tries = (mem.liveLagTries.get(s.clientOrderId) ?? 0) + 1;
+    mem.liveLagTries.set(s.clientOrderId, tries);
+    mem.liveLagLastOpen.set(s.clientOrderId, nowMs);
+    if (nowMs - liveAt! < LIVE_LAG_WATCH_MS) {
+      // Michael's change of 2026-11-13 (evening): every 2 s after the first steps; since the redesign of 2026-11-14 each recheck runs inside
+      // a P2 reservation of its cost (the sync's order list, its positions and this entry's lookup), so many remainders at once can never exceed it. With
+      // no room the recheck waits for room (the worker's own timer) until the last lagging remainder's 30 second window ends.
+      const gap = Math.min(500 * 2 ** (tries - 1), LIVE_LAG_RECHECK_MAX_MS);
+      ctx.lag.gap = ctx.lag.gap === undefined ? gap : Math.min(ctx.lag.gap, gap);
+      ctx.lag.until = Math.max(ctx.lag.until, liveAt! + LIVE_LAG_WATCH_MS);
+      if (createdMs(s) < fromMs) ctx.lag.lookups++; // looked up by id at the recheck (older than the order list's window)
+      mem.mustLook.add(s.clientOrderId);
+    }
+    return;
+  }
+  // Logging only: the list now shows the stop ended, for an entry whose lag was logged. The list's lag lies between `lagAtLeastMs` (the
+  // last sync that still saw the stop open) and `msFromLiveCancel` (this sync, the first that saw it ended); `syncsSawOpen` counts the
+  // syncs that saw it still open (the quick rechecks and any other sync).
+  if (liveAt !== undefined && mem.listLagLogged.has(s.clientOrderId) && !mem.listClearLogged.has(s.clientOrderId)) {
+    mem.listClearLogged.add(s.clientOrderId);
+    d.log?.("stop_cancel_list_cleared", { symbol: s.symbol, clientOrderId: s.clientOrderId, msFromLiveCancel: nowMs - liveAt, lagAtLeastMs: (mem.liveLagLastOpen.get(s.clientOrderId) ?? liveAt) - liveAt, syncsSawOpen: mem.liveLagTries.get(s.clientOrderId) ?? 0 });
+  }
+  const firstSeen = mem.bareSeen.get(s.clientOrderId) ?? nowMs;
+  mem.bareSeen.set(s.clientOrderId, firstSeen);
+  const cancelTime = bare.stop.canceledAt ?? (bare.liveCancel ? new Date(liveAt!).toISOString() : (bare.stop.updatedAt ?? null));
+  const parsed = cancelTime ? Date.parse(cancelTime) : NaN;
+  // Alpaca's own cancel time, never later than this worker's first sight of it (a clock that runs behind cannot add wait).
+  const since = Number.isFinite(parsed) ? Math.min(parsed, firstSeen) : firstSeen;
+  if (nowMs - since < BARE_GRACE_MS) {
+    const due = since + BARE_GRACE_MS;
+    ask(ctx, due);
+    // Group 1 review, round 2: the sync at the grace time must look this entry up again, even if it is older than the 10 minute read.
+    mem.mustLook.add(s.clientOrderId);
+    return;
+  }
+  const stuckDue = retryDue(d, mem, s.clientOrderId, d.now().getTime());
+  if ("wait" in stuckDue) {
+    // Part A, step 1: tried moments ago and stuck; it is tried again then (or when the shared request budget has room), and the sync
+    // carries on with the others.
+    ctx.unprotected.push(s.symbol);
+    ask(ctx, stuckDue.wait);
+    return;
+  }
+  d.log?.("bare_remainder", { symbol: s.symbol, clientOrderId: s.clientOrderId, shares: bare.shares, stopCancelledAt: cancelTime, listAgeMs: listAgeMs() });
+  lateNotice(s, "bare", cancelTime, { firstSeenAgoMs: d.now().getTime() - firstSeen });
+  const tp = flattenLegs(o).find((l) => l.side === "sell" && l.type === "limit");
+  // Decision 3 of 2026-11-06: the measurement starts the moment Alpaca accepts the sale, so it sees the sale's fill and the prints
+  // after it (before, it was told only after the sale had filled, and 99 of 103 sales went unmeasured).
+  const onSellSent = (x: { symbol: string; qty: number; clientOrderId: string; atMs: number }) => {
+    if (x.symbol !== s.symbol) return;
+    try {
+      d.onBareSale?.({ symbol: x.symbol, shares: x.qty, takeProfit: tp?.limitPrice ?? null, atMs: x.atMs, clientOrderId: x.clientOrderId });
+    } catch {
+      /* a measurement must never break the sync */
+    }
+  };
+  const c = await inTry(d, mem, stuckDue.go, "remainder", () => timedCleanup(d, day, mem, s, o, "bare", onSellSent, { stopPrice: bare.stop.stopPrice ?? s.stopPrice, stopCancelledAt: cancelTime }));
+  if (c.attempted) ctx.unprotected.push(s.symbol);
+  if (c.recheckAt !== undefined) ask(ctx, c.recheckAt);
+  if (!c.stuck) mem.bareSeen.delete(s.clientOrderId);
 }
 
 const EPS_QTY = 1e-9;
