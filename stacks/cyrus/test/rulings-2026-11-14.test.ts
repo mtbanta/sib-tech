@@ -321,7 +321,7 @@ test("Michael's answer (rechecks leave room): P2 keeps its share when holding ba
   b2.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP });
   assert.ok(b2.retryWaitUntil > t, "held");
   t = b2.retryWaitUntil;
-  assert.ok(b2.roomFor("P2", 1, false).ok, "lapsed: P2 may go to 40 again");
+  assert.ok(b2.roomFor("P2", 1, false).ok, "at its end P2 has room (its 38 have left the minute by then; the exact end is checked in the rulings round 3 test)");
 });
 
 test("group 1, rulings round 2 (finding 2): a timed-out stop's try is not under the 45: it starts with 40 budgeted requests already in the minute", async () => {
@@ -432,8 +432,11 @@ test("rulings round 3: a refused stuck retry sets the hold to 35 of the minute a
   assert.equal(b.retryWaitUntil, Math.max(t + 2_500, retry.at + 500), "the hold's end");
   const p2 = b.tryReserve("P2", 1, { label: "list lag recheck" });
   assert.ok(!(p2 instanceof Reservation) && p2.why === "five", "P2 held to 5 in the 5 seconds (6 already)");
+  // Group 2, rulings round 4: the hold ends exactly then: just before, P2 may not take 7 of the 5 seconds; at its end it may.
+  t = b.retryWaitUntil - 1;
+  assert.ok(!b.roomFor("P2", 7).ok, "just before its end: still held to 5 in the 5 seconds");
   t = b.retryWaitUntil;
-  assert.ok(b.roomFor("P2", 1).ok, "the hold has ended: P2 has its 15 in the 5 seconds again");
+  assert.ok(b.roomFor("P2", 7).ok, "at its end: P2 has its 15 in the 5 seconds again");
 });
 
 test("rulings round 3: while the hold is in force, P2 is granted at 34 of the minute and at 4 in the 5 seconds, and refused one above each", () => {

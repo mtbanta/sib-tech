@@ -21,8 +21,8 @@ Today each retry reserves 10 requests. So stuck retries get about 4 tries a minu
    - It would take the position, the open orders and whether the sale filled from the live order updates and the cached account view, instead of reading them again.
    - Effect: about 15 tries a minute fit in the 45, against 4 today.
 2. **A budget that grows with spare room.** The budget becomes the larger of 60 and Alpaca's spare requests above the reserve.
-   - Spare means Alpaca's 200 a minute less the routine reads (about 50 a minute measured) and the entries.
-   - The 15 for urgent work and the 15-in-5-seconds rule scale with it: a quarter of the budget per 5 seconds, as today.
+   - Spare means Alpaca's 200 a minute less the routine reads (about 50 a minute in the simulator: group 1's probe counted about 47 routine requests a minute; Monday measures it live) and the entries. The reserve is read as a level Alpaca's remaining must stay above (80 now), not a rate: the spare is the room the minute's refill leaves above that level.
+   - The 15-in-5-seconds rule scales with it (a quarter of the budget per 5 seconds, as today). The 15 a minute kept for urgent work stays 15, as Michael ruled; it is not scaled.
    - **When quiet** (no entries, for example after the last entry or in the mid-day pause), spare is about 150, so the budget could be about 150.
    - **When busy** (100 entries a minute on a normal day, 150 in a load window), spare is under 60, so the budget stays at 60, as today.
 
@@ -42,7 +42,7 @@ These are estimates. They assume each refused try takes about 1.5 s in the sale 
 **How to read these:**
 
 - **They are averages.** For one stuck position, tries come in bursts. Today the measured pattern is 5, 5, 5, then about 45 s: four tries, then a wait for the minute to free. Under option 1 it would be about 15 tries 2 s apart, then a wait of up to about 30 s.
-- **The model matches today's tests.** It says 75 s for 5 stuck positions; the tests measured 65 to 105 s. v22 measured 125 to 171 s in the same test.
+- **The model matches today's tests only without other low-priority work running.** It says 75 s for 5 stuck positions; with no list-lag rechecks the tests measured 65 to 105 s (v22: 125 to 171 s). Under steady low-priority demand stuck positions take turns unevenly: with 2 stuck up to about 106 s, with 4 stuck 98 to 171 s, with 5 stuck 101 to 257 s (group 1's measurement; balanced over an hour). The proposal's options would shorten those in the same proportion as the averages.
 - **A sale Alpaca holds is slower.** On 2026-11-02 Alpaca held some sales up to 16 s. While Alpaca holds each sale, the one-at-a-time queue sets the wait instead: about N times the hold. With 8 s holds that is about 8, 40 and 80 s, under every option.
 
 ## What each risks
