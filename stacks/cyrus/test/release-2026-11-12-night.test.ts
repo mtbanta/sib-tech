@@ -2144,3 +2144,71 @@ test("redesign part 1 (group 2, round 2): a timed-out stop's try waiting for roo
   assert.equal(await heldQty(w, "WULF"), 0, "sold once room returned");
   assert.equal(w.sim.oversellAttempts, 0);
 });
+
+// Group 1, round 2 of the redesign (mutant N4): Michael's item 2 limit on the client's own retries applies at the right call sites. The
+// simulated broker here retries a failed request the way the real client does, asking `retryAllowedInScope` before each retry: inside the 15
+// second limit's look (a reservation of 2 that limits retries) the lookup stops at 2 attempts; the unclear stop's earlier 5 s lookups (P2,
+// not limited) make all 3; an ordinary stuck retry's sale (not limited) is retried as before.
+import { retryAllowedInScope } from "../src/request-scope.ts";
+test("redesign part 1 (group 1, round 2, N4): the client's retries stop at the reservation only in a timed-out stop's work (the 15 second limit's look), never in other budgeted tries", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "WULF", 6, 9.5, 1);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 2, 9.58);
+  const realSubmit = w.sim.submitSell.bind(w.sim);
+  w.sim.submitSell = async (x: any) => {
+    if (x.stopPrice !== undefined) throw new AlpacaError("outcome unclear (test)", 502);
+    return realSubmit(x);
+  };
+  const attempts: Array<{ at: number; n: number }> = [];
+  const realFind = w.sim.findOrderByClientId.bind(w.sim);
+  w.sim.findOrderByClientId = async (cid: string) => {
+    if (!cid.startsWith("cyrus-p-")) return realFind(cid);
+    let n = 0;
+    for (;;) {
+      n++;
+      (w.sim as any).spend("plain"); // the attempt reached Alpaca and failed
+      if (n >= 3 || !retryAllowedInScope()) break; // the real client's reads: at most 3 tries, each retry asked first
+    }
+    attempts.push({ at: w.sim.simMs, n });
+    throw new AlpacaError("internal error (test)", 500);
+  };
+  w.sim.advance(300);
+  const sentAt = w.sim.simMs;
+  let r: any = await syncOrders(w.risk, dd, { protect: true });
+  while (w.sim.simMs < sentAt + FRESH_STOP_CONFIRM_MS + 6_000 && !w.events.some((e) => e.event === "fresh_stop_timeout")) {
+    w.sim.advanceTo(Math.max(w.sim.simMs + 100, Math.min(r.recheckAt ?? Infinity, w.sim.simMs + 10_000)));
+    r = await syncOrders(w.risk, dd, { protect: true });
+  }
+  const limitAt = w.events.find((e) => e.event === "fresh_stop_timeout")!.at;
+  const before = attempts.filter((a) => a.at < limitAt);
+  const atLimit = attempts.filter((a) => a.at >= limitAt);
+  assert.ok(before.length >= 1 && before.every((a) => a.n === 3), `the 5 s lookups (not limited): ${before.map((a) => a.n).join(",")}`);
+  assert.equal(atLimit[0]?.n, 2, `the limit's lookup stops at its reservation of 2: ${atLimit.map((a) => a.n).join(",")}`);
+});
+
+test("redesign part 1 (group 1, round 2, N4): an ordinary stuck retry's sale is never stopped halfway: the client's retries go on beyond its reservation", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "AAA", 1, 10, 1);
+  for (const l of w.sim.orders.find((o) => o.clientOrderId === id)!.legs) await w.sim.cancelOrder(l.id);
+  w.sim.advance(2_000);
+  w.sim.staleHeld.set("AAA", 1); // a hidden hold: the first try ends stuck, then the retries come
+  await syncOrders(w.risk, dd, { protect: true });
+  w.sim.staleHeld.delete("AAA");
+  let n = 0;
+  const realSell = w.sim.submitSell.bind(w.sim);
+  w.sim.submitSell = async (x: any) => {
+    for (;;) {
+      n++;
+      (w.sim as any).spend("plain");
+      if (n >= 8 || !retryAllowedInScope()) break; // the real client's safety writes after a 429: up to 8 sends
+    }
+    return realSell(x);
+  };
+  const st = w.memory.stuck.get(id)!;
+  w.sim.advanceTo(st.nextAt);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(n, 8, `all 8 sends of the retry's sale went out (its reservation is 10, the try's reads came first): ${n}`);
+});

@@ -490,3 +490,59 @@ test("part 1 (group 2, round 2): mostCappedIn5s leaves out close-out retries; an
   assert.equal(m.mostCappedIn5s, 26);
   assert.equal(m.overdrafts, 16);
 });
+
+// Group 1, round 2 of the redesign (mutants N8 and N12): a carried-position retry is a P1 try of the shared budget (decision 6: every retry
+// joins). With no room it is refused and not counted as an attempt; when it runs, its sells are tagged P1; the first try is a first try.
+test("part 1 (group 1, round 2, N8): a carried-position retry is a P1 try: refused without room (not an attempt), tagged P1 when it runs", async () => {
+  const full = (date: string) => ({ date, open: "09:30", close: "16:00" });
+  const broker = new FakeBroker();
+  (broker as any).calendar = [full("2026-10-29"), full("2026-10-30"), full("2026-11-02"), full("2026-11-03")];
+  broker.clock = { isOpen: true, timestamp: "", nextOpen: "", nextClose: "2026-11-02T21:00:00Z" } as any;
+  const first = rig({ broker });
+  await first.at("2026-11-01T22:10:00Z");
+  first.ownerSays("approve", "2026-11-01T22:20:00Z");
+  await first.at("2026-11-01T22:20:10Z");
+  broker.positions = [{ symbol: "AAA", qty: 5, marketValue: 500, avgEntryPrice: 100, unrealizedPl: 0 } as any];
+  const r = rig({ broker, store: first.store, bot: first.bot });
+  const wk: any = r.worker;
+  const sellTags: string[] = [];
+  broker.onSell = async () => {
+    sellTags.push(currentTag());
+    throw new Error("rejected (test)");
+  };
+  const t0 = Date.parse("2026-11-02T15:00:00Z");
+  await r.at(new Date(t0).toISOString()); // the first try
+  assert.deepEqual([...new Set(sellTags)], ["first"], "the first try is a first try");
+  const attempts = wk.carriedAttempts;
+  // The minute is full: the retry (due 1 minute later) is refused and not counted as an attempt.
+  const fill = () => {
+    const x = wk.budget.tryReserve("P1", 60, { label: "test: a full minute", fiveSec: false, force: true });
+    for (let i = 0; i < 60; i++) x.charge("/v2/test");
+    x.end();
+  };
+  r.setNow(new Date(t0 + 30_000).toISOString());
+  fill();
+  sellTags.length = 0;
+  await r.at(new Date(t0 + 61_000).toISOString());
+  assert.equal(sellTags.length, 0, "refused while the minute is full");
+  assert.equal(wk.carriedAttempts, attempts, "not counted as an attempt");
+  await r.at(new Date(t0 + 95_000).toISOString()); // the fill has aged out
+  assert.ok(sellTags.length > 0 && sellTags.every((t) => t === "P1"), `the retry's sells are P1: ${sellTags.join(",")}`);
+  assert.equal(wk.budget.inUse().open, 0, "no reservation left open");
+  r.worker.stop?.();
+});
+
+// Group 1, round 2 of the redesign (mutant N10, statistics only): the entry sweep while the stop flag is on is counted as a first try.
+test("part 1 (group 1, round 2, N10): the entry sweep while stopped sends its requests as a first try", async () => {
+  const { sweepEntriesWhileStopped } = await import("../src/risk.ts");
+  const { CONTROL_STOP } = await import("../src/store.ts");
+  const broker = new FakeBroker();
+  const store = new MemoryStore();
+  await store.setControl(CONTROL_STOP, { on: true, at: "2026-11-02T15:00:00Z", reason: "owner command (stop)" });
+  broker.orders = [{ id: "00000000-0000-0000-0000-000000000001", clientOrderId: "cyrus-20261102-AAA-1", symbol: "AAA", side: "buy", type: "limit", status: "new", qty: 5, filledQty: 0, filledAvgPrice: null, limitPrice: 10, stopPrice: null, legs: [] } as any];
+  const tags: string[] = [];
+  broker.onSend = () => void tags.push(currentTag());
+  const n = await sweepEntriesWhileStopped({ broker, store, now: () => new Date(0), say: async () => true } as any);
+  assert.equal(n, 1);
+  assert.ok(tags.length >= 2 && tags.every((t) => t === "first"), tags.join(","));
+});
