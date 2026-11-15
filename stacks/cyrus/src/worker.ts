@@ -42,6 +42,7 @@ import { PAPER_ONLY } from "./discord.ts";
 import { CLOSEOUT_RETRY_MOST, MIDDAY_NOT_FLAT_ALERT_AFTER_MS, MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MIDDAY_RETRY_MS, blockedNext, lossPast, middayFlat, middayTimes, readHold, readPause, resumedByText, retrySymbols, startupAction, updatePause } from "./midday.ts";
 import { Reservation, RequestBudget, withReservation } from "./request-budget.ts";
 import { inRequestScope, outsideScope } from "./request-scope.ts";
+import { ProtectionLoop, type WakeKind } from "./protection.ts";
 import type { PingKind } from "./heartbeat.ts";
 
 export type Channel = "commands" | "trading" | "alerts";
@@ -242,7 +243,6 @@ export class Worker {
   // Release A, fix 1: what the order sync remembers between runs, and when a bare remainder reaches its grace time (the next
   // sync runs then instead of waiting the full 10 or 30 seconds).
   private readonly syncMemory = new SyncMemory();
-  private syncRecheckAt: number | null = null;
   // Release A, fixes 3 and 5: the day whose close-out has been attempted, and how many times (the first is "close-out", the
   // rest "retry"). The carried-position sale never runs on a day whose close-out has started.
   private closeoutAttemptDate: string | null = null;
@@ -264,23 +264,16 @@ export class Worker {
   private readonly stopGap = new StopGapMeter();
   private stopGapDate: string | null = null;
   private stopGapSaving = false;
-  private eventSyncTimer: unknown = null;
-  private eventSyncAt: number | null = null;
-  // The redesign of 2026-11-14, part 1: the list-lag recheck's own timer (the sync asks for it in `SyncMemory.lagRecheck`). When it fires,
-  // a sync runs with a P2 reservation of the recheck's most requests in the shared budget, or, with no room, it waits for room (entries
-  // give way while it waits on the floor of 80) until the last lagging remainder's 30 second window ends.
-  private lagTimer: unknown = null;
-  private lagTimerAt: number | null = null;
-  // Michael's fix (a) of 2026-11-13: the moment the pending timer was set for when a sync asked for a recheck (its `recheckAt`), carried
-  // over when that timer is put off. When the 5 second pass runs that recheck itself, it cancels this timer, so no second sync repeats it.
-  private recheckTimerAt: number | null = null;
+  // The redesign of 2026-11-14, part 2: the protection loop (protection.ts) owns when each position's protection work runs: the order sync
+  // hands it each action and asks it for wakes, and the live updates wake the entry they are about. It replaces the sync brought forward by
+  // a timer (`syncAt`), fix (a)'s marks and the list-lag recheck's own timer.
+  readonly loop: ProtectionLoop;
   // Logging only (Michael's approval of 2026-11-10), for `late_notice`: when the live updates last reported each symbol's stop cancelled,
   // and what the timed sync did (last set, last fired, how often it was put off because a sync was still running, since the last sync
   // the timer started).
-  private readonly stopCancelSeen = new Map<string, { alpacaAtMs: number; receivedMs: number; syncSetFor: number }>();
+  private readonly stopCancelSeen = new Map<string, { alpacaAtMs: number; receivedMs: number; wokeFor: number }>();
   // The trade digest only (messaging): take-profit legs already counted (Alpaca order ids), so a partial fill and a later fill count once.
   private readonly digestTakeProfits = new Set<string>();
-  private syncTimerLog = { setAt: 0, setFor: 0, firedAt: 0, putOff: 0, lastPutOffAt: 0 };
   private syncAgain = false;
   private sessionForSync: { day: DayRecord; closeAt: Date } | null = null;
   private lastRawSampleAt = 0;
@@ -329,6 +322,7 @@ export class Worker {
     this.syncMemory.budget = this.budget;
     this.lossMemory.budget = this.budget;
     deps.governor.setSafetyHold?.(this.budget);
+    this.loop = new ProtectionLoop({ now: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}), ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {}), look: (ids, kind, extra) => this.look(ids, kind, extra), log: (e, data) => deps.log?.("info", e, data) });
     this.sessions = new NextSessionFinder(deps.broker);
     this.view = new BrokerView(deps.broker, () => deps.now().getTime());
     this.sellGate = new SellGate({ broker: deps.broker, say: (c, t, o) => this.say(c, t, o), log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime() });
@@ -428,9 +422,11 @@ export class Worker {
   }
 
   // May the order sync sell a position whose exits are gone? Not while any liquidation runs or waits (close-out, flatten, loss
-  // stop, carried, emergency), and not from the close-out time on: the close-out alone flattens the account.
+  // stop, carried, emergency), and not from the close-out time on: the close-out alone flattens the account. Since the redesign of
+  // 2026-11-14 (part 2) one position's own cleanup sale (the loop's, or the fast sale) does not stop the others: they wait their turn in the
+  // one-at-a-time sale queue (`isLiquidatingOthers`).
   protectNow(closeAt: Date): boolean {
-    return !this.closingOut && !this.liquidator.isLiquidating() && !this.inflight.has("closeout") && !this.inflight.has("carried") && !this.inflight.has("midday") && !this.middayOwnsSelling && this.d.now() < addMinutes(closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE);
+    return !this.closingOut && !this.liquidator.isLiquidatingOthers() && !this.inflight.has("closeout") && !this.inflight.has("carried") && !this.inflight.has("midday") && !this.middayOwnsSelling && this.d.now() < addMinutes(closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE);
   }
 
   private riskDeps() {
@@ -458,11 +454,12 @@ export class Worker {
     const now = this.d.now().getTime();
     const ago = (t: number) => (t > 0 ? now - t : null);
     const seen = this.stopCancelSeen.get(symbol);
-    const t = this.syncTimerLog;
+    const next = this.loop.nextLookAt();
     return {
-      streamReportedCancel: seen ? { alpacaAgoMs: ago(seen.alpacaAtMs), receivedAgoMs: ago(seen.receivedMs), syncSetForAgoMs: ago(seen.syncSetFor) } : null,
+      streamReportedCancel: seen ? { alpacaAgoMs: ago(seen.alpacaAtMs), receivedAgoMs: ago(seen.receivedMs), wokeForAgoMs: ago(seen.wokeFor) } : null,
       streamStatus: this.orderStream ? this.orderStreamLive() : false,
-      timedSync: { setAgoMs: ago(t.setAt), setForAgoMs: ago(t.setFor), firedAgoMs: ago(t.firedAt), putOff: t.putOff, lastPutOffAgoMs: ago(t.lastPutOffAt) },
+      // The redesign of 2026-11-14, part 2: the protection loop's next look and its pending wakes (replacing the timed sync's figures).
+      loop: { nextLookInMs: next === null ? null : next - now, pendingWakes: this.loop.pendingWakes().size, actionsRunning: this.loop.actionsRunning() },
       workerSyncStartedAgoMs: ago(this.lastSync),
       saleRunning: this.liquidator.isLiquidating(),
     };
@@ -531,10 +528,7 @@ export class Worker {
 
   stop(): void {
     if (this.timer) clearInterval(this.timer);
-    if (this.eventSyncTimer) (this.d.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>)))(this.eventSyncTimer);
-    if (this.lagTimer) (this.d.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>)))(this.lagTimer);
-    this.lagTimer = null;
-    this.lagTimerAt = null;
+    this.loop.stop();
     this.stream?.stop();
     this.orderStream?.stop();
   }
@@ -1053,22 +1047,9 @@ export class Worker {
     void this.d.store.retrySoonWrites?.().catch(() => undefined);
     this.sessionForSync = inSession ? { day: current, closeAt: day.closeAt } : null;
     if (inSession && current.phases.armed) await this.refreshView(now, date);
-    // Release A, fix 1: a bare remainder found by the last sync brings the next one forward to its grace time (also by a timer, see
-    // syncAt, so it does not wait for the next 5 second pass).
-    const recheckDue = this.syncRecheckAt !== null && now.getTime() >= this.syncRecheckAt && !this.inflight.has("risk");
-    if (inSession && (now.getTime() - this.lastSync >= SYNC_EVERY_MS || recheckDue)) {
-      // Michael's fix (a) of 2026-11-13: the pass's sync runs the recheck, so it cancels that recheck's own timer (still pending inside its
-      // 250 ms slack, or put off while a sync ran). Only that timer: any other pending timer (a live update's) is left to fire.
-      // Fix (a), round 1 (group 2): also on the regular 10 s branch before the recheck is due. That sync takes the recheck's place (it gives
-      // the recheck's charge back), and it asks again for any recheck still needed. Only when the sync will start (none is running).
-      // Fix (a), round 2 (group 1): if that sync fails, it has not run the recheck, so the cancelled time is put back once (`restoreAt`).
-      let restoreAt: number | undefined;
-      if (!this.inflight.has("risk") && this.eventSyncTimer !== null && this.eventSyncAt !== null && this.eventSyncAt === this.recheckTimerAt) {
-        restoreAt = this.eventSyncAt;
-        this.cancelRecheckTimer();
-      }
-      this.startSync(current, day.closeAt, { fromPass: true, restoreAt });
-    }
+    // The regular order sync, every 10 seconds (the record of truth). Since the redesign of 2026-11-14 (part 2) protection work never brings it
+    // forward: the protection loop looks at the entries that are due (`look`).
+    if (inSession && now.getTime() - this.lastSync >= SYNC_EVERY_MS) this.startSync(current, day.closeAt);
     if (inSession || (day.closeAt && now < addMinutes(day.closeAt, 10))) {
       await this.flushDigest();
       await this.stopGapStep(date, now);
@@ -1237,58 +1218,63 @@ export class Worker {
   // Michael's next command. While a close-out is running, and from the close-out time on, the missing-exit check is switched off
   // and nothing is sold here: the close-out alone flattens the account. It is asked again just before each sale, so a close-out
   // that starts meanwhile switches it off. One at a time: a sync already running is never doubled.
-  // The redesign of 2026-11-14, part 1: a sync started for the list-lag recheck runs inside its P2 reservation (`how.recheck`): every request
-  // it sends is counted as it is sent. Any other sync is routine.
-  private startSync(dayNow: DayRecord, closeAt: Date, how: { fromPass?: boolean; restoreAt?: number; recheck?: Reservation } = {}): void {
-    if (!this.backgroundReady("risk")) {
-      how.recheck?.end();
-      return;
-    }
+  // The redesign of 2026-11-14, part 2: it hands each entry's action to the protection loop and carries on (it never waits on a sale), and
+  // asks the loop for wakes instead of a sync brought forward. It is routine work.
+  private startSync(dayNow: DayRecord, closeAt: Date): void {
+    if (!this.backgroundReady("risk")) return;
     this.lastSync = this.d.now().getTime();
     const risk = this.riskDeps();
     const protect = () => this.protectNow(closeAt);
     const streamLive = this.orderStreamLive();
-    const started = this.background("risk", async () => {
+    this.background("risk", async () => {
       // While the daily loss stop is in force its own retry re-sells whatever is still held, inside its request budget; the
       // missing-exit check would otherwise start a liquidation of its own for every such position every 30 seconds (round 8).
-      let synced: Awaited<ReturnType<typeof syncOrders>>;
-      try {
-        const lossStopped = await this.lossStopInForce(dayNow.tradeDate);
-        this.syncRecheckAt = null;
-        const run = () => syncOrders(risk, dayNow, { protect: () => !lossStopped && protect(), streamLive, middayOwnsSelling: () => this.middayOwnsSelling });
-        synced = how.recheck ? await withReservation(how.recheck, run) : await run();
-      } catch (err) {
-        // The redesign of 2026-11-14, part 1 (rule 6): a list-lag recheck whose sync failed is dropped, so it never fires again at once on a
-        // failing read; the regular sync carries on, and the next sync that still sees the list lag asks again (within its 30 s window).
-        if (how.recheck) {
-          how.recheck.end();
-          this.syncMemory.lagRecheck = undefined;
-          this.d.log?.("warn", "list_lag_recheck_failed", { error: (err as Error).message.slice(0, 120), next: "regular sync" });
-        }
-        this.armLagRecheck();
-        // Fix (a), round 2 (group 1): the pass cancelled a recheck's own timer for this sync, and the sync failed before it could run that
-        // recheck or ask for it again. The cancelled time is put back once, as the recheck's own timer (it fires at once if already past).
-        // A sync started by that timer carries no `restoreAt`, so a failure there puts nothing back: at most one restore per pass.
-        if (how.restoreAt !== undefined) {
-          if (this.syncRecheckAt === null) this.syncRecheckAt = how.restoreAt;
-          this.syncAt(how.restoreAt);
-          if (this.eventSyncAt === how.restoreAt) this.recheckTimerAt = how.restoreAt;
-        }
-        throw err;
-      }
-      if (synced.recheckAt !== undefined) {
-        this.syncRecheckAt = synced.recheckAt;
-        this.syncAt(synced.recheckAt);
-        // Fix (a): this timer is the recheck's own only if it took its place. If an earlier pending timer kept its place, that timer keeps
-        // its own mark (fix (a), round 1, group 1: it may be an older recheck's own timer, which the pass must still cancel).
-        if (this.eventSyncAt === synced.recheckAt) this.recheckTimerAt = synced.recheckAt;
-      }
-      this.armLagRecheck();
+      const lossStopped = await this.lossStopInForce(dayNow.tradeDate);
+      const synced = await syncOrders(risk, dayNow, { protect: () => !lossStopped && protect(), streamLive, middayOwnsSelling: () => this.middayOwnsSelling, loop: this.loop });
       await this.lostExitsFollowUp(dayNow.tradeDate, synced.unprotected);
       await this.stopCancelFollowUp(dayNow.tradeDate);
       await sweepEntriesWhileStopped(risk);
     });
-    if (!started) how.recheck?.end();
+  }
+
+  // The redesign of 2026-11-14, part 2: one look of the protection loop for the entries that are due: the reads the order sync makes, for
+  // those entries only, and their decisions (risk.ts `syncOrders` with `only`). One at a time with the regular sync (both are "risk"); it
+  // never resets the regular sync's 10 seconds. A look only for list-lag rechecks runs inside a P2 reservation of its cost (the order list's
+  // pages as the last sync read them, the positions, and a lookup per older entry), as in part 1; any other look is routine work, as the
+  // sync it replaces was. Without room it waits for room (entries give way meanwhile).
+  private async look(ids: ReadonlySet<string>, kind: WakeKind, extraRequests: number): Promise<{ outcome: "busy" | "done" | "failed" } | { outcome: "wait"; retryAt: number }> {
+    const s = this.sessionForSync;
+    if (!s || this.d.now() >= s.closeAt) return { outcome: "done" };
+    if (!this.backgroundReady("risk")) return { outcome: "busy" };
+    let res: Reservation | null = null;
+    if (kind === "lag") {
+      const cost = this.syncMemory.lastListPages + 1 + extraRequests;
+      const r = this.budget.tryReserve("P2", cost, { label: "list lag recheck", waitKey: "list lag recheck" });
+      if (!(r instanceof Reservation)) {
+        this.d.log?.("info", "timed_out_try_out_of_room", { stage: "list lag recheck", cost, why: r.why, roomInMs: r.at - this.d.now().getTime(), next: "when the budget has room" });
+        return { outcome: "wait", retryAt: r.at };
+      }
+      res = r;
+    }
+    this.inflight.add("risk");
+    try {
+      await outsideScope(async () => {
+        const risk = this.riskDeps();
+        const protect = () => this.protectNow(s.closeAt);
+        const lossStopped = await this.lossStopInForce(s.day.tradeDate);
+        const run = () => syncOrders(risk, s.day, { protect: () => !lossStopped && protect(), streamLive: this.orderStreamLive(), middayOwnsSelling: () => this.middayOwnsSelling, loop: this.loop, only: ids });
+        const synced = res ? await withReservation(res, run) : await run();
+        await this.lostExitsFollowUp(s.day.tradeDate, synced.unprotected);
+        await this.stopCancelFollowUp(s.day.tradeDate);
+      });
+      return { outcome: "done" };
+    } catch (err) {
+      this.d.log?.("warn", kind === "lag" ? "list_lag_recheck_failed" : "protection_look_failed", { error: (err as Error).message.slice(0, 120), entries: ids.size, next: "regular sync" });
+      return { outcome: "failed" };
+    } finally {
+      res?.end();
+      this.inflight.delete("risk");
+    }
   }
 
   // Decision 1 of 2026-11-06: after a sync, an entry reported with both exits lost that the sync neither sold nor found closed (Alpaca's
@@ -1298,18 +1284,17 @@ export class Worker {
     if (this.lostExitsPending.size === 0) return;
     const rows = await this.d.store.listOrders(date).catch(() => null);
     const now = this.d.now().getTime();
-    let again: number | null = null;
     for (const [id, p] of [...this.lostExitsPending]) {
       const row = rows?.find((r) => r.clientOrderId === id);
-      if (sold.includes(p.symbol) || !row || row.closedAt || p.tries >= 3 || now - p.at > 10_000) {
+      // The redesign of 2026-11-14, part 2: handled also when the loop is running its action, or it is on the stuck list.
+      if (sold.includes(p.symbol) || this.loop.busy(id) || this.syncMemory.stuck.has(id) || !row || row.closedAt || p.tries >= 3 || now - p.at > 10_000) {
         this.lostExitsPending.delete(id);
         continue;
       }
       const wait = [500, 1_000, 2_000][p.tries]!;
       p.tries++;
-      again = again === null ? now + wait : Math.min(again, now + wait);
+      this.loop.wake(id, now + wait, "protect");
     }
-    if (again !== null) this.syncAt(again, 0);
   }
 
   // Michael's item 1 of 2026-11-13 (afternoon), the backup: after a sync, a remainder reported by the live update whose entry has no fresh
@@ -1324,108 +1309,17 @@ export class Worker {
       return null;
     });
     const now = this.d.now().getTime();
-    let again: number | null = null;
     for (const [id, p] of [...this.stopCancelPending]) {
       const row = rows?.find((r) => r.clientOrderId === id);
-      const handled = this.syncMemory.freshStops.has(id) || this.syncMemory.stuck.has(id) || this.syncMemory.liveLagTries.has(id);
+      const handled = this.syncMemory.freshStops.has(id) || this.syncMemory.stuck.has(id) || this.syncMemory.liveLagTries.has(id) || this.loop.busy(id);
       if (handled || !row || row.closedAt || p.tries >= 3 || now - p.at > 10_000) {
         this.stopCancelPending.delete(id);
         continue;
       }
       const wait = [500, 1_000, 2_000][p.tries]!;
       p.tries++;
-      again = again === null ? now + wait : Math.min(again, now + wait);
+      this.loop.wake(id, now + wait, "protect");
     }
-    if (again !== null) this.syncAt(again, 0);
-  }
-
-  // The speed release (decision 3): runs the order sync at a given moment (plus a quarter second for the clocks), by a timer, so a
-  // remainder left without a stop is sold about 3 seconds after Alpaca cancelled the stop rather than at the next 5 second pass. If
-  // a sync is running at that moment, it tries again a quarter second later. Only in the session.
-  // `slackMs` is added for the clocks (a grace counted from Alpaca's timestamp); 0 for "now" (decision 1 of 2026-11-06).
-  private syncAt(atMs: number, slackMs = 250): void {
-    if (this.eventSyncAt !== null && this.eventSyncAt <= atMs) return;
-    if (this.eventSyncTimer) (this.d.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>)))(this.eventSyncTimer);
-    this.eventSyncAt = atMs;
-    // A replaced timer's mark goes with it (fix (a)); the callers that mark set it after this.
-    this.recheckTimerAt = null;
-    this.syncTimerLog.setAt = this.d.now().getTime();
-    this.syncTimerLog.setFor = atMs;
-    const delay = Math.max(slackMs > 0 ? 100 : 0, atMs + slackMs - this.d.now().getTime());
-    this.eventSyncTimer = (this.d.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms)))(() => this.syncFromTimer(), delay);
-  }
-
-  // Michael's fix (a) of 2026-11-13: cancels the pending timer that is a recheck's own, because the pass is running that recheck now.
-  private cancelRecheckTimer(): void {
-    if (this.eventSyncTimer) (this.d.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>)))(this.eventSyncTimer);
-    this.eventSyncTimer = null;
-    this.eventSyncAt = null;
-    this.recheckTimerAt = null;
-  }
-
-  private syncFromTimer(): void {
-    const firedFor = this.eventSyncAt;
-    const ownRecheck = firedFor !== null && firedFor === this.recheckTimerAt;
-    this.recheckTimerAt = null;
-    this.eventSyncTimer = null;
-    this.eventSyncAt = null;
-    const s = this.sessionForSync;
-    if (!s || this.d.now() >= s.closeAt) return;
-    this.syncTimerLog.firedAt = this.d.now().getTime();
-    if (this.inflight.has("risk")) {
-      this.syncTimerLog.putOff++;
-      this.syncTimerLog.lastPutOffAt = this.d.now().getTime();
-      this.syncAt(this.d.now().getTime());
-      // Fix (a): still the recheck's own timer, put off a moment.
-      if (ownRecheck && this.eventSyncAt !== null) this.recheckTimerAt = this.eventSyncAt;
-      return;
-    }
-    this.syncTimerLog.putOff = 0;
-    this.startSync(s.day, s.closeAt);
-  }
-
-  // The redesign of 2026-11-14, part 1: arms (or clears) the list-lag recheck's own timer from what the last sync asked for.
-  private armLagRecheck(at?: number): void {
-    const lr = this.syncMemory.lagRecheck;
-    const clear = (this.d.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>)));
-    if (!lr) {
-      if (this.lagTimer) clear(this.lagTimer);
-      this.lagTimer = null;
-      this.lagTimerAt = null;
-      this.budget.stopWaiting("list lag recheck");
-      return;
-    }
-    const when = Math.min(at ?? lr.dueAt, lr.until);
-    if (this.lagTimer && this.lagTimerAt === when) return;
-    if (this.lagTimer) clear(this.lagTimer);
-    this.lagTimerAt = when;
-    this.lagTimer = (this.d.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms)))(() => this.lagRecheckFired(), Math.max(0, when - this.d.now().getTime()));
-  }
-
-  // The list-lag recheck's timer fired: a sync with a P2 reservation of the recheck's most requests, if the budget has room; else it waits
-  // for room (not a backoff step: no request is made while it waits), until the last lagging remainder's 30 second window ends. Limit
-  // (rule 6): that window and the shared budget; backoff: the recheck's own steps (0.5, 1, then 2 s), set by the sync.
-  private lagRecheckFired(): void {
-    this.lagTimer = null;
-    this.lagTimerAt = null;
-    const s = this.sessionForSync;
-    const lr = this.syncMemory.lagRecheck;
-    const now = this.d.now().getTime();
-    if (!s || this.d.now() >= s.closeAt || !lr) return;
-    if (now >= lr.until) {
-      this.syncMemory.lagRecheck = undefined;
-      this.budget.stopWaiting("list lag recheck");
-      this.d.log?.("info", "list_lag_recheck_window_over", { next: "regular sync" });
-      return;
-    }
-    // A sync is running: it asks again (or clears the recheck) when it ends; this is only the fallback, a quarter second later.
-    if (this.inflight.has("risk")) return this.armLagRecheck(now + 250);
-    const r = this.budget.tryReserve("P2", lr.cost, { label: "list lag recheck", waitKey: "list lag recheck" });
-    if (!(r instanceof Reservation)) {
-      this.d.log?.("info", "timed_out_try_out_of_room", { stage: "list lag recheck", cost: lr.cost, why: r.why, roomInMs: r.at - now, next: r.at < lr.until ? "when the budget has room" : "regular sync" });
-      return this.armLagRecheck(r.at);
-    }
-    this.startSync(s.day, s.closeAt, { recheck: r });
   }
 
   // Decision 3's measurement: loads the day's saved totals once, settles the sales whose 5 seconds are over, and saves the totals.
@@ -1483,6 +1377,9 @@ export class Worker {
       // most budgeted requests in any minute and any 5 seconds (at most 60 and 15 unless forced or overdrawn), and entries refused while a
       // P2 try waited on its floor.
       requestBudget: this.budget.takeMinute(),
+      // The redesign of 2026-11-14, part 2: the protection loop this minute (looks run, list-lag looks, failed, put off while a sync ran,
+      // waited for room, actions started, wakes asked for; wakes pending and actions running now).
+      protectionLoop: this.loop.takeMinute(),
     };
   }
 
@@ -1730,9 +1627,10 @@ export class Worker {
         // Item 1 of 2026-11-13 (afternoon): the order sync takes this live report over an order list that may still show the stop open.
         this.syncMemory.liveStopCancelled.set(info.clientOrderId, info.atMs);
         this.stopCancelPending.set(info.clientOrderId, { symbol: info.symbol, at: this.d.now().getTime(), tries: 0 });
-        this.stopCancelSeen.set(info.symbol, { alpacaAtMs: info.atMs, receivedMs: this.d.now().getTime(), syncSetFor: info.atMs + BARE_GRACE_MS });
-        // A4 of 2026-11-12: BARE_GRACE_MS is 0, so the sync runs at once and the remainder gets its fresh stop.
-        this.syncAt(info.atMs + BARE_GRACE_MS, BARE_GRACE_MS > 0 ? 250 : 0);
+        this.stopCancelSeen.set(info.symbol, { alpacaAtMs: info.atMs, receivedMs: this.d.now().getTime(), wokeFor: info.atMs + BARE_GRACE_MS });
+        // A4 of 2026-11-12: BARE_GRACE_MS is 0, so the entry is looked at once and the remainder gets its fresh stop (the redesign of
+        // 2026-11-14: a wake of the protection loop for that entry, not a sync of the whole account).
+        this.loop.wake(info.clientOrderId, info.atMs + BARE_GRACE_MS, "protect");
       },
       // A4 of 2026-11-12: a fresh stop's status. If it ended (cancelled, expired or rejected) other than by one of our own sales, the
       // remainder is unprotected again: the order sync runs at once and its missing-exit check sells it, as before A4.
@@ -1745,8 +1643,8 @@ export class Worker {
           if (entry && (info.event === "canceled" || info.event === "expired" || info.event === "rejected")) {
             // Recorded before any early return (group 1, round 5): a sale of that entry running now will not back off afterwards.
             noteTimedOutStopEnded(this.syncMemory, info.clientOrderId, this.d.now().getTime());
-            if (this.closingOut || this.liquidator.isLiquidating() || this.middayOwnsSelling) return;
-            this.syncAt(this.d.now().getTime(), 0);
+            if (this.closingOut || this.liquidator.isLiquidatingOthers() || this.middayOwnsSelling) return;
+            this.loop.wake(entry, this.d.now().getTime(), "protect");
           }
           return;
         }
@@ -1754,8 +1652,8 @@ export class Worker {
         settleFreshStop((e, data) => this.d.log?.("info", e, data), f, info.status, "live update", this.d.now().getTime());
         if (info.event === "canceled" || info.event === "expired" || info.event === "rejected") {
           this.d.log?.("info", "fresh_stop_ended", { symbol: info.symbol, stopClientOrderId: info.clientOrderId, event: info.event });
-          if (this.closingOut || this.liquidator.isLiquidating() || this.middayOwnsSelling) return;
-          this.syncAt(this.d.now().getTime(), 0);
+          if (this.closingOut || this.liquidator.isLiquidatingOthers() || this.middayOwnsSelling) return;
+          this.loop.wake(f.entryClientOrderId, this.d.now().getTime(), "protect");
         }
       },
       // A5 of 2026-11-12: an entry filled after the load window's 5 second cancel was sent: its exits are most likely being cancelled by
@@ -1771,10 +1669,10 @@ export class Worker {
       // runs: the exits were most likely cancelled by that sale itself, and the check is off then anyway.
       onExitsLost: (info) => {
         this.syncMemory.mustLook.add(info.clientOrderId);
-        if (this.closingOut || this.liquidator.isLiquidating()) return;
+        if (this.closingOut || this.liquidator.isLiquidatingOthers()) return;
         this.d.log?.("info", "exits_lost", { symbol: info.symbol });
         this.lostExitsPending.set(info.clientOrderId, { symbol: info.symbol, at: this.d.now().getTime(), tries: 0 });
-        this.syncAt(this.d.now().getTime(), 0);
+        this.loop.wake(info.clientOrderId, this.d.now().getTime(), "protect");
       },
       entryForGroup: (groupId) => [...this.syncMemory.lastSeen.values()].find((o) => o.groupId === groupId) ?? null,
       now: () => this.d.now().getTime(),

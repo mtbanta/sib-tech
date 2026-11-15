@@ -4,6 +4,7 @@ import { AlpacaError, type Order } from "./alpaca-trading.ts";
 import { activeOrdersOldestFirst } from "./order-index.ts";
 import { Reservation, RequestBudget, withReservation } from "./request-budget.ts";
 import { inRequestScope } from "./request-scope.ts";
+import type { ProtectionHooks } from "./protection.ts";
 import type { Broker } from "./broker.ts";
 import { centralClock, etInstant } from "./time.ts";
 import { CONTROL_STOP, type DayRecord, type OrderRecord, type StopFlag, type Store } from "./store.ts";
@@ -224,6 +225,8 @@ export class SyncMemory {
   // of the last lagging remainder's 30 second window). The worker runs it on its own timer as a sync with a P2 reservation of `cost`
   // (nothing is charged before it runs, so nothing is given back); with no room it waits for room, until `until`.
   lagRecheck: { dueAt: number; cost: number; until: number } | undefined = undefined;
+  // The redesign of 2026-11-14, part 2: the pages of the order list the last sync read (a list-lag look's cost is sized from it).
+  lastListPages = 1;
   // Item 3 of 2026-11-13: the wait after a failed lookup of an entry missing from Alpaca's listing (per entry, doubling to a minute).
   readonly lookupFailDelay = new Map<string, number>();
   readonly lookupFailUntil = new Map<string, number>();
@@ -485,6 +488,13 @@ export interface SyncOptions {
   // Michael's decision of 2026-11-09 ("Mid-day owns it"): true while the mid-day close-out is selling (10:30 until flat). Its own two
   // alerts (not flat yet, and 5 minutes later) cover those positions, so the stuck-entry 5 minute alert stands aside meanwhile.
   middayOwnsSelling?: () => boolean;
+  // The redesign of 2026-11-14, part 2: the protection loop (protection.ts). The walk hands each entry's action (a sale, a fresh stop, the 15
+  // second limit's work) to it and carries on, and asks it for a wake instead of a sync. Without one (a sync run on its own, as in the risk
+  // tests), an inline loop runs each action as the walk reaches it and gathers the wakes into `recheckAt`, as before.
+  loop?: ProtectionHooks;
+  // A look of the loop: only these entries are walked and looked up; everything else (which entries are open, the newest per symbol, what is
+  // forgotten) is still worked out from every open entry.
+  only?: ReadonlySet<string>;
 }
 
 // Updates stored entries from Alpaca by looking only at orders newer than the oldest entry still being watched
@@ -557,7 +567,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   mark("settleAwaiting");
   // Item 3: open entries made before the window read above are looked up by id, a few per sync, oldest look first.
   if (opts.streamLive) {
-    const older = active.filter((s) => createdMs(s) < fromMs && !byClientId.has(s.clientOrderId));
+    const older = active.filter((s) => createdMs(s) < fromMs && !byClientId.has(s.clientOrderId) && (!opts.only || opts.only.has(s.clientOrderId)));
     const must = older.filter((s) => mem.mustLook.has(s.clientOrderId));
     const due = older.filter((s) => !mem.mustLook.has(s.clientOrderId) && nowMs - (mem.oldLookedAt.get(s.clientOrderId) ?? 0) >= OLD_LOOKUP_EVERY_MS);
     due.sort((a, b) => (mem.oldLookedAt.get(a.clientOrderId) ?? 0) - (mem.oldLookedAt.get(b.clientOrderId) ?? 0) || createdMs(a) - createdMs(b));
@@ -586,6 +596,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   const lookupOrder = [...active].sort((a, b) => Number(mem.mustLook.has(b.clientOrderId)) - Number(mem.mustLook.has(a.clientOrderId)));
   for (const s of lookupOrder) {
     if (byClientId.has(s.clientOrderId) || lookups >= MISSING_LOOKUPS_PER_SYNC) continue;
+    if (opts.only && !opts.only.has(s.clientOrderId)) continue;
     if (createdMs(s) < fromMs) continue;
     const age = s.createdAt ? nowMs - new Date(s.createdAt).getTime() : Infinity;
     if (!(s.status === "submitted" || s.status === "filled" || (s.status === "intent" && age > MISSING_INTENT_AGE_MS))) continue;
@@ -677,7 +688,12 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   // has had room yet.
   // Group 2, round 1 of the night release: a symbol the position list does not show is passed as 0 held (nothing left to protect).
   mark("timedOutEnds");
-  if (!opts.middayOwnsSelling?.()) for (const id of [...mem.stuck.keys()]) await escalateIfDue(d, mem, id, positions.find((p) => p.symbol === mem.stuck.get(id)?.symbol)?.qty ?? 0, listed.orders);
+  // The redesign of 2026-11-14, part 2: not in a look of the loop for other entries, and not for an entry whose action is running (its try is
+  // changing what the alert reads; the next sync looks again).
+  if (!opts.middayOwnsSelling?.()) for (const id of [...mem.stuck.keys()]) {
+    if ((opts.only && !opts.only.has(id)) || opts.loop?.busy(id)) continue;
+    await escalateIfDue(d, mem, id, positions.find((p) => p.symbol === mem.stuck.get(id)?.symbol)?.qty ?? 0, listed.orders);
+  }
   // Michael's decision of 2026-11-09: entries on the short retry list are walked last, longest waiting first, so the first one due
   // takes the shared budget's room and the others take turns (before, the same few won every minute).
   const shortRetry = (s: OrderRecord) => (mem.stuck.get(s.clientOrderId)?.nextAt ?? 0) > 0;
@@ -695,8 +711,11 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   mark("alerts");
   // Michael's change of 2026-11-13 (evening): one recheck sync serves every remainder whose list still lags (gathered in `ctx.lag`).
   const walk = [...active.filter((s) => !shortRetry(s)), ...active.filter(shortRetry).sort((a, b) => mem.stuck.get(a.clientOrderId)!.lastTriedAt - mem.stuck.get(b.clientOrderId)!.lastTriedAt)];
-  const ctx: WalkCtx = { d, day, mem, opts, nowMs, listed, held, heldQty, latestPerSymbol, sellingSymbols, lookedUp, listAgeMs, fromMs, createdMs, lateNotice, timedCleanup, unprotected, lag: { until: 0, lookups: 0 } };
+  const ctx: WalkCtx = { d, day, mem, opts, nowMs, listed, held, heldQty, latestPerSymbol, sellingSymbols, lookedUp, listAgeMs, fromMs, createdMs, lateNotice, timedCleanup, unprotected, lag: { until: 0, lookups: 0 }, loop: undefined as unknown as ProtectionHooks };
+  ctx.loop = opts.loop ?? inlineLoop(ctx);
+  mem.lastListPages = Math.max(1, listed.pages);
   for (const s of walk) {
+    if (opts.only && !opts.only.has(s.clientOrderId)) continue;
     const o = byClientId.get(s.clientOrderId);
     if (!o) continue;
     mem.lastSeen.set(s.clientOrderId, o);
@@ -728,6 +747,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     const goneForGood = !held.has(s.symbol) && orderFinal && fillAge !== null && fillAge > (o.filledAt ? 10_000 : 60_000);
     if (exitFilledQty(o) >= o.filledQty - 1e-9 || goneForGood) {
       await d.store.updateOrder(s.clientOrderId, { closedAt: d.now().toISOString() });
+      (opts.loop as { forget?: (id: string) => void } | undefined)?.forget?.(s.clientOrderId);
       mem.bareSeen.delete(s.clientOrderId);
       mem.lastSeen.delete(s.clientOrderId);
       dropFreshStop(d, mem, s.clientOrderId, "its entry closed (its shares are gone)", nowMs);
@@ -779,6 +799,26 @@ interface WalkCtx {
   unprotected: string[];
   recheckAt?: number;
   lag: { gap?: number; until: number; lookups: number };
+  loop: ProtectionHooks;
+}
+
+// A sync run on its own (no protection loop, as in the risk tests): each action runs as the walk reaches it, and the wakes are gathered into
+// the sync's `recheckAt` and its list-lag recheck, as before part 2.
+function inlineLoop(ctx: WalkCtx): ProtectionHooks {
+  return {
+    busy: () => false,
+    act: async (_id, _label, run) => {
+      const r = await run();
+      if (r && r.recheckAt !== undefined) ask(ctx, r.recheckAt);
+    },
+    wake: (_id, at, kind, extra = {}) => {
+      if (kind === "protect") return ask(ctx, at);
+      const gap = at - ctx.nowMs;
+      ctx.lag.gap = ctx.lag.gap === undefined ? gap : Math.min(ctx.lag.gap, gap);
+      ctx.lag.until = Math.max(ctx.lag.until, extra.untilMs ?? 0);
+      ctx.lag.lookups += extra.extraRequests ?? 0;
+    },
+  };
 }
 const ask = (ctx: WalkCtx, at: number): void => {
   ctx.recheckAt = ctx.recheckAt === undefined ? at : Math.min(ctx.recheckAt, at);
@@ -787,6 +827,12 @@ const ask = (ctx: WalkCtx, at: number): void => {
 // The walk's decision for one entry that has shares and is not closed: whether it needs a sale, a fresh stop, a check, a recheck, or nothing.
 async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<void> {
   const { d, day, mem, opts, nowMs, listed, held, heldQty, latestPerSymbol, sellingSymbols, lookedUp, listAgeMs, fromMs, createdMs, lateNotice, timedCleanup } = ctx;
+  const id = s.clientOrderId;
+  // The redesign of 2026-11-14, part 2: an entry whose action is running is decided again when it ends (the loop keeps its wake).
+  if (ctx.loop.busy(id)) return;
+  const wake = (at: number): void => ctx.loop.wake(id, at, "protect");
+  // Asked again just before each action starts (a close-out or another liquidation may have started meanwhile).
+  const stillProtect = (): boolean => (typeof opts.protect === "function" ? opts.protect() : opts.protect);
   const protectNow = typeof opts.protect === "function" ? opts.protect() : opts.protect;
   // Group 1 review, round 1 (messaging): an entry reported stuck that is no longer the newest on its symbol gets its resolution line.
   if (latestPerSymbol.get(s.symbol)?.clientOrderId !== s.clientOrderId) await resolveStuck(d, mem, s.clientOrderId, `a newer ${s.symbol} position took over, and I watch that one now`);
@@ -800,9 +846,12 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
     // Michael's ruling B of 2026-11-12: still unclear 15 seconds after it was sent (as known before this sync's look): unprotected. The
     // look at the limit is part of cancelling it (freshStopTimeout), not a late confirmation.
     if (FRESH_STOP_LIMIT.on && covering && fresh.status === "unclear" && nowMs - fresh.placedAt >= FRESH_STOP_CONFIRM_MS) {
-      const t = await freshStopTimeout(d, day, mem, s, o, fresh, nowMs);
-      if (t.attempted) ctx.unprotected.push(s.symbol);
-      if (t.recheckAt !== undefined) ask(ctx, t.recheckAt);
+      await ctx.loop.act(id, "15 second limit", async () => {
+        if (!stillProtect()) return;
+        const t = await freshStopTimeout(d, day, mem, s, o, fresh, nowMs);
+        if (t.attempted) ctx.unprotected.push(s.symbol);
+        return t.recheckAt !== undefined ? { recheckAt: t.recheckAt } : undefined;
+      });
       return;
     }
     if (covering && (await freshStopLive(d, mem, fresh, listed.orders, nowMs, opts.streamLive === true, Math.max(1, listed.pages) + 1))) {
@@ -812,7 +861,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
         // Group 1, round 1 of the redesign (B3): a lookup that found no room is tried again as soon as room may return.
         const roomAt = fresh.lookRoomAt !== undefined ? Math.max(nowMs + 250, fresh.lookRoomAt) : Infinity;
         const due = Math.min(nowMs + FRESH_STOP_UNCLEAR_LOOKUP_MS, roomAt, fresh.placedAt + FRESH_STOP_CONFIRM_MS);
-        ask(ctx, due);
+        wake(due);
         mem.mustLook.add(s.clientOrderId);
       }
       return;
@@ -827,7 +876,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
       const w = await timedOutWait(d, mem, s, listed.orders, d.now().getTime());
       if (w !== null) {
         ctx.unprotected.push(s.symbol);
-        ask(ctx, w);
+        wake(w);
         return;
       }
     }
@@ -836,7 +885,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
       // Part A, step 1: tried moments ago and stuck; it is tried again at `due` (or when the shared request budget has room), and the
       // sync carries on with the others.
       ctx.unprotected.push(s.symbol);
-      ask(ctx, due.wait);
+      wake(due.wait);
       return;
     }
     d.log?.("unprotected_position", { symbol: s.symbol, clientOrderId: s.clientOrderId, listAgeMs: listAgeMs() });
@@ -846,9 +895,12 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
     const timedOutShown = listed.orders.filter((x) => mem.timedOutStops.get(x.clientOrderId) === s.clientOrderId && OPEN_STATUSES.has(x.status));
     const timedOutIds = timedOutShown.map((x) => x.id);
     // Group 2, round 3 (logging only): the cancel's outcome is logged by the sale after it was tried (cleanupSale), not here before it.
-    const c = await inTry(d, mem, due.go, "missing-exit sale", () => timedCleanup(d, day, mem, s, o, "missing", undefined, timedOutIds.length > 0 ? { alsoCancel: timedOutIds, alsoCancelStops: timedOutShown.map((x) => x.clientOrderId) } : {}));
-    if (c.attempted) ctx.unprotected.push(s.symbol);
-    if (c.recheckAt !== undefined) ask(ctx, c.recheckAt);
+    await ctx.loop.act(id, "missing-exit sale", async () => {
+      if (!stillProtect()) return;
+      const c = await inTry(d, mem, s, due.go, "missing-exit sale", () => timedCleanup(d, day, mem, s, o, "missing", undefined, timedOutIds.length > 0 ? { alsoCancel: timedOutIds, alsoCancelStops: timedOutShown.map((x) => x.clientOrderId) } : {}));
+      if (c.attempted) ctx.unprotected.push(s.symbol);
+      return c.recheckAt !== undefined ? { recheckAt: c.recheckAt } : undefined;
+    });
     return;
   }
   // Release A, fix 1: the take-profit is still open (so the check above passes) but the stop is gone and shares are left.
@@ -880,9 +932,8 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
       // a P2 reservation of its cost (the sync's order list, its positions and this entry's lookup), so many remainders at once can never exceed it. With
       // no room the recheck waits for room (the worker's own timer) until the last lagging remainder's 30 second window ends.
       const gap = Math.min(500 * 2 ** (tries - 1), LIVE_LAG_RECHECK_MAX_MS);
-      ctx.lag.gap = ctx.lag.gap === undefined ? gap : Math.min(ctx.lag.gap, gap);
-      ctx.lag.until = Math.max(ctx.lag.until, liveAt! + LIVE_LAG_WATCH_MS);
-      if (createdMs(s) < fromMs) ctx.lag.lookups++; // looked up by id at the recheck (older than the order list's window)
+      // A list-lag wake (a lookup by id at the look for an entry older than the order list's window; its 30 s window).
+      ctx.loop.wake(id, nowMs + gap, "lag", { extraRequests: createdMs(s) < fromMs ? 1 : 0, untilMs: liveAt! + LIVE_LAG_WATCH_MS });
       mem.mustLook.add(s.clientOrderId);
     }
     return;
@@ -902,7 +953,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
   const since = Number.isFinite(parsed) ? Math.min(parsed, firstSeen) : firstSeen;
   if (nowMs - since < BARE_GRACE_MS) {
     const due = since + BARE_GRACE_MS;
-    ask(ctx, due);
+    wake(due);
     // Group 1 review, round 2: the sync at the grace time must look this entry up again, even if it is older than the 10 minute read.
     mem.mustLook.add(s.clientOrderId);
     return;
@@ -912,7 +963,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
     // Part A, step 1: tried moments ago and stuck; it is tried again then (or when the shared request budget has room), and the sync
     // carries on with the others.
     ctx.unprotected.push(s.symbol);
-    ask(ctx, stuckDue.wait);
+    wake(stuckDue.wait);
     return;
   }
   d.log?.("bare_remainder", { symbol: s.symbol, clientOrderId: s.clientOrderId, shares: bare.shares, stopCancelledAt: cancelTime, listAgeMs: listAgeMs() });
@@ -928,10 +979,13 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
       /* a measurement must never break the sync */
     }
   };
-  const c = await inTry(d, mem, stuckDue.go, "remainder", () => timedCleanup(d, day, mem, s, o, "bare", onSellSent, { stopPrice: bare.stop.stopPrice ?? s.stopPrice, stopCancelledAt: cancelTime }));
-  if (c.attempted) ctx.unprotected.push(s.symbol);
-  if (c.recheckAt !== undefined) ask(ctx, c.recheckAt);
-  if (!c.stuck) mem.bareSeen.delete(s.clientOrderId);
+  await ctx.loop.act(id, "remainder", async () => {
+    if (!stillProtect()) return;
+    const c = await inTry(d, mem, s, stuckDue.go, "remainder", () => timedCleanup(d, day, mem, s, o, "bare", onSellSent, { stopPrice: bare.stop.stopPrice ?? s.stopPrice, stopCancelledAt: cancelTime }));
+    if (c.attempted) ctx.unprotected.push(s.symbol);
+    if (!c.stuck) mem.bareSeen.delete(s.clientOrderId);
+    return c.recheckAt !== undefined ? { recheckAt: c.recheckAt } : undefined;
+  });
 }
 
 const EPS_QTY = 1e-9;
@@ -948,7 +1002,9 @@ function backoffStuck(mem: SyncMemory, symbol: string, clientOrderId: string, no
   return st;
 }
 
-function retryDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string, nowMs: number): { wait: number } | { go: Reservation | null } {
+// A retry's reservation (the redesign of 2026-11-14): what `inTry` reserves when the try starts.
+type TrySpec = { n: number; timedOut: boolean };
+function retryDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string, nowMs: number): { wait: number } | { go: TrySpec | null } {
   const st = mem.stuck.get(clientOrderId);
   const timedOut = hasTimedOut(mem, clientOrderId);
   // A first try (no stuck record, or due at once) goes ahead, never refused (decision 4): counted as a first try. Since group 1's round 1
@@ -956,24 +1012,34 @@ function retryDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string, nowMs: nu
   if (!timedOut && (!st || st.nextAt === 0)) return { go: null };
   if (st && st.nextAt > nowMs) return { wait: st.nextAt };
   // The redesign of 2026-11-14, part 1: a retry is class P1 of the shared request budget. It starts only with room for its whole try
-  // (TIMED_OUT_TRY_REQUESTS for an entry with a timed-out stop, else STUCK_TRY_REQUESTS); what it sends is counted as it is sent.
-  const r = budgetOf(d, mem).tryReserve("P1", timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS, { label: timedOut ? "timed-out stop try" : "stuck retry", limitRetries: timedOut });
-  if (r instanceof Reservation) {
-    if (st) st.roomWaits = 0;
-    return { go: r };
-  }
-  // Waiting for room (not a backoff step of the try itself): until there is room for the coming sync's reads and the try, and at least 0.5,
-  // 1, 2, then 4 s after refusals in a row (group 2, round 2 of the redesign).
-  const waits = st ? (st.roomWaits = (st.roomWaits ?? 0) + 1) : 1;
-  const at = roomWaitUntil(d, mem, "P1", timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS, waits, nowMs);
-  if (st) st.nextAt = at;
-  if (timedOut && waits === 1) d.log?.("timed_out_try_out_of_room", { clientOrderId, why: r.why, retryInMs: at - nowMs });
-  return { wait: at };
+  // (TIMED_OUT_TRY_REQUESTS for an entry with a timed-out stop, else STUCK_TRY_REQUESTS); what it sends is counted as it is sent. Part 2
+  // (the advisor's point, and group 1's leak note): here the room is only looked at; the reservation is taken when the try starts (`inTry`,
+  // inside the loop's action, after its busy check and the stand-aside rules are asked again).
+  const n = timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS;
+  const room = budgetOf(d, mem).roomFor("P1", n);
+  if (room.ok) return { go: { n, timedOut } };
+  return { wait: waitForRoom(d, mem, st, clientOrderId, timedOut, n, room.why, nowMs) };
 }
 
-// Runs one try of the order sync's walk: inside its P1 reservation (a retry), or counted as a first try. The reservation ends with the try.
-function inTry<T>(d: RiskDeps, mem: SyncMemory, go: Reservation | null, label: string, fn: () => Promise<T>): Promise<T> {
-  return go ? withReservation(go, fn) : withReservation(budgetOf(d, mem).first(label), fn, "first");
+// Waiting for room (not a backoff step of the try itself): until there is room for the coming sync's reads and the try, and at least 0.5, 1,
+// 2, then 4 s after refusals in a row (group 2, round 2 of the redesign).
+function waitForRoom(d: RiskDeps, mem: SyncMemory, st: StuckEntry | undefined, clientOrderId: string, timedOut: boolean, n: number, why: string, nowMs: number): number {
+  const waits = st ? (st.roomWaits = (st.roomWaits ?? 0) + 1) : 1;
+  const at = roomWaitUntil(d, mem, "P1", n, waits, nowMs);
+  if (st) st.nextAt = at;
+  if (timedOut && waits === 1) d.log?.("timed_out_try_out_of_room", { clientOrderId, why, retryInMs: at - nowMs });
+  return at;
+}
+
+// Runs one try: inside its P1 reservation (a retry), taken now, or counted as a first try. The reservation ends with the try. A retry that
+// finds no room now (another try took it since the walk looked) sends nothing and waits for room.
+async function inTry(d: RiskDeps, mem: SyncMemory, s: OrderRecord, spec: TrySpec | null, label: string, fn: () => Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }>): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }> {
+  if (!spec) return withReservation(budgetOf(d, mem).first(label), fn, "first");
+  const r = budgetOf(d, mem).tryReserve("P1", spec.n, { label: spec.timedOut ? "timed-out stop try" : "stuck retry", limitRetries: spec.timedOut });
+  const st = mem.stuck.get(s.clientOrderId);
+  if (!(r instanceof Reservation)) return { attempted: true, stuck: true, recheckAt: waitForRoom(d, mem, st, s.clientOrderId, spec.timedOut, spec.n, r.why, d.now().getTime()) };
+  if (st) st.roomWaits = 0;
+  return withReservation(r, fn);
 }
 const plural = (n: number, one: string, many: string = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
 const minutesText = (ms: number): string => (ms < 60_000 ? plural(Math.max(1, Math.round(ms / 1000)), "second") : plural(Math.round(ms / 60_000), "minute"));

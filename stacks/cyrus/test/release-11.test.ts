@@ -133,13 +133,16 @@ test("decision 1, worker: exits cancelled while a sale is running (that sale can
   const { id, o } = await holdOne(sim, r, "SNAP");
   await r.at("15:00:00");
   await r.orderUpdate(upd("fill", { id: o.id, clientOrderId: id, symbol: "SNAP", side: "buy", status: "filled", qty: 1, filledQty: 1, filledAvgPrice: 10, groupId: o.groupId }, 1));
-  const w = r.worker as unknown as { liquidator: Liquidator };
-  const orig = w.liquidator.isLiquidating.bind(w.liquidator);
-  w.liquidator.isLiquidating = () => true;
+  // The redesign of 2026-11-14, part 2: a liquidation other than a one-entry cleanup (here a close-out or `flatten`) is running; the live
+  // update asks the protection loop for no look at the entry.
+  const w = r.worker as unknown as { liquidator: Liquidator; loop: { pendingWakes(): ReadonlyMap<string, unknown> } };
+  const orig = w.liquidator.isLiquidatingOthers.bind(w.liquidator);
+  w.liquidator.isLiquidatingOthers = () => true;
   const before = r.timers().length;
   for (const l of o.legs) await r.orderUpdate(upd("canceled", { ...structuredClone(l), status: "canceled", groupId: o.groupId }, null, sim.simMs));
-  assert.equal(r.timers().length, before, "no sync timer");
-  w.liquidator.isLiquidating = orig;
+  assert.equal(w.loop.pendingWakes().has(id), false, "no look asked for");
+  assert.equal(r.timers().length, before, "no timer");
+  w.liquidator.isLiquidatingOthers = orig;
 });
 
 // ================================ 2. The summary: every missing order, buys and sells ================================

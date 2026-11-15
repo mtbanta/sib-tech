@@ -329,16 +329,27 @@ export class Liquidator {
     return this.running > 0;
   }
 
+  // The redesign of 2026-11-14, part 2: true while a liquidation other than a one-entry cleanup sale (`ownEntryOnly`: the protection loop's
+  // sales and the fast sale) is asked for or running: a close-out, `flatten`, the loss stop's sale, a carried-position sale. One position's
+  // own sale no longer keeps the loop from deciding for the others (they wait their turn in this one-at-a-time queue).
+  isLiquidatingOthers(): boolean {
+    return this.runningOthers > 0;
+  }
+  private runningOthers = 0;
+
   // One liquidation at a time: a second request waits for the first and then looks again (usually it finds the
   // account flat and has nothing to do), so two can never sell the same shares.
   // A priority sale still waits for the sale running ahead of it, but a remainder sale (`yieldToPriority`) gives way at its next step.
   flatten(o: LiquidateOptions): Promise<LiquidateResult> {
     this.running++;
+    const other = !o.ownEntryOnly;
+    if (other) this.runningOthers++;
     if (o.priority) this.priorityPending++;
     const run = this.chain.then(() => this.run(o));
     this.chain = run.catch(() => undefined);
     return run.finally(() => {
       this.running--;
+      if (other) this.runningOthers--;
       if (o.priority) this.priorityPending--;
     });
   }

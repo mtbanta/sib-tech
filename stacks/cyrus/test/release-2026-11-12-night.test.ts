@@ -869,14 +869,15 @@ test("Michael's decision 2 of 2026-11-13 (the split): with ruling B switched off
   }
 });
 
-test("group 1, round 3 (night): the live update that a timed-out stop ended clears its entry's backoff time and the resting-stop note, and runs the order sync at once (no wait for the backoff)", async () => {
+test("group 1, round 3 (night): the live update that a timed-out stop ended clears its entry's backoff time and the resting-stop note, and looks at the entry at once (no wait for the backoff)", async () => {
   const { rig } = await import("./rig.ts");
   const r = rig({ orderStream: true });
   const wk: any = r.worker;
   wk.startOrderStream(D);
   const mem: SyncMemory = wk.syncMemory;
+  // The redesign of 2026-11-14, part 2: a wake of the protection loop for the entry (it was a sync brought forward).
   const syncs: number[] = [];
-  wk.syncAt = (atMs: number) => void syncs.push(atMs);
+  wk.loop.wake = (id: string, atMs: number) => void (id === "cyrus-20261102-RKLB-1" && syncs.push(atMs));
   mem.timedOutStops.set("cyrus-p-20261102-RKLB-x-s1", "cyrus-20261102-RKLB-1");
   mem.stuck.set("cyrus-20261102-RKLB-1", { symbol: "RKLB", since: 0, nextAt: 9e15, delayMs: 30_000, alerted: true, escalated: false, lastTriedAt: 0, why: "x", restingStop: { stopClientOrderId: "cyrus-p-20261102-RKLB-x-s1", cancel: "accepted" } });
   const hook = wk.orderHandler.d.onFreshStopUpdate;
@@ -887,16 +888,16 @@ test("group 1, round 3 (night): the live update that a timed-out stop ended clea
   const st = mem.stuck.get("cyrus-20261102-RKLB-1")!;
   assert.equal(st.nextAt, 0, "the sale is due now");
   assert.equal(st.restingStop, undefined, "the 5 minute alert no longer says the stop rests at Alpaca");
-  assert.equal(syncs.length, 1, "the order sync runs at once");
-  // Group 1, round 6 note (the wiring): while a sale is running the hook schedules no sync, but it still records the end, so that sale
-  // does not back off afterwards.
+  assert.equal(syncs.length, 1, "the entry is looked at at once");
+  // Group 1, round 6 note (the wiring): while another liquidation runs (a close-out, `flatten`) the hook asks for no look, but it still records
+  // the end, so that sale does not back off afterwards. (Since part 2 of the redesign, the entry's own cleanup sale does not count here.)
   mem.timedOutStops.set("cyrus-p-20261102-RKLB-x-s2", "cyrus-20261102-RKLB-1");
   st.nextAt = 9e15;
-  wk.liquidator.isLiquidating = () => true;
+  wk.liquidator.isLiquidatingOthers = () => true;
   hook({ clientOrderId: "cyrus-p-20261102-RKLB-x-s2", symbol: "RKLB", event: "canceled", status: "canceled", atMs: 0 });
   assert.ok(mem.timedOutEndedAt.has("cyrus-p-20261102-RKLB-x-s2"), "the end is recorded while a sale runs");
   assert.equal(st.nextAt, 0);
-  assert.equal(syncs.length, 1, "no sync scheduled while a sale runs (as on v20)");
+  assert.equal(syncs.length, 1, "no look asked for while another liquidation runs (as on v20)");
   wk.endOrderStream?.();
 });
 
@@ -1357,12 +1358,13 @@ test("Michael's item 1 of 2026-11-13 (afternoon): the worker records the live re
   const wk: any = r.worker;
   wk.startOrderStream(D);
   const syncs: number[] = [];
-  wk.syncAt = (atMs: number) => void syncs.push(atMs);
+  // The redesign of 2026-11-14, part 2: the protection loop's wakes for the entry (they were syncs brought forward).
+  wk.loop.wake = (_id: string, atMs: number) => void syncs.push(atMs);
   const id = "cyrus-20261102-LUNR-1";
   await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "LUNR", qty: 5, referencePrice: 12, stopPrice: 11.87, status: "filled", alpacaOrderId: null, filledQty: 5, filledAvgPrice: 12, note: null });
   wk.orderHandler.d.onStopCancelled({ clientOrderId: id, symbol: "LUNR", atMs: 1_000 });
   assert.equal(wk.syncMemory.liveStopCancelled.get(id), 1_000, "recorded for the sync");
-  assert.equal(syncs.length, 1, "a sync at once");
+  assert.equal(syncs.length, 1, "a look at once");
   await wk.stopCancelFollowUp(D);
   await wk.stopCancelFollowUp(D);
   await wk.stopCancelFollowUp(D);
@@ -1623,14 +1625,15 @@ test("Michael's change of 2026-11-13 (evening): the worker's backup syncs stand 
   const wk: any = r.worker;
   wk.startOrderStream(D);
   const syncs: number[] = [];
-  wk.syncAt = (atMs: number) => void syncs.push(atMs);
+  // The redesign of 2026-11-14, part 2: the protection loop's wakes for the entry (they were syncs brought forward).
+  wk.loop.wake = (_id: string, atMs: number) => void syncs.push(atMs);
   const id = "cyrus-20261102-LUNR-1";
   await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "LUNR", qty: 5, referencePrice: 12, stopPrice: 11.87, status: "filled", alpacaOrderId: null, filledQty: 5, filledAvgPrice: 12, note: null });
   wk.orderHandler.d.onStopCancelled({ clientOrderId: id, symbol: "LUNR", atMs: 1_000 });
   assert.equal(syncs.length, 1, "a sync at once");
   wk.syncMemory.liveLagTries.set(id, 1); // the sync saw the list still showing the stop open
   await wk.stopCancelFollowUp(D);
-  assert.equal(syncs.length, 1, "no backup sync: the sync's own charged rechecks carry it");
+  assert.equal(syncs.length, 1, "no backup look: the walk's own list-lag looks carry it");
   assert.equal(wk.stopCancelPending.has(id), false);
   wk.endOrderStream?.();
 });
@@ -1785,69 +1788,7 @@ async function workerLag() {
   return { sim, r, wk, mem, dd, closeAt, t0, run, settle, id };
 }
 
-test("the redesign of 2026-11-14, part 1: in the worker, the list-lag recheck runs on its own timer as a sync inside a P2 reservation; the budget charges exactly what those syncs sent, and other syncs charge nothing", async () => {
-  const { sim, r, wk, mem, t0, run, settle } = await workerLag();
-  const tagged: Record<string, number> = { entry: 0, first: 0, P1: 0, P2: 0, routine: 0 };
-  sim.onSend = () => void (tagged[currentTag()] = (tagged[currentTag()] ?? 0) + 1);
-  await run({}); // the live report's sync: sees the lag and asks for a recheck 0.5 s on
-  assert.ok(mem.lagRecheck && wk.lagTimerAt === mem.lagRecheck.dueAt, "the recheck's own timer is armed for its time");
-  assert.equal(mem.budget.totals.P2, 0, "nothing charged ahead");
-  let sentInRechecks = 0;
-  const realStart = wk.startSync.bind(wk);
-  wk.startSync = (d: any, c: any, how: any = {}) => {
-    if (how.recheck) {
-      const before = tagged.P2!;
-      const res = how.recheck;
-      const realEnd = res.end.bind(res);
-      res.end = () => {
-        sentInRechecks += tagged.P2! - before;
-        realEnd();
-      };
-    }
-    return realStart(d, c, how);
-  };
-  for (let i = 0; i < 10; i++) {
-    const at = wk.lagTimerAt;
-    if (at === null) break;
-    r.setNow(new Date(at).toISOString());
-    await settle();
-    await settle();
-  }
-  assert.ok(sentInRechecks > 0, "recheck syncs ran");
-  assert.equal(mem.budget.totals.P2, sentInRechecks, `charged ${mem.budget.totals.P2}, sent in recheck syncs ${sentInRechecks}`);
-  // A regular sync (routine work) charges nothing.
-  const p2 = mem.budget.totals.P2;
-  await run({ fromPass: true });
-  assert.equal(mem.budget.totals.P2, p2, "a regular sync is routine");
-  void t0;
-  r.worker.stop?.();
-});
 
-test("the redesign of 2026-11-14, part 1: in the worker, a list-lag recheck with no room waits for room without syncing, and gives up at the end of its 30 second window", async () => {
-  const { sim, r, wk, mem, t0, run, settle } = await workerLag();
-  await run({});
-  assert.ok(mem.lagRecheck, "a recheck is asked for");
-  // Use the whole minute so no recheck fits until the window is over.
-  const filler = mem.budget.tryReserve("P1", 60, { fiveSec: false, label: "test: a full minute" });
-  for (let i = 0; i < 60; i++) filler.charge("/v2/test");
-  filler.end();
-  let recheckSyncs = 0;
-  const realStart = wk.startSync.bind(wk);
-  wk.startSync = (d: any, c: any, how: any = {}) => {
-    if (how.recheck) recheckSyncs++;
-    return realStart(d, c, how);
-  };
-  const reqs = sim.requests;
-  for (let i = 0; i < 20 && wk.lagTimerAt !== null; i++) {
-    r.setNow(new Date(wk.lagTimerAt).toISOString());
-    await settle();
-  }
-  assert.equal(recheckSyncs, 0, "no recheck sync without room");
-  assert.equal(sim.requests, reqs, "no request while it waited");
-  assert.equal(mem.lagRecheck, undefined, "dropped at the end of its window: the regular sync carries on");
-  assert.ok(sim.simMs - t0 <= 31_000, "within the 30 second window");
-  r.worker.stop?.();
-});
 
 
 
@@ -1899,43 +1840,6 @@ test("redesign part 1 (group 2, round 1): with the unclear stop's failing lookup
 
 // Group 2, round 1 of the redesign (part 1): the rule 6 limit of the list-lag recheck's own timer. A recheck sync that fails is dropped
 // (the warning `list_lag_recheck_failed`), its reservation is released, and it never fires again at once on a failing read.
-test("redesign part 1: in the worker, a list-lag recheck whose sync fails is dropped with a warning, its reservation released, and not fired again until a sync asks again", async () => {
-  const { sim, r, wk, mem, run, settle } = await workerLag();
-  const warns: string[] = [];
-  const realLog = wk.d.log;
-  wk.d.log = (level: string, e: string, data: any) => {
-    if (level === "warn") warns.push(e);
-    return realLog?.(level, e, data);
-  };
-  await run({});
-  const due = mem.lagRecheck!.dueAt;
-  let fails = 0;
-  const realList = (sim as any).listOrdersPaged.bind(sim);
-  (sim as any).listOrdersPaged = async (...a: any[]) => {
-    fails++;
-    throw new Error("order list read failed (test)");
-  };
-  let rechecks = 0;
-  const realStart = wk.startSync.bind(wk);
-  wk.startSync = (d: any, c: any, how: any = {}) => {
-    if (how.recheck) rechecks++;
-    return realStart(d, c, how);
-  };
-  r.setNow(new Date(due).toISOString());
-  await settle();
-  await settle();
-  assert.equal(rechecks, 1, "one recheck sync");
-  assert.ok(fails >= 1, "its read failed");
-  assert.ok(warns.includes("list_lag_recheck_failed"), warns.join(","));
-  assert.equal(mem.lagRecheck, undefined, "dropped");
-  assert.equal(wk.lagTimerAt, null, "no timer left");
-  assert.equal(mem.budget.inUse().open, 0, "its reservation released");
-  r.setNow(new Date(due + 5_000).toISOString());
-  await settle();
-  assert.equal(rechecks, 1, "not fired again");
-  (sim as any).listOrdersPaged = realList;
-  r.worker.stop?.();
-});
 
 // Group 1, round 1 of the redesign (part 1), B4: the lagging remainder's entry closes while no other entry is open, so the next sync returns
 // early. Its recheck must not stay asked for (before: the worker's timer fired at once after every sync until the window ended).
@@ -2211,4 +2115,85 @@ test("redesign part 1 (group 1, round 2, N4): an ordinary stuck retry's sale is 
   w.sim.advanceTo(st.nextAt);
   await syncOrders(w.risk, dd, { protect: true });
   assert.equal(n, 8, `all 8 sends of the retry's sale went out (its reservation is 10, the try's reads came first): ${n}`);
+});
+
+// The redesign of 2026-11-14, part 2: in the worker, the list-lag rechecks are looks of the protection loop (only the lagging entry, the
+// reads the sync makes for it), inside a P2 reservation of their cost; the budget charges exactly the P2 requests those looks sent; the
+// regular sync charges nothing; a look never resets the regular sync's 10 seconds.
+test("redesign part 2: in the worker, list-lag looks run inside P2 reservations, charged exactly what they sent; the regular sync charges nothing; looks never reset the regular sync's clock", async () => {
+  const { sim, r, wk, mem, run, settle } = await workerLag();
+  const tagged: Record<string, number> = { entry: 0, first: 0, P1: 0, P2: 0, routine: 0 };
+  sim.onSend = () => void (tagged[currentTag()] = (tagged[currentTag()] ?? 0) + 1);
+  wk.loop.wake("cyrus-20261102-LUNR-1", sim.simMs, "protect"); // the live report: a look at once
+  r.setNow(new Date(sim.simMs).toISOString());
+  await settle();
+  await settle();
+  const lastSync = wk.lastSync;
+  const lag = [...wk.loop.pendingWakes()].find(([, w]: any) => w.kind === "lag");
+  assert.ok(lag, "the look saw the lag and asked for a list-lag look");
+  for (let i = 0; i < 10 && wk.loop.nextLookAt() !== null; i++) {
+    r.setNow(new Date(wk.loop.nextLookAt()).toISOString());
+    await settle();
+    await settle();
+  }
+  assert.ok(mem.budget.totals.P2 > 0, "list-lag looks ran (P2)");
+  assert.equal(mem.budget.totals.P2, tagged.P2, "charged exactly the P2 requests they sent");
+  assert.equal(wk.lastSync, lastSync, "looks never reset the regular sync's clock");
+  const p2 = mem.budget.totals.P2;
+  await run({}); // a regular sync
+  assert.equal(mem.budget.totals.P2, p2, "a regular sync is routine");
+  r.worker.stop?.();
+});
+
+test("redesign part 2: in the worker, a list-lag look with no room waits for room without any request, and is dropped at the end of its 30 second window", async () => {
+  const { sim, r, wk, mem, t0, settle } = await workerLag();
+  wk.loop.wake("cyrus-20261102-LUNR-1", sim.simMs, "protect");
+  r.setNow(new Date(sim.simMs).toISOString());
+  await settle();
+  await settle();
+  assert.ok([...wk.loop.pendingWakes().values()].some((w: any) => w.kind === "lag"), "a list-lag look is asked for");
+  const filler = mem.budget.tryReserve("P1", 60, { fiveSec: false, label: "test: a full minute", force: true });
+  for (let i = 0; i < 60; i++) filler.charge("/v2/test");
+  filler.end();
+  const reqs = sim.requests;
+  for (let i = 0; i < 30 && wk.loop.nextLookAt() !== null && sim.simMs < t0 + 31_000; i++) {
+    r.setNow(new Date(Math.min(wk.loop.nextLookAt(), t0 + 31_000)).toISOString());
+    await settle();
+  }
+  assert.equal(sim.requests, reqs, "no request while it waited for room");
+  r.setNow(new Date(t0 + 31_000).toISOString());
+  await settle();
+  assert.equal([...wk.loop.pendingWakes().values()].some((w: any) => w.kind === "lag"), false, "dropped at the end of its window");
+  r.worker.stop?.();
+});
+
+test("redesign part 2: in the worker, a look whose reads fail keeps its wakes and looks again after a growing wait (1 s, 2 s, ...), with a warning", async () => {
+  const { sim, r, wk, settle } = await workerLag();
+  const warns: string[] = [];
+  const realLog = wk.d.log;
+  wk.d.log = (level: string, e: string, data: any) => {
+    if (level === "warn") warns.push(e);
+    return realLog?.(level, e, data);
+  };
+  const tries: number[] = [];
+  const realList = (sim as any).listOrdersPaged.bind(sim);
+  (sim as any).listOrdersPaged = async () => {
+    tries.push(sim.simMs);
+    throw new Error("order list read failed (test)");
+  };
+  wk.loop.wake("cyrus-20261102-LUNR-1", sim.simMs, "protect");
+  const start = sim.simMs;
+  for (let i = 0; i < 12 && wk.loop.nextLookAt() !== null && sim.simMs < start + 20_000; i++) {
+    r.setNow(new Date(Math.max(sim.simMs, wk.loop.nextLookAt())).toISOString());
+    await settle();
+    await settle();
+  }
+  const gaps = tries.slice(1).map((t, i) => t - tries[i]!);
+  assert.ok(warns.includes("protection_look_failed"), warns.join(","));
+  assert.ok(tries.length >= 3, `looked again: ${tries.map((t) => t - start).join(", ")}`);
+  assert.ok(gaps.every((g, i) => i === 0 || g >= gaps[i - 1]!), `growing waits: ${gaps.join(", ")}`);
+  assert.ok(gaps[0]! >= 1_000, `the first wait is 1 s: ${gaps.join(", ")}`);
+  assert.equal(wk.budget.inUse().open, 0, "no reservation left open");
+  (sim as any).listOrdersPaged = realList;
+  r.worker.stop?.();
 });

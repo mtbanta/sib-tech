@@ -1,0 +1,344 @@
+// The redesign of 2026-11-14, part 2: the protection loop (src/protection.ts) and how the worker uses it. It replaces fix (a)'s tests
+// (test/weekend-r8.test.ts, retired with the shared sync timer): the properties they guarded are kept here in the loop's terms (a recheck runs
+// once at its time, a failed read does not lose a stuck sale's retry, an outage of the reads stays bounded).
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { ProtectionLoop, LOOK_FAIL_FIRST_MS, LOOK_FAIL_MAX_MS, LOOK_PUT_OFF_MS } from "../src/protection.ts";
+import { SimBroker } from "./sim-broker.ts";
+import { rig, settle, D } from "./rig.ts";
+import { clientOrderIdFor } from "../src/gate.ts";
+import { FakeBot } from "./helpers.ts";
+
+const iso = (ms: number) => new Date(ms).toISOString();
+
+// ---------------- the loop on its own ----------------
+
+function loopWorld() {
+  let now = 0;
+  const timers: Array<{ due: number; fn: () => void }> = [];
+  const looks: Array<{ at: number; ids: string[]; kind: string; extra: number }> = [];
+  let next: (ids: ReadonlySet<string>) => any = () => ({ outcome: "done" });
+  const loop = new ProtectionLoop({
+    now: () => now,
+    setTimer: (fn, ms) => {
+      const h = { due: now + ms, fn };
+      timers.push(h);
+      return h;
+    },
+    clearTimer: (h) => {
+      const i = timers.indexOf(h as any);
+      if (i >= 0) timers.splice(i, 1);
+    },
+    look: async (ids, kind, extra) => {
+      looks.push({ at: now, ids: [...ids].sort(), kind, extra });
+      return next(ids);
+    },
+  });
+  const to = async (t: number) => {
+    for (let g = 0; g < 100; g++) {
+      timers.sort((a, b) => a.due - b.due);
+      const h = timers[0];
+      if (!h || h.due > t) break;
+      timers.shift();
+      now = Math.max(now, h.due);
+      h.fn();
+      for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r));
+    }
+    now = Math.max(now, t);
+  };
+  return { loop, looks, timers, to, setNext: (f: typeof next) => void (next = f), now: () => now };
+}
+
+test("part 2, the loop: wakes for several entries due together make one look; the earliest wake wins; a protection wake is never turned into a list-lag one", async () => {
+  const w = loopWorld();
+  w.loop.wake("A", 1_000, "protect");
+  w.loop.wake("B", 1_000, "lag", { extraRequests: 1, untilMs: 30_000 });
+  w.loop.wake("A", 5_000, "protect"); // later: ignored
+  w.loop.wake("C", 3_000, "lag", { untilMs: 30_000 });
+  w.loop.wake("C", 2_000, "protect"); // earlier, and a protection wake
+  await w.to(1_000);
+  assert.deepEqual(w.looks, [{ at: 1_000, ids: ["A", "B"], kind: "protect", extra: 1 }], "one look for both; a protection wake makes it routine");
+  await w.to(3_000);
+  assert.deepEqual(w.looks.at(-1), { at: 2_000, ids: ["C"], kind: "protect", extra: 0 });
+  assert.equal(w.looks.length, 2, "each wake served once");
+});
+
+test("part 2, the loop: a look only for list-lag wakes is a list-lag look (P2 in the worker); a list-lag wake past its window is dropped", async () => {
+  const w = loopWorld();
+  w.loop.wake("B", 500, "lag", { extraRequests: 1, untilMs: 30_000 });
+  await w.to(500);
+  assert.deepEqual(w.looks.at(-1), { at: 500, ids: ["B"], kind: "lag", extra: 1 });
+  w.loop.wake("B", 31_000, "lag", { untilMs: 30_000 });
+  await w.to(32_000);
+  assert.equal(w.looks.length, 1, "past its window: no look");
+  assert.equal(w.loop.pendingWakes().size, 0);
+});
+
+test("part 2, the loop: one action per entry at a time; a wake that comes while it runs is looked at when it ends; a recheck the action asks for becomes a wake", async () => {
+  const w = loopWorld();
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let runs = 0;
+  await w.loop.act("A", "sale", async () => {
+    runs++;
+    await gate;
+    return { recheckAt: 10_000 };
+  });
+  await w.loop.act("A", "sale", async () => void runs++);
+  assert.equal(runs, 1, "a second action for the same entry does not start");
+  assert.equal(w.loop.busy("A"), true);
+  w.loop.wake("A", 100, "protect");
+  await w.to(200);
+  assert.equal(w.looks.length, 0, "no look while its action runs");
+  release();
+  for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(w.loop.busy("A"), false);
+  await w.to(300);
+  assert.deepEqual(w.looks.map((l) => l.ids), [["A"]], "looked at once the action ended");
+});
+
+test("part 2, the loop: a look put off by a running sync comes a quarter second later; one that waits for room comes when room returns; neither drops a wake asked for meanwhile", async () => {
+  const w = loopWorld();
+  let n = 0;
+  w.setNext(() => (++n === 1 ? { outcome: "busy" } : n === 2 ? { outcome: "wait", retryAt: 5_000 } : { outcome: "done" }));
+  w.loop.wake("A", 1_000, "protect");
+  await w.to(1_000);
+  assert.equal(w.looks.length, 1);
+  await w.to(1_000 + LOOK_PUT_OFF_MS);
+  assert.equal(w.looks.length, 2, "a quarter second later");
+  await w.to(4_999);
+  assert.equal(w.looks.length, 2, "waiting for room: nothing before 5 s");
+  await w.to(5_000);
+  assert.equal(w.looks.length, 3);
+  assert.equal(w.loop.pendingWakes().size, 0, "served");
+});
+
+test("part 2, the loop (rule 6): a look whose reads fail keeps its wakes and waits 1 s, doubling to 10 s; a look that works resets the wait", async () => {
+  const w = loopWorld();
+  let fail = true;
+  w.setNext(() => (fail ? { outcome: "failed" } : { outcome: "done" }));
+  w.loop.wake("A", 0, "protect");
+  await w.to(60_000);
+  const gaps = w.looks.slice(1).map((l, i) => l.at - w.looks[i]!.at);
+  assert.deepEqual(gaps.slice(0, 5), [LOOK_FAIL_FIRST_MS, 2_000, 4_000, 8_000, LOOK_FAIL_MAX_MS], gaps.join(","));
+  assert.ok(gaps.every((g) => g <= LOOK_FAIL_MAX_MS));
+  fail = false;
+  await w.to(80_000);
+  assert.equal(w.loop.pendingWakes().size, 0, "served once a look worked");
+  w.loop.wake("A", 80_500, "protect");
+  await w.to(80_500);
+  assert.equal(w.looks.at(-1)!.at, 80_500, "the wait was reset");
+});
+
+test("part 2, the loop: after stop, nothing more is looked at or started", async () => {
+  const w = loopWorld();
+  w.loop.wake("A", 1_000, "protect");
+  w.loop.stop();
+  await w.to(2_000);
+  let ran = false;
+  await w.loop.act("B", "x", async () => void (ran = true));
+  assert.equal(w.looks.length, 0);
+  assert.equal(ran, false);
+});
+
+// ---------------- the worker ----------------
+
+async function armedDay(orderStream = false) {
+  const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
+  const bot = new FakeBot();
+  const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, bot, orderStream });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("cap 2\napprove", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:25:00");
+  await r.at("14:30:05");
+  return { sim, r };
+}
+
+async function holdOne(sim: SimBroker, r: any, symbol: string, n = 1) {
+  const id = clientOrderIdFor(D, symbol, n);
+  await sim.submitEntry({ symbol, qty: 5, stopPrice: 11.87, takeProfitPrice: 12.08, referencePrice: 12, clientOrderId: id });
+  sim.fillEntry(id, 12);
+  await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol, qty: 5, referencePrice: 12, stopPrice: 11.87, takeProfitPrice: 12.08, status: "filled", alpacaOrderId: null, filledQty: 5, filledAvgPrice: 12, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+  return id;
+}
+
+// Runs the worker's timers (the loop's looks) and 5 second passes up to `end`.
+async function drive(r: any, sim: SimBroker, end: number, passFrom?: number) {
+  let nextPass = passFrom ?? sim.simMs + 5_000;
+  for (let g = 0; g < 2000; g++) {
+    const tAll = Math.min(...r.timers(), Infinity);
+    const next = Math.min(nextPass, tAll);
+    if (next > end) break;
+    if (next === nextPass) {
+      await r.at(iso(next));
+      nextPass += 5_000;
+    } else r.setNow(iso(Math.max(next, sim.simMs)));
+    await settle();
+    await settle();
+  }
+}
+
+test("part 2, the worker: a stuck sale's retry runs at its time in a look of the loop (not a sync brought forward), once, and never resets the regular sync's clock", async () => {
+  const { sim, r } = await armedDay();
+  const wk: any = r.worker;
+  const id = await holdOne(sim, r, "GE");
+  await r.at("14:30:10");
+  sim.refuseStops = true;
+  const sells: number[] = [];
+  sim.refuseSellIf = (x: any) => (x.symbol === "GE" ? (sells.push(sim.simMs), true) : false);
+  sim.partialTakeProfit(id, 1, 12.08);
+  wk.loop.wake(id, sim.simMs, "protect"); // as the live update of the stop's cancel does
+  r.setNow(iso(sim.simMs));
+  for (let i = 0; i < 4; i++) await settle();
+  const st = wk.syncMemory.stuck.get(id);
+  assert.ok(st && st.nextAt > sim.simMs, "stuck, with a retry time");
+  const due = st.nextAt;
+  const lastSync = wk.lastSync;
+  const looks: number[] = [];
+  const realLook = wk.look.bind(wk);
+  wk.look = async (ids: any, kind: any, extra: any) => (looks.push(sim.simMs), realLook(ids, kind, extra));
+  const before = sells.length;
+  r.setNow(iso(due));
+  for (let i = 0; i < 6; i++) await settle();
+  assert.deepEqual(looks, [due], "one look, at the retry's time");
+  assert.ok(sells.length > before, "the retry tried to sell");
+  assert.equal(wk.lastSync, lastSync, "the regular sync's clock was not reset");
+  r.worker.stop?.();
+});
+
+test("part 2, the worker (Monday 2026-11-09's finding): a stuck sale whose try waits never holds up the order sync; another entry's remainder gets its fresh stop meanwhile", async () => {
+  const { sim, r } = await armedDay();
+  const wk: any = r.worker;
+  const slow = await holdOne(sim, r, "IONQ", 1);
+  const other = await holdOne(sim, r, "CMCSA", 2);
+  await r.at("14:30:10");
+  // IONQ: both exits gone, and every sell of it waits 20 s inside Alpaca before failing (a sale that takes a long time).
+  for (const l of sim.orders.find((o) => o.clientOrderId === slow)!.legs) await sim.cancelOrder(l.id);
+  sim.advance(1_000);
+  const realSell = sim.submitSell.bind(sim);
+  let release!: () => void;
+  const heldAtAlpaca = new Promise<void>((x) => (release = x));
+  let ionqSent = false;
+  sim.submitSell = async (x: any) => {
+    if (x.symbol === "IONQ") {
+      ionqSent = true;
+      await heldAtAlpaca; // Alpaca holds the request until the test lets it go
+      throw new Error("held at Alpaca (test)");
+    }
+    return realSell(x);
+  };
+  const t0 = sim.simMs;
+  r.setNow(iso(t0));
+  wk.loop.wake(slow, t0, "protect");
+  // The look may be put off a quarter second while the earlier sync finishes.
+  for (let i = 0; i < 8 && !ionqSent; i++) {
+    r.setNow(iso(t0 + i * 250));
+    for (let k = 0; k < 6; k++) await settle();
+  }
+  assert.ok(ionqSent && wk.loop.busy(slow), "IONQ's sale is running, held at Alpaca");
+  // CMCSA's stop is cancelled at a partial take-profit while IONQ's sale waits.
+  sim.partialTakeProfit(other, 1, 12.08);
+  wk.syncMemory.liveStopCancelled.set(other, sim.simMs);
+  const syncStart = sim.simMs;
+  wk.lastSync = 0;
+  await r.at(iso(sim.simMs + 100)); // the regular sync
+  for (let i = 0; i < 6; i++) await settle();
+  assert.equal(wk.inflight.has("risk"), false, `the sync finished at once (${sim.simMs - syncStart} ms), without waiting on IONQ's sale`);
+  assert.ok(wk.loop.busy(other) || sim.stopLog.some((x) => x.symbol === "CMCSA"), "CMCSA's fresh stop was started by the loop meanwhile");
+  release();
+  for (let i = 0; i < 10; i++) await settle();
+  r.worker.stop?.();
+});
+
+test("part 2, the worker: a look for one entry does not touch the others (no false resolution line, another entry's fresh stop kept)", async () => {
+  const { sim, r } = await armedDay();
+  const wk: any = r.worker;
+  const a = await holdOne(sim, r, "AAA", 1);
+  const b = await holdOne(sim, r, "BBB", 2);
+  await r.at("14:30:10");
+  const mem = wk.syncMemory;
+  mem.stuck.set(b, { symbol: "BBB", since: sim.simMs, nextAt: sim.simMs + 60_000, delayMs: 30_000, alerted: true, escalated: false, lastTriedAt: sim.simMs, why: "x" });
+  mem.freshStops.set(b, { symbol: "BBB", entryClientOrderId: b, stopClientOrderId: "cyrus-p-x", orderId: null, qty: 5, stopPrice: 11.87, placedAt: sim.simMs, status: "accepted", lookedAt: sim.simMs });
+  const said = r.bot.posts.length;
+  const outcome = await wk.look(new Set([a]), "protect", 0);
+  assert.equal(outcome.outcome, "done");
+  assert.ok(mem.stuck.has(b), "BBB's stuck record kept");
+  assert.ok(mem.freshStops.has(b), "BBB's fresh stop kept");
+  assert.equal(r.bot.posts.slice(said).filter((p: any) => p.text.startsWith("BBB")).length, 0, "no line about BBB");
+  r.worker.stop?.();
+});
+
+test("part 2, the worker: one entry's own cleanup sale does not stop the loop from deciding for another entry, but a close-out or flatten does", async () => {
+  const { r } = await armedDay();
+  const wk: any = r.worker;
+  const closeAt = new Date(Date.UTC(2026, 10, 2, 21, 0));
+  let release!: () => void;
+  const held = new Promise<void>((x) => (release = x));
+  const own = wk.liquidator.flatten({ reason: "remainder", tradeDate: D, only: ["AAA"], ownEntryOnly: { maxQty: { AAA: 1 } }, maxRounds: 1 });
+  void held;
+  assert.equal(wk.protectNow(closeAt), true, "a one-entry cleanup sale running: the others are still decided");
+  const other = wk.liquidator.flatten({ reason: "flatten command", tradeDate: D, maxRounds: 1 });
+  assert.equal(wk.protectNow(closeAt), false, "a whole-account liquidation: the loop stands aside");
+  release();
+  await Promise.allSettled([own, other]);
+  assert.equal(wk.protectNow(closeAt), true);
+  r.worker.stop?.();
+});
+
+test("part 2, the worker (fix (a)'s round 2 finding, in the loop's terms): when a look's reads fail, the stuck sale's retry still comes soon after they recover, and an outage of 120 s stays bounded", async () => {
+  const { sim, r } = await armedDay(true);
+  const wk: any = r.worker;
+  const id = await holdOne(sim, r, "GE");
+  await r.at("14:30:10");
+  sim.refuseStops = true;
+  const sells: number[] = [];
+  sim.refuseSellIf = (x: any) => (x.symbol === "GE" ? (sells.push(sim.simMs), true) : false);
+  sim.partialTakeProfit(id, 1, 12.08);
+  wk.loop.wake(id, sim.simMs, "protect");
+  r.setNow(iso(sim.simMs));
+  for (let i = 0; i < 4; i++) await settle();
+  const due = wk.syncMemory.stuck.get(id).nextAt;
+  let failing = true;
+  let fails = 0;
+  const realList = (sim as any).listOrdersPaged.bind(sim);
+  (sim as any).listOrdersPaged = async (...a: any[]) => {
+    if (failing) {
+      fails++;
+      throw new Error("order list read failed (test)");
+    }
+    return realList(...a);
+  };
+  const outageEnd = due + 120_000;
+  await drive(r, sim, outageEnd);
+  failing = false;
+  const before = sells.length;
+  await drive(r, sim, outageEnd + 12_000);
+  console.log(`MEASURE part 2, 120 s outage: ${fails} failed order-list reads (looks and regular syncs)`);
+  assert.ok(fails <= 40, `bounded: ${fails} failed reads in 120 s (12 regular syncs and the looks' growing waits)`);
+  assert.ok(sells.length > before, "the stuck sale was retried after the reads recovered");
+  r.worker.stop?.();
+});
+
+test("part 2, the worker: the 5 minute alert is not judged for an entry while its action runs (its try is changing what the alert reads)", async () => {
+  const { sim, r } = await armedDay();
+  const wk: any = r.worker;
+  const id = await holdOne(sim, r, "GE");
+  await r.at("14:30:10");
+  const mem = wk.syncMemory;
+  mem.stuck.set(id, { symbol: "GE", since: sim.simMs - 6 * 60_000, nextAt: sim.simMs + 60_000, delayMs: 30_000, alerted: true, escalated: false, lastTriedAt: sim.simMs, why: "x" });
+  let release!: () => void;
+  const held = new Promise<void>((x) => (release = x));
+  await wk.loop.act(id, "test: a running try", async () => void (await held));
+  wk.lastSync = 0;
+  await r.at(iso(sim.simMs + 100));
+  for (let i = 0; i < 6; i++) await settle();
+  assert.equal(mem.stuck.get(id).escalated, false, "not judged while the try runs");
+  release();
+  for (let i = 0; i < 6; i++) await settle();
+  wk.lastSync = 0;
+  await r.at(iso(sim.simMs + 200));
+  for (let i = 0; i < 6; i++) await settle();
+  assert.equal(mem.stuck.get(id)?.escalated ?? true, true, "judged at the next sync after it ended");
+  r.worker.stop?.();
+});

@@ -93,6 +93,8 @@ export const STORED_INFO_EVENTS = new Set([
   "budget_sent_after_end",
   "fresh_stop_lookup_skipped",
   "list_lag_recheck_window_over",
+  // The redesign of 2026-11-14, part 2 (rare): an action of the protection loop that threw (its entry is decided again at the next look).
+  "protection_action_failed",
 ]);
 
 export function shouldStoreEvent(level: "info" | "warn" | "error", event: string): boolean {
