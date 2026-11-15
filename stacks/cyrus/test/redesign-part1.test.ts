@@ -470,3 +470,23 @@ test("part 1 (group 1, round 1, M2): the worker's background work starts outside
   assert.equal(tag, "routine", "the background task did not inherit the P2 scope");
   r.worker.stop?.();
 });
+
+// Group 2, round 2 of the redesign: `mostCappedIn5s` counts only the tries capped by the 5 seconds (a close-out retry, minute only, is left
+// out), while `mostBudgetedIn5s` counts every budgeted request.
+test("part 1 (group 2, round 2): mostCappedIn5s leaves out close-out retries; an overdrawn capped try shows above 15", () => {
+  let t = 0;
+  const b = new RequestBudget({ now: () => t });
+  const closeout = b.tryReserve("P1", 49, { label: "close-out retry", fiveSec: false }) as Reservation;
+  sendN(closeout, 49);
+  closeout.end();
+  let m = b.takeMinute();
+  assert.equal(m.mostBudgetedIn5s, 49);
+  assert.equal(m.mostCappedIn5s, 0, "the close-out retry is not capped by the 5 seconds");
+  t = 70_000;
+  const stuck = b.tryReserve("P1", 10, { label: "stuck retry" }) as Reservation;
+  sendN(stuck, 26); // 3 rounds against its 10: an overdraft of 16
+  stuck.end();
+  m = b.takeMinute();
+  assert.equal(m.mostCappedIn5s, 26);
+  assert.equal(m.overdrafts, 16);
+});

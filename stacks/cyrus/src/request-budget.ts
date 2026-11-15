@@ -102,7 +102,7 @@ export interface BudgetMinute {
   mostBudgetedInMinute: number;
   mostBudgetedIn5s: number;
   // Group 2, round 1 of the redesign: the most in any 5 seconds sent by tries capped by the 5 seconds (close-out retries left out; they
-  // reserve against the minute only, design 3.2). Above 15 only if a try overdrew or was forced.
+  // reserve against the minute only, design 3.2). Above 15 only if a try overdrew, or a request came after its try ended.
   mostCappedIn5s: number;
   givingWayRefusals: number;
 }
@@ -175,12 +175,13 @@ export class RequestBudget {
     return r;
   }
 
-  // Looks only: would `tryReserve` grant this now? (For scheduling.)
-  roomFor(cls: BudgetClass, n: number, fiveSec = true): { ok: true } | Refusal {
-    return this.refusal(cls, Math.max(0, Math.ceil(n)), fiveSec, this.nowMs()) ?? { ok: true };
+  // Looks only: would `tryReserve` grant this now? (For scheduling.) `routineAhead`: routine requests that will be sent first from the same
+  // Alpaca bucket (the reads of the sync that comes for the try), counted against the floor only (group 2, round 2 of the redesign).
+  roomFor(cls: BudgetClass, n: number, fiveSec = true, routineAhead = 0): { ok: true } | Refusal {
+    return this.refusal(cls, Math.max(0, Math.ceil(n)), fiveSec, this.nowMs(), routineAhead) ?? { ok: true };
   }
 
-  private refusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number): Refusal | null {
+  private refusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead = 0): Refusal | null {
     const u = this.usage(now);
     const cap = cls === "P1" ? BUDGET_PER_MINUTE : BUDGET_PER_MINUTE - P1_KEEP;
     const at: number[] = [];
@@ -194,7 +195,7 @@ export class RequestBudget {
       at.push(this.agedOutAt(u.five + u.unsentFive + n - BUDGET_PER_5S, 5_000, now, u.unsentFive));
     }
     const floor = cls === "P1" ? P1_FLOOR : P2_FLOOR;
-    const left = this.remaining() - u.unsentMinute - n;
+    const left = this.remaining() - u.unsentMinute - n - routineAhead;
     if (left < floor) {
       why ??= "floor";
       at.push(now + Math.ceil((floor - left) / REFILL_PER_MS));

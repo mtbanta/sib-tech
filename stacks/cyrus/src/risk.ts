@@ -44,6 +44,18 @@ export interface RiskDeps {
   budget?: RequestBudget;
 }
 
+// Group 2, round 2 of the redesign (rule 6): when a budgeted try finds no room, the sync that comes for its next try first reads the order
+// list and the positions (routine work from the same Alpaca bucket). So the next try waits until there is room for those reads and the try
+// together, and at least 0.5, 1, 2, then 4 s after refusals in a row (`waits`, counted by the caller; a try that starts resets it). Before
+// this, such a wait brought a whole sync forward about every half second, whose reads spent the refill the try was waiting for.
+export const ROOM_WAIT_FIRST_MS = 500;
+export const ROOM_WAIT_MAX_MS = 4_000;
+function roomWaitUntil(d: Pick<RiskDeps, "budget" | "now" | "governor">, holder: { budget?: RequestBudget }, cls: "P1" | "P2", n: number, waits: number, nowMs: number, syncReads = 2, fiveSec = true): number {
+  const room = budgetOf(d, holder).roomFor(cls, n, fiveSec, syncReads);
+  const roomAt = room.ok ? nowMs : room.at;
+  return Math.max(roomAt, nowMs + Math.min(ROOM_WAIT_FIRST_MS * 2 ** Math.max(0, waits - 1), ROOM_WAIT_MAX_MS));
+}
+
 // The shared request budget for these deps: the worker's, else one kept in `holder` (a test's own memory), on the deps' clock.
 function budgetOf(d: Pick<RiskDeps, "budget" | "now" | "governor">, holder: { budget?: RequestBudget }): RequestBudget {
   if (d.budget) return d.budget;
@@ -158,6 +170,8 @@ export interface StuckEntry {
   restingStop?: { stopClientOrderId: string; cancel: "accepted" | "refused" | "pending" | "not sent" };
   // Item 3 of 2026-11-13: the wait for a sale held by visible open orders (10 s, doubling to 30), kept apart from the hidden-hold backoff.
   visibleDelayMs?: number;
+  // The redesign of 2026-11-14 (group 2, round 2): retries refused for lack of room in a row (their wait grows); reset when one starts.
+  roomWaits?: number;
 }
 
 export class SyncMemory {
@@ -218,7 +232,8 @@ export class SyncMemory {
   // `probeFailed`: the last status check could not be read (the next one waits on the backoff).
   // `probeFailDelayMs`: after a failed check the next one waits longer (doubling from the normal interval, at most a minute), so failed
   // checks do not take the shared budget's room from the sale's tries.
-  readonly timedOutCheck = new Map<string, { probeAt: number; resendAt: number; resendDelayMs: number; probeFailed: boolean; probeFailDelayMs: number }>();
+  // `roomWaits` (the redesign, group 2 round 2): checks or cancels refused for lack of room in a row (their wait grows).
+  readonly timedOutCheck = new Map<string, { probeAt: number; resendAt: number; resendDelayMs: number; probeFailed: boolean; probeFailDelayMs: number; roomWaits?: number }>();
   // Item 2 of 2026-11-13, second point: the start-up protection check (once per process, retried on a backoff until it succeeds), and the
   // timed-out stops written to the database (control key `timed_out_stops:<date>`) so a restart keeps them.
   startupChecked = false;
@@ -407,17 +422,15 @@ async function freshStopLive(d: RiskDeps, mem: SyncMemory, f: FreshStop, listed:
     // Group 1, round 1 of the redesign (B3), with the builder's check after it: the sync that comes for the next try reads the order list
     // and the positions first (routine work from the same bucket), so the next try waits until there is room for those reads and the lookup
     // together, and at least 0.5, 1, 2, then 4 s after refusals in a row (rule 6). A lookup that runs resets it.
-    if (r instanceof Reservation) {
+    if (!(r instanceof Reservation)) {
+      f.lookWaits = (f.lookWaits ?? 0) + 1;
+      f.lookRoomAt = roomWaitUntil(d, mem, "P2", 1, f.lookWaits, nowMs, syncReads);
+      // Stored once per wait (the first refusal in a row), not at every sync (group 2, round 2).
+      if (f.lookWaits === 1) d.log?.("fresh_stop_lookup_skipped", { symbol: f.symbol, stopClientOrderId: f.stopClientOrderId, why: r.why, roomInMs: r.at - nowMs, status: f.status });
+    } else {
       f.lookRoomAt = undefined;
       f.lookWaits = 0;
-    } else {
-      f.lookWaits = (f.lookWaits ?? 0) + 1;
-      const room = budgetOf(d, mem).roomFor("P2", 1 + syncReads);
-      const roomAt = room.ok ? nowMs : room.at;
-      f.lookRoomAt = Math.max(roomAt, nowMs + Math.min(500 * 2 ** (f.lookWaits - 1), 4_000));
-    }
-    if (!(r instanceof Reservation)) d.log?.("fresh_stop_lookup_skipped", { symbol: f.symbol, stopClientOrderId: f.stopClientOrderId, why: r.why, roomInMs: r.at - nowMs, status: f.status });
-    else await withReservation(r, async () => {
+      await withReservation(r, async () => {
       try {
         const x = await d.broker.findOrderByClientId(f.stopClientOrderId);
         if (x) f.orderId = x.id;
@@ -425,7 +438,8 @@ async function freshStopLive(d: RiskDeps, mem: SyncMemory, f: FreshStop, listed:
       } catch (err) {
         d.log?.("fresh_stop_lookup_failed", { symbol: f.symbol, error: (err as Error).message.slice(0, 120) });
       }
-    });
+      });
+    }
   }
   return OPEN_STATUSES.has(f.status) || f.status === "unclear";
 }
@@ -911,10 +925,17 @@ function retryDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string, nowMs: nu
   // The redesign of 2026-11-14, part 1: a retry is class P1 of the shared request budget. It starts only with room for its whole try
   // (TIMED_OUT_TRY_REQUESTS for an entry with a timed-out stop, else STUCK_TRY_REQUESTS); what it sends is counted as it is sent.
   const r = budgetOf(d, mem).tryReserve("P1", timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS, { label: timedOut ? "timed-out stop try" : "stuck retry", limitRetries: timedOut });
-  if (r instanceof Reservation) return { go: r };
-  if (st) st.nextAt = r.at; // waiting for room is not a backoff step
-  if (timedOut) d.log?.("timed_out_try_out_of_room", { clientOrderId, why: r.why, retryInMs: r.at - nowMs });
-  return { wait: r.at };
+  if (r instanceof Reservation) {
+    if (st) st.roomWaits = 0;
+    return { go: r };
+  }
+  // Waiting for room (not a backoff step of the try itself): until there is room for the coming sync's reads and the try, and at least 0.5,
+  // 1, 2, then 4 s after refusals in a row (group 2, round 2 of the redesign).
+  const waits = st ? (st.roomWaits = (st.roomWaits ?? 0) + 1) : 1;
+  const at = roomWaitUntil(d, mem, "P1", timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS, waits, nowMs);
+  if (st) st.nextAt = at;
+  if (timedOut && waits === 1) d.log?.("timed_out_try_out_of_room", { clientOrderId, why: r.why, retryInMs: at - nowMs });
+  return { wait: at };
 }
 
 // Runs one try of the order sync's walk: inside its P1 reservation (a retry), or counted as a first try. The reservation ends with the try.
@@ -1049,7 +1070,12 @@ async function timedOutWait(d: RiskDeps, mem: SyncMemory, s: OrderRecord, listed
       if (chk.probeAt > nowMs) return chk.probeAt;
       // The redesign of 2026-11-14, part 1: the check is class P1 of the shared request budget, with room for both of its reads.
       const r = budgetOf(d, mem).tryReserve("P1", TIMED_OUT_CHECK_REQUESTS, { label: "timed-out stop check", limitRetries: true });
-      if (!(r instanceof Reservation)) return Math.max(nowMs + 250, r.at);
+      if (!(r instanceof Reservation)) {
+        chk.roomWaits = (chk.roomWaits ?? 0) + 1;
+        chk.probeAt = roomWaitUntil(d, mem, "P1", TIMED_OUT_CHECK_REQUESTS, chk.roomWaits, nowMs);
+        return chk.probeAt;
+      }
+      chk.roomWaits = 0;
       try {
         await withReservation(r, async () => {
           try {
@@ -1108,7 +1134,8 @@ async function timedOutWait(d: RiskDeps, mem: SyncMemory, s: OrderRecord, listed
         chk.resendAt = d.now().getTime() + chk.resendDelayMs;
       } else {
         // Group 1, round 1 of the weekend build: no room now, so not before the budget has room (never a quick look again).
-        chk.resendAt = Math.max(nowMs + 250, r.at);
+        chk.roomWaits = (chk.roomWaits ?? 0) + 1;
+        chk.resendAt = roomWaitUntil(d, mem, "P1", 1, chk.roomWaits, nowMs);
       }
     }
     const next = Math.min(shown ? nowMs + 10_000 : chk.probeAt, status !== "pending_cancel" ? chk.resendAt : Infinity);
@@ -1173,11 +1200,9 @@ async function freshStopTimeout(d: RiskDeps, day: DayRecord, mem: SyncMemory, s:
     const what = saleNow
       ? cancelId
         ? `I am cancelling that stop and selling ${it} now`
-        : notAsked
-          ? `I have not been able to ask Alpaca about that stop (no room in my request budget), so I am selling ${it} now`
-          : found === "lookup failed"
-            ? `Alpaca could not be asked about that stop, so I am selling ${it} now`
-            : `Alpaca told me it does not hold that stop open, so I am selling ${it} now`
+        : notAsked || found === "lookup failed"
+          ? `Alpaca could not be asked about that stop, so I am selling ${it} now`
+          : `Alpaca told me it does not hold that stop open, so I am selling ${it} now`
       : cancelId
         ? `I will cancel that stop and sell ${it} as soon as my request budget has room`
         : notAsked
@@ -1194,7 +1219,8 @@ async function freshStopTimeout(d: RiskDeps, day: DayRecord, mem: SyncMemory, s:
   }
   if (!saleNow) {
     // Its first try waits for room (not a backoff step).
-    st.nextAt = Math.max(nowMs + 250, sale.at);
+    st.roomWaits = (st.roomWaits ?? 0) + 1;
+    st.nextAt = roomWaitUntil(d, mem, "P1", TIMED_OUT_TRY_REQUESTS, st.roomWaits, nowMs);
     st.lastTriedAt = nowMs;
     d.log?.("timed_out_try_out_of_room", { symbol: s.symbol, clientOrderId: s.clientOrderId, stage: "15 second limit", why: sale.why, retryInMs: st.nextAt - nowMs });
     return { attempted: true, stuck: true, recheckAt: st.nextAt };

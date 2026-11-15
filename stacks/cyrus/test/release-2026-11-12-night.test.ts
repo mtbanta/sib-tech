@@ -1854,7 +1854,7 @@ test("the redesign of 2026-11-14, part 1: in the worker, a list-lag recheck with
 // Group 2, round 1 of the redesign (part 1): the unclear stop's own lookups (every 5 s) are charged even when they fail (a timeout or a 5xx
 // reaches Alpaca). The 15 second limit then still looks the stop up (its look and its first try are reserved separately), and its alert says
 // what the stack is doing: selling now, or as soon as the budget has room.
-test("redesign part 1 (group 2, round 1): with the unclear stop's failing lookups charged, the 15 second limit still looks the stop up, its alert is true, and the sale follows within 5 s of the limit", async () => {
+test("redesign part 1 (group 2, round 1): with the unclear stop's failing lookups charged, the 15 second limit still looks the stop up, its alert is true, and the sale follows within 5.5 s of the limit", async () => {
   for (const offset of [0, 1_000, 2_500, 4_000]) {
     const w = world();
     const dd = await day(w);
@@ -2071,4 +2071,76 @@ test("redesign part 1 (B3, a real bucket): with entries holding Alpaca's bucket 
   assert.ok(syncsAt.length <= 6, `few syncs: ${syncsAt.join(", ")}`);
   assert.ok(gaps.every((g) => g >= 400), `spaced by the backoff: ${gaps.join(", ")}`);
   assert.equal(w.sim.sellLog.length, 0);
+});
+
+// Group 2, round 2 of the redesign (part 1): the same with the bucket starting at 70, 79 or 85 and no other load (group 2's probe): the
+// syncs that come for the lookup's next tries must not spend the refill it waits for (before: 16 to 23 syncs, the bucket falling, and the
+// 15 second limit selling shares whose stop Alpaca held).
+for (const start of [70, 79, 85]) {
+  test(`redesign part 1 (group 2, round 2): an unclear fresh stop's lookup, the bucket starting at ${start} with no other load: confirmed before the 15 second limit, few syncs, nothing sold`, async () => {
+    const w = world();
+    const dd = await day(w);
+    const id = await hold(w, "WULF", 6, 9.5, 1);
+    w.sim.advance(5_000);
+    w.sim.partialTakeProfit(id, 2, 9.58);
+    w.memory.budget = new RequestBudget({ now: () => w.sim.simMs, remaining: () => w.sim.tokens });
+    const realSubmit = w.sim.submitSell.bind(w.sim);
+    w.sim.submitSell = async (x: any) => {
+      if (x.stopPrice !== undefined) {
+        await realSubmit(x);
+        throw new AlpacaError("outcome unclear (test)", 502);
+      }
+      return realSubmit(x);
+    };
+    const realPaged = w.sim.listOrdersPaged.bind(w.sim);
+    w.sim.listOrdersPaged = async (...a: any[]) => {
+      const r: any = await (realPaged as any)(...a);
+      return { ...r, orders: r.orders.filter((o: any) => !o.clientOrderId.startsWith("cyrus-p-")) };
+    };
+    w.sim.advance(300);
+    w.sim.tokens = start;
+    const sentAt = w.sim.simMs;
+    let r: any = await syncOrders(w.risk, dd, { protect: true });
+    let syncs = 1;
+    while (w.sim.simMs < sentAt + 20_000 && w.memory.freshStops.get(id)?.status === "unclear") {
+      w.sim.advanceTo(Math.max(w.sim.simMs + 100, Math.min(r.recheckAt ?? Infinity, w.sim.simMs + 10_000)));
+      r = await syncOrders(w.risk, dd, { protect: true });
+      syncs++;
+    }
+    assert.ok(w.memory.freshStops.get(id)?.status !== "unclear", `start ${start}: confirmed`);
+    assert.equal(w.events.filter((e) => e.event === "fresh_stop_timeout").length, 0, `start ${start}: the limit never fired`);
+    assert.ok(syncs <= 7, `start ${start}: ${syncs} syncs`);
+    assert.ok(w.events.filter((e) => e.event === "fresh_stop_lookup_skipped").length <= 1, "the skip is stored once per wait");
+    assert.equal(w.sim.sellLog.length, 0);
+  });
+}
+
+// Group 2, round 2 of the redesign: a timed-out stop's try waiting on its floor (Alpaca's remaining 32 for 6 s after the limit) no longer
+// brings a sync forward every half second; its waits grow (0.5, 1, 2, then 4 s at least) and the out-of-room event is stored once per wait.
+test("redesign part 1 (group 2, round 2): a timed-out stop's try waiting for room is retried on growing waits, not every half second", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "WULF", 6, 9.5, 1);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 2, 9.58);
+  let low = false;
+  w.memory.budget = new RequestBudget({ now: () => w.sim.simMs, remaining: () => (low ? 32 : w.sim.tokens) });
+  unclearStops(w, false);
+  w.sim.advance(300);
+  const sentAt = w.sim.simMs;
+  let r: any = await syncOrders(w.risk, dd, { protect: true });
+  const syncsAt: number[] = [];
+  while (w.sim.simMs < sentAt + 40_000 && (await heldQty(w, "WULF")) > 0) {
+    low = w.sim.simMs >= sentAt + FRESH_STOP_CONFIRM_MS && w.sim.simMs < sentAt + FRESH_STOP_CONFIRM_MS + 6_000;
+    w.sim.advanceTo(Math.max(w.sim.simMs + 100, Math.min(r.recheckAt ?? Infinity, w.sim.simMs + 10_000)));
+    low = w.sim.simMs >= sentAt + FRESH_STOP_CONFIRM_MS && w.sim.simMs < sentAt + FRESH_STOP_CONFIRM_MS + 6_000;
+    if (low) syncsAt.push(w.sim.simMs - sentAt);
+    r = await syncOrders(w.risk, dd, { protect: true });
+  }
+  const gaps = syncsAt.slice(1).map((t, i) => t - syncsAt[i]!);
+  assert.ok(syncsAt.length <= 5, `syncs while waiting: ${syncsAt.join(", ")}`);
+  assert.ok(gaps.every((g) => g >= 450), `spaced: ${gaps.join(", ")}`);
+  assert.ok(w.events.filter((e) => e.event === "timed_out_try_out_of_room").length <= 2, "stored once per wait");
+  assert.equal(await heldQty(w, "WULF"), 0, "sold once room returned");
+  assert.equal(w.sim.oversellAttempts, 0);
 });
