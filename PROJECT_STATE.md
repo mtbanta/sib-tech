@@ -8,8 +8,9 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 **BUILD C2: FLY RUNS RELEASE V22 (UNCHANGED). THE REDESIGN IS APPROVED (MICHAEL, 2026-11-14, WITH CHANGES A AND B). PART 1 (THE SHARED REQUEST BUDGET) IS BUILT AND IN REVIEW; PART 2 (THE PROTECTION LOOP) IS NEXT.** As of 2026-11-14 (Saturday night).
 - **Branch:** `redesign-2026-11-14` (unmerged). Design `builds/c2-redesign-2026-11-14.md`, section 10 "As approved" and 10.1 "As built". Approval saved verbatim in the C2 log.
-- **Part 1:** built (`436e91e`), group 2 round 1 CHANGES REQUIRED (fixed), group 1 round 1 in review. Up to 8 rounds per group.
-- **Open for Michael:** the overdraft of an ordinary stuck retry (options a, b, c in the C2 log, "Redesign part 1 ... built", item 1).
+- **Part 1:** built (`436e91e`); round 1: group 2 CHANGES REQUIRED, group 1 STOP AND FLAG (a change beyond the approval, reverted); round 2: group 2 CHANGES REQUIRED (fixed); group 1 round 2 in review. Up to 8 rounds per group.
+- **Part 2 (the protection loop):** in build on branch `redesign-2026-11-14-p2` (step 1 done).
+- **Open for Michael (both block group 1's pass):** (1) the overdraft of an ordinary stuck retry (options a, b, c); (2) unclear fresh-stop lookups while first tries hold Alpaca's remaining below 80 (options i, ii, iii). Both in the C2 log, "Redesign part 1, round 1 (436e91e): group 1 STOP AND FLAG MICHAEL, and fixes", "Flagged to Michael".
 - **Deploy:** not before v22 has traded Monday morning; the Monday mid-day pause with Michael's written yes in `commands`, otherwise Monday night. Part 1 can ship alone if part 2 has not passed both groups (decision 8).
 - Paper only. Research input for a human decision.
 

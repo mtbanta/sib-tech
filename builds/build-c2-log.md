@@ -5797,3 +5797,21 @@ The B3 test pinned Alpaca's remaining with a function. Rerun with the simulated 
 **For Michael's question 2 (B3's remaining part):** this works only because entries give way. When first tries hold the bucket below 80 (Thursday 2026-11-12, lowest 65 for 16 minutes), nothing approved lets a P2 lookup run, and the 15 second limit then cancels a stop Alpaca may hold and sells (option ii, the unclear stop's lookups as P1 with the floor of 20, is the cure).
 
 Full suite 766 of 766. Type check clean.
+
+### Redesign part 1, round 2 (910cf3f): group 2 CHANGES REQUIRED, and fixes
+
+**Group 2, redesign part 1, round 2: CHANGES REQUIRED.** Nothing under checks 2, 7 or 10. All four round 1 findings confirmed fixed (the 15 second limit's alert variants each true for what happens, including a stop held with no room for the try; the give-way refusals one row at the flush; the briefs; the comments).
+
+**Blocking:** the B3 fix (at 910cf3f) brought a whole routine sync forward about every 550 ms while an unclear fresh stop's lookup waited on its floor; each sync's reads (about 3 requests) spent the refill it waited for. With the budget's remaining tied to the simulated bucket and no other load, starting at 70, 79 or 85: 16 to 23 syncs and 60 to 74 requests in 20 s, the bucket falling, the lookup never fitting, and the 15 second limit cancelling a stop Alpaca held and selling (at 436e91e: 6 syncs, confirmed at 7.75 s). The same loop in a timed-out stop's try waiting on its floor (remaining 32 for 6 s): a sync every 550 ms, `timed_out_try_out_of_room` stored 12 times. `fresh_stop_lookup_skipped` was stored at every sync. Flagged item 2 for Michael was incomplete: the stack's own retry syncs also hold remaining below 80.
+
+The fresh-stop half was already fixed in `53706cb` ("the B3 fix checked against a real bucket", above), made while this round ran on 910cf3f.
+
+**Fixes (scheduling only, inside the approval; rule 6):**
+- One rule for every budgeted try refused for lack of room (`roomWaitUntil` in `src/risk.ts`): the next try waits until the budget has room for the coming sync's reads and the try together (the reads count against the floor only, `RequestBudget.roomFor`'s `routineAhead`), and at least 0.5, 1, 2, then 4 s after refusals in a row (`ROOM_WAIT_FIRST_MS`, `ROOM_WAIT_MAX_MS`). It applies to a stuck or timed-out stop's try (`retryDue`, `StuckEntry.roomWaits`), the timed-out stop's status check and cancel sent again (`timedOutCheck.roomWaits`), the 15 second limit's first try, and the fresh-stop lookup. A try that starts resets its count.
+- `fresh_stop_lookup_skipped` and `timed_out_try_out_of_room` are stored once per wait (the first refusal in a row).
+- New tests, each failing on 910cf3f: the fresh-stop lookup with the bucket starting at 70, 79 and 85 and no other load (confirmed before the limit, at most 7 syncs, the skip stored at most once, nothing sold); a timed-out stop's try with remaining at 32 for 6 s (at most 5 syncs while it waits, at least 450 ms apart, the event stored at most twice, sold once room returned).
+- Flagged item 2 restated in PROJECT_STATE: both items, with the stack's own syncs no longer adding to the dip.
+
+**Non-blocking, done:** a test of `mostCappedIn5s`; its comment ("or was forced" cannot happen); the four-offset test's title (5.5 s); the daily and mid-day briefs' `timed_out_try_out_of_room` line (the recheck's own fields); the alert variant that could not appear folded into "could not be asked"; design 10.1 and PROJECT_STATE updated. On the log's tag audit: the counts listed were the close-out's 81 of 84 asks (3 mid-day close-out asks unlisted); about 2,448 more came from tests calling the liquidator or sell gate directly; group 2 ran the worker-level tests one by one and found none from the worker.
+
+Full suite 771 of 771. Type check clean.
