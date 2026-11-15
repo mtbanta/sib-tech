@@ -266,6 +266,14 @@ export class RequestBudget {
   noteGiveWayRefusal(): void {
     this.minute.givingWayRefusals++;
   }
+  // Group 1, round 3 of the redesign (decision 5 with change A: entries give way *while* a P2 try waits on its floor): a try whose next attempt
+  // is scheduled later than GIVE_WAY_MAX_MS keeps its wait until then (`untilMs`, which its caller bounds). Only a wait already recorded (a
+  // refusal on the floor) is extended.
+  extendWait(waitKey: string, untilMs: number): void {
+    const cur = this.floorWaits.get(waitKey);
+    if (cur !== undefined && untilMs > cur) this.floorWaits.set(waitKey, untilMs);
+  }
+
   // Drops a P2 try's wait (it gave up: its window ended).
   stopWaiting(waitKey: string): void {
     this.floorWaits.delete(waitKey);

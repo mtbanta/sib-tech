@@ -271,6 +271,8 @@ export class Worker {
   // give way while it waits on the floor of 80) until the last lagging remainder's 30 second window ends.
   private lagTimer: unknown = null;
   private lagTimerAt: number | null = null;
+  // Group 2, round 3 of the redesign: refusals in a row of the current recheck (its out-of-room event is stored once per wait).
+  private lagWaits = 0;
   // Michael's fix (a) of 2026-11-13: the moment the pending timer was set for when a sync asked for a recheck (its `recheckAt`), carried
   // over when that timer is put off. When the 5 second pass runs that recheck itself, it cancels this timer, so no second sync repeats it.
   private recheckTimerAt: number | null = null;
@@ -1413,6 +1415,7 @@ export class Worker {
     const now = this.d.now().getTime();
     if (!s || this.d.now() >= s.closeAt || !lr) return;
     if (now >= lr.until) {
+      this.lagWaits = 0;
       this.syncMemory.lagRecheck = undefined;
       this.budget.stopWaiting("list lag recheck");
       this.d.log?.("info", "list_lag_recheck_window_over", { next: "regular sync" });
@@ -1422,9 +1425,11 @@ export class Worker {
     if (this.inflight.has("risk")) return this.armLagRecheck(now + 250);
     const r = this.budget.tryReserve("P2", lr.cost, { label: "list lag recheck", waitKey: "list lag recheck" });
     if (!(r instanceof Reservation)) {
-      this.d.log?.("info", "timed_out_try_out_of_room", { stage: "list lag recheck", cost: lr.cost, why: r.why, roomInMs: r.at - now, next: r.at < lr.until ? "when the budget has room" : "regular sync" });
+      // Stored once per wait (the first refusal in a row); later refusals are counted in the per-minute statistics (group 2, round 3).
+      if (++this.lagWaits === 1) this.d.log?.("info", "timed_out_try_out_of_room", { stage: "list lag recheck", cost: lr.cost, why: r.why, roomInMs: r.at - now, next: r.at < lr.until ? "when the budget has room" : "regular sync" });
       return this.armLagRecheck(r.at);
     }
+    this.lagWaits = 0;
     this.startSync(s.day, s.closeAt, { recheck: r });
   }
 
@@ -1752,6 +1757,8 @@ export class Worker {
         }
         // Ruling B of 2026-11-12: a stop that was unclear gets its time to confirm logged here too.
         settleFreshStop((e, data) => this.d.log?.("info", e, data), f, info.status, "live update", this.d.now().getTime());
+        // Group 1, round 3 of the redesign: a stop no longer unclear ends the give-way its lookup was waiting with.
+        if (f.status !== "unclear") this.budget.stopWaiting(`fresh stop lookup ${f.stopClientOrderId}`);
         if (info.event === "canceled" || info.event === "expired" || info.event === "rejected") {
           this.d.log?.("info", "fresh_stop_ended", { symbol: info.symbol, stopClientOrderId: info.clientOrderId, event: info.event });
           if (this.closingOut || this.liquidator.isLiquidating() || this.middayOwnsSelling) return;

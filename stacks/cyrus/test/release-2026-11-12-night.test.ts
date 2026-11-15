@@ -2117,7 +2117,7 @@ for (const start of [70, 79, 85]) {
 
 // Group 2, round 2 of the redesign: a timed-out stop's try waiting on its floor (Alpaca's remaining 32 for 6 s after the limit) no longer
 // brings a sync forward every half second; its waits grow (0.5, 1, 2, then 4 s at least) and the out-of-room event is stored once per wait.
-test("redesign part 1 (group 2, round 2): a timed-out stop's try waiting for room is retried on growing waits, not every half second", async () => {
+test("redesign part 1 (group 2, round 2): a timed-out stop's try waiting for room is retried at waits of at least 450 ms (few syncs), not every half second", async () => {
   const w = world();
   const dd = await day(w);
   const id = await hold(w, "WULF", 6, 9.5, 1);
@@ -2211,4 +2211,134 @@ test("redesign part 1 (group 1, round 2, N4): an ordinary stuck retry's sale is 
   w.sim.advanceTo(st.nextAt);
   await syncOrders(w.risk, dd, { protect: true });
   assert.equal(n, 8, `all 8 sends of the retry's sale went out (its reservation is 10, the try's reads came first): ${n}`);
+});
+
+// Group 1, round 3 of the redesign (B1): entries give way *while* an unclear fresh stop's lookup waits on its floor (decision 5 with change
+// A), through the whole wait, not only 2 s after each refusal. Entries take every request above 81 unless they give way; other traffic (first
+// tries, routine reads) takes 2 a second and never gives way. Before: entries came back during the 2 and 4 s waits and the 15 second limit
+// sold shares whose stop Alpaca held.
+test("redesign part 1 (group 1, round 3, B1): with entries running and other traffic at 2 a second, entries give way through the lookup's whole wait; the stop is confirmed and nothing is sold", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "WULF", 6, 9.5, 1);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 2, 9.58);
+  w.memory.budget = new RequestBudget({ now: () => w.sim.simMs, remaining: () => w.sim.tokens });
+  const realSubmit = w.sim.submitSell.bind(w.sim);
+  w.sim.submitSell = async (x: any) => {
+    if (x.stopPrice !== undefined) {
+      await realSubmit(x);
+      throw new AlpacaError("outcome unclear (test)", 502);
+    }
+    return realSubmit(x);
+  };
+  const realPaged = w.sim.listOrdersPaged.bind(w.sim);
+  w.sim.listOrdersPaged = async (...a: any[]) => {
+    const r: any = await (realPaged as any)(...a);
+    return { ...r, orders: r.orders.filter((o: any) => !o.clientOrderId.startsWith("cyrus-p-")) };
+  };
+  w.sim.advance(300);
+  const sentAt = w.sim.simMs;
+  let r: any = await syncOrders(w.risk, dd, { protect: true });
+  w.sim.tokens = 80;
+  let entriesBackWhileWaiting = 0;
+  while (w.sim.simMs < sentAt + 20_000 && w.memory.freshStops.get(id)?.status === "unclear") {
+    const next = Math.max(w.sim.simMs + 100, Math.min((r.recheckAt ?? Infinity) + 250, w.sim.simMs + 10_000)); // the worker's 250 ms slack
+    while (w.sim.simMs < next) {
+      w.sim.advance(100);
+      w.sim.tokens = Math.max(0, w.sim.tokens - 0.2); // other traffic, 2 a second
+      if (!w.memory.budget.givingWay()) {
+        if (w.memory.freshStops.get(id)?.lookWaits) entriesBackWhileWaiting++;
+        w.sim.tokens = Math.min(w.sim.tokens, 81); // entries take everything above 81
+      }
+    }
+    r = await syncOrders(w.risk, dd, { protect: true });
+  }
+  assert.ok(w.memory.freshStops.get(id)?.status !== "unclear", "confirmed");
+  assert.equal(w.events.filter((e) => e.event === "fresh_stop_timeout").length, 0, "the limit never fired");
+  assert.equal(w.sim.sellLog.length, 0, "nothing sold");
+  assert.equal(entriesBackWhileWaiting, 0, "entries never came back while the lookup waited");
+});
+
+// Group 1, round 3 of the redesign (B2, mutants Q13, Q5 and Q6): each budgeted try refused for lack of room waits until there is room for the
+// coming sync's reads (2) and the try together. With Alpaca's remaining held where the try alone would fit after a little refill but not with
+// the reads, the wait is longer than the try's own refill time.
+test("redesign part 1 (group 1, round 3, Q13): a stuck retry refused on its floor waits for room for the sync's reads too", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "AAA", 1, 10, 1);
+  for (const l of w.sim.orders.find((o) => o.clientOrderId === id)!.legs) await w.sim.cancelOrder(l.id);
+  w.sim.advance(2_000);
+  w.sim.staleHeld.set("AAA", 1);
+  await syncOrders(w.risk, dd, { protect: true });
+  const st = w.memory.stuck.get(id)!;
+  assert.ok(st && st.nextAt > w.sim.simMs);
+  w.sim.advanceTo(st.nextAt);
+  w.memory.budget = new RequestBudget({ now: () => w.sim.simMs, remaining: () => 29 }); // 29 - 10 = 19: refused; with the reads 3 short
+  await syncOrders(w.risk, dd, { protect: true });
+  const wait = w.memory.stuck.get(id)!.nextAt - w.sim.simMs;
+  assert.ok(wait >= 850, `waited ${wait} ms: room for the try and the sync's 2 reads (about 0.9 s), not the try alone (0.5 s)`);
+  assert.equal(w.memory.stuck.get(id)!.roomWaits, 1);
+});
+
+test("redesign part 1 (group 1, round 3, Q5): a timed-out stop's status check refused on its floor waits for room for the sync's reads too", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "RKLB", 5, 20, 1);
+  for (const l of w.sim.orders.find((o) => o.clientOrderId === id)!.legs) await w.sim.cancelOrder(l.id);
+  w.sim.advance(2_000);
+  const stop = "cyrus-p-20261102-RKLB-x-s1"; // a timed-out stop Alpaca's list does not show, whose cancel was accepted
+  w.memory.timedOutStops.set(stop, id);
+  w.memory.stuck.set(id, { symbol: "RKLB", since: w.sim.simMs, nextAt: 0, delayMs: 0, alerted: true, escalated: false, lastTriedAt: w.sim.simMs, why: "x", restingStop: { stopClientOrderId: stop, cancel: "accepted" } });
+  w.memory.budget = new RequestBudget({ now: () => w.sim.simMs, remaining: () => 21 }); // 21 - 2 = 19: refused; with the reads 3 short
+  await syncOrders(w.risk, dd, { protect: true });
+  const chk = w.memory.timedOutCheck.get(stop)!;
+  assert.ok(chk && chk.probeAt - w.sim.simMs >= 850, `the next check in ${chk ? chk.probeAt - w.sim.simMs : "none"} ms (room for the check and the sync's reads)`);
+});
+
+test("redesign part 1 (group 1, round 3, Q6): a timed-out stop's cancel sent again, refused on its floor, waits for room for the sync's reads too", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "RKLB", 5, 20, 1);
+  for (const l of w.sim.orders.find((o) => o.clientOrderId === id)!.legs) await w.sim.cancelOrder(l.id);
+  const stop = "cyrus-p-20261102-RKLB-x-s1";
+  w.sim.advance(30_000); // the exits' cancels have landed
+  await w.sim.submitSell({ symbol: "RKLB", qty: 5, clientOrderId: stop, stopPrice: 19.8 } as any); // the stop rests at Alpaca, shown in its list
+  w.sim.advance(2_000);
+  w.memory.timedOutStops.set(stop, id);
+  w.memory.budget = new RequestBudget({ now: () => w.sim.simMs, remaining: () => 20 }); // 20 - 1 = 19: refused; with the reads 3 short
+  await syncOrders(w.risk, dd, { protect: true });
+  const chk = w.memory.timedOutCheck.get(stop)!;
+  assert.ok(chk && chk.resendAt - w.sim.simMs >= 850, `the cancel again in ${chk ? chk.resendAt - w.sim.simMs : "none"} ms (room for the cancel and the sync's reads)`);
+});
+
+// Group 2, round 3 of the redesign (part 1): the worker's list-lag recheck, refused again and again for lack of room, stores its out-of-room
+// event once per wait (before: at every refusal, about every 300 ms while other work held remaining near the floor).
+test("redesign part 1 (group 2, round 3): a list-lag recheck refused again and again stores timed_out_try_out_of_room once per wait", async () => {
+  const { r, wk, mem, t0, run, settle } = await workerLag();
+  const events: string[] = [];
+  const realLog = wk.d.log;
+  wk.d.log = (level: string, e: string, data: any) => {
+    if (e === "timed_out_try_out_of_room" && data?.stage === "list lag recheck") events.push(e);
+    return realLog?.(level, e, data);
+  };
+  await run({});
+  assert.ok(mem.lagRecheck, "a recheck is asked for");
+  let refusals = 0;
+  const realTry = mem.budget.tryReserve.bind(mem.budget);
+  mem.budget.tryReserve = (cls: any, n: any, o: any) => {
+    if (o?.label === "list lag recheck") {
+      refusals++;
+      return { ok: false, at: wk.d.now().getTime() + 300, why: "floor" }; // other work holds remaining at the floor
+    }
+    return realTry(cls, n, o);
+  };
+  for (let i = 0; i < 40 && wk.lagTimerAt !== null; i++) {
+    r.setNow(new Date(wk.lagTimerAt).toISOString());
+    await settle();
+  }
+  assert.ok(refusals >= 5, `refused again and again (${refusals})`);
+  assert.equal(events.length, 1, `stored once per wait (${events.length} for ${refusals} refusals)`);
+  void t0;
+  r.worker.stop?.();
 });
