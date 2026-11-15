@@ -5854,3 +5854,22 @@ On branch `redesign-2026-11-14-p2`, on top of part 1 (merged forward after each 
 - Full suite 775 of 775. Type check clean.
 
 Paper only. Research input for a human decision.
+### Redesign part 1, round 3 (a22451d): group 1 and group 2 CHANGES REQUIRED, and fixes
+
+**Group 1, round 3: CHANGES REQUIRED** (no flag; scheduling only, inside the approval). Round 2's findings confirmed fixed (its B3 probe: all six cases, 3 syncs, 20 requests, nothing sold; mutants N4, N5, N8 and N10 caught). No reservation leaks.
+- **B1:** entries gave way to a waiting P2 fresh-stop lookup for only `GIVE_WAY_MAX_MS` (2 s, the builder's figure) after each refusal, while the lookup's wait grows to 2 and 4 s, so entries came back during the wait and spent the refill. In group 1's model (entries at 100 or 150 a minute admitted above 81, other traffic that never gives way at 2 a second, syncs 250 ms after the asked time) the 15 second limit fired and sold a stop Alpaca held; with the give-way lengthened to the wait it confirmed at 12.4 s. At 3 a second both versions fail (Michael's item 2 proper). The 2 a second rate is group 1's assumption, not a measurement.
+- **B2 (check 9):** mutants Q5 and Q6 (the timed-out stop's check and cancel waits put back to the round 2 code) and Q13 (`roomWaitUntil` without the sync's reads) survived the suite; Q5 and Q6 together bring back the round 2 sync storm (18 syncs about 550 ms apart against 6).
+- Notes: item 1 accurately described; item 2's text should add that the give-way lapsed during long waits (now fixed) and PROJECT_STATE's "no longer adding to the dip" went too far (each wait still brings one sync's reads); Q9 and Q12 (counts not reset by a granted try or a lookup that ran) only lengthen a bounded wait; `timedOutCheck.roomWaits` shared by the check and the cancel and not reset by a granted cancel; only the lookup passes the list's real page count.
+
+**Group 2, round 3: CHANGES REQUIRED.** Its round 2 blocker confirmed fixed (bucket starts 60 to 100: 6 or 7 syncs, the skip stored once, confirmed, nothing sold; with remaining pinned at exactly 80 the limit still fires, Michael's item 2). The 15 second limit's alert variants each true in every case run.
+- **1 (check 9):** the same missing test as group 1's B2 (the check and the cancel re-send's waits): reverted, 36 syncs every 550 ms against 8.
+- **2 (events):** the worker's list-lag recheck (`lagRecheckFired`) stored `timed_out_try_out_of_room` at every refusal: 33, 50 and 99 events in a 30 s window with remaining held at 79, 80 and 81 by other work (once with a real bucket and no other load). A miss from round 2, not a regression; it matters only if part 1 ships alone (part 2 removes this timer).
+- Notes: "I will cancel that stop" (no room for the try) relies on an order list showing the stop for the cancel to come (the stop's id is not kept; a money-touching change for Michael, or a wording change); PROJECT_STATE stale; the log's "stored once per wait" needed "except the list-lag recheck" (now true everywhere); two stale comments; a test title.
+
+**Fixes:**
+- **B1 (scheduling, decision 5's "while it waits"):** an unclear fresh stop's lookup refused on its floor keeps entries giving way until its next try's sync (`lookRoomAt` plus 500 ms), never past the stop's 15 second limit (`RequestBudget.extendWait`); the give-way ends when the lookup runs, when the stop is no longer unclear (the order list, a lookup, a live update) or when the fresh stop is dropped (`endLookWait`). New test with entries admitted above 81 unless giving way and other traffic at 2 a second: confirmed, the limit never fired, nothing sold, and entries never came back while the lookup waited (it fails without `extendWait`). The list-lag recheck keeps its refusal-by-refusal give-way (each refusal re-arms within 0.3 s, inside the 2 s).
+- **B2 / group 2's 1:** tests for a stuck retry (Q13), the timed-out stop's check (Q5) and its cancel sent again (Q6) refused on their floor: each waits about 0.9 s (room for the try and the sync's two reads) instead of 0.3 to 0.5 s; each fails on its mutant. A granted cancel resets the shared count.
+- **Group 2's 2:** the list-lag recheck's out-of-room event is stored once per wait (`Worker.lagWaits`; reset when it is granted or its window ends). New test: refused again and again, stored once.
+- Notes done: the stale comments; the test title; PROJECT_STATE. Left for Michael: "I will cancel that stop" when the stop's id is not kept (group 2's note).
+
+Full suite 780 of 780. Type check clean.

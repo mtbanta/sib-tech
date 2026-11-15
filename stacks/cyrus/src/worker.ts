@@ -1650,6 +1650,8 @@ export class Worker {
         }
         // Ruling B of 2026-11-12: a stop that was unclear gets its time to confirm logged here too.
         settleFreshStop((e, data) => this.d.log?.("info", e, data), f, info.status, "live update", this.d.now().getTime());
+        // Group 1, round 3 of the redesign: a stop no longer unclear ends the give-way its lookup was waiting with.
+        if (f.status !== "unclear") this.budget.stopWaiting(`fresh stop lookup ${f.stopClientOrderId}`);
         if (info.event === "canceled" || info.event === "expired" || info.event === "rejected") {
           this.d.log?.("info", "fresh_stop_ended", { symbol: info.symbol, stopClientOrderId: info.clientOrderId, event: info.event });
           if (this.closingOut || this.liquidator.isLiquidatingOthers() || this.middayOwnsSelling) return;

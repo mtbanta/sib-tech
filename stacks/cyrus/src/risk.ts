@@ -400,12 +400,19 @@ export function settleFreshStop(log: ((event: string, data?: Record<string, unkn
   if (was === "unclear" && status !== "unclear") log?.("fresh_stop_confirmed", { symbol: f.symbol, clientOrderId: f.entryClientOrderId, stopClientOrderId: f.stopClientOrderId, status, by, found: status !== "unknown_at_alpaca", msToConfirm: nowMs - f.placedAt, afterLimit: nowMs - f.placedAt >= FRESH_STOP_CONFIRM_MS });
 }
 
+// The give-way key of an unclear fresh stop's lookup, and its end (the lookup ran, or the stop is no longer unclear, or it was dropped).
+const lookWaitKey = (f: FreshStop): string => `fresh stop lookup ${f.stopClientOrderId}`;
+function endLookWait(d: Pick<RiskDeps, "budget" | "now" | "governor">, mem: SyncMemory, f: FreshStop): void {
+  budgetOf(d, mem).stopWaiting(lookWaitKey(f));
+}
+
 // Forgets an entry's fresh stop. Group 2, round 1 of the night release: one that was still unclear gets its outcome logged
 // (`fresh_stop_unclear_end`), so every unclear fresh stop ends in exactly one of fresh_stop_confirmed, fresh_stop_timeout or this.
 function dropFreshStop(d: RiskDeps, mem: SyncMemory, entryClientOrderId: string, how: string, nowMs: number): void {
   const f = mem.freshStops.get(entryClientOrderId);
   if (!f) return;
   mem.freshStops.delete(entryClientOrderId);
+  endLookWait(d, mem, f);
   if (f.status === "unclear") d.log?.("fresh_stop_unclear_end", { symbol: f.symbol, clientOrderId: entryClientOrderId, stopClientOrderId: f.stopClientOrderId, how, msFromSent: nowMs - f.placedAt });
 }
 
@@ -421,13 +428,16 @@ async function freshStopLive(d: RiskDeps, mem: SyncMemory, f: FreshStop, listed:
   } else if (f.status === "unclear" || !streamLive || nowMs - f.lookedAt >= FRESH_STOP_LOOKUP_MS) {
     // An unclear stop's lookup waits for room (entries give way while it waits on its floor, decision 5 with change A); a confirmed stop's
     // periodic lookup simply waits for the next sync.
-    const r = budgetOf(d, mem).tryReserve("P2", 1, { label: "fresh stop lookup", ...(f.status === "unclear" ? { waitKey: `fresh stop lookup ${f.stopClientOrderId}` } : {}) });
+    const r = budgetOf(d, mem).tryReserve("P2", 1, { label: "fresh stop lookup", ...(f.status === "unclear" ? { waitKey: lookWaitKey(f) } : {}) });
     // Group 1, round 1 of the redesign (B3), with the builder's check after it: the sync that comes for the next try reads the order list
     // and the positions first (routine work from the same bucket), so the next try waits until there is room for those reads and the lookup
     // together, and at least 0.5, 1, 2, then 4 s after refusals in a row (rule 6). A lookup that runs resets it.
     if (!(r instanceof Reservation)) {
       f.lookWaits = (f.lookWaits ?? 0) + 1;
       f.lookRoomAt = roomWaitUntil(d, mem, "P2", 1, f.lookWaits, nowMs, syncReads);
+      // Group 1, round 3 of the redesign: entries give way through the whole wait (until the next try's sync, 250 ms after its time), never
+      // past the stop's 15 second limit; dropped when the lookup runs or the fresh stop is settled or dropped (`endLookWait`).
+      budgetOf(d, mem).extendWait(lookWaitKey(f), Math.min(f.lookRoomAt + 500, f.placedAt + FRESH_STOP_CONFIRM_MS));
       // Stored once per wait (the first refusal in a row), not at every sync (group 2, round 2).
       if (f.lookWaits === 1) d.log?.("fresh_stop_lookup_skipped", { symbol: f.symbol, stopClientOrderId: f.stopClientOrderId, why: r.why, roomInMs: r.at - nowMs, status: f.status });
     } else {
@@ -706,6 +716,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     if (shown) {
       f.orderId = shown.id;
       settleFreshStop(d.log, f, shown.status, "order list", nowMs);
+      endLookWait(d, mem, f);
     }
   }
   mark("alerts");
@@ -854,11 +865,14 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
       });
       return;
     }
-    if (covering && (await freshStopLive(d, mem, fresh, listed.orders, nowMs, opts.streamLive === true, Math.max(1, listed.pages) + 1))) {
+    const live = covering && (await freshStopLive(d, mem, fresh, listed.orders, nowMs, opts.streamLive === true, Math.max(1, listed.pages) + 1));
+  if (fresh.status !== "unclear") endLookWait(d, mem, fresh);
+  if (live) {
       if (FRESH_STOP_LIMIT.on && fresh.status === "unclear") {
         // Still unclear: looked up again within 5 seconds, and the sync runs at the 15 second limit (the entry is looked up at that
         // sync too, even if it is older than the 10 minute list).
-        // Group 1, round 1 of the redesign (B3): a lookup that found no room is tried again as soon as room may return.
+        // Group 1, round 1 of the redesign (B3), with group 2's round 2: a lookup that found no room is tried again when there is room for it
+      // and the coming sync's reads, and at least 0.5, 1, 2, then 4 s after refusals in a row (`roomWaitUntil`).
         const roomAt = fresh.lookRoomAt !== undefined ? Math.max(nowMs + 250, fresh.lookRoomAt) : Infinity;
         const due = Math.min(nowMs + FRESH_STOP_UNCLEAR_LOOKUP_MS, roomAt, fresh.placedAt + FRESH_STOP_CONFIRM_MS);
         wake(due);
@@ -1218,6 +1232,7 @@ async function timedOutWait(d: RiskDeps, mem: SyncMemory, s: OrderRecord, listed
       // The redesign of 2026-11-14, part 1: class P1 of the shared request budget (1 request).
       const r = budgetOf(d, mem).tryReserve("P1", 1, { label: "timed-out stop cancel again", limitRetries: true });
       if (r instanceof Reservation) {
+        chk.roomWaits = 0;
         try {
           await withReservation(r, () => d.broker.cancelOrder(orderId!));
           d.log?.("fresh_stop_timeout_cancel", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: stop, by: "status check", again: mem.timedOutCancelAccepted.has(stop) });
