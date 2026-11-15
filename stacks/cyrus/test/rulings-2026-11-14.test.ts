@@ -534,3 +534,33 @@ test("rulings round 5: a refused look of a waiting stuck retry renews the hold p
   t = a2.at;
   assert.ok(b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP }) instanceof Reservation, "the retry gets in at its next look");
 });
+
+// Group 2, rulings round 6: a later refused look never shortens the hold. Stuck retry A looks while an urgent reservation is open (room for A
+// returns late); the urgent try ends having sent nothing; stuck retry B looks and is refused with an earlier room time, and never tries (its
+// record resolved). The hold keeps A's end, so P2 cannot take the room before A's look, and A gets in.
+test("rulings round 6: a later refused look with an earlier room time never shortens the hold; P2 cannot take the room before the first retry's look, and it gets in", () => {
+  let t = 0;
+  const b: any = new RequestBudget({ now: () => t });
+  for (let i = 0; i < 6; i++) {
+    t = 36_000 + i * 800;
+    const r = b.tryReserve("P2", 1, { label: "list lag recheck" }) as Reservation;
+    r.charge("/v2/t");
+    r.end();
+  }
+  t = 40_100;
+  const urgent = b.tryReserve("P1", 3, { label: "15 second limit lookup" }) as Reservation;
+  assert.ok(urgent instanceof Reservation);
+  const a = b.roomFor("P1", 10, true, 0, STUCK_RETRY_MINUTE_CAP);
+  assert.ok(!a.ok && a.why === "five");
+  const endA = b.retryWaitUntil;
+  t = 40_200;
+  urgent.end(); // ended having sent nothing
+  const bLook = b.roomFor("P1", 10, true, 0, STUCK_RETRY_MINUTE_CAP);
+  assert.ok(!bLook.ok && bLook.at < a.at, "B refused, with an earlier room time");
+  assert.equal(b.retryWaitUntil, endA, "the hold's end did not move back");
+  t = bLook.at + 2_000; // after B's room time plus 0.5 s, before A's look
+  assert.ok(t > bLook.at + 500 && t < a.at);
+  assert.ok(!(b.tryReserve("P2", 5, { label: "list lag recheck" }) instanceof Reservation), "P2 still held");
+  t = a.at;
+  assert.ok(b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP }) instanceof Reservation, "A gets in at its look");
+});

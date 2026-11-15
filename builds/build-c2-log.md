@@ -6178,3 +6178,11 @@ Full suite 830 of 830. Type check clean.
 - Notes: the draft's 5-stuck range has two runs (101 to 257 s in group 1's round 3, 101 to 125 s in its round 4); "(v22: 125 to 171 s)" read as the same test shape.
 
 **Fixes (a test and wording only):** the probe as a test (the second look refused, the hold renewed past it, P2 refused 4 just after the first end, the retry in at its next look); `noRenew` fails it. The draft names both runs and calls v22 "the earlier release, in its own test".
+
+### Michael's rulings, round 6 (4a6d04f): group 2 CHANGES REQUIRED (one test gap), and fixes
+
+**Group 2, rulings round 6: CHANGES REQUIRED** (check 9; nothing under checks 2, 7, 10; src unchanged since fa357df). Round 5 closed (`noRenew` fails the new test; `holdBoundary`, `holdLinger`, `holdLinger5`, `noWhen`, `renewOnlyNow`, `roomForNoHold2` each fail a real test; the draft's wording fixed).
+- **Blocking:** no test failed if a later refused look shortened the hold (`noPrevMax`, the hold's end without its previous value, passed all 281 tests that import the budget). Its probe `prevmax2`: stuck retry A refused while an urgent reservation of 3 was open (hold to 43.9 s); the urgent try ended unused; stuck retry B refused with room at 41.0 s and never tried (its record resolved): in base P2 is refused 5 at 43.0 s and A gets in at 43.4 s; in `noPrevMax` the hold ends at 42.7 s, P2 takes 5 and A is refused again.
+- Notes: a hold can outlast a retry that got in (a design question for group 1, already named to Michael: at most about 60 s); `retryWaitRoom` and `retryWaitFive` follow the last look (harmless while every ordinary stuck retry asks for 10).
+
+**Fix (a test only):** its sequence as a test (the hold's end does not move back on B's look; P2 refused between B's room time plus 0.5 s and A's look; A in at its look); `noPrevMax` fails it.
