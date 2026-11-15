@@ -347,9 +347,11 @@ test("item 6: the daily loss stop's sale is marked priority, the order sync's on
   assert.ok(/reason: "daily loss stop", tradeDate: day\.tradeDate, maxRounds: 1, priority: true/.test(risk));
   // Release 1 of 2026-11-09: both one-position sales (missing exit, remainder) go through one helper, whose sale gives way.
   // Item 2 of 2026-11-13: a try charged per request (ruling B) runs one round.
-  assert.equal((risk.match(/only: \[s\.symbol\],[\s\S]*?maxRounds: extra\.fast \|\| timedOutTry \? 1 : 3,[^)]*yieldToPriority: true/g) ?? []).length, 1);
+  // Michael's ruling 1 of 2026-11-14 (night): an ordinary stuck retry runs one round too.
+  assert.equal((risk.match(/only: \[s\.symbol\],[\s\S]*?maxRounds: extra\.fast \|\| timedOutTry \|\| ordinaryRetry \? 1 : 3,[^)]*yieldToPriority: true/g) ?? []).length, 1);
   // The redesign of 2026-11-14: each runs inside its try's reservation (a retry) or a first try's counter (`inTry`).
-  assert.equal((risk.match(/\(\) => timedCleanup\(d, day, mem, s, o, "(missing|bare)"/g) ?? []).length, 2); // 2026-11-10: timed for the late-notice log
+  // Michael's answer of 2026-11-14 (night) on ruling 1: a third, the remainder seen with no exits after its own take-profit cancel landed.
+  assert.equal((risk.match(/\(\) => timedCleanup\(d, day, mem, s, o, "(missing|bare)"/g) ?? []).length, 3); // 2026-11-10: timed for the late-notice log
 });
 
 // ------------------------------------------------ decision 5: the refusal backoff ---------------------------------------------------

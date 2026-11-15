@@ -1196,3 +1196,34 @@ test("part 2 (group 2, round 5): the 15 second limit's first try refused for roo
   const r = await w.acts[0]!.run();
   assert.deepEqual(r?.room, { cls: "P1", n: w.TIMED_OUT_TRY_REQUESTS, reads: 2 });
 });
+
+// Michael's ruling 1 of 2026-11-14 (night): a stuck sale (here every sale is refused by Alpaca) is tried again within a few seconds while the
+// shared budget has room (2 s after its last try, as soon as there is room), each retry is one round and never sends more than the 10
+// requests it reserved (no overdraft), and the budget's limits (60 a minute, 15 in any 5 seconds) hold.
+test("Michael's ruling 1 of 2026-11-14: in the worker, a stuck sale retries within a few seconds while the budget has room, one round each, with no overdraft", async () => {
+  const { sim, r } = await armedDay();
+  const wk: any = r.worker;
+  const id = await holdOne(sim, r, "QXA");
+  await r.at("14:30:10");
+  for (const l of sim.orders.find((o: any) => o.clientOrderId === id)!.legs) await sim.cancelOrder(l.id);
+  sim.refuseSellIf = (x: any) => x.symbol === "QXA";
+  const tries: number[] = [];
+  const realSell = sim.submitSell.bind(sim);
+  sim.submitSell = async (x: any) => {
+    if (x.symbol === "QXA") tries.push(sim.simMs);
+    return realSell(x);
+  };
+  const t0 = sim.simMs;
+  await drive(r, sim, t0 + 60_000, t0 + 100);
+  // The first try keeps its 3 rounds (a first try is counted, never refused); each retry after it is one round, so one sell each.
+  const retries = tries.slice(3);
+  const gaps = retries.slice(1).map((t, i) => t - retries[i]!);
+  // At least 2 s apart; about 5 s while there is room, set by the budget's 15 in any 5 seconds (each retry reserves 10); after 6 retries
+  // this one position has reserved the budget's whole 60 for the minute, and the next waits for the minute to free.
+  assert.ok(retries.length >= 6, `retried while there was room: ${retries.length} retries in about 60 s`);
+  assert.ok(gaps.slice(0, 5).every((g) => g >= 2_000 && g <= 6_000), `within a few seconds, never sooner than 2 s: ${gaps.join(", ")}`);
+  const b = wk.budget;
+  assert.equal(b.totals.overdraft, 0, "no retry sent more than it reserved");
+  assert.ok(b.peak.minute <= 60 && b.peak.five <= 15, `within the budget's limits (minute ${b.peak.minute}, 5 s ${b.peak.five})`);
+  r.worker.stop?.();
+});

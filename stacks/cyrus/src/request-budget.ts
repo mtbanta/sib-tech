@@ -28,7 +28,8 @@ export const P1_KEEP = 20;
 export const P1_FLOOR = 20;
 export const P2_FLOOR = SAFETY_RESERVE;
 // A P2 try refused on its floor counts as waiting (entries give way) until it is granted, or this long after its last refusal unless its
-// caller extends the wait to its next try (`extendWait`: the fresh-stop lookup and the list-lag recheck, bounded by their own limits).
+// caller extends the wait to its next try (`extendWait`: the list-lag recheck, bounded by its 30 s window; the unclear fresh-stop lookup is P1
+// since Michael's ruling 2 of 2026-11-14, night).
 export const GIVE_WAY_MAX_MS = 2_000;
 const REFILL_PER_MS = ALPACA_REQUESTS_PER_MINUTE / 60_000;
 

@@ -24,7 +24,7 @@ import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
 import { ProgressGap, RetryBackoff } from "./retry-backoff.ts";
-import { BARE_GRACE_MS, lookWaitKey, enforceDailyLoss, fastLostExitSale, LossStopMemory, noteTimedOutStopEnded, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
+import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, noteTimedOutStopEnded, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import type { SelfMonitor } from "./self-monitor.ts";
 import { SCREEN_MINUTES_BEFORE_OPEN, AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
 import { BusyPlaceholder } from "./strategy.ts";
@@ -1698,8 +1698,6 @@ export class Worker {
         }
         // Ruling B of 2026-11-12: a stop that was unclear gets its time to confirm logged here too.
         settleFreshStop((e, data) => this.d.log?.("info", e, data), f, info.status, "live update", this.d.now().getTime());
-        // Group 1, round 3 of the redesign: a stop no longer unclear ends the give-way its lookup was waiting with.
-        if (f.status !== "unclear") this.budget.stopWaiting(lookWaitKey(f));
         if (info.event === "canceled" || info.event === "expired" || info.event === "rejected") {
           this.d.log?.("info", "fresh_stop_ended", { symbol: info.symbol, stopClientOrderId: info.clientOrderId, event: info.event });
           if (this.closingOut || this.liquidator.isLiquidatingOthers() || this.middayOwnsSelling) return;

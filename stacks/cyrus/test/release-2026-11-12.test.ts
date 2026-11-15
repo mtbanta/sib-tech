@@ -324,7 +324,7 @@ test("group 2, finding 1 (round 2 wording): the stop-gap line names only the fre
 
 // Group 2 review, round 2, probe 2: a remainder sold outside the fresh-stop step (by the missing-exit check after a stuck cleanup, or after
 // its fresh stop ended) is not counted by the line, and the line must not claim anything false about it.
-test("group 2, round 2 (probe 2): a stuck remainder later sold by the missing-exit check, and a fresh stop cancelled in the dashboard then sold: the line claims nothing false", async () => {
+test("group 2, round 2 (probe 2): a stuck remainder later protected by its fresh stop (Michael's answer of 2026-11-14 on ruling 1), and a fresh stop cancelled in the dashboard then sold: the line claims nothing false", async () => {
   for (const shape of ["stuck", "fresh-ended"] as const) {
     const w = world();
     const meter = new StopGapMeter();
@@ -345,9 +345,12 @@ test("group 2, round 2 (probe 2): a stuck remainder later sold by the missing-ex
     await syncOrders(w.risk, dd, { protect: true });
     meter.settle(w.sim.simMs + 70_000);
     const line = stopGapLine(meter.totals());
-    assert.ok(w.sim.sellLog.some((x) => x.symbol === "LUNR"), `${shape}: the remainder was sold (outside the fresh-stop step)`);
+    // Michael's answer of 2026-11-14 (night) on ruling 1: the stuck remainder, seen with no exits once its take-profit cancel landed, gets its
+    // fresh stop (not a market sale by the missing-exit check).
+    if (shape === "stuck") assert.ok(freshStopOrder(w, "LUNR") && !w.sim.sellLog.some((x) => x.symbol === "LUNR"), `${shape}: the remainder got its fresh stop`);
+    else assert.ok(w.sim.sellLog.some((x) => x.symbol === "LUNR"), `${shape}: the remainder was sold (outside the fresh-stop step)`);
     assert.ok(!/none today|no remainder(s)? (was )?sold\b(?! at market at that step)/.test(line), `${shape}: no general claim: ${line}`);
-    if (shape === "stuck") assert.equal(line, "Fresh stops after a partial take-profit: none placed today, and no remainder sold at market at that step.");
+    if (shape === "stuck") assert.equal(line, "Fresh stops after a partial take-profit: 1 placed (3 shares); no remainder sold at market at that step.");
     else assert.equal(line, "Fresh stops after a partial take-profit: 1 placed (3 shares); no remainder sold at market at that step.");
   }
 });
@@ -379,7 +382,12 @@ for (const [CMS, GAP] of [[25_000, 0], [30_000, 0], [28_000, 1_000], [35_000, 5_
       }
       return o;
     };
-    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    // Michael's ruling 1 of 2026-11-14 (night): each retry is one round, so the fresh stop is placed by the retry that comes once the
+    // take-profit's cancel has landed (each 2 s after the last, while the budget has room).
+    for (let i = 0; i < 40 && !w.memory.freshStops.has(id); i++) {
+      const r: any = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+      if (!w.memory.freshStops.has(id)) w.sim.advanceTo(Math.max(w.sim.simMs + 500, r.recheckAt ?? 0));
+    }
     w.sim.submitSell = realSubmit;
     assert.equal(w.memory.freshStops.get(id)?.status, "unclear");
     const before = mentions(w).length;
