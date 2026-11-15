@@ -23,6 +23,7 @@ import { CONTROL_STOP, MemoryStore, type StopFlag, type Store } from "../src/sto
 import { FakeBroker } from "./helpers.ts";
 import { SimBroker } from "./sim-broker.ts";
 import { D, rig, settle, z } from "./rig.ts";
+import { routineAsks, routineSafetyCalls } from "./tag-audit.ts";
 
 const stopIn = async (s: Store) => (await s.getControl<StopFlag>(CONTROL_STOP))?.on === true;
 const plus = (t: string, seconds: number) => new Date(z(t).getTime() + seconds * 1000).toISOString();
@@ -171,6 +172,8 @@ test("40 positions and repeated refusals: total requests stay under Alpaca's lim
   const START = Date.UTC(2026, 10, 1, 22, 0); // before the evening approval: the worker runs on the simulator's clock
   const CLOSEOUT = Date.UTC(2026, 10, 2, 20, 55);
   const sim = new SimBroker(START);
+  const asks0 = routineAsks.length;
+  const calls0 = routineSafetyCalls.length;
   const events: string[] = [];
   const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, log: (_l, e) => void events.push(e), midday: false }); // one clock, as in production; the mid-day cycle (on in production) would sell at 10:30 CT; it is tested in midday.test.ts
   sim.onRate = (remaining) => r.governor.observe({ path: "/v2/orders", status: 200, limit: 200, remaining, reset: null });
@@ -211,6 +214,9 @@ test("40 positions and repeated refusals: total requests stay under Alpaca's lim
   if (process.env.DEBUG_R8) console.log("events", [...new Set(events)].join(","), "unprotected", events.filter((e) => e === "unprotected_position").length);
   console.log(`40-position refusal rehearsal: busiest minute ${worst} requests, lowest bucket ${Math.floor(sim.lowestTokens)}, rate-limit answers ${sim.rejected429}`);
   assert.equal(await stopIn(r.store), true, "the loss stop fired");
+  // The redesign of 2026-11-14: every sale, cancel and liquidation the worker made was inside a scope (a first try or a budgeted try).
+  assert.deepEqual(routineAsks.slice(asks0), [], "no sale asked for outside a scope");
+  assert.deepEqual(routineSafetyCalls.slice(calls0).filter((c) => c.fn !== "submitEntry"), [], "no sell or cancel sent outside a scope (the test's own entries are its setup)");
   assert.equal(sim.rejected429, 0, "Alpaca never answered 'too many requests'");
   // The redesign of 2026-11-14 (decision 4, change A): the loss stop's first sale is a first try, counted but no longer charged to the
   // re-sells' budget, so the re-sells start about 10 s after it (before: a minute later) and the busiest 60 s rose from 180 to 226 here. What

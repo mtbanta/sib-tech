@@ -6,11 +6,14 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**BUILD C2: FLY RUNS RELEASE V22 (UNCHANGED). THE REDESIGN (ONE REQUEST BUDGET AND ONE PROTECTION LOOP) IS DESIGNED AND WAITS FOR MICHAEL'S APPROVAL; NOTHING BUILT.** As of 2026-11-14 (Saturday evening).
-- **Design:** `builds/c2-redesign-2026-11-14.md` on branch `redesign-2026-11-14` (unmerged). Michael's request is saved verbatim in the C2 log, "Michael's request of 2026-11-14 (Saturday, about 4:30 PM): the redesign, saved verbatim".
-- **Open for Michael:** the nine numbered decisions in the design's section 1 (budget size, priority order, safety first tries, the reserve, which retries join, shadow or live, how it ships, and the list of behaviour changes in section 7).
-- **After approval:** build both parts with tests; group 1 and group 2 reviews, up to 8 rounds each. Deploy not before v22 has traded Monday morning: at the Monday mid-day pause with Michael's written yes in `commands`, otherwise Monday night.
+**BUILD C2: FLY RUNS RELEASE V22 (UNCHANGED). THE REDESIGN IS APPROVED (MICHAEL, 2026-11-14, WITH CHANGES A AND B). PART 1 (THE SHARED REQUEST BUDGET) IS BUILT AND IN REVIEW; PART 2 (THE PROTECTION LOOP) IS NEXT.** As of 2026-11-14 (Saturday night).
+- **Branch:** `redesign-2026-11-14` (unmerged). Design `builds/c2-redesign-2026-11-14.md`, section 10 "As approved" and 10.1 "As built". Approval saved verbatim in the C2 log.
+- **Part 1:** built (`436e91e`), group 2 round 1 CHANGES REQUIRED (fixed), group 1 round 1 in review. Up to 8 rounds per group.
+- **Open for Michael:** the overdraft of an ordinary stuck retry (options a, b, c in the C2 log, "Redesign part 1 ... built", item 1).
+- **Deploy:** not before v22 has traded Monday morning; the Monday mid-day pause with Michael's written yes in `commands`, otherwise Monday night. Part 1 can ship alone if part 2 has not passed both groups (decision 8).
 - Paper only. Research input for a human decision.
+
+Earlier entry, superseded by the paragraph above: **BUILD C2: FLY RUNS RELEASE V22 (UNCHANGED). THE REDESIGN (ONE REQUEST BUDGET AND ONE PROTECTION LOOP) IS DESIGNED AND WAITS FOR MICHAEL'S APPROVAL; NOTHING BUILT.** As of 2026-11-14 (Saturday evening).
 
 Earlier entry, superseded by the paragraph above: **BUILD C2: FLY RUNS RELEASE V22, THE WEEKEND BUILD WITH RULING B ON. DEPLOYED FRIDAY 2026-11-13, 6:40 PM CENTRAL, WHILE FLAT, AFTER BOTH REVIEW GROUPS PASSED (FIX (A) ROUND 8).** As of 2026-11-13, evening.
 - **v22:** `main` `2dbdb9c`, code of `b1bd65c`. On top of v21:

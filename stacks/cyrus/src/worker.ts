@@ -41,7 +41,7 @@ import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } fr
 import { PAPER_ONLY } from "./discord.ts";
 import { CLOSEOUT_RETRY_MOST, MIDDAY_NOT_FLAT_ALERT_AFTER_MS, MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MIDDAY_RETRY_MS, blockedNext, lossPast, middayFlat, middayTimes, readHold, readPause, resumedByText, retrySymbols, startupAction, updatePause } from "./midday.ts";
 import { Reservation, RequestBudget, withReservation } from "./request-budget.ts";
-import { outsideScope } from "./request-scope.ts";
+import { inRequestScope, outsideScope } from "./request-scope.ts";
 import type { PingKind } from "./heartbeat.ts";
 
 export type Channel = "commands" | "trading" | "alerts";
@@ -196,6 +196,8 @@ export class Worker {
     ["summary", new RetryBackoff(5_000, 5 * 60_000)],
   ]);
   private lastCarriedAttempt = 0;
+  // The redesign of 2026-11-14: what the last carried-position try sent (the next retry's reservation).
+  private carriedLastCost: number | null = null;
   private carriedAttemptDate: string | null = null;
   private carriedAttempts = 0;
   // Group 1, round 2 of the weekend build: the mid-day and afternoon close-out retries grow their wait only while they sell nothing.
@@ -331,7 +333,8 @@ export class Worker {
     this.view = new BrokerView(deps.broker, () => deps.now().getTime());
     this.sellGate = new SellGate({ broker: deps.broker, say: (c, t, o) => this.say(c, t, o), log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime() });
     this.liquidator = new Liquidator({ broker: deps.broker, gate: this.sellGate, now: deps.now, sleep: deps.sleep, log: (e, data) => deps.log?.("info", e, data), waitEvent: (symbols, ms) => this.waitEvent(symbols, ms) });
-    this.entryExpiry = new EntryExpiry({ cancelOrder: (id) => deps.broker.cancelOrder(id), wasFilled: (id) => this.orderHandler?.wasFilled(id) ?? false, log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}) });
+    // The load window's 5 second cancels are part of entering (tagged as entries for the shared request budget's statistics).
+    this.entryExpiry = new EntryExpiry({ cancelOrder: (id) => inRequestScope({ tag: "entry" }, () => deps.broker.cancelOrder(id)), wasFilled: (id) => this.orderHandler?.wasFilled(id) ?? false, log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}) });
     this.commands = new CommandProcessor({
       sessions: this.sessions,
       settings: deps.settings,
@@ -529,6 +532,9 @@ export class Worker {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     if (this.eventSyncTimer) (this.d.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>)))(this.eventSyncTimer);
+    if (this.lagTimer) (this.d.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>)))(this.lagTimer);
+    this.lagTimer = null;
+    this.lagTimerAt = null;
     this.stream?.stop();
     this.orderStream?.stop();
   }
@@ -781,7 +787,8 @@ export class Worker {
     await this.say("alerts", `${why}, so I am closing everything from the broker's clock alone.`);
     this.closingOut = true;
     try {
-      const result = await closeOut(this.closeoutDeps(), date, { path: "emergency" });
+      // A first try of safety work (the redesign of 2026-11-14): counted, never refused.
+      const result = await inRequestScope({ tag: "first" }, () => closeOut(this.closeoutDeps(), date, { path: "emergency" }));
       await this.setNotFlat(!result.flat, result.remaining, date);
     } finally {
       this.closingOut = false;
@@ -1094,10 +1101,26 @@ export class Worker {
       this.carriedAttempts = 0;
     }
     const carriedGapMs = this.carriedAttempts === 0 ? 0 : Math.min(60_000 * 2 ** (this.carriedAttempts - 1), 5 * 60_000);
-    if (this.notFlat && now >= day.openAt && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !closeoutStarted && !this.closingOut && now.getTime() - this.lastCarriedAttempt >= carriedGapMs) {
-      this.lastCarriedAttempt = now.getTime();
-      this.carriedAttempts++;
-      this.background("carried", () => this.carriedPhase(date));
+    if (this.notFlat && now >= day.openAt && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !closeoutStarted && !this.closingOut && now.getTime() - this.lastCarriedAttempt >= carriedGapMs && this.backgroundReady("carried")) {
+      // The redesign of 2026-11-14 (decision 6, every retry joins): the first try is a first try (counted, never refused); a retry is a P1 try
+      // of the shared request budget, reserving the last try's measured cost (at most CLOSEOUT_RETRY_MOST) against the minute only, down to
+      // 20 of Alpaca's remaining. Refused, it is not an attempt; the next pass asks again.
+      const retry = this.carriedAttempts > 0;
+      const res = retry ? this.budget.tryReserve("P1", Math.min(CLOSEOUT_RETRY_MOST, this.carriedLastCost ?? CLOSEOUT_RETRY_MOST), { fiveSec: false, label: "carried-position retry" }) : this.budget.first("carried-position sale");
+      if (res instanceof Reservation) {
+        this.lastCarriedAttempt = now.getTime();
+        this.carriedAttempts++;
+        const started = this.background("carried", () =>
+          withReservation(res, async () => {
+            try {
+              await this.carriedPhase(date);
+            } finally {
+              this.carriedLastCost = res.used;
+            }
+          }, retry ? undefined : "first"),
+        );
+        if (!started) res.end();
+      }
     }
 
     // The mid-day cycle (Michael, 2026-11-09): at 10:30 AM Central the pause goes on and the mid-day close-out sells everything, retried
@@ -1217,7 +1240,7 @@ export class Worker {
   // The redesign of 2026-11-14, part 1: a sync started for the list-lag recheck runs inside its P2 reservation (`how.recheck`): every request
   // it sends is counted as it is sent. Any other sync is routine.
   private startSync(dayNow: DayRecord, closeAt: Date, how: { fromPass?: boolean; restoreAt?: number; recheck?: Reservation } = {}): void {
-    if (this.inflight.has("risk")) {
+    if (!this.backgroundReady("risk")) {
       how.recheck?.end();
       return;
     }
@@ -1225,7 +1248,7 @@ export class Worker {
     const risk = this.riskDeps();
     const protect = () => this.protectNow(closeAt);
     const streamLive = this.orderStreamLive();
-    this.background("risk", async () => {
+    const started = this.background("risk", async () => {
       // While the daily loss stop is in force its own retry re-sells whatever is still held, inside its request budget; the
       // missing-exit check would otherwise start a liquidation of its own for every such position every 30 seconds (round 8).
       let synced: Awaited<ReturnType<typeof syncOrders>>;
@@ -1265,6 +1288,7 @@ export class Worker {
       await this.stopCancelFollowUp(dayNow.tradeDate);
       await sweepEntriesWhileStopped(risk);
     });
+    if (!started) how.recheck?.end();
   }
 
   // Decision 1 of 2026-11-06: after a sync, an entry reported with both exits lost that the sync neither sold nor found closed (Alpaca's
@@ -1879,7 +1903,7 @@ export class Worker {
   // never stops the price stream (a `go` without a deploy trades at once), never sets the not-flat flag, and leaves the borrowing cap
   // alone (closeOut skips that for this path). The missing-exit check is off while it runs (protectNow). The first try is the full
   // close-out; a retry is ONE round of it without the wait for its own sells (the next retry looks again), which is how retries stay
-  // inside 60 requests a minute. What Alpaca counted for each try is charged to the retries' budget afterwards.
+  // inside 60 requests a minute. Since the redesign of 2026-11-14 each retry reserves its estimate in the shared request budget first, and its requests are counted as they are sent.
   private async middayPhase(date: string, day: DayRecord, pauseAt: Date, retry = false, only: string[] | null = null, res: Reservation | null = null): Promise<void> {
     const pause = await readPause(this.d.store, date);
     if (pause?.resumedAt) return; // already resumed today

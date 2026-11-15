@@ -1,5 +1,6 @@
 // Test doubles for the broker and Discord, shared by the command, gate and day tests.
 import { chargeFromScope } from "../src/request-scope.ts";
+import { noteSafetyCall } from "./tag-audit.ts";
 import type { Account, AccountConfig, CalendarDay, Clock, EntryOrder, Order, Position, SellOrder } from "../src/alpaca-trading.ts";
 import { AlpacaError } from "../src/alpaca-trading.ts";
 import type { FullBroker } from "../src/broker.ts";
@@ -39,6 +40,7 @@ export class FakeBroker implements FullBroker {
     const path = fn === "getClock" ? "/v2/clock" : fn === "getCalendar" ? "/v2/calendar" : `/v2/${fn}`;
     chargeFromScope(path);
     this.onSend?.(path);
+    if (fn === "submitEntry" || fn === "submitSell" || fn === "cancelOrder" || fn === "cancelAllOrders") noteSafetyCall(fn);
     this.calls.push({ fn, args });
     if (this.failOn.has(fn)) throw new Error(`${fn} failed (test)`);
   }

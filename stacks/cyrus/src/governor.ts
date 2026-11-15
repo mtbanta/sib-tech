@@ -153,7 +153,8 @@ export class Governor {
     if (!this.canSpend()) return this.refuse(`holding back for safety: Alpaca's request budget is down to ${Math.floor(this.budget())} (the last ${this.reserve()} are kept for the stop command, cancels and the close-out)`);
     if (this.safetyHold?.givingWay()) {
       this.safetyHold.noteGiveWayRefusal?.();
-      return this.refuse("holding back for a safety retry: a recheck is waiting for Alpaca's request budget to refill above the reserve");
+      // Group 2, round 1 of the redesign: it starts like the other budget refusal, so the gate counts it in one row a minute (FLOW_REASONS).
+      return this.refuse("holding back for safety: a recheck is waiting for Alpaca's request budget to refill above the reserve");
     }
     this.tradeTimes.push(this.now());
     this.peakTrades = Math.max(this.peakTrades, this.tradeTimes.length);

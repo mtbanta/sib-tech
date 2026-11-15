@@ -3,6 +3,7 @@
 import { AlpacaError, type Order } from "./alpaca-trading.ts";
 import { activeOrdersOldestFirst } from "./order-index.ts";
 import { Reservation, RequestBudget, withReservation } from "./request-budget.ts";
+import { inRequestScope } from "./request-scope.ts";
 import type { Broker } from "./broker.ts";
 import { centralClock, etInstant } from "./time.ts";
 import { CONTROL_STOP, type DayRecord, type OrderRecord, type StopFlag, type Store } from "./store.ts";
@@ -126,11 +127,10 @@ export const TIMED_OUT_PROBE_STREAM_MS = 30_000;
 export const TIMED_OUT_PROBE_FAIL_MAX_MS = 60_000;
 // The redesign of 2026-11-14, part 1: what each budgeted try reserves before it starts (its most requests; section 3.2's table of the
 // design). A sale try for an entry with a timed-out stop: clock and positions 2, open orders 1, a cancel 1, two looks 4, re-read 1, sale 3,
-// last look 1. A status check of a timed-out stop: its lookup by client id, and Alpaca's open orders if that lookup fails. The 15 second
-// limit: its two lookups, then the first try.
+// last look 1. A status check of a timed-out stop, and the 15 second limit's look: its lookup by client id, and Alpaca's open orders if that
+// lookup fails. The 15 second limit reserves its look and its first try separately (group 2, round 1 of the redesign).
 export const TIMED_OUT_TRY_REQUESTS = 13;
 export const TIMED_OUT_CHECK_REQUESTS = 2;
-export const FRESH_STOP_TIMEOUT_REQUESTS = 2 + TIMED_OUT_TRY_REQUESTS;
 export const STUCK_ESCALATE_MS = 5 * 60_000;
 // The redesign of 2026-11-14, part 1 (Michael's approval): the short retries of stuck entries are class P1 of the shared request budget
 // (request-budget.ts: 60 a minute and 15 in any 5 seconds for every retry and check together, down to 20 of Alpaca's remaining). Each
@@ -789,7 +789,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       if (nowMs - liveAt! < LIVE_LAG_WATCH_MS) {
         // Michael's change of 2026-11-13 (evening): every 2 s after the first steps; since the redesign of 2026-11-14 each recheck runs inside
         // a P2 reservation of its cost (the sync's order list, its positions and this entry's lookup), so many remainders at once can never exceed it. With
-        // no room, no quick recheck: the regular sync comes next (see the end of the walk).
+        // no room the recheck waits for room (the worker's own timer) until the last lagging remainder's 30 second window ends.
         const gap = Math.min(500 * 2 ** (tries - 1), LIVE_LAG_RECHECK_MAX_MS);
         lagRecheckGap = lagRecheckGap === undefined ? gap : Math.min(lagRecheckGap, gap);
         lagUntil = Math.max(lagUntil, liveAt! + LIVE_LAG_WATCH_MS);
@@ -991,7 +991,7 @@ async function reportTimedOutOnce(d: RiskDeps, mem: SyncMemory, s: OrderRecord, 
 // fresh stop. Returns null to go on to the sale (whole tries, P1 reservations of the shared request budget), or the moment to look again while it
 // waits. It waits while the stop is known open (the sync's list shows it, or the last try or check saw it, whatever the state of our cancel:
 // accepted, pending or refused): a sale try could not sell the shares that stop holds. Its status comes free from the sync's list when the
-// list shows it; otherwise one lookup by client id (charged, leaving the reserve), every 10 seconds with the live updates down and every 30
+// list shows it; otherwise one lookup by client id (a P1 reservation of 2 in the shared request budget, with the open orders below), every 10 seconds with the live updates down and every 30
 // with them up, then Alpaca's open orders if that lookup fails; a check that fails both ways waits on its own backoff (doubling to a
 // minute). Ended (cancelled, expired, rejected, unknown to Alpaca, or not among the open orders): noted, and the sale is tried (when a whole
 // try fits). While it waits its cancel is sent again on the backoff's steps (5, 10, 20, then every 30 seconds; the first at once), 1
@@ -1105,52 +1105,77 @@ async function freshStopTimeout(d: RiskDeps, day: DayRecord, mem: SyncMemory, s:
   mem.timedOutDirty = true; // written to the database by this sync (item 2 of 2026-11-13)
   let cancelId: string | null = f.orderId;
   let found: string = "lookup failed";
-  // The redesign of 2026-11-14, part 1: the 15 second limit's lookups and its first try are class P1 of the shared request budget, with room
-  // for both (FRESH_STOP_TIMEOUT_REQUESTS). Without room nothing is sent now: the lookups are skipped, the alert says Alpaca could not be
-  // asked, and the entry's first try comes when the budget has room (the order sync's walk, on the stuck record's time), as a try for an
-  // entry with a timed-out stop (it never sells shares a working stop holds, sells.ts).
-  const r = budgetOf(d, mem).tryReserve("P1", FRESH_STOP_TIMEOUT_REQUESTS, { label: "15 second limit" });
-  const room = r instanceof Reservation;
-  const run = async (): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }> => {
-    if (!room) found = "not looked up (no room in the request budget)";
-    else try {
-      const x = await d.broker.findOrderByClientId(f.stopClientOrderId);
-      found = x ? x.status : "unknown_at_alpaca";
-      if (x) cancelId = OPEN_STATUSES.has(x.status) ? x.id : null;
-      else cancelId = null;
-    } catch (err) {
-      d.log?.("fresh_stop_lookup_failed", { symbol: f.symbol, error: (err as Error).message.slice(0, 120) });
-      // The lookup by client id failed: Alpaca's open orders are a second way to find it (one more request, only here).
+  // The redesign of 2026-11-14, part 1 (with group 2's round 1 finding): the 15 second limit's lookups (TIMED_OUT_CHECK_REQUESTS, 2) and its
+  // first try (TIMED_OUT_TRY_REQUESTS, 13) are each a P1 try of the shared request budget, reserved separately, so a lookup made in the last
+  // 5 seconds (the unclear stop's own, every 5 seconds) does not keep the limit from looking. Without room for the lookups they are skipped;
+  // without room for the first try it comes when the budget has room (the order sync's walk, on the stuck record's time), as a try for an
+  // entry with a timed-out stop (it never sells shares a working stop holds, sells.ts). The alert says which.
+  const budget = budgetOf(d, mem);
+  const look = budget.tryReserve("P1", TIMED_OUT_CHECK_REQUESTS, { label: "15 second limit lookup" });
+  if (!(look instanceof Reservation)) found = "not looked up (no room in the request budget)";
+  else
+    await withReservation(look, async () => {
       try {
-        const x = (await d.broker.listOrders("open")).find((y) => y.clientOrderId === f.stopClientOrderId);
-        found = x ? x.status : "not in Alpaca's open orders";
-        cancelId = x ? x.id : null;
-      } catch {
-        /* neither read answered: the sale below still cannot sell shares a working stop holds (sells.ts) */
+        const x = await d.broker.findOrderByClientId(f.stopClientOrderId);
+        found = x ? x.status : "unknown_at_alpaca";
+        if (x) cancelId = OPEN_STATUSES.has(x.status) ? x.id : null;
+        else cancelId = null;
+      } catch (err) {
+        d.log?.("fresh_stop_lookup_failed", { symbol: f.symbol, error: (err as Error).message.slice(0, 120) });
+        // The lookup by client id failed: Alpaca's open orders are a second way to find it (one more request, in the same reservation).
+        try {
+          const x = (await d.broker.listOrders("open")).find((y) => y.clientOrderId === f.stopClientOrderId);
+          found = x ? x.status : "not in Alpaca's open orders";
+          cancelId = x ? x.id : null;
+        } catch {
+          /* neither read answered: the sale below still cannot sell shares a working stop holds (sells.ts) */
+        }
       }
+    });
+  d.log?.("fresh_stop_timeout", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: f.stopClientOrderId, msFromSent: nowMs - f.placedAt, found, cancelling: cancelId !== null });
+  // The stop filled after all: its shares are sold; the next sync closes the entry. Nothing to cancel or sell.
+  if (found === "filled") return { attempted: false, stuck: false };
+  const sale = budget.tryReserve("P1", TIMED_OUT_TRY_REQUESTS, { label: "timed-out stop try" });
+  const saleNow = sale instanceof Reservation;
+  const left = f.qty;
+  const st = mem.stuck.get(s.clientOrderId) ?? { symbol: s.symbol, since: nowMs, nextAt: 0, delayMs: 0, alerted: false, escalated: false, lastTriedAt: nowMs, why: "" };
+  if (!st.alerted) {
+    st.alerted = true;
+    st.why = "its fresh protective stop was not confirmed within 15 seconds";
+    mem.stuck.set(s.clientOrderId, st);
+    const it = left === 1 ? "it" : "them";
+    const notAsked = found.startsWith("not looked up");
+    // Messaging only (group 2, round 1 of the redesign): what the stack is doing now, true whether or not the budget had room.
+    const what = saleNow
+      ? cancelId
+        ? `I am cancelling that stop and selling ${it} now`
+        : notAsked
+          ? `I have not been able to ask Alpaca about that stop (no room in my request budget), so I am selling ${it} now`
+          : found === "lookup failed"
+            ? `Alpaca could not be asked about that stop, so I am selling ${it} now`
+            : `Alpaca told me it does not hold that stop open, so I am selling ${it} now`
+      : cancelId
+        ? `I will cancel that stop and sell ${it} as soon as my request budget has room`
+        : notAsked
+          ? `I have not been able to ask Alpaca about that stop yet (no room in my request budget); I will sell ${it} as soon as there is room`
+          : found === "lookup failed"
+            ? `Alpaca could not be asked about that stop, so I will sell ${it} as soon as my request budget has room`
+            : `Alpaca told me it does not hold that stop open, so I will sell ${it} as soon as my request budget has room`;
+    try {
+      await d.say("alerts", `**Michael: ${s.symbol}'s fresh protective stop for ${plural(left, "share")} was not confirmed within 15 seconds, so I treat ${it} as unprotected.** ${what}, and will post again when ${left === 1 ? "it is" : "they are"} sold or gone.`, { mentionOwner: true });
+    } catch (err) {
+      if (saleNow) sale.end(); // never left holding room
+      throw err;
     }
-    d.log?.("fresh_stop_timeout", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: f.stopClientOrderId, msFromSent: nowMs - f.placedAt, found, cancelling: cancelId !== null });
-    // The stop filled after all: its shares are sold; the next sync closes the entry. Nothing to cancel or sell.
-    if (found === "filled") return { attempted: false, stuck: false };
-    const left = f.qty;
-    const st = mem.stuck.get(s.clientOrderId) ?? { symbol: s.symbol, since: nowMs, nextAt: 0, delayMs: 0, alerted: false, escalated: false, lastTriedAt: nowMs, why: "" };
-    if (!st.alerted) {
-      st.alerted = true;
-      st.why = "its fresh protective stop was not confirmed within 15 seconds";
-      mem.stuck.set(s.clientOrderId, st);
-      const what = cancelId ? "I am cancelling that stop and selling" : found === "lookup failed" || found.startsWith("not looked up") ? "Alpaca could not be asked about that stop, so I am selling" : "Alpaca told me it does not hold that stop open, so I am selling";
-      await d.say("alerts", `**Michael: ${s.symbol}'s fresh protective stop for ${plural(left, "share")} was not confirmed within 15 seconds, so I treat ${left === 1 ? "it" : "them"} as unprotected.** ${what} ${left === 1 ? "it" : "them"} now, and will post again when ${left === 1 ? "it is" : "they are"} sold or gone.`, { mentionOwner: true });
-    }
-    if (!room) {
-      // Its first try waits for room (not a backoff step).
-      st.nextAt = Math.max(nowMs + 250, (r as { at: number }).at);
-      st.lastTriedAt = nowMs;
-      d.log?.("timed_out_try_out_of_room", { symbol: s.symbol, clientOrderId: s.clientOrderId, stage: "15 second limit", retryInMs: st.nextAt - nowMs });
-      return { attempted: true, stuck: true, recheckAt: st.nextAt };
-    }
-    return cleanupSale(d, day, mem, s, o, "missing", undefined, cancelId ? { alsoCancel: [cancelId], alsoCancelStops: [f.stopClientOrderId], alsoCancelBy: "15 second limit" } : {});
-  };
-  return room ? withReservation(r, run) : run();
+  }
+  if (!saleNow) {
+    // Its first try waits for room (not a backoff step).
+    st.nextAt = Math.max(nowMs + 250, sale.at);
+    st.lastTriedAt = nowMs;
+    d.log?.("timed_out_try_out_of_room", { symbol: s.symbol, clientOrderId: s.clientOrderId, stage: "15 second limit", why: sale.why, retryInMs: st.nextAt - nowMs });
+    return { attempted: true, stuck: true, recheckAt: st.nextAt };
+  }
+  return withReservation(sale, () => cleanupSale(d, day, mem, s, o, "missing", undefined, cancelId ? { alsoCancel: [cancelId], alsoCancelStops: [f.stopClientOrderId], alsoCancelBy: "15 second limit" } : {}));
 }
 
 async function resolveStuck(d: RiskDeps, mem: SyncMemory, clientOrderId: string, how: string): Promise<boolean> {
@@ -1741,7 +1766,11 @@ const fallbackMemory = new LossStopMemory();
 // While the stop flag is on, cancel any entry that has not filled. This catches an entry that passed the gate's
 // last look at the flag just before a stop command and reached Alpaca after the command's own cancel pass.
 // Exits resting at Alpaca (sell orders) and entries that have started to fill are left alone.
+// Part of the stop command's work (the redesign of 2026-11-14): its requests are counted as a first try, never refused.
 export async function sweepEntriesWhileStopped(d: RiskDeps): Promise<number> {
+  return inRequestScope({ tag: "first" }, () => sweepEntriesNow(d));
+}
+async function sweepEntriesNow(d: RiskDeps): Promise<number> {
   const flag = await d.store.getControl<StopFlag>(CONTROL_STOP);
   if (!flag?.on) return 0;
   const open = await d.broker.listOrders("open");

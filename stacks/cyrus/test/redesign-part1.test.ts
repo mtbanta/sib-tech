@@ -373,3 +373,36 @@ for (const rate of [0, 0.1, 0.3]) {
     if (budget.totals.overdraft === 0) assert.ok(budget.peak.minute <= 60 && budget.peak.five <= 15);
   });
 }
+
+// Group 2, round 1 of the redesign: an entry refused while entries give way is counted like the other flow refusals (one row a minute at
+// the flush), never one database write per refused signal inside the gate's queue.
+test("part 1 (group 2, round 1): entries refused while a P2 recheck waits on its floor are counted in one row at the flush, not written one by one", async () => {
+  const { OrderGate } = await import("../src/gate.ts");
+  const { BrokerView } = await import("../src/broker-view.ts");
+  const { Governor } = await import("../src/governor.ts");
+  const store = new MemoryStore();
+  const broker = new FakeBroker();
+  const now = new Date("2026-11-02T15:30:00Z");
+  const say = async () => true;
+  await ensureDay({ broker, store, now: () => now, say } as any, D);
+  await store.updateDay(D, { status: "approved", decided: { position: true, loss: true, trades: true, cap: true }, phases: { request: "2026-11-01T22:10:00.000Z", armed: "2026-11-02T14:25:00.000Z" } } as any);
+  const governor = new Governor(() => now.getTime());
+  const b = new RequestBudget({ now: () => now.getTime(), remaining: () => 82 });
+  governor.setSafetyHold(b);
+  b.tryReserve("P2", 5, { label: "list lag recheck", waitKey: "list lag recheck" }); // refused on its floor: waiting
+  assert.equal(b.givingWay(), true);
+  let writes = 0;
+  const realAdd = store.addRefusal.bind(store);
+  store.addRefusal = async (x: any) => (writes++, realAdd(x));
+  const gate = new OrderGate({ broker, store, view: new BrokerView(broker, () => now.getTime()), governor, now: () => now, say: say as any, note: () => undefined });
+  for (let i = 0; i < 10; i++) {
+    const r = await gate.enter({ symbol: `S${i}`, price: 50, tradeTime: new Date(now.getTime() - 2_000), stopPrice: 49.25, takeProfitPrice: 50.13 });
+    assert.equal(r.status, "refused");
+    assert.match((r as any).reason, /^holding back for safety: a recheck is waiting/);
+  }
+  await gate.settled();
+  assert.equal(writes, 0, "no write per refused signal");
+  await gate.flush();
+  assert.equal(writes, 1, "one counted row at the flush");
+  assert.equal(broker.count("submitEntry"), 0);
+});

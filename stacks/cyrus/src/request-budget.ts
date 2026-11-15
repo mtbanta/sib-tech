@@ -93,17 +93,21 @@ export interface BudgetMinute {
   sentAfterEnd: number;
   mostBudgetedInMinute: number;
   mostBudgetedIn5s: number;
+  // Group 2, round 1 of the redesign: the most in any 5 seconds sent by tries capped by the 5 seconds (close-out retries left out; they
+  // reserve against the minute only, design 3.2). Above 15 only if a try overdrew or was forced.
+  mostCappedIn5s: number;
   givingWayRefusals: number;
 }
 
-const emptyMinute = (): BudgetMinute => ({ sent: { entry: 0, first: 0, P1: 0, P2: 0, routine: 0, clock: 0 }, granted: 0, refused: { minute: 0, five: 0, class: 0, floor: 0 }, forced: 0, overdrafts: 0, sentAfterEnd: 0, mostBudgetedInMinute: 0, mostBudgetedIn5s: 0, givingWayRefusals: 0 });
+const emptyMinute = (): BudgetMinute => ({ sent: { entry: 0, first: 0, P1: 0, P2: 0, routine: 0, clock: 0 }, granted: 0, refused: { minute: 0, five: 0, class: 0, floor: 0 }, forced: 0, overdrafts: 0, sentAfterEnd: 0, mostBudgetedInMinute: 0, mostBudgetedIn5s: 0, mostCappedIn5s: 0, givingWayRefusals: 0 });
 
 export class RequestBudget {
   readonly nowMs: () => number;
   private readonly remaining: () => number;
   private readonly log: ((event: string, data?: Record<string, unknown>) => void) | undefined;
   // Every budgeted request sent in the last 60 seconds, oldest first (its time and class).
-  private sent: Array<{ t: number; cls: BudgetClass }> = [];
+  // `capped`: sent by a try that reserved against the 5 seconds too (every budgeted try but a close-out retry).
+  private sent: Array<{ t: number; cls: BudgetClass; capped: boolean }> = [];
   private readonly open = new Set<Reservation>();
   private readonly floorWaits = new Map<string, number>();
   private minute = emptyMinute();
@@ -207,8 +211,11 @@ export class RequestBudget {
     if (separateBucket(path)) return;
     const now = this.nowMs();
     if (r.cls !== null) {
-      this.sent.push({ t: now, cls: r.cls });
+      this.sent.push({ t: now, cls: r.cls, capped: r.fiveSec });
       const u = this.usage(now);
+      let capped5 = 0;
+      for (let i = this.sent.length - 1; i >= 0 && now - this.sent[i]!.t < 5_000; i--) if (this.sent[i]!.capped) capped5++;
+      this.minute.mostCappedIn5s = Math.max(this.minute.mostCappedIn5s, capped5);
       this.minute.mostBudgetedInMinute = Math.max(this.minute.mostBudgetedInMinute, u.minute);
       this.minute.mostBudgetedIn5s = Math.max(this.minute.mostBudgetedIn5s, u.five);
       this.totals[r.cls]++;

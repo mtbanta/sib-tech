@@ -10,6 +10,7 @@
 import { AlpacaError, type Account, type AccountConfig, type CalendarDay, type Clock, type EntryOrder, type Order, type Position, type SellOrder } from "../src/alpaca-trading.ts";
 import type { FullBroker } from "../src/broker.ts";
 import { chargeFromScope } from "../src/request-scope.ts";
+import { noteSafetyCall } from "./tag-audit.ts";
 import { order } from "./helpers.ts";
 
 const OPEN = new Set(["new", "accepted", "pending_new", "partially_filled", "held", "pending_cancel"]);
@@ -353,6 +354,7 @@ export class SimBroker implements FullBroker {
     return { fills, complete: true, pages: 1 };
   }
   async submitEntry(e: EntryOrder): Promise<Order> {
+    noteSafetyCall("submitEntry");
     this.spend("plain");
     if (this.orders.some((o) => o.clientOrderId === e.clientOrderId)) throw new AlpacaError("client_order_id must be unique", 422);
     const created = new Date(this.simMs + this.n).toISOString();
@@ -367,6 +369,7 @@ export class SimBroker implements FullBroker {
     return structuredClone(parent);
   }
   async submitSell(s: SellOrder): Promise<Order> {
+    noteSafetyCall("submitSell");
     this.spend("safety");
     this.maxSellQtyEver = Math.max(this.maxSellQtyEver, s.qty);
     if (this.refuseSellIf?.(s)) throw new AlpacaError("sell refused (test)", 403);
@@ -401,10 +404,12 @@ export class SimBroker implements FullBroker {
     this.cancels.push({ id, doneAt: this.simMs + this.cancelMs });
   }
   async cancelOrder(id: string): Promise<void> {
+    noteSafetyCall("cancelOrder");
     this.spend("safety");
     this.startCancel(id);
   }
   async cancelAllOrders(): Promise<{ attempted: number; failed: string[] }> {
+    noteSafetyCall("cancelAllOrders");
     this.spend("safety");
     let n = 0;
     const failed: string[] = [];

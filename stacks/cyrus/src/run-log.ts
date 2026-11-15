@@ -85,9 +85,10 @@ export const STORED_INFO_EVENTS = new Set([
   "fresh_stop_timeout_cancel_not_sent",
   "fresh_stop_timeout_still_open",
   "fresh_stop_unclear_end",
-  // The redesign of 2026-11-14, part 1 (rare, for the reviews): a budgeted try that sent more than it reserved, a request sent after its try
-  // ended, a fresh-stop lookup skipped for lack of room, and a list-lag recheck dropped at the end of its window. Every refusal
-  // (`budget_refused`) stays in Fly's log only; the per-minute statistics (`governor_stats`, stored) count them.
+  // The redesign of 2026-11-14, part 1 (for the reviews): a budgeted try that sent more than it reserved (at most once per try), a request
+  // sent after its try ended, a fresh-stop lookup skipped for lack of room (at most once per sync per fresh stop), and a list-lag recheck
+  // dropped at the end of its window (at most once per window). Every refusal (`budget_refused`) stays in Fly's log only; the per-minute
+  // statistics (`governor_stats`, stored) count them.
   "budget_overdraft",
   "budget_sent_after_end",
   "fresh_stop_lookup_skipped",

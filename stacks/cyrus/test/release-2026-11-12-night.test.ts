@@ -517,7 +517,7 @@ for (const cancelMs of [200, 1_400, 3_000, 8_700, 11_000]) {
   });
 }
 
-test("group 1, round 2 (night): cancels Alpaca keeps refusing for 3 timed-out stops are retried on the backoff within the allowance, never every second, and never a sale on top", async () => {
+test("group 1, round 2 (night): cancels Alpaca keeps refusing for 3 timed-out stops are retried on the backoff within the shared request budget, never every second, and never a sale on top", async () => {
   const w = world();
   const dd = await day(w);
   const ids: string[] = [];
@@ -551,7 +551,7 @@ test("group 1, round 2 (night): cancels Alpaca keeps refusing for 3 timed-out st
   const reqs = w.sim.bucketTimes.filter((t) => t >= t0);
   const maxIn = (arr: number[], win: number) => Math.max(0, ...arr.map((t) => arr.filter((x) => x >= t && x < t + win).length));
   console.log(`MEASURE refused cancels, 3 stops, 5 minutes: ${cancelTimes.length} cancels (most in a minute ${maxIn(cancelTimes, 60_000)}, in 5 s ${maxIn(cancelTimes, 5_000)}); requests ${reqs.length} (most in a minute ${maxIn(reqs, 60_000)})`);
-  // Item 2 of 2026-11-13: each cancel sent again is one request, charged to the allowance, on the backoff (5, 10, 20, then 30 s): at most
+  // Item 2 of 2026-11-13: each cancel sent again is one request, a P1 try of the shared request budget, on the backoff (5, 10, 20, then 30 s): at most
   // about 4 a stop in a minute (before: whole tries of about 10 requests each, at most 4 a minute in all).
   assert.ok(maxIn(cancelTimes, 60_000) <= 4 * 3, `cancels in a minute ${maxIn(cancelTimes, 60_000)}: at most 4 a stop`);
   assert.ok(maxIn(reqs, 60_000) <= 120, `requests in a minute ${maxIn(reqs, 60_000)}: Alpaca's 200 minus the reserve of 80`);
@@ -686,7 +686,7 @@ function acceptedButStillWorking(w: World, stopIds: Set<string>, untilMs: number
 }
 
 for (const n of [1, 3]) {
-  test(`group 1, round 3 (night, Michael's decision 1 of 2026-11-13): ${n} timed-out stop(s) the sync's list does not show, whose accepted cancel does not clear for 60 s: only the first accepted cancel gets a look in a second, then the stuck backoff within the allowance; with routine traffic beside, no rate-limit answer`, async () => {
+  test(`group 1, round 3 (night, Michael's decision 1 of 2026-11-13): ${n} timed-out stop(s) the sync's list does not show, whose accepted cancel does not clear for 60 s: only the first accepted cancel gets a look in a second, then the stuck backoff within the shared request budget; with routine traffic beside, no rate-limit answer`, async () => {
     const w = world();
     const syms = ["AAA", "BBB", "CCC"].slice(0, n);
     const { dd, stopIds } = await timedOutStops(w, syms, true);
@@ -708,7 +708,7 @@ for (const n of [1, 3]) {
     assert.ok(spent >= 1, "the retries were charged to the shared request budget (P1)");
     assert.ok(reqs.length <= 80 + 35 * n, `requests in the minute ${reqs.length} (before the fix: about 290 for one stop, 374 for three)`);
     assert.equal(w.sim.oversellAttempts, 0);
-    // Alpaca's cancel then takes effect: the shares are sold once a try (charged per request, sharing the allowance among the stops)
+    // Alpaca's cancel then takes effect: the shares are sold once a try (P1 tries of the shared request budget, shared among the stops)
     // sends the cancel again, and nothing is oversold.
     await runWorker(w, dd, 240_000);
     for (const sym of syms) assert.equal(await heldQty(w, sym), 0, `${sym} sold once the stop really ended`);
@@ -795,7 +795,7 @@ test("group 1 note of round 4 (night): a timed-out stop pending cancel that the 
   console.log(`MEASURE round 4 fix, hidden route, stop pending cancel: tries in 3 minutes ${tries.length}; requests in minutes 2 to 3 ${reqs.length}; delay ${st.delayMs} ms; budgeted P1 requests ${w.memory.budget!.totals.P1}, most in a minute ${w.memory.budget!.peak.minute}`);
   void st;
   // Item 2 of 2026-11-13: while the stop is known pending cancel no sale is tried; its status is checked (here those checks fail, so the
-  // tries go on, charged per request to the allowance and spaced by it).
+  // tries go on, as P1 tries of the shared request budget and spaced by it).
   const gaps = tries.map((e, i) => (i ? e.at - tries[i - 1]!.at : Infinity)).slice(1);
   assert.ok(tries.length <= 10, `tries ${tries.length} (before: about 15 in 3 minutes, one a sync)`);
   assert.ok(gaps.every((g) => g >= 4_000), `tries spaced at least 4 s apart: ${gaps.join(", ")}`);
@@ -942,7 +942,7 @@ for (const hide of [true, false]) {
       assert.ok(r.gap !== null, `pending ${p} ms: no sale`);
       worst = Math.max(worst, r.gap!);
       if (process.env.RACE_DUMP) console.log(`RACE ${hide ? "hidden" : "visible"} pending ${p} gap ${r.gap}`);
-      // Item 2 of 2026-11-13: the tries are charged to the allowance per request, and its 15 in 5 seconds is full for about 5 seconds after
+      // Item 2 of 2026-11-13: the tries are P1 tries of the shared request budget, and its 15 in 5 seconds can be full for about 5 seconds after
       // the try that sent the cancel; once that has passed, the live update brings the sale at once.
       assert.ok(r.gap! <= (p >= 6_000 ? 1_000 : 6_000), `pending ${p} ms: sale ${r.gap} ms after the cancel landed (before the fix: up to 30 s)`);
       assert.equal(r.oversell, 0);
@@ -1606,7 +1606,7 @@ test("the redesign of 2026-11-14, part 1 (decision 5 with change A): a P2 rechec
   const r = b.tryReserve("P2", 6, { label: "list lag recheck", waitKey: "list lag recheck" });
   assert.ok(!(r instanceof Reservation) && r.why === "floor", "85 - 6 is below 80: refused on the floor");
   const e = g.admitTrade(100);
-  assert.ok(!e.ok && /safety retry/.test(e.reason), "entries give way while it waits");
+  assert.ok(!e.ok && /^holding back for safety: a recheck is waiting/.test(e.reason), "entries give way while it waits");
   const p1 = b.tryReserve("P1", 13, { label: "stuck retry" });
   assert.ok(p1 instanceof Reservation, "a P1 try still starts (85 - 13 is above 20)");
   p1.end();
@@ -1850,3 +1850,89 @@ test("the redesign of 2026-11-14, part 1: in the worker, a list-lag recheck with
 });
 
 
+
+// Group 2, round 1 of the redesign (part 1): the unclear stop's own lookups (every 5 s) are charged even when they fail (a timeout or a 5xx
+// reaches Alpaca). The 15 second limit then still looks the stop up (its look and its first try are reserved separately), and its alert says
+// what the stack is doing: selling now, or as soon as the budget has room.
+test("redesign part 1 (group 2, round 1): with the unclear stop's failing lookups charged, the 15 second limit still looks the stop up, its alert is true, and the sale follows within 5 s of the limit", async () => {
+  for (const offset of [0, 1_000, 2_500, 4_000]) {
+    const w = world();
+    const dd = await day(w);
+    const id = await hold(w, "WULF", 6, 9.5, 1);
+    w.sim.advance(5_000);
+    w.sim.partialTakeProfit(id, 2, 9.58);
+    const realSubmit = w.sim.submitSell.bind(w.sim);
+    w.sim.submitSell = async (x: any) => {
+      if (x.stopPrice !== undefined) throw new AlpacaError("outcome unclear (test)", 502); // Alpaca did not take it
+      return realSubmit(x);
+    };
+    const realFind = w.sim.findOrderByClientId.bind(w.sim);
+    w.sim.findOrderByClientId = async (cid: string) => {
+      if (cid.startsWith("cyrus-p-")) {
+        (w.sim as any).spend("plain"); // the request reached Alpaca and failed: it counts
+        throw new AlpacaError("internal error (test)", 500);
+      }
+      return realFind(cid);
+    };
+    w.sim.advance(300);
+    const sentAt = w.sim.simMs;
+    // The syncs at the recheck times the walk asks for (the unclear stop's lookups), shifted so the limit's sync falls at different points.
+    let r: any = await syncOrders(w.risk, dd, { protect: true });
+    while (w.sim.simMs < sentAt + FRESH_STOP_CONFIRM_MS + 8_000 && w.sim.sellLog.length === 0) {
+      const next = Math.max(w.sim.simMs + 100, Math.min(r.recheckAt ?? Infinity, w.sim.simMs + 10_000));
+      w.sim.advanceTo(next === sentAt + FRESH_STOP_CONFIRM_MS ? next + offset : next);
+      r = await syncOrders(w.risk, dd, { protect: true });
+    }
+    const at = `offset ${offset}: `;
+    const ev = w.events.find((e) => e.event === "fresh_stop_timeout")!;
+    assert.ok(ev, at + "the limit fired");
+    assert.ok(!String(ev.data.found).startsWith("not looked up"), at + `the limit looked the stop up (${ev.data.found})`);
+    const alert = w.said.find((m) => m.mention && m.text.includes("was not confirmed within 15 seconds"))!;
+    const sale = w.sim.sellLog.find((x) => x.symbol === "WULF");
+    assert.ok(sale && sale.at - sentAt <= FRESH_STOP_CONFIRM_MS + offset + 5_500, at + `sold ${sale ? sale.at - sentAt : "never"} ms after the stop was sent`);
+    const soldAtOnce = sale !== undefined && sale.at - ev.at <= 2_000;
+    if (/selling them now/.test(alert.text)) assert.ok(soldAtOnce, at + "the alert said 'now', and the sale came at once");
+    else assert.match(alert.text, /as soon as my request budget has room/, at + alert.text);
+    assert.equal(w.sim.oversellAttempts, 0);
+  }
+});
+
+// Group 2, round 1 of the redesign (part 1): the rule 6 limit of the list-lag recheck's own timer. A recheck sync that fails is dropped
+// (the warning `list_lag_recheck_failed`), its reservation is released, and it never fires again at once on a failing read.
+test("redesign part 1: in the worker, a list-lag recheck whose sync fails is dropped with a warning, its reservation released, and not fired again until a sync asks again", async () => {
+  const { sim, r, wk, mem, run, settle } = await workerLag();
+  const warns: string[] = [];
+  const realLog = wk.d.log;
+  wk.d.log = (level: string, e: string, data: any) => {
+    if (level === "warn") warns.push(e);
+    return realLog?.(level, e, data);
+  };
+  await run({});
+  const due = mem.lagRecheck!.dueAt;
+  let fails = 0;
+  const realList = (sim as any).listOrdersPaged.bind(sim);
+  (sim as any).listOrdersPaged = async (...a: any[]) => {
+    fails++;
+    throw new Error("order list read failed (test)");
+  };
+  let rechecks = 0;
+  const realStart = wk.startSync.bind(wk);
+  wk.startSync = (d: any, c: any, how: any = {}) => {
+    if (how.recheck) rechecks++;
+    return realStart(d, c, how);
+  };
+  r.setNow(new Date(due).toISOString());
+  await settle();
+  await settle();
+  assert.equal(rechecks, 1, "one recheck sync");
+  assert.ok(fails >= 1, "its read failed");
+  assert.ok(warns.includes("list_lag_recheck_failed"), warns.join(","));
+  assert.equal(mem.lagRecheck, undefined, "dropped");
+  assert.equal(wk.lagTimerAt, null, "no timer left");
+  assert.equal(mem.budget.inUse().open, 0, "its reservation released");
+  r.setNow(new Date(due + 5_000).toISOString());
+  await settle();
+  assert.equal(rechecks, 1, "not fired again");
+  (sim as any).listOrdersPaged = realList;
+  r.worker.stop?.();
+});
