@@ -105,7 +105,7 @@ test("Michael's answer (45 for stuck retries): with another position stuck and e
     return realSell(x);
   };
   const t0 = sim.simMs;
-  await drive(t0 + 40_000); // S has used its 45 for the minute
+  await drive(t0 + 40_000); // S has reserved 40 of the minute (a fifth retry would pass its 45)
   const tU = sim.simMs;
   sim.partialTakeProfit(U, 2, 12.08);
   wk.loop.wake(U, sim.simMs, "protect");

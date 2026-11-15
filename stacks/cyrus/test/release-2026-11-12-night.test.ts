@@ -2422,3 +2422,80 @@ test("rulings round 1 (B1): a confirmed fresh stop's periodic lookup stays P2: w
   assert.equal(skip!.data.why, "floor");
   assert.equal(skip!.data.status, "accepted");
 });
+
+// Group 2, rulings round 2 (finding 2): an unclear fresh stop's lookup refused on the floor of 20 at about 10 s after the stop was sent, with
+// Alpaca's remaining then back at 50. Its next try waits for room for itself (P1), not for P2's floor of 80, so it is confirmed before the 15
+// second limit and nothing is sold (the wait worked out with P2's floor slept to 16.5 s, and the limit sold 4 shares whose stop rested).
+test("rulings round 2: an unclear lookup refused on the floor of 20 late in its 15 seconds, with room back soon after, is confirmed in time; nothing sold", async () => {
+  const { w, dd, id, box } = await unclearLookup();
+  const placedAt = w.memory.freshStops.get(id)!.placedAt;
+  const refuseAt = 10_000;
+  const realFind = w.sim.findOrderByClientId.bind(w.sim);
+  (w.sim as any).findOrderByClientId = async (cid: string) => {
+    if (w.sim.simMs < placedAt + refuseAt - 500) throw new Error("lookup failed (test)"); // keeps it unclear until then
+    return realFind(cid);
+  };
+  let r: any = { recheckAt: w.sim.simMs + 100 };
+  let switched = false;
+  while (w.sim.simMs < placedAt + 25_000) {
+    w.sim.advanceTo(Math.max(w.sim.simMs + 100, Math.min(r.recheckAt ?? Infinity, w.sim.simMs + 10_000)));
+    if (!switched && w.sim.simMs >= placedAt + refuseAt - 500) {
+      box.remaining = 20; // refused on the floor of 20 now
+      switched = true;
+    } else if (switched && box.remaining === 20) box.remaining = 50; // room back
+    r = await syncOrders(w.risk, dd, { protect: true });
+    if (w.events.some((e) => e.event === "fresh_stop_timeout" || e.event === "fresh_stop_confirmed")) break;
+  }
+  assert.ok(w.events.some((e) => e.event === "fresh_stop_lookup_skipped" && e.data.why === "floor"), "refused on the floor first");
+  const c = w.events.find((e) => e.event === "fresh_stop_confirmed");
+  assert.ok(c && c.data.msToConfirm < FRESH_STOP_CONFIRM_MS, `confirmed in time (${c?.data.msToConfirm})`);
+  assert.equal(w.events.filter((e) => e.event === "fresh_stop_timeout").length, 0);
+  assert.equal(w.sim.sellLog.length, 0, "nothing sold");
+});
+
+// Group 2, rulings round 2 (finding 2), the B3 shape in `syncOrders` with a real budget: a stuck symbol whose sales Alpaca refuses, retried
+// under ruling 1, and a second symbol whose fresh stop goes unclear (Alpaca holds it) when the stuck retries have taken the most of the
+// minute they may (5 under their ceiling). The second symbol's lookup gets room: confirmed, no 15 second limit, nothing of it sold, no
+// mention for it. With the ceiling at 60 (no keep) the lookup was refused on the minute and the limit fired.
+test("rulings round 2 (B3 shape): with a stuck symbol's retries at the most of the minute they may take, another symbol's unclear fresh stop is confirmed; no 15 second limit, nothing sold", async () => {
+  const { STUCK_RETRY_MINUTE_CAP } = await import("../src/risk.ts");
+  const w = world();
+  const dd = await day(w);
+  const stuck = await hold(w, "AAA", 1, 10, 1);
+  for (const l of w.sim.orders.find((o) => o.clientOrderId === stuck)!.legs) await w.sim.cancelOrder(l.id);
+  w.sim.refuseSellIf = (x: any) => x.symbol === "AAA" && x.stopPrice === undefined;
+  const id = await hold(w, "WULF", 6, 9.5, 2);
+  w.memory.budget = new RequestBudget({ now: () => w.sim.simMs, remaining: () => w.sim.tokens });
+  const b: any = w.memory.budget;
+  const realSubmit = w.sim.submitSell.bind(w.sim);
+  w.sim.submitSell = async (x: any) => {
+    if (x.stopPrice !== undefined) {
+      await realSubmit(x);
+      throw new AlpacaError("outcome unclear (test)", 502);
+    }
+    return realSubmit(x);
+  };
+  const realPaged = w.sim.listOrdersPaged.bind(w.sim);
+  w.sim.listOrdersPaged = async (...a: any[]) => {
+    const r: any = await (realPaged as any)(...a);
+    return { ...r, orders: r.orders.filter((o: any) => !o.clientOrderId.startsWith("cyrus-p-")) };
+  };
+  w.sim.advance(2_000);
+  const t0 = w.sim.simMs;
+  let r: any = await syncOrders(w.risk, dd, { protect: true });
+  let triggered: number | null = null;
+  while (w.sim.simMs < t0 + 150_000) {
+    w.sim.advanceTo(Math.max(w.sim.simMs + 100, Math.min(r.recheckAt ?? Infinity, w.sim.simMs + 2_000)));
+    if (triggered === null && b.usage(w.sim.simMs).minute >= STUCK_RETRY_MINUTE_CAP - 5) {
+      w.sim.partialTakeProfit(id, 2, 9.58);
+      triggered = w.sim.simMs;
+    }
+    r = await syncOrders(w.risk, dd, { protect: true });
+    if (triggered !== null && w.sim.simMs - triggered > 30_000) break;
+  }
+  assert.ok(triggered !== null, "the stuck retries reached their most");
+  assert.ok(w.events.some((e) => e.event === "fresh_stop_confirmed" && e.data.symbol === "WULF"), "confirmed");
+  assert.equal(w.events.filter((e) => e.event === "fresh_stop_timeout").length, 0, "no 15 second limit");
+  assert.equal(w.sim.sellLog.filter((x: any) => x.symbol === "WULF").length, 0, "nothing of it sold");
+  assert.ok(!w.said.some((m: any) => m.text.includes("WULF") && /not confirmed within 15 seconds/.test(m.text)));
+});
