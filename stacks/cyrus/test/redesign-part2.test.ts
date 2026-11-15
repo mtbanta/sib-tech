@@ -988,3 +988,132 @@ for (const when of ["2:55", "mid-day pause", "mid-day step", "carried step", "st
     r.worker.stop?.();
   });
 }
+
+// Group 1, round 4 of part 2 (B1; design 4.4: the scheduler wakes "the moment the budget has room for the first record waiting"): 30
+// positions without exits whose every sale Alpaca holds 8 s and then fails, for 12 minutes. A retry waiting for room in the shared budget
+// waits locally (no request) and makes a look only once its try would have room. Before: each refused retry re-read the order list and the
+// positions every 0.5 to 4 s with no end (group 1 measured 470 s below 80 left, 280 s below 20, and 49 rate-limit answers; v22 never below
+// 120). Now: no rate-limit answer, and Alpaca's remaining never below 80.
+test("part 2 (group 1, round 4, B1): 30 stuck sales held 8 s at Alpaca for 12 minutes: retries waiting for room make no reads; no rate-limit answer, remaining never below 80", async () => {
+  const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
+  const bot = new FakeBot();
+  const holds: Array<{ until: number; res: () => void }> = [];
+  let timed = false;
+  const tsleep = (ms: number): Promise<void> => (timed ? new Promise<void>((res) => holds.push({ until: sim.simMs + ms, res })) : sim.sleep(ms));
+  const r = rig<SimBroker>({ broker: sim, sleep: tsleep, simClock: sim, bot });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("cap 2\napprove", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:25:00");
+  await r.at("14:30:05");
+  const wk: any = r.worker;
+  await r.at("20:40:00");
+  const bad = Array.from({ length: 30 }, (_, i) => "QX" + String.fromCharCode(65 + i));
+  for (const s of bad) await holdOne(sim, r, s);
+  await r.at("20:40:01");
+  const loseAt = new Date(`${D}T20:40:05Z`).getTime();
+  const realSell = sim.submitSell.bind(sim);
+  sim.submitSell = async (x: any) => {
+    if (bad.includes(x.symbol)) {
+      await tsleep(8_000);
+      throw new Error("held at Alpaca (test)");
+    }
+    return realSell(x);
+  };
+  timed = true;
+  let lost = false;
+  let lastTok = 200;
+  let lastTokAt = sim.simMs;
+  let below80 = 0;
+  let lowest = 200;
+  const prev = (sim as any).onRate;
+  (sim as any).onRate = (k: number) => {
+    const now = sim.simMs;
+    if (now > loseAt) {
+      if (lastTok < 80) below80 += now - lastTokAt;
+      lowest = Math.min(lowest, k);
+    }
+    lastTok = k;
+    lastTokAt = now;
+    prev?.(k);
+  };
+  const r429 = sim.rejected429;
+  let nextPass = sim.simMs + 5_000;
+  const end = new Date(`${D}T20:52:00Z`).getTime();
+  while (sim.simMs < end) {
+    if (!lost && sim.simMs >= loseAt) {
+      lost = true;
+      for (const s of bad) for (const l of sim.orders.find((o: any) => o.clientOrderId === clientOrderIdFor(D, s, 1))!.legs) await sim.cancelOrder(l.id);
+    }
+    if (sim.simMs >= nextPass) {
+      void r.at(iso(sim.simMs));
+      nextPass += 5_000;
+    } else r.setNow(iso(sim.simMs + 100));
+    for (const h of holds.filter((h) => h.until <= sim.simMs)) {
+      holds.splice(holds.indexOf(h), 1);
+      h.res();
+    }
+    await settle();
+  }
+  assert.ok(lost);
+  assert.equal(sim.rejected429 - r429, 0, "no rate-limit answer");
+  assert.equal(below80, 0, `remaining never below 80 (lowest ${Math.round(lowest)}, ${Math.round(below80 / 1000)} s below 80)`);
+  timed = false;
+  for (const h of holds.splice(0)) h.res();
+  r.worker.stop?.();
+});
+
+// Group 1, round 4 of part 2: the loop's room wakes on their own. A wake whose only reason is room for a try is checked against the budget
+// locally and makes no look until there is room; a deferred room wake never delays the entry's other wakes (a live update's, a follow-up's).
+test("part 2 (group 1, round 4): a room wake makes no look until the budget has room, and never delays the entry's other wakes", async () => {
+  let now = 0;
+  let roomFrom = 10_000;
+  const timers: Array<{ due: number; fn: () => void }> = [];
+  const looks: Array<{ at: number; ids: string[] }> = [];
+  const loop = new ProtectionLoop({
+    now: () => now,
+    setTimer: (fn, ms) => {
+      const h = { due: now + ms, fn };
+      timers.push(h);
+      return h;
+    },
+    clearTimer: (h) => {
+      const i = timers.indexOf(h as any);
+      if (i >= 0) timers.splice(i, 1);
+    },
+    look: async (ids) => {
+      looks.push({ at: now, ids: [...ids].sort() });
+      return { outcome: "done" };
+    },
+    roomAt: () => (now >= roomFrom ? null : Math.min(roomFrom, now + 250)),
+  });
+  const to = async (t: number) => {
+    for (let g = 0; g < 500; g++) {
+      timers.sort((a, b) => a.due - b.due);
+      const h = timers[0];
+      if (!h || h.due > t) break;
+      timers.shift();
+      now = Math.max(now, h.due);
+      h.fn();
+      for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r));
+    }
+    now = Math.max(now, t);
+  };
+  loop.wake("A", 1_000, "protect", { room: { cls: "P1", n: 10, reads: 2 } });
+  await to(5_000);
+  assert.equal(looks.length, 0, "no room before 10 s: no look");
+  assert.ok(loop.takeMinute().roomChecks > 0, "checked locally");
+  loop.wake("A", 6_000, "protect"); // a live update for A, later than the room wake
+  await to(6_000);
+  assert.deepEqual(looks, [{ at: 6_000, ids: ["A"] }], "the live update's look comes at its time, not delayed by the room wake");
+  await to(9_999);
+  assert.equal(looks.length, 1, "still no room: no look");
+  await to(10_500);
+  assert.equal(looks.length, 2, "room at 10 s: one look");
+  assert.equal(looks[1]!.at, 10_000);
+  loop.wake("B", 11_000, "protect", { room: { cls: "P1", n: 10, reads: 2 } });
+  loop.forget("B");
+  await to(12_000);
+  assert.equal(looks.length, 2, "a forgotten room wake makes no look");
+  loop.stop();
+});

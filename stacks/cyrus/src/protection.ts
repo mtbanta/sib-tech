@@ -16,16 +16,25 @@
 // It sends nothing itself and decides nothing about an order: the decisions and the actions are the walk's and the sale's, as before.
 
 export type WakeKind = "protect" | "lag";
+// Group 1, round 4 of part 2 (design 4.4: the scheduler wakes "the moment the budget has room for the first record waiting"): what a try
+// waiting only for room in the shared request budget will ask for. Such a wake is checked against the budget locally (no request) and
+// re-armed until there is room; only then does it make a look (the order list and positions, `reads`).
+export interface RoomNeed {
+  cls: "P1" | "P2";
+  n: number;
+  reads: number;
+}
 
 export interface ProtectionHooks {
   // True while the entry's action runs (its decision is left until the action ends).
   busy(entryClientOrderId: string): boolean;
   // Starts the entry's action (a sale, a fresh stop, the 15 second limit's work). Resolves when the action has been started (the loop), or
   // when it has finished (the inline loop that a sync without the worker uses).
-  act(entryClientOrderId: string, label: string, run: () => Promise<{ recheckAt?: number } | void>): Promise<void>;
+  act(entryClientOrderId: string, label: string, run: () => Promise<{ recheckAt?: number; room?: RoomNeed } | void>): Promise<void>;
   // Asks for a look at the entry at `atMs`. `lag`: a list-lag recheck (`extraRequests`, a lookup by id for an entry older than the order
   // list's window; `untilMs`, the end of its 30 s window).
-  wake(entryClientOrderId: string, atMs: number, kind: WakeKind, extra?: { extraRequests?: number; untilMs?: number }): void;
+  // `room`: the wake's only reason is room in the shared budget for that try (kept apart from the entry's other wakes, which it never delays).
+  wake(entryClientOrderId: string, atMs: number, kind: WakeKind, extra?: { extraRequests?: number; untilMs?: number; room?: RoomNeed }): void;
 }
 
 export interface LoopDeps {
@@ -41,6 +50,9 @@ export interface LoopDeps {
   // no list-lag wake is left (`pendingWakes`).
   onLagDropped?: (id: string) => void;
   log?: (event: string, data?: Record<string, unknown>) => void;
+  // When a room wake's try would have room (null: now), asked of the shared budget locally (group 1, round 4 of part 2). Without it a room
+  // wake is an ordinary wake.
+  roomAt?: (need: RoomNeed) => number | null;
   // Told when an action throws (the worker logs it at error level and alerts, at most once every 5 minutes; group 2, round 1).
   onActionFailed?: (id: string, label: string, err: unknown) => void;
 }
@@ -61,12 +73,16 @@ export interface LoopStats {
   waitedForRoom: number;
   actions: number;
   wakes: number;
+  // Room wakes found still without room and re-armed with no request (group 1, round 4 of part 2).
+  roomChecks: number;
 }
-const emptyStats = (): LoopStats => ({ looks: 0, lagLooks: 0, failed: 0, putOff: 0, waitedForRoom: 0, actions: 0, wakes: 0 });
+const emptyStats = (): LoopStats => ({ looks: 0, lagLooks: 0, failed: 0, putOff: 0, waitedForRoom: 0, actions: 0, wakes: 0, roomChecks: 0 });
 
 export class ProtectionLoop implements ProtectionHooks {
   private readonly d: LoopDeps;
   private readonly wakes = new Map<string, { at: number; kind: WakeKind; extra: number; until: number }>();
+  // Wakes whose only reason is room in the shared budget for a try (kept apart, so a deferred one never delays the entry's other wakes).
+  private readonly roomWakes = new Map<string, { at: number; need: RoomNeed }>();
   private readonly running = new Set<string>();
   private readonly actionFail = new Map<string, { delayMs: number; until: number }>();
   private timer: unknown = null;
@@ -90,7 +106,7 @@ export class ProtectionLoop implements ProtectionHooks {
     return this.running.size;
   }
 
-  act(id: string, label: string, run: () => Promise<{ recheckAt?: number } | void>): Promise<void> {
+  act(id: string, label: string, run: () => Promise<{ recheckAt?: number; room?: RoomNeed } | void>): Promise<void> {
     if (this.running.has(id) || this.stopped) return Promise.resolve();
     const failed = this.actionFail.get(id);
     if (failed && this.d.now() < failed.until) {
@@ -103,7 +119,7 @@ export class ProtectionLoop implements ProtectionHooks {
       try {
         const r = await run();
         this.actionFail.delete(id);
-        if (r && r.recheckAt !== undefined) this.wake(id, r.recheckAt, "protect");
+        if (r && r.recheckAt !== undefined) this.wake(id, r.recheckAt, "protect", r.room ? { room: r.room } : {});
       } catch (err) {
         const prev = this.actionFail.get(id);
         const delayMs = prev ? Math.min(prev.delayMs * 2, ACTION_FAIL_MAX_MS) : ACTION_FAIL_FIRST_MS;
@@ -117,16 +133,22 @@ export class ProtectionLoop implements ProtectionHooks {
       } finally {
         this.running.delete(id);
         // A wake that came while it ran is looked at now (or at its time).
-        if (this.wakes.has(id)) this.arm();
+        if (this.wakes.has(id) || this.roomWakes.has(id)) this.arm();
       }
     })();
     return Promise.resolve();
   }
 
-  wake(id: string, atMs: number, kind: WakeKind, extra: { extraRequests?: number; untilMs?: number } = {}): void {
+  wake(id: string, atMs: number, kind: WakeKind, extra: { extraRequests?: number; untilMs?: number; room?: RoomNeed } = {}): void {
     if (this.stopped) return;
-    const cur = this.wakes.get(id);
     this.minute.wakes++;
+    if (extra.room && kind === "protect" && this.d.roomAt) {
+      const rw = this.roomWakes.get(id);
+      if (!rw || atMs < rw.at) this.roomWakes.set(id, { at: atMs, need: extra.room });
+      this.arm();
+      return;
+    }
+    const cur = this.wakes.get(id);
     // The earliest wake wins; a protection wake is never downgraded to a list-lag one.
     const k: WakeKind = cur && cur.kind === "protect" ? "protect" : kind;
     if (!cur || atMs < cur.at) this.wakes.set(id, { at: atMs, kind: k, extra: extra.extraRequests ?? 0, until: extra.untilMs ?? Infinity });
@@ -137,11 +159,16 @@ export class ProtectionLoop implements ProtectionHooks {
   // Drops an entry's wake (its entry closed).
   forget(id: string): void {
     this.wakes.delete(id);
+    this.roomWakes.delete(id);
   }
 
   private earliest(): number | null {
     let at: number | null = null;
     for (const [id, w] of this.wakes) {
+      if (this.running.has(id)) continue;
+      if (at === null || w.at < at) at = w.at;
+    }
+    for (const [id, w] of this.roomWakes) {
       if (this.running.has(id)) continue;
       if (at === null || w.at < at) at = w.at;
     }
@@ -174,6 +201,21 @@ export class ProtectionLoop implements ProtectionHooks {
     if (this.stopped || this.looking) return;
     const now = this.d.now();
     if (now < this.failUntil) return this.arm();
+    // Room wakes due: asked of the budget locally (no request); still no room, re-armed at the time room may return; room now, an ordinary
+    // protection wake for this look (group 1, round 4 of part 2; rule 6: the wait sends nothing, and the try stays under the budget's cap).
+    for (const [id, w] of [...this.roomWakes]) {
+      if (w.at > now || this.running.has(id)) continue;
+      const roomAt = this.d.roomAt?.(w.need) ?? null;
+      if (roomAt !== null && roomAt > now) {
+        w.at = roomAt;
+        this.minute.roomChecks++;
+        continue;
+      }
+      this.roomWakes.delete(id);
+      const cur = this.wakes.get(id);
+      if (!cur || now < cur.at) this.wakes.set(id, { at: now, kind: "protect", extra: 0, until: Infinity });
+      else cur.kind = "protect";
+    }
     const due = new Map<string, { at: number; kind: WakeKind; extra: number; until: number }>();
     for (const [id, w] of this.wakes) {
       if (w.at > now || this.running.has(id)) continue;
@@ -264,8 +306,8 @@ export class ProtectionLoop implements ProtectionHooks {
     return this.wakes;
   }
 
-  takeMinute(): LoopStats & { pendingWakes: number; actionsRunning: number } {
-    const out = { ...this.minute, pendingWakes: this.wakes.size, actionsRunning: this.running.size };
+  takeMinute(): LoopStats & { pendingWakes: number; roomWakes: number; actionsRunning: number } {
+    const out = { ...this.minute, pendingWakes: this.wakes.size, roomWakes: this.roomWakes.size, actionsRunning: this.running.size };
     this.minute = emptyStats();
     return out;
   }
