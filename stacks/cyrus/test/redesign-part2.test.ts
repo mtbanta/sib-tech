@@ -207,7 +207,7 @@ test("part 2, the worker: a stuck sale's retry runs at its time in a look of the
   r.worker.stop?.();
 });
 
-test("part 2, the worker (Monday 2026-11-09's finding): a stuck sale whose try waits never holds up the order sync; another entry's remainder gets its fresh stop meanwhile", async () => {
+test("part 2, the worker (Monday 2026-11-09's finding): a stuck sale whose try waits never holds up the order sync; another entry's remainder has its fresh stop started meanwhile (it then waits its turn in the one-at-a-time sale queue)", async () => {
   const { sim, r } = await armedDay();
   const wk: any = r.worker;
   const slow = await holdOne(sim, r, "IONQ", 1);
@@ -339,6 +339,127 @@ test("part 2, the worker: the 5 minute alert is not judged for an entry while it
   wk.lastSync = 0;
   await r.at(iso(sim.simMs + 200));
   for (let i = 0; i < 6; i++) await settle();
-  assert.equal(mem.stuck.get(id)?.escalated ?? true, true, "judged at the next sync after it ended");
+  assert.ok(mem.stuck.has(id), "the record is still there");
+  assert.equal(mem.stuck.get(id)!.escalated, true, "judged at the next sync after it ended");
+  r.worker.stop?.();
+});
+
+// Group 2, round 1 of the redesign (part 2): a stuck entry's sale fills at Alpaca while its action is still running (the answer comes back
+// slowly), and a regular sync meanwhile sees the entry closed. One resolution posts one line (before: "no longer held" from the sync, then
+// the sold line from the action).
+test("part 2 (group 2, round 1): an entry closed by a sync while its own action still runs gets exactly one resolution line", async () => {
+  const { sim, r } = await armedDay();
+  const wk: any = r.worker;
+  const id = await holdOne(sim, r, "GE");
+  await r.at("14:30:10");
+  for (const l of sim.orders.find((o: any) => o.clientOrderId === id)!.legs) await sim.cancelOrder(l.id);
+  sim.advance(15_000);
+  wk.syncMemory.stuck.set(id, { symbol: "GE", since: sim.simMs - 120_000, nextAt: 0, delayMs: 0, alerted: true, escalated: false, lastTriedAt: sim.simMs - 30_000, why: "x" });
+  sim.sellFillDelayMs = 0;
+  const realSell = sim.submitSell.bind(sim);
+  let release!: () => void;
+  const slow = new Promise<void>((x) => (release = x));
+  let sent = false;
+  sim.submitSell = async (x: any) => {
+    const o = await realSell(x);
+    if (x.symbol === "GE" && !sent) {
+      sent = true;
+      await slow; // Alpaca filled it; its answer is slow to come back
+    }
+    return o;
+  };
+  const said0 = r.bot.posts.length;
+  wk.loop.wake(id, sim.simMs, "protect");
+  for (let i = 0; i < 10 && !sent; i++) {
+    r.setNow(iso(sim.simMs + 250));
+    for (let k = 0; k < 6; k++) await settle();
+  }
+  assert.ok(sent && wk.loop.busy(id), "the action is running with its sale sent");
+  sim.advance(100);
+  wk.lastSync = 0;
+  await r.at(iso(sim.simMs + 100)); // the regular sync sees the shares gone
+  for (let i = 0; i < 6; i++) await settle();
+  release();
+  for (let i = 0; i < 20; i++) {
+    r.setNow(iso(sim.simMs + 200));
+    await settle();
+  }
+  const lines = r.bot.posts.slice(said0).map((p: any) => p.text).filter((t: string) => t.includes("GE"));
+  assert.equal(lines.length, 1, `one line: ${lines.join(" | ")}`);
+  assert.match(lines[0]!, /^GE: sold \(/);
+  r.worker.stop?.();
+});
+
+// Group 2, round 1 of the redesign (part 2): an action that throws (a database or broker error) is logged at error level and alerted, at
+// most once every 5 minutes (as the failed "risk" step was before part 2); the loop waits 5 s, doubling to 30 s, before that entry's next
+// action (rule 6).
+test("part 2 (group 2, round 1): an action that throws is alerted once and logged at error level; that entry's next action waits 5 s, then 10 s", async () => {
+  const { sim, r } = await armedDay();
+  const wk: any = r.worker;
+  const logs: Array<{ level: string; e: string }> = [];
+  const realLog = wk.d.log;
+  wk.d.log = (level: string, e: string, data: any) => (logs.push({ level, e }), realLog?.(level, e, data));
+  const id = await holdOne(sim, r, "GE");
+  await r.at("14:30:10");
+  for (const l of sim.orders.find((o: any) => o.clientOrderId === id)!.legs) await sim.cancelOrder(l.id);
+  sim.advance(15_000);
+  const tries: number[] = [];
+  wk.liquidator.flatten = async () => {
+    tries.push(sim.simMs);
+    throw new Error("database write failed (test)");
+  };
+  const t0 = sim.simMs;
+  await drive(r, sim, t0 + 40_000, t0 + 100);
+  const alerts = r.bot.posts.filter((p: any) => p.channel === "alerts" && p.text.startsWith('Step "protection" failed'));
+  assert.equal(alerts.length, 1, "alerted once (at most once every 5 minutes)");
+  assert.ok(logs.some((x) => x.level === "error" && x.e === "protection_action_failed"), "logged at error level");
+  const gaps = tries.slice(1).map((t, i) => t - tries[i]!);
+  assert.ok(tries.length >= 3, `tried again: ${tries.map((t) => t - t0).join(", ")}`);
+  assert.ok(gaps[0]! >= 5_000 && gaps[1]! >= 10_000, `growing waits: ${gaps.join(", ")}`);
+  r.worker.stop?.();
+});
+
+// Group 2, round 3 of part 1, in part 2's terms: a list-lag look refused again and again for lack of room stores its out-of-room event once
+// per wait; `next` names the regular sync when the 30 s window ends before room returns.
+test("part 2: a list-lag look refused again and again stores timed_out_try_out_of_room once per wait, and names the regular sync when its window ends first", async () => {
+  const { sim, r } = await armedDay();
+  const wk: any = r.worker;
+  const events: any[] = [];
+  const realLog = wk.d.log;
+  wk.d.log = (level: string, e: string, data: any) => {
+    if (e === "timed_out_try_out_of_room" && data?.stage === "list lag recheck") events.push(data);
+    return realLog?.(level, e, data);
+  };
+  const realTry = wk.budget.tryReserve.bind(wk.budget);
+  let refusals = 0;
+  wk.budget.tryReserve = (cls: any, n: any, o: any) => {
+    if (o?.label === "list lag recheck") {
+      refusals++;
+      return { ok: false, at: sim.simMs + 300, why: "floor" };
+    }
+    return realTry(cls, n, o);
+  };
+  const id = await holdOne(sim, r, "LUNR");
+  await r.at("14:30:10");
+  const t0 = sim.simMs;
+  wk.loop.wake(id, t0, "lag", { untilMs: t0 + 5_000 });
+  for (let i = 0; i < 40 && wk.loop.nextLookAt() !== null; i++) {
+    r.setNow(iso(Math.max(sim.simMs, wk.loop.nextLookAt())));
+    await settle();
+  }
+  assert.ok(refusals >= 5, `refused again and again (${refusals})`);
+  assert.equal(events.length, 1, `stored once per wait (${events.length} for ${refusals} refusals)`);
+  assert.equal(events[0].next, "when the budget has room");
+  // A wait whose room comes only after the window: named as the regular sync, and the wake is dropped.
+  wk.budget.tryReserve = (cls: any, n: any, o: any) => (o?.label === "list lag recheck" ? { ok: false, at: sim.simMs + 60_000, why: "minute" } : realTry(cls, n, o));
+  events.length = 0;
+  (wk as any).lagWaits = 0;
+  const t1 = sim.simMs;
+  wk.loop.wake(id, t1, "lag", { untilMs: t1 + 5_000 });
+  r.setNow(iso(t1));
+  await settle();
+  await settle();
+  assert.equal(events[0]?.next, "regular sync");
+  assert.equal(wk.loop.pendingWakes().has(id), false, "dropped: its window ends before room returns");
   r.worker.stop?.();
 });

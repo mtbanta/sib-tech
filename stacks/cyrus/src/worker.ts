@@ -268,9 +268,10 @@ export class Worker {
   // hands it each action and asks it for wakes, and the live updates wake the entry they are about. It replaces the sync brought forward by
   // a timer (`syncAt`), fix (a)'s marks and the list-lag recheck's own timer.
   readonly loop: ProtectionLoop;
+  // Refusals in a row of a list-lag look for room (its out-of-room event is stored once per wait).
+  private lagWaits = 0;
   // Logging only (Michael's approval of 2026-11-10), for `late_notice`: when the live updates last reported each symbol's stop cancelled,
-  // and what the timed sync did (last set, last fired, how often it was put off because a sync was still running, since the last sync
-  // the timer started).
+  // and the moment the protection loop was woken for (since the redesign of 2026-11-14; the timed sync is gone).
   private readonly stopCancelSeen = new Map<string, { alpacaAtMs: number; receivedMs: number; wokeFor: number }>();
   // The trade digest only (messaging): take-profit legs already counted (Alpaca order ids), so a partial fill and a later fill count once.
   private readonly digestTakeProfits = new Set<string>();
@@ -322,7 +323,7 @@ export class Worker {
     this.syncMemory.budget = this.budget;
     this.lossMemory.budget = this.budget;
     deps.governor.setSafetyHold?.(this.budget);
-    this.loop = new ProtectionLoop({ now: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}), ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {}), look: (ids, kind, extra) => this.look(ids, kind, extra), log: (e, data) => deps.log?.("info", e, data) });
+    this.loop = new ProtectionLoop({ now: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}), ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {}), look: (ids, kind, extra, until) => this.look(ids, kind, extra, until), log: (e, data) => deps.log?.("info", e, data), onActionFailed: (id, label, err) => this.protectionActionFailed(id, label, err), onLagDropped: () => this.budget.stopWaiting("list lag recheck") });
     this.sessions = new NextSessionFinder(deps.broker);
     this.view = new BrokerView(deps.broker, () => deps.now().getTime());
     this.sellGate = new SellGate({ broker: deps.broker, say: (c, t, o) => this.say(c, t, o), log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime() });
@@ -1242,18 +1243,35 @@ export class Worker {
   // never resets the regular sync's 10 seconds. A look only for list-lag rechecks runs inside a P2 reservation of its cost (the order list's
   // pages as the last sync read them, the positions, and a lookup per older entry), as in part 1; any other look is routine work, as the
   // sync it replaces was. Without room it waits for room (entries give way meanwhile).
-  private async look(ids: ReadonlySet<string>, kind: WakeKind, extraRequests: number): Promise<{ outcome: "busy" | "done" | "failed" } | { outcome: "wait"; retryAt: number }> {
+  // Group 2, round 1 of the redesign (part 2): an action of the loop that threw is logged at error level and alerted, at most once every 5
+  // minutes (as a failed "risk" step was before part 2); the loop waits 5 s, doubling to 30 s, before acting on that entry again.
+  private protectionActionFailed(id: string, label: string, err: unknown): void {
+    const msg = (err as Error)?.message?.slice(0, 150) ?? String(err).slice(0, 150);
+    this.lastTickError = `protection (${label}): ${msg}`;
+    this.d.log?.("error", "protection_action_failed", { clientOrderId: id, label, error: msg });
+    const t = this.d.now().getTime();
+    const last = this.lastBackgroundAlert.get("protection");
+    if (last === undefined || t - last >= 5 * 60_000) {
+      this.lastBackgroundAlert.set("protection", t);
+      void this.say("alerts", `Step "protection" failed (${label}): ${msg}`).catch(() => undefined);
+    }
+  }
+
+  private async look(ids: ReadonlySet<string>, kind: WakeKind, extraRequests: number, untilMs = Infinity): Promise<{ outcome: "busy" | "done" | "failed" | "idle" } | { outcome: "wait"; retryAt: number }> {
     const s = this.sessionForSync;
-    if (!s || this.d.now() >= s.closeAt) return { outcome: "done" };
+    if (!s || this.d.now() >= s.closeAt) return { outcome: "idle" };
     if (!this.backgroundReady("risk")) return { outcome: "busy" };
     let res: Reservation | null = null;
     if (kind === "lag") {
       const cost = this.syncMemory.lastListPages + 1 + extraRequests;
       const r = this.budget.tryReserve("P2", cost, { label: "list lag recheck", waitKey: "list lag recheck" });
       if (!(r instanceof Reservation)) {
-        this.d.log?.("info", "timed_out_try_out_of_room", { stage: "list lag recheck", cost, why: r.why, roomInMs: r.at - this.d.now().getTime(), next: "when the budget has room" });
+        // Stored once per wait (the first refusal in a row; group 2, round 3 of part 1); `next` says what comes: the look when there is room,
+        // or the regular sync when the 30 s window ends first (the loop then drops it).
+        if (++this.lagWaits === 1) this.d.log?.("info", "timed_out_try_out_of_room", { stage: "list lag recheck", cost, why: r.why, roomInMs: r.at - this.d.now().getTime(), next: r.at < untilMs ? "when the budget has room" : "regular sync" });
         return { outcome: "wait", retryAt: r.at };
       }
+      this.lagWaits = 0;
       res = r;
     }
     this.inflight.add("risk");
@@ -1269,7 +1287,7 @@ export class Worker {
       });
       return { outcome: "done" };
     } catch (err) {
-      this.d.log?.("warn", kind === "lag" ? "list_lag_recheck_failed" : "protection_look_failed", { error: (err as Error).message.slice(0, 120), entries: ids.size, next: "regular sync" });
+      this.d.log?.("warn", kind === "lag" ? "list_lag_recheck_failed" : "protection_look_failed", { error: (err as Error).message.slice(0, 120), entries: ids.size, next: "a look again after the loop's wait (1 s, doubling to 10 s)" });
       return { outcome: "failed" };
     } finally {
       res?.end();
@@ -1633,12 +1651,12 @@ export class Worker {
         this.loop.wake(info.clientOrderId, info.atMs + BARE_GRACE_MS, "protect");
       },
       // A4 of 2026-11-12: a fresh stop's status. If it ended (cancelled, expired or rejected) other than by one of our own sales, the
-      // remainder is unprotected again: the order sync runs at once and its missing-exit check sells it, as before A4.
+      // remainder is unprotected again: the protection loop looks at the entry at once and its missing-exit check sells it, as before A4.
       onFreshStopUpdate: (info) => {
         const f = [...this.syncMemory.freshStops.values()].find((x) => x.stopClientOrderId === info.clientOrderId);
         if (!f) {
           // Ruling B (group 1, round 2 of the night release): a fresh stop that hit the 15 second limit has ended at Alpaca: its entry's
-          // sale is due now (no new request; a pending retry time for that entry is cleared), so the order sync runs at once.
+          // sale is due now (no new request; a pending retry time for that entry is cleared), so the protection loop looks at the entry at once.
           const entry = this.syncMemory.timedOutStops.get(info.clientOrderId);
           if (entry && (info.event === "canceled" || info.event === "expired" || info.event === "rejected")) {
             // Recorded before any early return (group 1, round 5): a sale of that entry running now will not back off afterwards.

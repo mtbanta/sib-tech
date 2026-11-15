@@ -5873,3 +5873,21 @@ Paper only. Research input for a human decision.
 - Notes done: the stale comments; the test title; PROJECT_STATE. Left for Michael: "I will cancel that stop" when the stop's id is not kept (group 2's note).
 
 Full suite 780 of 780. Type check clean.
+
+### Redesign part 2, round 1 (b58994e): group 2 CHANGES REQUIRED, and fixes
+
+**Group 2, redesign part 2, round 1: CHANGES REQUIRED.** Nothing under checks 2, 7 or 10. Message wording and mentions unchanged; the 5 minute alert skipped while the entry's action runs; the statistics and stored events match the briefs; the figures reproduce (775, 28 failed reads, the 1, 2, 4, 8, 10 s backoff).
+
+1. **One resolution could post two closing lines (new in part 2).** The sync's walk, its "not active" sweep and its no-open-entry branch could resolve a stuck entry while that entry's own action was still running; the action then found no stuck record and posted the plain sold line too. Group 2's probe (a sale filled at Alpaca with a slow answer, a regular sync meanwhile): "GE: no longer held (2 minutes after ...)" and then "**GE: I could not confirm a live protective stop, so I sold it.**"; at part 1's head, only "GE: sold (...)".
+2. **An action that threw raised no alert.** Before part 2 a throw ended the "risk" step, logged `background_failed` at error level and posted `Step "risk" failed: ...` (at most once per 5 minutes); now the loop caught it and logged only at info. For group 1: an action that keeps throwing was retried at every regular sync with no growing wait (rule 6).
+3. **Events and briefs:** a failed look logged `next: "regular sync"` (the loop retries after 1 s, doubling); a list-lag look refused for room always logged `next: "when the budget has room"`, even when its window ends first; a stale brief bullet ("runs on its own timer"; `sync_slow` for "a stuck sale's try").
+
+Notes: the Monday test's title overstated ("gets its fresh stop meanwhile": it is started meanwhile and waits its turn in the sale queue); stale comments; `late_notice`'s `syncSetForAgoMs` renamed `wokeForAgoMs` unlogged; the cleanup counts in `sync_slow` and `late_notice` now count only actions finishing during that sync; `protectionLoop.looks` counted idle looks outside the session; the list-lag give-way was never ended when its wake was dropped; a missing-exit action may now start while the fast sale runs (the second sale finds the shares gone or covered); untested events; a weak assertion.
+
+**Fixes:**
+- **1:** the three resolution calls in `syncOrders` leave a busy entry's stuck record to its action (`opts.loop.busy`); the action resolves it with the right line, or the first sync after it ends does. New test shaped like group 2's probe: one line, "GE: sold (...)"; it fails without the fix.
+- **2:** an action that throws is logged at error level and alerted at most once every 5 minutes (`Step "protection" failed (<action>): <error>`, `Worker.protectionActionFailed`), and that entry's next action waits 5 s, doubling to 30 s while it keeps throwing (`ACTION_FAIL_FIRST_MS`, `ACTION_FAIL_MAX_MS` in `src/protection.ts`). New test: one alert, an error-level log, the next tries 5 s and 10 s apart.
+- **3:** a failed look's warning says it is looked at again after 1 s, doubling to 10 s; a refused list-lag look's `next` is "regular sync" when its window (passed to the look) ends before room returns, and the event is stored once per wait (as in part 1, `Worker.lagWaits`); the briefs' stale bullet, the cleanup counts, the renamed field and the throw alert are described. New test: refused again and again, stored once; a window that ends first names the regular sync and drops the wake.
+- Notes done: idle looks (outside the session) are not counted; a dropped list-lag wake ends its give-way at once (`onLagDropped`); the Monday test's title; the weak assertion; the stale comments (`src/risk.ts`, `src/worker.ts`).
+
+Full suite 782 of 782. Type check clean.

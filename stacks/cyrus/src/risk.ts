@@ -85,7 +85,7 @@ export interface AwaitingFill {
 // finishes, the rest of the position has no stop. If it is still like that this long after the stop was cancelled, the rest is
 // sold. 604 of the 655 finished within 10 seconds, 90 took longer than 5.
 // The speed release (Michael's decision 3, 2026-11-05): 3 seconds, counted from Alpaca's cancel. The live update of the stop's cancel
-// brings the next sync forward to that moment (worker.ts); the 10 second sync stays the backstop. On 2026-11-05, of 1,100 such
+// wakes the entry at that moment (worker.ts; since the redesign of 2026-11-14 a look of the protection loop); the 10 second sync stays the backstop. On 2026-11-05, of 1,100 such
 // cancels the take-profit finished on its own within 3 seconds in 827.
 // A4 of the proposal of 2026-11-12 (Michael's approval): at once. The take-profit's rest is cancelled and a fresh stop placed for the
 // shares left as soon as the stop's cancel is seen (the take-profits that would have finished on their own, about two thirds, are given
@@ -102,7 +102,7 @@ export const SLOW_SYNC_MS = 2_000;
 // Group 2, round 4 of the weekend build: how long after a live report of a completed stop cancel the sync keeps rechecking quickly while the
 // list still shows that stop open.
 export const LIVE_LAG_WATCH_MS = 30_000;
-// Michael's change of 2026-11-13 (evening): the longest gap between those rechecks (since the redesign of 2026-11-14 each recheck sync runs
+// Michael's change of 2026-11-13 (evening): the longest gap between those rechecks (since part 2 of the redesign each recheck is a look of the protection loop that runs
 // inside a P2 reservation of the shared request budget, charged at what it sends, once for all the remainders it serves).
 export const LIVE_LAG_RECHECK_MAX_MS = 2_000;
 const MISSING_RETRY_MS = 60_000;
@@ -222,7 +222,7 @@ export class SyncMemory {
   // Logging only (group 2, round 5): when a sync last saw such a stop still open (a lower bound on the list's lag).
   readonly liveLagLastOpen = new Map<string, number>();
   // The redesign of 2026-11-14, part 1: the quick list-lag recheck the last sync asked for (when it is due, its most requests, and the end
-  // of the last lagging remainder's 30 second window). The worker runs it on its own timer as a sync with a P2 reservation of `cost`
+  // of the last lagging remainder's 30 second window). Read only by a sync run without the protection loop (the risk tests); with the loop the walk asks the loop for a list-lag wake instead,
   // (nothing is charged before it runs, so nothing is given back); with no room it waits for room, until `until`.
   lagRecheck: { dueAt: number; cost: number; until: number } | undefined = undefined;
   // The redesign of 2026-11-14, part 2: the pages of the order list the last sync read (a list-lag look's cost is sized from it).
@@ -379,7 +379,7 @@ export interface FreshStop {
 // missing-exit check away), else from the live order updates; this often it is also looked up by its client id (one request), and at
 // every such sync while the live updates are down or its first answer was unclear.
 export const FRESH_STOP_LOOKUP_MS = 30_000;
-// Michael's ruling B of 2026-11-12: a fresh stop whose first answer was unclear is looked up every 5 seconds (the sync runs again that
+// Michael's ruling B of 2026-11-12: a fresh stop whose first answer was unclear is looked up every 5 seconds (the entry is looked at again that
 // soon while one is unclear), and if it is still unclear 15 seconds after it was sent, the remainder is treated as unprotected: the stop
 // is looked up by its client id and cancelled if Alpaca has it, the sale waits for that cancel, and the shares are sold through the
 // checked sell path, with an alert to Michael at once and one line when it resolves.
@@ -540,7 +540,9 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     await settleAwaiting(d, mem, null, new Set());
     // Group 2 review, round 1: an entry reported stuck whose record was closed elsewhere (the live updates close a record when an exit
     // fill leaves the symbol flat) still gets its one resolution line.
-    for (const id of [...mem.stuck.keys()]) await resolveStuck(d, mem, id, "no longer held");
+    // The redesign of 2026-11-14, part 2 (group 2, round 1): not while the entry's own action runs (it resolves the record itself, with the
+    // right line; otherwise the first sync after it ends does), so one resolution never posts two lines.
+    for (const id of [...mem.stuck.keys()]) if (!opts.loop?.busy(id)) await resolveStuck(d, mem, id, "no longer held");
     mem.bareSeen.clear();
     mem.lastSeen.clear();
     for (const id of [...mem.freshStops.keys()]) dropFreshStop(d, mem, id, "its entry is no longer open", syncStartMs);
@@ -558,7 +560,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   for (const id of [...mem.listClearLogged]) if (!activeIds.has(id)) mem.listClearLogged.delete(id);
   for (const id of [...mem.liveLagLastOpen.keys()]) if (!activeIds.has(id)) mem.liveLagLastOpen.delete(id);
   for (const id of [...mem.freshStops.keys()]) if (!activeIds.has(id)) dropFreshStop(d, mem, id, "its entry is no longer open", syncStartMs);
-  for (const id of [...mem.stuck.keys()]) if (!activeIds.has(id)) await resolveStuck(d, mem, id, "no longer held");
+  for (const id of [...mem.stuck.keys()]) if (!activeIds.has(id) && !opts.loop?.busy(id)) await resolveStuck(d, mem, id, "no longer held");
   const midnight = etInstant(day.tradeDate, "00:00").getTime();
   const nowMs = d.now().getTime();
   const createdMs = (o: OrderRecord) => (o.createdAt ? new Date(o.createdAt).getTime() : midnight);
@@ -720,7 +722,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
     }
   }
   mark("alerts");
-  // Michael's change of 2026-11-13 (evening): one recheck sync serves every remainder whose list still lags (gathered in `ctx.lag`).
+  // Michael's change of 2026-11-13 (evening): one look serves every remainder whose list still lags (a list-lag wake of the loop; without the loop, gathered in `ctx.lag`).
   const walk = [...active.filter((s) => !shortRetry(s)), ...active.filter(shortRetry).sort((a, b) => mem.stuck.get(a.clientOrderId)!.lastTriedAt - mem.stuck.get(b.clientOrderId)!.lastTriedAt)];
   const ctx: WalkCtx = { d, day, mem, opts, nowMs, listed, held, heldQty, latestPerSymbol, sellingSymbols, lookedUp, listAgeMs, fromMs, createdMs, lateNotice, timedCleanup, unprotected, lag: { until: 0, lookups: 0 }, loop: undefined as unknown as ProtectionHooks };
   ctx.loop = opts.loop ?? inlineLoop(ctx);
@@ -762,14 +764,14 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
       mem.bareSeen.delete(s.clientOrderId);
       mem.lastSeen.delete(s.clientOrderId);
       dropFreshStop(d, mem, s.clientOrderId, "its entry closed (its shares are gone)", nowMs);
-      await resolveStuck(d, mem, s.clientOrderId, "no longer held");
+      if (!opts.loop?.busy(s.clientOrderId)) await resolveStuck(d, mem, s.clientOrderId, "no longer held");
       continue;
     }
     await protectEntry(ctx, s, o);
   }
   // The redesign of 2026-11-14, part 1: the quick recheck is asked of the worker with its most requests (the order list's pages and the
-  // positions as this sync read them, plus a lookup per lagging entry older than the list's window). The worker runs it on its own timer as
-  // a sync with a P2 reservation of that size, so it is charged when it runs, at what it really sends (nothing ahead, nothing to give
+  // positions as this sync read them, plus a lookup per lagging entry older than the list's window). Without the protection loop it is kept in `lagRecheck`; with the loop each lagging entry has a list-lag wake, and its
+  // look runs inside a P2 reservation of that size, so it is charged when it runs, at what it really sends (nothing ahead, nothing to give
   // back). With no room it waits for room (entries give way while it waits on the floor of 80), until the last lagging remainder's 30
   // second window ends; after that the regular sync carries on.
   if (ctx.recheckAt !== undefined) recheckAt = recheckAt === undefined ? ctx.recheckAt : Math.min(recheckAt, ctx.recheckAt);
@@ -869,7 +871,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
   if (fresh.status !== "unclear") endLookWait(d, mem, fresh);
   if (live) {
       if (FRESH_STOP_LIMIT.on && fresh.status === "unclear") {
-        // Still unclear: looked up again within 5 seconds, and the sync runs at the 15 second limit (the entry is looked up at that
+        // Still unclear: looked up again within 5 seconds, and the entry is looked at again at the 15 second limit (it is looked up at that
         // sync too, even if it is older than the 10 minute list).
         // Group 1, round 1 of the redesign (B3), with group 2's round 2: a lookup that found no room is tried again when there is room for it
       // and the coming sync's reads, and at least 0.5, 1, 2, then 4 s after refusals in a row (`roomWaitUntil`).
@@ -933,10 +935,10 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
     return;
   }
   // Group 2, round 4 of the weekend build: while the list still shows the stop open, the sale is not started (the sell gate counts that
-  // stop, so the sale would wait inside this sync, up to about 22 s, and every entry after it would wait too). The sync is run again soon
-  // instead: 0.5 s, then 1, then every 2 s (Michael, 2026-11-13 evening), for up to LIVE_LAG_WATCH_MS after the live report, each charged
+  // stop, so the sale would wait inside this sync, up to about 22 s, and every entry after it would wait too). The entry is looked at again soon
+  // instead (a list-lag wake of the protection loop): 0.5 s, then 1, then every 2 s (Michael, 2026-11-13 evening), for up to LIVE_LAG_WATCH_MS after the live report, each charged
   // run by the worker inside a P2 reservation of the shared request budget (rule 6: the 30 s window and the budget, and these steps); the sale
-  // then starts in the first sync after the list clears. After that window the regular syncs carry on.
+  // then starts in the first look or sync after the list clears. After that window the regular syncs carry on.
   if (bare.liveCancel) {
     const tries = (mem.liveLagTries.get(s.clientOrderId) ?? 0) + 1;
     mem.liveLagTries.set(s.clientOrderId, tries);
@@ -944,7 +946,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
     if (nowMs - liveAt! < LIVE_LAG_WATCH_MS) {
       // Michael's change of 2026-11-13 (evening): every 2 s after the first steps; since the redesign of 2026-11-14 each recheck runs inside
       // a P2 reservation of its cost (the sync's order list, its positions and this entry's lookup), so many remainders at once can never exceed it. With
-      // no room the recheck waits for room (the worker's own timer) until the last lagging remainder's 30 second window ends.
+      // no room the recheck waits for room (the loop's list-lag wake) until the last lagging remainder's 30 second window ends.
       const gap = Math.min(500 * 2 ** (tries - 1), LIVE_LAG_RECHECK_MAX_MS);
       // A list-lag wake (a lookup by id at the look for an entry older than the order list's window; its 30 s window).
       ctx.loop.wake(id, nowMs + gap, "lag", { extraRequests: createdMs(s) < fromMs ? 1 : 0, untilMs: liveAt! + LIVE_LAG_WATCH_MS });
@@ -1483,7 +1485,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   }
   if (r.freshStopUnclear && r.freshStopUnclear.symbol === s.symbol) {
     const f = r.freshStopUnclear;
-    // Ruling B: timed from its sending; looked up at the next sync, 2 seconds on, then every 5 seconds while still unclear. The entry
+    // Ruling B: timed from its sending; looked up at the next look of the entry, 2 seconds on, then every 5 seconds while still unclear. The entry
     // itself is looked up at each of those syncs too (group 1, round 1 of the night release): one older than the sync's 10 minute list
     // would otherwise be skipped by the walk and its limit would come late.
     if (FRESH_STOP_LIMIT.on) mem.mustLook.add(s.clientOrderId);

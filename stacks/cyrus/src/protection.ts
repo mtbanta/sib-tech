@@ -34,11 +34,20 @@ export interface LoopDeps {
   clearTimer?: (handle: unknown) => void;
   // Runs one look for these entries. "busy": a sync or look is running (put off a quarter second); "wait": no room in the shared budget for
   // a list-lag look (tried again at `retryAt`); "failed": the look's reads failed; "done": it ran.
-  look: (ids: ReadonlySet<string>, kind: WakeKind, extraRequests: number) => Promise<{ outcome: "busy" | "done" | "failed" } | { outcome: "wait"; retryAt: number }>;
+  // "idle": outside the session, nothing read (not counted). `untilMs`: the earliest end of the due list-lag wakes' windows.
+  look: (ids: ReadonlySet<string>, kind: WakeKind, extraRequests: number, untilMs: number) => Promise<{ outcome: "busy" | "done" | "failed" | "idle" } | { outcome: "wait"; retryAt: number }>;
+  // Told when a list-lag wake is dropped (its window ended): the worker ends its give-way at once.
+  onLagDropped?: (id: string) => void;
   log?: (event: string, data?: Record<string, unknown>) => void;
+  // Told when an action throws (the worker logs it at error level and alerts, at most once every 5 minutes; group 2, round 1).
+  onActionFailed?: (id: string, label: string, err: unknown) => void;
 }
 
 export const LOOK_PUT_OFF_MS = 250;
+// Rule 6 (group 2's note to group 1, round 1): an entry whose action threw is not acted on again for 5 s, doubling to 30 s while it keeps
+// throwing; one that ends normally resets it.
+export const ACTION_FAIL_FIRST_MS = 5_000;
+export const ACTION_FAIL_MAX_MS = 30_000;
 export const LOOK_FAIL_FIRST_MS = 1_000;
 export const LOOK_FAIL_MAX_MS = 10_000;
 
@@ -57,6 +66,7 @@ export class ProtectionLoop implements ProtectionHooks {
   private readonly d: LoopDeps;
   private readonly wakes = new Map<string, { at: number; kind: WakeKind; extra: number; until: number }>();
   private readonly running = new Set<string>();
+  private readonly actionFail = new Map<string, { delayMs: number; until: number }>();
   private timer: unknown = null;
   private timerAt: number | null = null;
   private looking = false;
@@ -80,14 +90,28 @@ export class ProtectionLoop implements ProtectionHooks {
 
   act(id: string, label: string, run: () => Promise<{ recheckAt?: number } | void>): Promise<void> {
     if (this.running.has(id) || this.stopped) return Promise.resolve();
+    const failed = this.actionFail.get(id);
+    if (failed && this.d.now() < failed.until) {
+      this.wake(id, failed.until, "protect"); // decided again when its wait ends
+      return Promise.resolve();
+    }
     this.running.add(id);
     this.minute.actions++;
     void (async () => {
       try {
         const r = await run();
+        this.actionFail.delete(id);
         if (r && r.recheckAt !== undefined) this.wake(id, r.recheckAt, "protect");
       } catch (err) {
-        this.d.log?.("protection_action_failed", { clientOrderId: id, label, error: (err as Error).message.slice(0, 160) });
+        const prev = this.actionFail.get(id);
+        const delayMs = prev ? Math.min(prev.delayMs * 2, ACTION_FAIL_MAX_MS) : ACTION_FAIL_FIRST_MS;
+        this.actionFail.set(id, { delayMs, until: this.d.now() + delayMs });
+        try {
+          this.d.onActionFailed?.(id, label, err);
+        } catch {
+          /* reporting must never break the loop */
+        }
+        if (!this.d.onActionFailed) this.d.log?.("protection_action_failed", { clientOrderId: id, label, error: (err as Error).message.slice(0, 160), retryInMs: delayMs });
       } finally {
         this.running.delete(id);
         // A wake that came while it ran is looked at now (or at its time).
@@ -155,6 +179,7 @@ export class ProtectionLoop implements ProtectionHooks {
       if (w.kind === "lag" && now >= w.until) {
         this.wakes.delete(id);
         this.d.log?.("list_lag_recheck_window_over", { clientOrderId: id, next: "regular sync" });
+        this.d.onLagDropped?.(id);
         continue;
       }
       due.set(id, w);
@@ -162,6 +187,7 @@ export class ProtectionLoop implements ProtectionHooks {
     if (due.size === 0) return this.arm();
     const kind: WakeKind = [...due.values()].every((w) => w.kind === "lag") ? "lag" : "protect";
     const extra = [...due.values()].reduce((n, w) => n + (w.kind === "lag" ? w.extra : 0), 0);
+    const until = Math.min(...[...due.values()].map((w) => w.until));
     const ids = new Set(due.keys());
     // Taken out before the look, so a wake asked for during it (a follow-up, a stuck retry's next time) is kept; put back (the earlier of the
     // two) if the look did not run.
@@ -176,7 +202,7 @@ export class ProtectionLoop implements ProtectionHooks {
     this.looking = true;
     let r: Awaited<ReturnType<LoopDeps["look"]>>;
     try {
-      r = await this.d.look(ids, kind, extra);
+      r = await this.d.look(ids, kind, extra, until);
     } catch (err) {
       r = { outcome: "failed" };
       this.d.log?.("protection_look_failed", { error: (err as Error).message.slice(0, 160) });
@@ -198,6 +224,7 @@ export class ProtectionLoop implements ProtectionHooks {
         if (w.kind === "lag" && retryAt >= w.until) {
           due.delete(id);
           this.d.log?.("list_lag_recheck_window_over", { clientOrderId: id, next: "regular sync" });
+        this.d.onLagDropped?.(id);
         }
       }
       putBack(() => retryAt);
@@ -213,10 +240,10 @@ export class ProtectionLoop implements ProtectionHooks {
       putBack((w) => w.at);
       return this.arm();
     }
-    // The due wakes were served (any wake asked for during the look stays).
-    {
-      this.failDelayMs = 0;
-      this.failUntil = 0;
+    // The due wakes were served (any wake asked for during the look stays). An idle look (outside the session) read nothing: not counted.
+    this.failDelayMs = 0;
+    this.failUntil = 0;
+    if (r.outcome !== "idle") {
       this.minute.looks++;
       if (kind === "lag") this.minute.lagLooks++;
     }
