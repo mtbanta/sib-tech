@@ -903,74 +903,88 @@ for (const which of ["remainder", "15 second limit"] as const) {
 // Group 1, round 3 of part 2 (B1 and B2): loop cleanup sales queued just before 2:55 whose turn comes after 2:55:00 but before the close-out's
 // own pass asks for it send nothing (design 4.3, "from the close-out time ... no selling action"; v22's sync started no cleanup from 2:55:00).
 // The stood-aside entries say nothing to Michael, gain no stuck record, and an existing stuck record is left as it was.
-test("part 2 (group 1, round 3, B1): loop cleanup sales whose turn comes after 2:55:00, before the close-out starts, stand aside; no alert, no stuck record, an existing one unchanged", async () => {
-  const { sim, r } = await armedDay();
-  const wk: any = r.worker;
-  await r.at("20:54:40");
-  wk.middayOwnsSelling = false; // an afternoon after Michael's `go` (the mid-day pause no longer owns selling)
-  const syms = ["QXA", "QXB", "QXC", "QXD"];
-  const ids: string[] = [];
-  for (const s of syms) ids.push(await holdOne(sim, r, s));
-  for (const id of ids) for (const l of sim.orders.find((o: any) => o.clientOrderId === id)!.legs) await sim.cancelOrder(l.id);
-  sim.advanceTo(new Date(`${D}T20:54:55Z`).getTime());
-  wk.lastSync = sim.simMs;
-  const stuckD = { symbol: "QXD", since: sim.simMs - 120_000, nextAt: 0, delayMs: 10_000, alerted: true, escalated: false, lastTriedAt: sim.simMs - 30_000, why: "x" };
-  wk.syncMemory.stuck.set(ids[3], { ...stuckD });
-  const liq: any = wk.liquidator;
-  let current: any = null;
-  const realRun = liq.run.bind(liq);
-  liq.run = async (o: any) => {
-    current = o;
-    try {
-      return await realRun(o);
-    } finally {
-      current = null;
+for (const when of ["2:55", "mid-day pause", "mid-day step", "carried step", "starting close-out"] as const) {
+  test(`part 2 (group 1, round 3, B1; group 2, round 4): loop cleanup sales whose turn comes ${when === "2:55" ? "after 2:55:00, before the close-out starts" : `while the ${when} owns selling`}, stand aside; no alert, no stuck record, an existing one unchanged`, async () => {
+    const { sim, r } = await armedDay();
+    const wk: any = r.worker;
+    await r.at("20:54:40");
+    wk.middayOwnsSelling = false; // an afternoon after Michael's `go` (the mid-day pause no longer owns selling)
+    const syms = ["QXA", "QXB", "QXC", "QXD"];
+    const ids: string[] = [];
+    for (const s of syms) ids.push(await holdOne(sim, r, s));
+    for (const id of ids) for (const l of sim.orders.find((o: any) => o.clientOrderId === id)!.legs) await sim.cancelOrder(l.id);
+    sim.advanceTo(new Date(`${D}T20:54:55Z`).getTime());
+    wk.lastSync = sim.simMs;
+    const stuckD = { symbol: "QXD", since: sim.simMs - 120_000, nextAt: 0, delayMs: 10_000, alerted: true, escalated: false, lastTriedAt: sim.simMs - 30_000, why: "x" };
+    wk.syncMemory.stuck.set(ids[3], { ...stuckD });
+    const liq: any = wk.liquidator;
+    let current: any = null;
+    const realRun = liq.run.bind(liq);
+    liq.run = async (o: any) => {
+      current = o;
+      try {
+        return await realRun(o);
+      } finally {
+        current = null;
+      }
+    };
+    const realSell = sim.submitSell.bind(sim);
+    let release!: () => void;
+    const held = new Promise<void>((x) => (release = x));
+    let heldSent = false;
+    const closeoutAt = new Date(`${D}T20:55:00Z`).getTime();
+    const sent: Array<{ symbol: string; own: boolean; at: number }> = [];
+    sim.submitSell = async (x: any) => {
+      sent.push({ symbol: x.symbol, own: !!current?.ownEntryOnly, at: sim.simMs });
+      if (!heldSent && current?.ownEntryOnly) {
+        heldSent = true;
+        await held;
+      }
+      return realSell(x);
+    };
+    const yieldedTo = new Map<string, string>();
+    const results: any[] = [];
+    const realLog = wk.d.log;
+    wk.d.log = (level: string, e: string, data: any) => {
+      if (e === "unprotected_position_yielded") yieldedTo.set(data.symbol, data.to);
+      if (e === "liquidation_result") results.push(data);
+      return realLog?.(level, e, data);
+    };
+    for (const id of ids) wk.loop.wake(id, sim.simMs, "protect");
+    for (let i = 0; i < 20 && !(heldSent && liq.running >= 4); i++) {
+      r.setNow(iso(sim.simMs + 100));
+      for (let k = 0; k < 6; k++) await settle();
     }
-  };
-  const realSell = sim.submitSell.bind(sim);
-  let release!: () => void;
-  const held = new Promise<void>((x) => (release = x));
-  let heldSent = false;
-  const closeoutAt = new Date(`${D}T20:55:00Z`).getTime();
-  const sent: Array<{ symbol: string; own: boolean; at: number }> = [];
-  sim.submitSell = async (x: any) => {
-    sent.push({ symbol: x.symbol, own: !!current?.ownEntryOnly, at: sim.simMs });
-    if (!heldSent && current?.ownEntryOnly) {
-      heldSent = true;
-      await held;
+    assert.ok(heldSent && liq.running >= 4, `four cleanup sales asked for before 2:55, the first one's sell held (${liq.running})`);
+    const runningSymbol = sent.find((x) => x.own)!.symbol;
+    const said0 = r.bot.posts.length;
+    // Group 2, round 4: each half of the worker's rule: the clock (2:55:01, no pass yet, so the close-out has not been asked for), or a step
+    // that owns selling, set before 2:55.
+    if (when === "2:55") {
+      sim.advanceTo(closeoutAt + 1_000);
+      assert.equal(wk.closingOut, false, "the close-out has not started");
+    } else if (when === "mid-day pause") wk.middayOwnsSelling = true;
+    else if (when === "mid-day step") wk.inflight.add("midday");
+    else if (when === "carried step") wk.inflight.add("carried");
+    else wk.closingOut = true;
+    const turnFrom = sim.simMs;
+    release();
+    for (let i = 0; i < 40; i++) {
+      sim.advance(50);
+      await settle();
     }
-    return realSell(x);
-  };
-  const yieldedTo = new Map<string, string>();
-  const realLog = wk.d.log;
-  wk.d.log = (level: string, e: string, data: any) => {
-    if (e === "unprotected_position_yielded") yieldedTo.set(data.symbol, data.to);
-    return realLog?.(level, e, data);
-  };
-  for (const id of ids) wk.loop.wake(id, sim.simMs, "protect");
-  for (let i = 0; i < 20 && !(heldSent && liq.running >= 4); i++) {
-    r.setNow(iso(sim.simMs + 100));
-    for (let k = 0; k < 6; k++) await settle();
-  }
-  assert.ok(heldSent && liq.running >= 4, `four cleanup sales asked for before 2:55, the first one's sell held (${liq.running})`);
-  const runningSymbol = sent.find((x) => x.own)!.symbol;
-  const said0 = r.bot.posts.length;
-  sim.advanceTo(closeoutAt + 1_000); // 2:55:01: no pass yet, so the close-out has not been asked for
-  assert.equal(wk.closingOut, false, "the close-out has not started");
-  release();
-  for (let i = 0; i < 40; i++) {
-    sim.advance(50);
-    await settle();
-  }
-  const ownAfter = sent.filter((x) => x.own && x.at >= closeoutAt && x.symbol !== runningSymbol);
-  assert.equal(ownAfter.length, 0, `no queued cleanup sale sent anything from 2:55:00: ${ownAfter.map((x) => x.symbol).join(", ")}`);
-  for (const s of syms.filter((x) => x !== runningSymbol)) assert.equal(yieldedTo.get(s), "the close-out (stood aside at its turn)", `${s} logged as standing aside for the close-out`);
-  const posts = r.bot.posts.slice(said0).map((p: any) => p.text).filter((t: string) => syms.some((x) => x !== runningSymbol && t.includes(x)));
-  assert.equal(posts.length, 0, `nothing posted for the stood-aside ones: ${posts.join(" | ")}`);
-  for (const [i, s] of syms.entries()) {
-    if (s === runningSymbol) continue;
-    if (s === "QXD") assert.deepEqual(wk.syncMemory.stuck.get(ids[i]), stuckD, "the existing stuck record is unchanged");
-    else assert.equal(wk.syncMemory.stuck.has(ids[i]), false, `${s}: no stuck record`);
-  }
-  r.worker.stop?.();
-});
+    const ownAfter = sent.filter((x) => x.own && x.at >= turnFrom && x.symbol !== runningSymbol);
+    assert.equal(ownAfter.length, 0, `no queued cleanup sale sent anything: ${ownAfter.map((x) => x.symbol).join(", ")}`);
+    const stoodRows = results.filter((x) => (x.errors ?? []).includes("stood aside: the close-out owns selling (or its time has come) and sells these shares"));
+    assert.equal(stoodRows.length, 3, `three stored liquidation_result rows with the close-out's text (${JSON.stringify(results.map((x) => x.errors))})`);
+    for (const s of syms.filter((x) => x !== runningSymbol)) assert.equal(yieldedTo.get(s), "the close-out (stood aside at its turn)", `${s} logged as standing aside for the close-out`);
+    const posts = r.bot.posts.slice(said0).map((p: any) => p.text).filter((t: string) => syms.some((x) => x !== runningSymbol && t.includes(x)));
+    assert.equal(posts.length, 0, `nothing posted for the stood-aside ones: ${posts.join(" | ")}`);
+    for (const [i, s] of syms.entries()) {
+      if (s === runningSymbol) continue;
+      if (s === "QXD") assert.deepEqual(wk.syncMemory.stuck.get(ids[i]), stuckD, "the existing stuck record is unchanged");
+      else assert.equal(wk.syncMemory.stuck.has(ids[i]), false, `${s}: no stuck record`);
+    }
+    r.worker.stop?.();
+  });
+}
