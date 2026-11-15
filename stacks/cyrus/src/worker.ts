@@ -24,7 +24,7 @@ import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
 import { ProgressGap, RetryBackoff } from "./retry-backoff.ts";
-import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, noteTimedOutStopEnded, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
+import { BARE_GRACE_MS, lookWaitKey, enforceDailyLoss, fastLostExitSale, LossStopMemory, noteTimedOutStopEnded, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import type { SelfMonitor } from "./self-monitor.ts";
 import { SCREEN_MINUTES_BEFORE_OPEN, AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
 import { BusyPlaceholder } from "./strategy.ts";
@@ -323,7 +323,11 @@ export class Worker {
     this.syncMemory.budget = this.budget;
     this.lossMemory.budget = this.budget;
     deps.governor.setSafetyHold?.(this.budget);
-    this.loop = new ProtectionLoop({ now: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}), ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {}), look: (ids, kind, extra, until) => this.look(ids, kind, extra, until), log: (e, data) => deps.log?.("info", e, data), onActionFailed: (id, label, err) => this.protectionActionFailed(id, label, err), onLagDropped: () => this.budget.stopWaiting("list lag recheck") });
+    this.loop = new ProtectionLoop({ now: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}), ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {}), look: (ids, kind, extra, until) => this.look(ids, kind, extra, until), log: (e, data) => deps.log?.("info", e, data), onActionFailed: (id, label, err) => this.protectionActionFailed(id, label, err), onLagDropped: () => {
+      // Part 1, group 2 round 4: the wait ended (its window), so the next one stores its out-of-room event afresh.
+      this.lagWaits = 0;
+      this.budget.stopWaiting("list lag recheck");
+    } });
     this.sessions = new NextSessionFinder(deps.broker);
     this.view = new BrokerView(deps.broker, () => deps.now().getTime());
     this.sellGate = new SellGate({ broker: deps.broker, say: (c, t, o) => this.say(c, t, o), log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime() });
@@ -1275,6 +1279,9 @@ export class Worker {
         // Stored once per wait (the first refusal in a row; group 2, round 3 of part 1); `next` says what comes: the look when there is room,
         // or the regular sync when the 30 s window ends first (the loop then drops it).
         if (++this.lagWaits === 1) this.d.log?.("info", "timed_out_try_out_of_room", { stage: "list lag recheck", cost, why: r.why, roomInMs: r.at - this.d.now().getTime(), next: r.at < untilMs ? "when the budget has room" : "regular sync" });
+        // Decision 5 as changed by A (part 1, round 4): entries give way while it waits on its floor, through to its next look (the loop
+        // looks again at `retryAt`), never past the earliest lag window's end; a refusal for another reason ends the give-way (the budget).
+        if (r.why === "floor") this.budget.extendWait("list lag recheck", Math.min(r.at + 500, untilMs));
         return { outcome: "wait", retryAt: r.at };
       }
       this.lagWaits = 0;
@@ -1291,6 +1298,12 @@ export class Worker {
         await this.lostExitsFollowUp(s.day.tradeDate, synced.unprotected);
         await this.stopCancelFollowUp(s.day.tradeDate);
       });
+      // A protection look that served list-lag wakes ended their wait too (a lag look's grant already did): the count starts afresh and
+      // entries stop giving way for it (part 1, group 2 round 4).
+      if (kind !== "lag" && this.lagWaits > 0) {
+        this.lagWaits = 0;
+        this.budget.stopWaiting("list lag recheck");
+      }
       return { outcome: "done" };
     } catch (err) {
       this.d.log?.("warn", kind === "lag" ? "list_lag_recheck_failed" : "protection_look_failed", { error: (err as Error).message.slice(0, 120), entries: ids.size, next: "a look again after the loop's wait (1 s, doubling to 10 s)" });
@@ -1677,7 +1690,7 @@ export class Worker {
         // Ruling B of 2026-11-12: a stop that was unclear gets its time to confirm logged here too.
         settleFreshStop((e, data) => this.d.log?.("info", e, data), f, info.status, "live update", this.d.now().getTime());
         // Group 1, round 3 of the redesign: a stop no longer unclear ends the give-way its lookup was waiting with.
-        if (f.status !== "unclear") this.budget.stopWaiting(`fresh stop lookup ${f.stopClientOrderId}`);
+        if (f.status !== "unclear") this.budget.stopWaiting(lookWaitKey(f));
         if (info.event === "canceled" || info.event === "expired" || info.event === "rejected") {
           this.d.log?.("info", "fresh_stop_ended", { symbol: info.symbol, stopClientOrderId: info.clientOrderId, event: info.event });
           if (this.closingOut || this.liquidator.isLiquidatingOthers() || this.middayOwnsSelling) return;

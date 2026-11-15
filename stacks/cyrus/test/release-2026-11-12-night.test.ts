@@ -2315,3 +2315,107 @@ test("redesign part 1 (group 1, round 3, Q6): a timed-out stop's cancel sent aga
   const chk = w.memory.timedOutCheck.get(stop)!;
   assert.ok(chk && chk.resendAt - w.sim.simMs >= 850, `the cancel again in ${chk ? chk.resendAt - w.sim.simMs : "none"} ms (room for the cancel and the sync's reads)`);
 });
+
+// ---------------- Redesign part 1, round 4 (group 1 B1 and group 2 items 1 and 2) ----------------
+// Decision 5 with change A: entries give way only while a P2 try has room in the minute but waits on the 80, never because the minute or
+// the 5 seconds are used up (then entries giving way helps nothing).
+test("redesign part 1 (round 4): a P2 try's floor wait ends when it is refused for another reason (the 5 seconds), and extendWait does not bring it back", () => {
+  const t = 0;
+  let remaining = 82;
+  const b = new RequestBudget({ now: () => t, remaining: () => remaining });
+  const r1 = b.tryReserve("P2", 5, { label: "recheck", waitKey: "k" });
+  assert.ok(!(r1 instanceof Reservation) && r1.why === "floor");
+  assert.equal(b.givingWay(), true);
+  remaining = 200;
+  const other = b.tryReserve("P1", 12, { label: "other" });
+  assert.ok(other instanceof Reservation);
+  const r2 = b.tryReserve("P2", 5, { label: "recheck", waitKey: "k" });
+  assert.ok(!(r2 instanceof Reservation) && r2.why === "five");
+  assert.equal(b.givingWay(), false, "refused on the 5 seconds: entries do not give way");
+  b.extendWait("k", t + 10_000);
+  assert.equal(b.givingWay(), false, "only a recorded floor wait is extended");
+  other.end();
+});
+
+async function unclearLookup() {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "WULF", 6, 9.5, 1);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 2, 9.58);
+  const box = { remaining: 200 };
+  w.memory.budget = new RequestBudget({ now: () => w.sim.simMs, remaining: () => box.remaining });
+  const realSubmit = w.sim.submitSell.bind(w.sim);
+  w.sim.submitSell = async (x: any) => {
+    if (x.stopPrice !== undefined) {
+      await realSubmit(x);
+      throw new AlpacaError("outcome unclear (test)", 502);
+    }
+    return realSubmit(x);
+  };
+  const realPaged = w.sim.listOrdersPaged.bind(w.sim);
+  w.sim.listOrdersPaged = async (...a: any[]) => {
+    const r: any = await (realPaged as any)(...a);
+    return { ...r, orders: r.orders.filter((o: any) => !o.clientOrderId.startsWith("cyrus-p-")) };
+  };
+  w.sim.advance(300);
+  const r: any = await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(w.memory.freshStops.get(id)?.status, "unclear");
+  return { w, dd, id, box, r };
+}
+
+test("redesign part 1 (round 4, group 1 B1): an unclear fresh stop's lookup refused on P2's share of the minute (class) after a floor refusal: entries are not held", async () => {
+  const { w, dd, id, box, r } = await unclearLookup();
+  box.remaining = 80;
+  w.sim.advanceTo(Math.max(w.sim.simMs + 100, r.recheckAt ?? 0));
+  const r2: any = await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(w.memory.freshStops.get(id)?.status, "unclear");
+  assert.equal(w.memory.budget!.givingWay(), true, "refused on its floor: entries give way");
+  box.remaining = 200;
+  const other = w.memory.budget!.tryReserve("P1", 45, { label: "other P1 work", fiveSec: false });
+  assert.ok(other instanceof Reservation);
+  w.sim.advanceTo(Math.max(w.sim.simMs + 100, r2.recheckAt ?? 0));
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(w.memory.freshStops.get(id)?.status, "unclear");
+  assert.equal(w.memory.freshStops.get(id)?.lookWaits, 2, "the lookup was refused again");
+  assert.equal((w.memory.budget!.roomFor("P2", 1) as any).why, "class", "on the minute's P2 share");
+  assert.equal(w.memory.budget!.givingWay(), false, "entries are not held while the minute itself is used");
+  other.end();
+});
+
+test("redesign part 1 (round 4, group 1 B1, mutant E2): the give-way for an unclear fresh stop's lookup never runs past the 15 second limit", async () => {
+  const { w, dd, id, box } = await unclearLookup();
+  const placedAt = w.memory.freshStops.get(id)!.placedAt;
+  box.remaining = 40; // room for the lookup is more than 10 s away
+  w.sim.advanceTo(placedAt + 12_000);
+  await syncOrders(w.risk, dd, { protect: true });
+  const f = w.memory.freshStops.get(id)!;
+  assert.equal(f.status, "unclear");
+  assert.ok((f.lookRoomAt ?? 0) > placedAt + FRESH_STOP_CONFIRM_MS, "its next try is due after the limit");
+  w.sim.advanceTo(placedAt + FRESH_STOP_CONFIRM_MS - 100);
+  assert.equal(w.memory.budget!.givingWay(), true, "entries give way through the wait");
+  w.sim.advanceTo(placedAt + FRESH_STOP_CONFIRM_MS + 100);
+  assert.equal(w.memory.budget!.givingWay(), false, "not past the limit, even before the sync at the limit runs");
+});
+
+test("redesign part 1 (round 4, group 1 B1): the 15 second limit ends the lookup's give-way", async () => {
+  const { w, dd, id, box } = await unclearLookup();
+  const placedAt = w.memory.freshStops.get(id)!.placedAt;
+  box.remaining = 80;
+  w.sim.advanceTo(placedAt + 14_000);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(w.memory.budget!.givingWay(), true);
+  box.remaining = 200;
+  w.sim.advanceTo(placedAt + FRESH_STOP_CONFIRM_MS);
+  let atLimit: boolean | null = null;
+  const realTry = w.memory.budget!.tryReserve.bind(w.memory.budget);
+  w.memory.budget!.tryReserve = (c: any, n: any, o: any) => {
+    if (o?.label === "15 second limit lookup") atLimit = w.memory.budget!.givingWay(); // the limit's own look, as it starts
+    return realTry(c, n, o);
+  };
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(atLimit, false, "entries are back as soon as the limit fires (its base wait ran to 16 s)");
+  assert.ok(w.events.some((e) => e.event === "fresh_stop_timeout"), "the limit fired");
+  assert.equal(w.memory.budget!.givingWay(), false, "entries are back at once");
+});
+

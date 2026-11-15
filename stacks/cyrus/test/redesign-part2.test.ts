@@ -458,12 +458,14 @@ test("part 2: a list-lag look refused again and again stores timed_out_try_out_o
   // A wait whose room comes only after the window: named as the regular sync, and the wake is dropped.
   wk.budget.tryReserve = (cls: any, n: any, o: any) => (o?.label === "list lag recheck" ? { ok: false, at: sim.simMs + 60_000, why: "minute" } : realTry(cls, n, o));
   events.length = 0;
-  (wk as any).lagWaits = 0;
+  // The first wait ended with its window (the loop dropped the wake): the second wait stores its event afresh (part 1, group 2 round 4).
+  assert.equal(wk.loop.pendingWakes().has(id), false, "the first wait ended with its window");
   const t1 = sim.simMs;
   wk.loop.wake(id, t1, "lag", { untilMs: t1 + 5_000 });
   r.setNow(iso(t1));
   await settle();
   await settle();
+  assert.equal(events.length, 1, "the second wait is stored too");
   assert.equal(events[0]?.next, "regular sync");
   assert.equal(wk.loop.pendingWakes().has(id), false, "dropped: its window ends before room returns");
   r.worker.stop?.();
@@ -595,4 +597,34 @@ test("part 2 (group 1, round 1): a close-out that starts between the decision an
   await acts[0]!();
   assert.ok(asks >= 2, "asked again before the action");
   assert.equal(sim.sellLog.length, 0, "no sale reached Alpaca");
+});
+
+// Part 1, round 4, in part 2's terms (decision 5 with change A, "while it waits"): a list-lag look refused on its floor keeps entries giving
+// way through to its next look, never past its window; a refusal for another reason ends the give-way; a protection look that serves the
+// lag wake ends it too.
+test("part 2 (part 1, round 4): a list-lag look refused on its floor keeps entries giving way until its next look, never past its window; a protection look serving it ends the wait", async () => {
+  const { sim, r } = await armedDay();
+  const wk: any = r.worker;
+  const id = await holdOne(sim, r, "LUNR");
+  await r.at("14:30:10");
+  const realRemaining = wk.budget.remaining;
+  wk.budget.remaining = () => 60; // room for the look is several seconds away
+  const t0 = sim.simMs;
+  wk.loop.wake(id, t0, "lag", { untilMs: t0 + 20_000 });
+  r.setNow(iso(t0));
+  await settle();
+  await settle();
+  const next = wk.loop.nextLookAt();
+  assert.ok(next !== null && next - t0 > 2_500, `its next look is more than 2.5 s away (${next === null ? null : next - t0} ms)`);
+  r.setNow(iso(t0 + 2_200));
+  assert.equal(wk.budget.givingWay(), true, "entries still give way after 2 s, through to the next look");
+  // A protection wake for the same entry: the look that serves it is not a lag look, and it ends the wait.
+  wk.budget.remaining = realRemaining;
+  wk.loop.wake(id, sim.simMs, "protect");
+  r.setNow(iso(sim.simMs));
+  await settle();
+  await settle();
+  assert.equal(wk.budget.givingWay(), false, "served by a protection look: entries are back");
+  assert.equal(wk.lagWaits, 0);
+  r.worker.stop?.();
 });

@@ -279,7 +279,7 @@ async function startupProtectionCheck(d: RiskDeps, mem: SyncMemory, tradeDate: s
       for (const [stop, entry] of stored?.stops ?? []) {
         if (!mem.timedOutStops.has(stop)) mem.timedOutStops.set(stop, entry);
         // A timed-out stop the sale re-adopted before this read is not protection (ruling B: never taken as protection again).
-        for (const [e, f] of [...mem.freshStops]) if (f.stopClientOrderId === stop) mem.freshStops.delete(e);
+        for (const [e, f] of [...mem.freshStops]) if (f.stopClientOrderId === stop) (mem.freshStops.delete(e), endLookWait(d, mem, f));
       }
       storedCount = stored?.stops?.length ?? 0;
       mem.startupStoredCount = storedCount;
@@ -401,7 +401,7 @@ export function settleFreshStop(log: ((event: string, data?: Record<string, unkn
 }
 
 // The give-way key of an unclear fresh stop's lookup, and its end (the lookup ran, or the stop is no longer unclear, or it was dropped).
-const lookWaitKey = (f: FreshStop): string => `fresh stop lookup ${f.stopClientOrderId}`;
+export const lookWaitKey = (f: Pick<FreshStop, "stopClientOrderId">): string => `fresh stop lookup ${f.stopClientOrderId}`;
 function endLookWait(d: Pick<RiskDeps, "budget" | "now" | "governor">, mem: SyncMemory, f: FreshStop): void {
   budgetOf(d, mem).stopWaiting(lookWaitKey(f));
 }
@@ -435,9 +435,10 @@ async function freshStopLive(d: RiskDeps, mem: SyncMemory, f: FreshStop, listed:
     if (!(r instanceof Reservation)) {
       f.lookWaits = (f.lookWaits ?? 0) + 1;
       f.lookRoomAt = roomWaitUntil(d, mem, "P2", 1, f.lookWaits, nowMs, syncReads);
-      // Group 1, round 3 of the redesign: entries give way through the whole wait (until the next try's sync, 250 ms after its time), never
-      // past the stop's 15 second limit; dropped when the lookup runs or the fresh stop is settled or dropped (`endLookWait`).
-      budgetOf(d, mem).extendWait(lookWaitKey(f), Math.min(f.lookRoomAt + 500, f.placedAt + FRESH_STOP_CONFIRM_MS));
+      // Group 1, round 3 of the redesign: entries give way through the whole wait (until the next try's sync, with 500 ms for the worker's
+      // slack), never past the stop's 15 second limit; dropped when the lookup runs or the fresh stop is settled or dropped (`endLookWait`).
+      // Only after a refusal on the floor (group 2, round 4): for another reason, entries giving way would not help.
+      if (r.why === "floor") budgetOf(d, mem).extendWait(lookWaitKey(f), Math.min(f.lookRoomAt + 500, f.placedAt + FRESH_STOP_CONFIRM_MS));
       // Stored once per wait (the first refusal in a row), not at every sync (group 2, round 2).
       if (f.lookWaits === 1) d.log?.("fresh_stop_lookup_skipped", { symbol: f.symbol, stopClientOrderId: f.stopClientOrderId, why: r.why, roomInMs: r.at - nowMs, status: f.status });
     } else {
@@ -1270,6 +1271,7 @@ async function timedOutWait(d: RiskDeps, mem: SyncMemory, s: OrderRecord, listed
 // stuck record (already "alerted") gives the one line when it resolves (sold, or gone).
 async function freshStopTimeout(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, o: Order, f: FreshStop, nowMs: number): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }> {
   mem.freshStops.delete(s.clientOrderId);
+  endLookWait(d, mem, f); // group 1, round 4 of the redesign: entries stop giving way for its lookup at the limit
   mem.timedOutStops.set(f.stopClientOrderId, s.clientOrderId);
   mem.timedOutDirty = true; // written to the database by this sync (item 2 of 2026-11-13)
   let cancelId: string | null = f.orderId;
