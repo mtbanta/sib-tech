@@ -2490,6 +2490,28 @@ test("redesign part 1 (round 4): a list-lag recheck refused on its floor keeps e
   assert.ok(next !== null && next - start > 2_500, `its next try is more than 2.5 s away (${next - start} ms)`);
   r.setNow(new Date(start + 2_200).toISOString());
   assert.equal(mem.budget.givingWay(), true, "entries still give way after 2 s, through to the next try");
-  assert.ok(Math.min(next + 500, lr.until) >= start + 2_200);
+  // Group 1 and group 2, round 5: the budget's own record of the wait ends by the next try plus 0.5 s and never past the window.
+  const waitEnds: number = mem.budget.floorWaits.get("list lag recheck");
+  assert.ok(waitEnds <= next + 500 && waitEnds <= lr.until, `the wait ends by the next try and within the window (${waitEnds - start} ms; next ${next - start}, window ${lr.until - start})`);
+  r.worker.stop?.();
+});
+
+test("redesign part 1 (round 5): a list-lag recheck's give-way stops the moment a sync sees the list caught up, and never runs past its window", async () => {
+  const { r, sim, wk, mem, t0, run, settle } = await workerLag();
+  await run({});
+  const lr = mem.lagRecheck;
+  assert.ok(lr && wk.lagTimerAt !== null);
+  mem.budget.remaining = () => 0; // room for the recheck only after its window
+  r.setNow(new Date(wk.lagTimerAt).toISOString());
+  await settle();
+  assert.equal(mem.budget.givingWay(), true, "refused on its floor: entries give way");
+  assert.ok(mem.budget.floorWaits.get("list lag recheck") <= lr.until, "the wait is capped at the window");
+  // The list catches up (its lag was 15 s): the next regular sync sees it and the give-way ends at once.
+  r.setNow(new Date(t0 + 16_000).toISOString());
+  mem.budget.remaining = () => 200;
+  await run({});
+  assert.equal(mem.lagRecheck, undefined, "the recheck is cleared");
+  assert.equal(mem.budget.givingWay(), false, "entries are back as soon as the list caught up");
+  void sim;
   r.worker.stop?.();
 });
