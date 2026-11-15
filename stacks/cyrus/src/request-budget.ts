@@ -32,6 +32,11 @@ export const P2_FLOOR = SAFETY_RESERVE;
 // caller extends the wait to its next try (`extendWait`: the list-lag recheck, bounded by its 30 s window; the unclear fresh-stop lookup is P1
 // since Michael's ruling 2 of 2026-11-14, night).
 export const GIVE_WAY_MAX_MS = 2_000;
+// Michael's answer of 2026-11-14 (night, after group 1's rulings round 2): while an ordinary stuck retry waits for room under its ceiling of
+// 45, and P2's use is what keeps it out, P2 (list-lag rechecks, a confirmed fresh stop's periodic lookup) may draw only while it leaves room
+// for that retry (its share is in effect 45 less the retry's size, 35, instead of 40), until the retry looks again (when room may return)
+// and at least this long; each refused look of the retry renews it.
+export const RETRY_WAIT_HOLD_MS = 2_500;
 const REFILL_PER_MS = ALPACA_REQUESTS_PER_MINUTE / 60_000;
 
 export type Refusal = { ok: false; at: number; why: "minute" | "five" | "class" | "floor" };
@@ -123,6 +128,11 @@ export class RequestBudget {
   // Every budgeted request sent in the last 60 seconds, oldest first (its time and class).
   // `capped`: sent by a try that reserved against the 5 seconds too (every budgeted try but a close-out retry).
   private sent: Array<{ t: number; cls: BudgetClass; capped: boolean }> = [];
+  // Michael's answer after group 1's rulings round 2: until when a capped retry is waiting that P2 holding back would let in, and the
+  // ceiling P2 must then leave the minute at (the retry's ceiling less its size).
+  private retryWaitUntil = 0;
+  private retryWaitRoom = Infinity;
+  private retryWaitFive = Infinity;
   private readonly open = new Set<Reservation>();
   private readonly floorWaits = new Map<string, number>();
   private minute = emptyMinute();
@@ -193,17 +203,27 @@ export class RequestBudget {
 
   private refusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead = 0, minuteCap?: number): Refusal | null {
     const u = this.usage(now);
-    const cap = Math.min(cls === "P1" ? BUDGET_PER_MINUTE : BUDGET_PER_MINUTE - P1_KEEP, minuteCap ?? Infinity);
+    // P2 leaves room, in the minute and in the 5 seconds, for a waiting capped retry (Michael's answer after group 1's rulings round 2).
+    const holding = now < this.retryWaitUntil;
+    const p2Cap = holding ? Math.min(BUDGET_PER_MINUTE - P1_KEEP, this.retryWaitRoom) : BUDGET_PER_MINUTE - P1_KEEP;
+    const cap = Math.min(cls === "P1" ? BUDGET_PER_MINUTE : p2Cap, minuteCap ?? Infinity);
+    const fiveCap = cls === "P2" && holding ? Math.min(BUDGET_PER_5S, this.retryWaitFive) : BUDGET_PER_5S;
     const at: number[] = [];
     let why: Refusal["why"] | null = null;
-    if (u.minute + u.unsentMinute + n > cap) {
+    const minuteShort = u.minute + u.unsentMinute + n > cap;
+    const fiveShort = fiveSec && u.five + u.unsentFive + n > fiveCap;
+    if (minuteShort) {
       why = u.minute + u.unsentMinute + n <= BUDGET_PER_MINUTE ? "class" : "minute";
       at.push(this.agedOutAt(u.minute + u.unsentMinute + n - cap, 60_000, now, u.unsentMinute));
     }
-    if (fiveSec && u.five + u.unsentFive + n > BUDGET_PER_5S) {
+    if (fiveShort) {
       why ??= "five";
-      at.push(this.agedOutAt(u.five + u.unsentFive + n - BUDGET_PER_5S, 5_000, now, u.unsentFive));
+      at.push(this.agedOutAt(u.five + u.unsentFive + n - fiveCap, 5_000, now, u.unsentFive));
     }
+    // A capped retry (an ordinary stuck retry, under its ceiling of 45) kept out by the minute or the 5 seconds: if the urgent work alone (P1,
+    // sent and reserved) leaves it room in both, P2's use is what keeps it out, so P2 holds back for it until it looks again. If P1 alone already
+    // fills either, holding P2 back would not help, and P2 keeps its share.
+    const holdForRetry = cls === "P1" && minuteCap !== undefined && (minuteShort || fiveShort) && (!minuteShort || (cap === minuteCap && this.p1Use(now, 60_000) + n <= minuteCap)) && (!fiveShort || this.p1Use(now, 5_000, true) + n <= BUDGET_PER_5S);
     const floor = cls === "P1" ? P1_FLOOR : P2_FLOOR;
     const left = this.remaining() - u.unsentMinute - n - routineAhead;
     if (left < floor) {
@@ -211,8 +231,16 @@ export class RequestBudget {
       at.push(now + Math.ceil((floor - left) / REFILL_PER_MS));
     }
     if (why === null) return null;
-    return { ok: false, at: Math.max(now + 1, ...at), why };
+    const when = Math.max(now + 1, ...at);
+    // The hold lasts until the retry looks again (when room may return, plus a moment), and at least RETRY_WAIT_HOLD_MS; each look renews it.
+    if (holdForRetry && minuteCap !== undefined) {
+      this.retryWaitUntil = Math.max(this.retryWaitUntil, now + RETRY_WAIT_HOLD_MS, when + 500);
+      this.retryWaitRoom = minuteCap - n;
+      this.retryWaitFive = BUDGET_PER_5S - n;
+    }
+    return { ok: false, at: when, why };
   }
+
 
   // When `excess` budgeted requests will have left the window (oldest first). Room reserved by a try still running is released only when
   // that try ends, which cannot be known: then a quarter of a second from now, the earliest a look is worth it.
@@ -220,6 +248,15 @@ export class RequestBudget {
     const inWindow = this.sent.filter((s) => now - s.t < windowMs);
     if (excess > inWindow.length) return now + Math.max(250, unsent > 0 ? 250 : windowMs);
     return Math.max(now + (unsent > 0 ? 250 : 1), inWindow[excess - 1]!.t + windowMs);
+  }
+
+  // Budgeted P1 requests in the last minute (or 5 seconds), sent and reserved but not yet sent (for the 5 seconds, reservations it caps), as
+  // `usage` counts them.
+  private p1Use(now: number, windowMs: number, fiveSecOnly = false): number {
+    let n = 0;
+    for (const x of this.sent) if (x.cls === "P1" && now - x.t < windowMs) n++; // as `usage` counts the window
+    for (const r of this.open) if (r.cls === "P1" && (!fiveSecOnly || r.fiveSec)) n += r.unsent();
+    return n;
   }
 
   // A first try's counter: never refused, not part of the budgeted minute; `used` says what the try sent (the mid-day close-out's next
