@@ -465,3 +465,36 @@ test("rulings round 3: while the hold is in force, P2 is granted at 34 of the mi
   assert.ok(bf.roomFor("P2", 1).ok, "5 in the 5 seconds: granted");
   assert.ok(!bf.roomFor("P2", 2).ok, "6: refused");
 });
+
+// Group 1, rulings round 3: the 5-second side of the hold, with P2 drawn under the 5 seconds (the reviewer's suggested tests). Case A: the
+// retry's own last try fills the 5 seconds, so holding P2 back would not help: no hold, P2 keeps its 15. Case B: a P2 burst keeps the retry
+// out on the 5 seconds with the minute low: P2 held to 5 there until the retry looks again, and the retry gets in.
+const sendAs = (b: any, cls: "P1" | "P2", n: number, opts: any = {}) => {
+  const r = b.tryReserve(cls, n, { label: "x", ...opts });
+  assert.ok(r instanceof Reservation, `${cls} ${n} granted`);
+  for (let i = 0; i < n; i++) r.charge("/v2/x");
+  r.end();
+};
+test("group 1, rulings round 3 (case A): the stuck retry's own last try fills the 5 seconds: no hold, P2 keeps its 15 in the 5 seconds", () => {
+  let t = 0;
+  const b: any = new RequestBudget({ now: () => t });
+  sendAs(b, "P1", 10, { minuteCap: STUCK_RETRY_MINUTE_CAP });
+  t = 1_000;
+  const r = b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP });
+  assert.ok(!(r instanceof Reservation) && r.why === "five", "kept out by its own use of the 5 seconds");
+  assert.ok(b.retryWaitUntil <= t, "no hold: P2 holding back would not help");
+  assert.ok(b.roomFor("P2", 5).ok, "P2 may still draw up to 15 in the 5 seconds (10 + 5)");
+});
+test("group 1, rulings round 3 (case B): a P2 burst keeps the retry out on the 5 seconds: P2 held to 5 there until the retry looks again, and the retry gets in", () => {
+  let t = 0;
+  const b: any = new RequestBudget({ now: () => t });
+  sendAs(b, "P2", 8);
+  t = 1_000;
+  const r = b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP });
+  assert.ok(!(r instanceof Reservation) && r.why === "five", "kept out by P2's use of the 5 seconds");
+  assert.ok(b.retryWaitUntil >= r.at, "held until the retry's next look");
+  t = 5_000;
+  const p2 = b.roomFor("P2", 6);
+  assert.ok(!p2.ok && p2.why === "five", "P2 may not take 6 of the 5 seconds back while the retry waits");
+  assert.ok(b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP }) instanceof Reservation, "the retry gets in");
+});
