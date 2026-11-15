@@ -2025,3 +2025,50 @@ test("redesign part 1 (group 1, round 1, B3): while an unclear fresh stop's look
   t += 2_000;
   assert.equal(b.givingWay(), false, "lapses 2 s after its last refusal");
 });
+
+// Group 1, round 1 of the redesign (B3), with the builder's check after it (the advisor's point): a realistic bucket, not a pinned figure.
+// Entries take every request above 80 until they give way; the syncs that come for the lookup's next try read the order list and the
+// positions from the same bucket. Before the backoff and the room for those reads, 21 lookups were skipped in 22 syncs about 0.7 s apart and
+// the 15 second limit fired.
+test("redesign part 1 (B3, a real bucket): with entries holding Alpaca's bucket at 80 until they give way, an unclear fresh stop's lookup still gets room before the 15 second limit, after a few syncs spaced by its backoff", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "WULF", 6, 9.5, 1);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 2, 9.58);
+  w.memory.budget = new RequestBudget({ now: () => w.sim.simMs, remaining: () => w.sim.tokens });
+  const realSubmit = w.sim.submitSell.bind(w.sim);
+  w.sim.submitSell = async (x: any) => {
+    if (x.stopPrice !== undefined) {
+      await realSubmit(x);
+      throw new AlpacaError("outcome unclear (test)", 502);
+    }
+    return realSubmit(x);
+  };
+  const realPaged = w.sim.listOrdersPaged.bind(w.sim);
+  w.sim.listOrdersPaged = async (...a: any[]) => {
+    const r: any = await (realPaged as any)(...a);
+    return { ...r, orders: r.orders.filter((o: any) => !o.clientOrderId.startsWith("cyrus-p-")) };
+  };
+  w.sim.advance(300);
+  const sentAt = w.sim.simMs;
+  let r: any = await syncOrders(w.risk, dd, { protect: true });
+  w.sim.tokens = 80;
+  const syncsAt: number[] = [];
+  while (w.sim.simMs < sentAt + 20_000 && w.memory.freshStops.get(id)?.status === "unclear") {
+    const next = Math.max(w.sim.simMs + 100, Math.min(r.recheckAt ?? Infinity, w.sim.simMs + 10_000));
+    while (w.sim.simMs < next) {
+      w.sim.advance(100);
+      if (!w.memory.budget.givingWay()) w.sim.tokens = Math.min(w.sim.tokens, 80); // entries take everything above 80
+    }
+    syncsAt.push(w.sim.simMs - sentAt);
+    r = await syncOrders(w.risk, dd, { protect: true });
+  }
+  const gaps = syncsAt.slice(1).map((t, i) => t - syncsAt[i]!);
+  console.log(`MEASURE B3 real bucket: syncs at ${syncsAt.join(", ")} ms; confirmed ${w.memory.freshStops.get(id)?.status}`);
+  assert.ok(w.memory.freshStops.get(id)?.status !== "unclear", "confirmed");
+  assert.equal(w.events.filter((e) => e.event === "fresh_stop_timeout").length, 0, "the limit never fired");
+  assert.ok(syncsAt.length <= 6, `few syncs: ${syncsAt.join(", ")}`);
+  assert.ok(gaps.every((g) => g >= 400), `spaced by the backoff: ${gaps.join(", ")}`);
+  assert.equal(w.sim.sellLog.length, 0);
+});
