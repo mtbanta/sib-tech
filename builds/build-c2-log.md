@@ -6409,6 +6409,33 @@ Built on branch `midday-2026-11-16-item2` (`5fd09ba`, on top of `b99fa6a`; not f
 
 **Deploy:** the reviewed commit itself, `20ba5bd` (Michael asked in `commands` at 11:45 AM for his yes), through `tools/midday-deploy.mjs`, mid-day pause route, from a clean clone at `20ba5bd`. Check-only at 11:47: flat, no open orders, pause on, mid-day flat, stop flag off; refused only for his yes.
 
+## Michael's ruling on item 2 and the afternoon plan (2026-11-16, about 11:50 AM), saved verbatim
+
+> Before I give my yes: add item 2 now, with my ruling: missing-exit sales for different stocks run side by side, as many at once as the request budget allows at that moment, above the floor for urgent work. One at a time per stock. A close-out request stops new ones from starting. Test with 30 stuck sales held at Alpaca: no rate-limit answers, remaining never below the urgent floor of 20.
+> Group 1 and group 2 review, as many rounds as fit. Deadline 1:10 PM Central: if it has passed both groups, post the new commit for my yes. If not, post 20ba5bd again and I will give my yes for that instead.
+>
+> Then, after the deploy, write this afternoon's speed-release proposal (no code until I approve), from this morning's per-source counts:
+> 1. A 1-second worker pass, so checks start on time. Request math for the order check at 5, 7 and 10 seconds; recommend one.
+> 2. The reserve: simulate a full flatten of 30 positions with slow cancels at reserves of 40, 50 and 60, and recommend the lowest that never gets a rate-limit answer.
+> 3. Cheaper entries (fewer expiry cancels), fewer routine reads, and the stuck-retry items already drafted.
+> For each: the expected gain in accepted orders a minute and in protection time, the request math, and the risk. After approval, build and review on its own branch this afternoon (up to 8 rounds per group). Nothing deploys during market hours without my written yes. After the close, add the end-of-day findings and deploy before 7:30 AM Tuesday only if both groups pass.
+> Never print any token or key.
+
+Built on branch `midday-2026-11-16-b`, from `94d72f2` (stack code identical to the reviewed `20ba5bd`), with item 2 from `5fd09ba` reworked to the ruling.
+
+### Item 2 under Michael's ruling (built 2026-11-16, about 12:25 PM; branch `midday-2026-11-16-b`, `0f38508`)
+
+On top of `94d72f2` (stack code identical to the reviewed `20ba5bd`, items 1, 3, 4): `bee2969` is item 2 as first built (cherry-picked from `5fd09ba`; its "NOT FOR DEPLOY" message predates the ruling), and `0f38508` brings it to the ruling.
+- **`src/sells.ts`:** a side-by-side missing-exit sale (the fast sale's too; `sideBySide`, one symbol, own entry only) starts when no other side-by-side sale is running (never worse than the one-at-a-time queue), or while `sideBySideRoom(running)` says the request budget has room. Otherwise it waits, 0.25 s doubling to 2 s, sending nothing (logged once, `side_by_side_waited`, Fly only), until room comes, every running side-by-side sale has ended (each bounded by its rounds and waits), or a sale of the whole account (a close-out, `flatten`, the loss stop, a carried position) is asked for; `run` then stands aside before sending anything ("A close-out request stops new ones from starting"). Sales already running carry on. One at a time per symbol; every other kind of sale runs alone.
+- **`src/worker.ts`:** `sideBySideRoom(running)`: the governor's estimate of Alpaca's remaining, less the request budget's reserved but unsent room, less 18 (`SIDE_BY_SIDE_SALE_REQUESTS`, the most one missing-exit sale is counted as still able to send; measured about 14.5 per fast sale today, 17 or 18 in tests when Alpaca kept the exits) for each running sale and the new one, stays at or above the urgent floor of 20 (`P1_FLOOR`).
+- **Tests:** the queue order with room, with room for two, with none (one at a time); a close-out request makes a waiting sale stand aside having sent nothing while the running one carries on; the worker's room rule with fixed figures (74 remaining: room for 3, not 4; the budget's unsent room counts); two lost exits sold side by side end to end with no oversell; **Michael's test, 30 stuck sales held 8 s at Alpaca for 12 minutes: no rate-limit answer, remaining never below 20** (before item 2 this test held 80; its criterion follows the ruling); design 4.3's seven stand-aside tests now hold the queued sales as waiting (no room), so they test "stops new ones from starting" with their assertions unchanged. Full suite 870 of 870; type check clean.
+
+### Item 2 (ruling), group 1 round 1 (0f38508): CHANGES REQUIRED; 20ba5bd posted again (12:41 PM)
+
+**Group 1: CHANGES REQUIRED** (nothing under checks 2, 7, 10; within the ruling). The same-symbol order, the waiting sale standing aside at a close-out request, the sell gate as the only path, and `sideBySideRoom` all hold. **Blocking:** a sale of the whole account (a close-out, `flatten`, the loss stop) waits for every side-by-side sale already running; those sales send their sells one at a time through the sell gate and check only for the loss stop between rounds (`yieldNow`), so with up to 10 running, each up to 3 rounds, they keep it waiting. Its probe (Michael's 30-sales shape, sells held 8 s, a `flatten` asked partway): started 115 s after the ask on `0f38508` against 27 s on `20ba5bd` (asked 20 s in: not started after 100 s, against 13 s). At 2:55 that would leave about 3 of the last 5 minutes to get flat. Fix (beyond the ruling, so for Michael under the rule of 2026-11-03): (a) running side-by-side sales stop at their next step once a whole-account sale is asked (as `yieldToPriority` does for the loss stop), or (b) fewer at once. Notes: the 30-stuck test never fed Alpaca's remaining to the governor (`budget()` stayed 200, so the room rule was "at most 10"); with it fed, 4 minutes ran with no rate-limit answers, lowest 73 (93 on `20ba5bd`); the queue tests can spin if a test ends with a sale left running; its own probe of 30 lost exits whose sells succeed at once gave rate-limit answers on both commits (possibly its harness; to look at).
+
+Group 2's round 1 on `0f38508` was stopped (item 2 not shipping today). Under Michael's ruling ("If not, post 20ba5bd again"), `20ba5bd` was posted again in `commands` at 12:41 PM for his yes, with the finding and the two options.
+
 ## Deploy (2026-11-16, 12:46 PM Central, market hours, flat and paused): Fly release v24, the mid-day release (items 1, 3, 4)
 
 - **Michael's written yes:** Discord `commands`, 12:45:39 PM CT: "Yes, deploy 20ba5bd now." (after `20ba5bd` was posted again at 12:41 because item 2 did not pass group 1 in time).
