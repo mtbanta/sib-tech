@@ -6255,3 +6255,10 @@ Paper trading only; research input for a human decision, never an instruction to
 > Never print any token or key.
 
 This supersedes "not before v22 has traded Monday morning" and the Monday mid-day target for the redesign deploy. Group 1 rounds for the counter are numbered "hold counter, group 1 round n", up to 3.
+
+### Hold counter, group 1 round 1 (15dd5f7): group 1 PASS
+
+**Group 1, hold counter round 1: PASS** (no blocking findings; checks 2, 7, 8, 10 clean; the retry rule untouched: no loop added or changed). Logging only under the rule of 2026-11-03: the new flag is set from values `refusal` has already worked out and read at once by `tryReserve`; `countHold` writes only statistics; nothing that decides reads them; `tryReserve` and `roomFor` make exactly as many clock and remaining reads as before; the one added clock read is in `takeMinute`, once a minute. Its own probe against `fa357df` (log lines, the raw sent list, `floorWaits`, `overdraftAt`, call counts, P2 tries with their own ceiling, `limitRetries`, the clock bucket; an independent oracle for each number): 5 seeds, 1,500 runs of 600 steps each, 0 decision differences, 0 call-count differences, every `retryHold` number exact. Cost of a refused look with the hold in force: 76 to 80 ns before, 77 to 81 ns after (noise). Its 11 broken copies all caught. Full suite 853 of 853, type check clean.
+- Notes: `p2Refused` is within "logging only" but goes beyond Michael's words and was not named to him before it was built: to be told plainly; the `inForceMs` comment and the log say "up to its end (not up to the read)", but a hold still in force at a minute's read is counted to the read and the rest goes into the next minute (as tested; documentation only, the source comment left as reviewed so the deployed code is the reviewed code); no production P2 try passes `fiveSec: false`.
+
+**Standing:** the counter has passed group 1 (hold counter group 1 round 1) and group 2 (hold counter round 2). Under Michael's decision of tonight, the redesign deploys tonight with the counter, from `stacks/cyrus` identical to `15dd5f7`.
