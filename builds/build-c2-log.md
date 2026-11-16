@@ -6408,3 +6408,11 @@ Built on branch `midday-2026-11-16-item2` (`5fd09ba`, on top of `b99fa6a`; not f
 **Group 2, round 2: PASS** (no blocking findings; checks 2, 7, 8, 10 clean). Both round 1 findings fixed (the three stored names tested; both briefs list every fast-sale ending, the reconnect sync, "not yet confirmed"). Notes: an older brief sentence ("a fast sale that stood aside has ... no stored end") qualified after the pass (documents only); M1e survives (logging only).
 
 **Deploy:** the reviewed commit itself, `20ba5bd` (Michael asked in `commands` at 11:45 AM for his yes), through `tools/midday-deploy.mjs`, mid-day pause route, from a clean clone at `20ba5bd`. Check-only at 11:47: flat, no open orders, pause on, mid-day flat, stop flag off; refused only for his yes.
+
+## Deploy (2026-11-16, 12:46 PM Central, market hours, flat and paused): Fly release v24, the mid-day release (items 1, 3, 4)
+
+- **Michael's written yes:** Discord `commands`, 12:45:39 PM CT: "Yes, deploy 20ba5bd now." (after `20ba5bd` was posted again at 12:41 because item 2 did not pass group 1 in time).
+- **Route:** `tools/midday-deploy.mjs`, mid-day pause route, from a clean clone at exactly `20ba5bd` (group 1 PASS and group 2 PASS, round 2): flat, no open orders, pause on, mid-day flat, before 1:30 PM, Michael's yes recorded. Image `deployment-01M7JTWRW7Z8Z48MATZT522T3T`; machine on release **v24**.
+- **After it:** one start (12:46:50; `start_history` 18:46:50.284 UTC); the start note and "Release ZT522T3T started while flat and paused. `hold` is set, so I stay paused."; the pause still on (`deployedAt` recorded), `hold` on; Alpaca 0 positions, 0 open orders, 0 orders since; Healthchecks up (pinged 12:46:52); the order stream connected once (connecting, authenticating, live in 0.3 s; no reconnect sync, as designed for a first connection); stop flag off. Michael's yes line drew the bot's usual "I did not understand the line" reply (not a command; nothing done).
+- **Merged:** `midday-2026-11-16` fast-forwarded to `main` (stack code identical to `20ba5bd`). Item 2 stays on `midday-2026-11-16-b` for Michael's ruling on running sales giving way.
+- Next: Michael sends `load afternoon` (accepted until 1:30 PM). Paper trading only; research input for a human decision, never an instruction to act.
