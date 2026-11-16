@@ -221,3 +221,68 @@ test("hold counter: a P2 try refused on a minute ceiling of its own under the ho
   assert.ok(!(own instanceof Reservation) && own.why === "class");
   assert.equal(b.takeMinute().retryHold.p2Refused, 0, "its own ceiling refused it, not the hold");
 });
+
+// Group 2, hold counter round 1 (finding 1): the held-only test at its edges and with reserved but unsent room. The P2 call has the
+// production shape (the worker's list-lag recheck: no minute ceiling of its own, the 5 seconds counted, a wait key). Adopted from the
+// reviewer's probes.
+const p2Try = (b: any, n: number) => b.tryReserve("P2", n, { label: "list lag recheck", waitKey: "list lag recheck" });
+function edge(sentOld: number, sentRecent: number, remaining = 200) {
+  let t = 100_000;
+  const b: any = new RequestBudget({ now: () => t, remaining: () => remaining });
+  if (sentOld) {
+    const r = b.tryReserve("P1", sentOld, { label: "old", fiveSec: false, force: true }) as Reservation;
+    for (let i = 0; i < sentOld; i++) r.charge("/v2/test");
+    r.end();
+  }
+  t = 140_000; // the old requests are outside the 5 seconds, inside the minute
+  for (let i = 0; i < sentRecent; i++) {
+    const r = b.tryReserve("P1", 1, { label: "recent", force: true }) as Reservation;
+    r.charge("/v2/test");
+    r.end();
+    t += 100;
+  }
+  b.retryWaitUntil = t + 10_000;
+  b.retryWaitRoom = 35;
+  b.retryWaitFive = 5;
+  b.takeMinute();
+  return b;
+}
+
+test("hold counter edges: 39 in the minute then a P2 try of 1 (exactly 40, P2's share) under the hold is held only", () => {
+  const b = edge(39, 0);
+  const r = p2Try(b, 1);
+  assert.ok(!(r instanceof Reservation) && r.why === "class");
+  assert.equal(b.takeMinute().retryHold.p2Refused, 1);
+});
+
+test("hold counter edges: 14 in the 5 seconds then a P2 try of 1 (exactly 15) under the hold is held only", () => {
+  const b = edge(0, 14);
+  const r = p2Try(b, 1);
+  assert.ok(!(r instanceof Reservation) && r.why === "five");
+  assert.equal(b.takeMinute().retryHold.p2Refused, 1);
+});
+
+test("hold counter edges: Alpaca's remaining leaving exactly 80 after a P2 try of 1 under the hold is held only", () => {
+  const b = edge(0, 6, 81);
+  const r = p2Try(b, 1);
+  assert.ok(!(r instanceof Reservation), "held to 5 in the 5 seconds (6 already)");
+  assert.equal(b.takeMinute().retryHold.p2Refused, 1);
+});
+
+test("hold counter edges: an open, unsent P1 reservation filling the minute past 40 means refused anyway, not held", () => {
+  const b = edge(30, 0);
+  const open = b.tryReserve("P1", 10, { label: "stuck retry in the sale queue", fiveSec: false, force: true }) as Reservation;
+  const r = p2Try(b, 1); // 30 sent + 10 reserved + 1 = 41
+  assert.ok(!(r instanceof Reservation) && r.why === "class");
+  assert.equal(b.takeMinute().retryHold.p2Refused, 0);
+  open.end();
+});
+
+test("hold counter edges: an open, unsent P1 reservation filling the 5 seconds past 15 means refused anyway, not held", () => {
+  const b = edge(0, 4);
+  const open = b.tryReserve("P1", 11, { label: "stuck retry in the sale queue", force: true }) as Reservation;
+  const r = p2Try(b, 1); // 4 sent + 11 reserved + 1 = 16
+  assert.ok(!(r instanceof Reservation) && r.why === "five");
+  assert.equal(b.takeMinute().retryHold.p2Refused, 0);
+  open.end();
+});
