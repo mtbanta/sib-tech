@@ -92,8 +92,9 @@ export interface WorkerDeps {
   budget?: RequestBudget;
 }
 
-// The speed release, item 3: the order sync runs every 10 seconds on every day (it was 30 on a normal day, 10 on a load day). With the
-// live order updates connected it is the backstop and reads only the last 10 minutes of orders (risk.ts).
+// The speed release, item 3: the order sync runs on every day at the same pace (it was 30 s on a normal day, 10 s on a load day); since
+// Michael's ruling 1 of 2026-11-16, every 6 s, and every 2 s while the live updates are down (SYNC_EVERY_MS below). With the live order
+// updates connected it is the backstop and reads only the last 10 minutes of orders (risk.ts).
 // Decision 2 of 2026-11-06: the day phase set when shares carried from an earlier day were sold (the summary's "carried" note).
 export const CARRIED_PHASE = "carried";
 // Decision 2 of 2026-11-06: the summary's reads (on a day of 10,000 fills or more, a few hundred: the fills' pages and the lookups) wait
@@ -320,7 +321,8 @@ export class Worker {
   // Decision 1 of 2026-11-06: entries whose two exits the live updates reported lost, with the symbol, when, and the syncs tried.
   private readonly lostExitsPending = new Map<string, { symbol: string; at: number; tries: number }>();
   // Michael's item 1 of 2026-11-13 (afternoon): a remainder whose stop cancel the live update reported complete gets up to 3 more syncs,
-  // 0.5, 1 and 2 seconds apart, until it has its fresh stop (or is sold or closed); the 10 second sync is the backstop after that.
+  // 0.5, 1 and 2 seconds apart, until it has its fresh stop (or is sold or closed); the regular sync (every 6 s, 2 s while the live updates
+  // are down) is the backstop after that.
   private readonly stopCancelPending = new Map<string, { symbol: string; at: number; tries: number }>();
   // The mid-day cycle (Michael, 2026-11-09): what started this process (main.ts, from the start note), whether the start-up decision
   // about the pause has been made, the mid-day close-out's last attempt, and the day its not-flat alert went out.
@@ -1454,7 +1456,7 @@ export class Worker {
 
   // Decision 1 of 2026-11-06: after a sync, an entry reported with both exits lost that the sync neither sold nor found closed (Alpaca's
   // order list may not show the cancel yet) gets another sync shortly: at most 3 more, 0.5, 1 and 2 seconds later. After that the
-  // 10 second sync is the backstop, as before.
+  // regular sync (every 6 s, 2 s while the live updates are down) is the backstop, as before.
   private async lostExitsFollowUp(date: string, sold: string[]): Promise<void> {
     if (this.lostExitsPending.size === 0) return;
     const rows = await this.d.store.listOrders(date).catch(() => null);
@@ -1553,8 +1555,10 @@ export class Worker {
       ...(raw ? { rawUpdate: raw } : {}),
       // The redesign of 2026-11-14, part 1: the shared request budget this minute: requests sent by tag (entries, first tries, P1, P2,
       // routine, and the clock's separate bucket), tries granted and refused (and why), forced (the 2:55 retry from 2:58), overdrafts, the
-      // most budgeted requests in any minute and any 5 seconds (at most 60 and 15 unless forced or overdrawn), and entries refused while a
-      // P2 try waited on its floor.
+      // most budgeted requests in any minute and any 5 seconds, and entries refused while a P2 try waited on its floor. Since the speed
+      // release (item 2) the minute grows with Alpaca's spare: judge `mostBudgetedInMinute` against `minuteInForce.highest` (or its
+      // `ceilingHighest` after the minute fell) and `mostCappedIn5s` against a quarter of `minuteInForce.highest`, not a flat 60 and 15,
+      // unless forced or overdrawn; urgent work's own `mostUrgentInMinute` and `mostUrgentIn5s` against its 60 and 15 (group 2, round 1).
       requestBudget: this.budget.takeMinute(),
       // The redesign of 2026-11-14, part 2: the protection loop this minute (looks run, list-lag looks, failed, put off while a sync ran,
       // waited for room, actions started, wakes asked for; wakes pending and actions running now).
@@ -1843,7 +1847,7 @@ export class Worker {
         void this.fastLostExit(info.clientOrderId, info.symbol, info.atMs);
       },
       // Decision 1 of 2026-11-06: both exits of a filled entry ended with nothing filled. The order sync runs at once (not at the
-      // next 10 second sync); its missing-exit check sells the shares, with its guards (no sale while a close-out or any other sale
+      // next regular sync); its missing-exit check sells the shares, with its guards (no sale while a close-out or any other sale
       // runs, only the newest entry of the symbol, none if a sell is already working on it). Not while a sale or the close-out
       // runs: the exits were most likely cancelled by that sale itself, and the check is off then anyway.
       onExitsLost: (info) => {

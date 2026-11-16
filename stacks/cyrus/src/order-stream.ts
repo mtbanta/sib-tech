@@ -6,10 +6,10 @@
 //     wait), which frees the symbol the same way;
 //   - keeps the gate's cached positions current from each fill's share count (`position_qty`), between the 10 second reads;
 //   - reports a protective stop that Alpaca cancelled while the take-profit had partly filled (shares left without a stop), so the
-//     worker runs the order sync 3 seconds after the cancel instead of at the next 10 second sync.
+//     worker runs the order sync 3 seconds after the cancel instead of at the next regular sync.
 //
 // It is a listener only. It never sends an order and never calls Alpaca's REST interface, so it costs none of the 200 requests a
-// minute. The order sync stays the record of truth: it runs every 10 seconds, still frees what this misses (while the stream is
+// minute. The order sync stays the record of truth: it runs every 6 seconds (every 2 while the stream is down), still frees what this misses (while the stream is
 // down, everything), and still runs the missing-exit and bare-remainder checks.
 //
 // PAPER ONLY: the address is built from the fixed paper host and checked; nothing can point it anywhere else.
