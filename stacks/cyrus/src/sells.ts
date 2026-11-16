@@ -337,6 +337,14 @@ export interface LiquidatorDeps {
 // nothing is waited for, else every look the wait can make up to `waitCancelMs`, plus one for each early wake), the positions again (1), the
 // sell gate's read of the open orders and the positions, and the sell (1); the last round also its last look at the positions (1). The
 // Alpaca client's own retries of a failed request are not in it.
+// Michael's answer of 2026-11-16 on the round 4 blocker: "Every side-by-side sale after the first needs 120 left, not 20". The room check
+// for a side-by-side sale (at its start and before each of its rounds, whenever another side-by-side sale is running) asks that Alpaca's
+// remaining, less the room budgeted tries hold unsent and the most the rounds in flight and the new one can send, stays at or above this.
+// Group 1 (round 4) measured lost-exit sales running side by side just before a sale of the whole account leaving Alpaca's remaining at 41 to
+// 52 when that sale started (59 to 72 rate-limit answers on its sells and cancels, against 0 to 20 on v24). The sale running alone always goes
+// ahead, as before.
+export const SIDE_BY_SIDE_HEADROOM = 120;
+
 export function sideBySideRoundMost(o: Pick<LiquidateOptions, "cancelIds" | "waitCancelMs" | "waitForAlpacaCancel">, openPages = 1): number {
   const pages = Number.isFinite(openPages) && openPages > 1 ? Math.ceil(openPages) : 1;
   const look = pages + 1; // the open orders, then the positions
@@ -443,7 +451,8 @@ export class Liquidator {
   }
 
   // Michael's ruling on item 2 of 2026-11-16: a side-by-side sale starts when no other is running (never worse than the one-at-a-time queue)
-  // or while the request budget allows one more above the urgent floor (`sideBySideRoom`). Otherwise it waits, 0.25 s doubling to 2 s, with
+  // or while the request budget allows one more above the headroom of SIDE_BY_SIDE_HEADROOM (`sideBySideRoom`, Michael's answer on the round
+  // 4 blocker). Otherwise it waits, 0.25 s doubling to 2 s, with
   // no request: the wait ends when room comes, when every running side-by-side sale has ended (each is bounded by its rounds and waits), or
   // at once when a sale of the whole account (a close-out, `flatten`, the loss stop, a carried position) is asked for, in which case
   // `run` stands aside before sending anything: a close-out request stops new ones from starting. Sales already running carry on.
@@ -606,8 +615,8 @@ export class Liquidator {
       // side-by-side sale asks for room before each of its rounds, not only at its start (its first round was asked for when it started). It
       // waits, sending nothing, 0.25 s doubling to 2 s, until the room check says yes. Whenever it is the only side-by-side sale running it
       // goes ahead, so it is never worse than the one-at-a-time queue. The wait sends nothing and ends when room returns (Alpaca's bucket
-      // refills about 3.3 requests a second, so room for one round above the floor of 20 returns within seconds), when the others have ended,
-      // or when a sale of the whole account is asked (it then gives way, as before).
+      // refills about 3.3 requests a second, so room for one round above the headroom of 120 returns within about half a minute at worst),
+      // when the others have ended, or when a sale of the whole account is asked (it then gives way, as before).
       if (round > 1 && this.sideBySideRounds.has(o)) {
         const most = this.roundMost(o, round);
         let wait = 250;
