@@ -6358,3 +6358,16 @@ Fly's metrics (read with the read-only metrics token, never printed): CPU burst 
 3. **The daily review after the close:** measure the 9:55 sync gap from Fly's logs if still there (likely gone: Fly keeps the last 100 lines), and the afternoon's fresh stops and budget use if trading resumes.
 
 Paper trading only; research input for a human decision, never an instruction to act.
+
+## Michael's mid-day build request (2026-11-16, about 10:45 AM), saved verbatim
+
+> Mid-day build now, one release, deploy while flat and paused by 1:15 PM Central (so load afternoon stays available until 1:30):
+> 1. Run an order check immediately after the live-update connection reconnects.
+> 2. Missing-exit sales for different stocks run side by side (one at a time per stock). If this one cannot pass group 1 by 1:15, ship the rest without it.
+> 3. Record the missing fast-sale outcome.
+> 4. Fix the morning line's count.
+> Tests that fail without each fix, group 1 and group 2, as many rounds as fit before 1:15. When ready, tell me the exact commit in commands; I will write my yes there. After deploy, stay paused (I have sent hold); I will send load afternoon.
+> Tonight, proposal only, using today's per-source counts (entries and their cancels 75 percent, routine reads 22, retries 0): one speed release covering cheaper entries (fewer expiry cancels), fewer routine reads, and the stuck-retry items already drafted. For each: the expected gain in accepted orders a minute and in protection time, the request math, and the risk.
+> Never print any token or key.
+
+Built on branch `midday-2026-11-16` from `main` (v23). Deploy route: the mid-day pause route of `tools/midday-deploy.mjs`, with Michael's written yes for the exact commit in `commands`.
