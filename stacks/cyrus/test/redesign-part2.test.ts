@@ -1049,6 +1049,9 @@ test("part 2 (group 1, round 4, B1; item 2 of 2026-11-16): 30 stuck sales held 8
     lastTok = k;
     lastTokAt = now;
     prev?.(k);
+    // Michael's ruling 6 of 2026-11-16: Alpaca's live remaining count reaches the governor (as main.ts wires it), so the side-by-side room
+    // check works from the real budget (group 1's item 2 round 1 note: before, the governor's estimate stayed at 200).
+    r.governor.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: k, reset: null });
   };
   const r429 = sim.rejected429;
   let nextPass = sim.simMs + 5_000;
@@ -1241,3 +1244,92 @@ test("Michael's ruling 1 of 2026-11-14: in the worker, a stuck sale retries with
   assert.ok(b.peak.minute <= 45 && b.peak.five <= 15, `within the stuck retries' 45 a minute and the 15 in 5 seconds (minute ${b.peak.minute}, 5 s ${b.peak.five})`);
   r.worker.stop?.();
 });
+
+// Michael's ruling 6 of 2026-11-16 (the speed release, item 3d): with 30 positions whose sales Alpaca holds 8 s, a `flatten` asked partway
+// through must start no slower than on 20ba5bd (before side-by-side sales): running side-by-side sales give way at their next step. Alpaca's
+// live remaining count reaches the governor, as main.ts wires it. Returns when the whole-account sale started after it was asked, and more.
+async function flattenPartway(flattenAfterMs: number, minutes: number) {
+  const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
+  const bot = new FakeBot();
+  const holds: Array<{ until: number; res: () => void }> = [];
+  let timed = false;
+  const tsleep = (ms: number): Promise<void> => (timed ? new Promise<void>((res) => holds.push({ until: sim.simMs + ms, res })) : sim.sleep(ms));
+  const r = rig<SimBroker>({ broker: sim, sleep: tsleep, simClock: sim, bot });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("cap 2\napprove", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:25:00");
+  await r.at("14:30:05");
+  const wk: any = r.worker;
+  await r.at("20:40:00");
+  const bad = Array.from({ length: 30 }, (_, i) => "QX" + String.fromCharCode(65 + i));
+  for (const s of bad) await holdOne(sim, r, s);
+  await r.at("20:40:01");
+  const loseAt = new Date(`${D}T20:40:05Z`).getTime();
+  const realSell = sim.submitSell.bind(sim);
+  sim.submitSell = async (x: any) => {
+    if (bad.includes(x.symbol)) {
+      await tsleep(8_000);
+      throw new Error("held at Alpaca (test)");
+    }
+    return realSell(x);
+  };
+  const liq: any = wk.liquidator;
+  let wholeStartAt: number | null = null;
+  const realRun = liq.run.bind(liq);
+  liq.run = (o: any) => {
+    if (!o.ownEntryOnly && wholeStartAt === null) wholeStartAt = sim.simMs;
+    return realRun(o);
+  };
+  timed = true;
+  let lowest = 200;
+  let peak = 0;
+  const prev = (sim as any).onRate;
+  (sim as any).onRate = (k: number) => {
+    if (sim.simMs > loseAt) lowest = Math.min(lowest, k);
+    r.governor.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: k, reset: null });
+    prev?.(k);
+  };
+  const r429 = sim.rejected429;
+  let nextPass = sim.simMs + 5_000;
+  const end = loseAt + minutes * 60_000;
+  const flatAt = loseAt + flattenAfterMs;
+  let flatP: Promise<unknown> | null = null;
+  let lost = false;
+  while (sim.simMs < end) {
+    if (!lost && sim.simMs >= loseAt) {
+      lost = true;
+      for (const s of bad) for (const l of sim.orders.find((o: any) => o.clientOrderId === clientOrderIdFor(D, s, 1))!.legs) await sim.cancelOrder(l.id);
+    }
+    if (!flatP && sim.simMs >= flatAt) flatP = liq.flatten({ reason: "flatten command", tradeDate: D });
+    peak = Math.max(peak, liq.sideBySideNow?.() ?? 0);
+    if (sim.simMs >= nextPass) {
+      void r.at(iso(sim.simMs));
+      nextPass += 5_000;
+    } else r.setNow(iso(sim.simMs + 100));
+    for (const h of holds.filter((h) => h.until <= sim.simMs)) {
+      holds.splice(holds.indexOf(h), 1);
+      h.res();
+    }
+    await settle();
+  }
+  const out = { startAfterMs: wholeStartAt === null ? null : wholeStartAt - flatAt, rateLimited: sim.rejected429 - r429, lowest: Math.round(lowest), peakSideBySide: peak, oversell: sim.oversellAttempts };
+  timed = false;
+  for (const h of holds.splice(0)) h.res();
+  r.worker.stop?.();
+  return out;
+}
+
+// The baselines are 20ba5bd's own figures for these same runs (the one-at-a-time queue), measured by the builder with this function on a
+// clean extract of 20ba5bd on 2026-11-16: asked 20 s in, the flatten started 13.0 s later; asked 60 s in, 27.0 s later (group 1 measured 13 s
+// and 27 s). This branch: 2.0 s in both (side-by-side peak 5 and 7, lowest remaining 73, no rate-limit answer).
+for (const [after, baselineMs] of [[20_000, 13_000], [60_000, 27_000]] as const) {
+  test(`speed release, item 3d (Michael's ruling 6): a flatten asked ${after / 1000} s into 30 held sales starts no slower than on 20ba5bd (${baselineMs / 1000} s)`, async () => {
+    const r = await flattenPartway(after, after === 20_000 ? 2 : 3);
+    assert.ok(r.startAfterMs !== null, "the flatten started");
+    assert.ok(r.startAfterMs <= baselineMs, `started ${r.startAfterMs} ms after the ask (20ba5bd: ${baselineMs} ms); ${JSON.stringify(r)}`);
+    assert.equal(r.rateLimited, 0, "no rate-limit answer");
+    assert.ok(r.lowest >= 20, `remaining never below 20 (lowest ${r.lowest})`);
+    assert.equal(r.oversell, 0);
+  });
+}

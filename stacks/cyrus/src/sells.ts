@@ -105,8 +105,10 @@ export class SellGate {
   // gate has sent since that read, and it is also kept below the shares Alpaca itself reports as free.
   // `stopPrice` (A4 of 2026-11-12): a stop sell instead of a market sell. The same check applies: it may not be larger than the shares
   // held minus the sells already open.
-  sell(req: { symbol: string; qty: number; clientOrderId: string; reason: string; stopPrice?: number }): Promise<SellResult> {
-    const run = this.chain.then(() => this.run(req));
+  // `stillWanted` (Michael's ruling 6 of 2026-11-16): asked when this sell's turn in the gate comes; false means the sale that asked has
+  // given way meanwhile, so nothing is read or sent (a side-by-side sale waiting here behind sells Alpaca holds would otherwise still send).
+  sell(req: { symbol: string; qty: number; clientOrderId: string; reason: string; stopPrice?: number; stillWanted?: () => boolean }): Promise<SellResult> {
+    const run = this.chain.then(() => (req.stillWanted && !req.stillWanted() ? ({ status: "error", reason: "not sent: the sale gave way to a sale of the whole account", notSent: true } as SellResult) : this.run(req)));
     this.chain = run.catch(() => undefined);
     return run;
   }
@@ -249,6 +251,8 @@ export interface LiquidateResult {
   // owns selling or the close-out time has come ("close-out").
   yielded?: boolean;
   stoodAside?: "whole account" | "close-out";
+  // Michael's ruling 6 of 2026-11-16: a running side-by-side sale that stopped at its next step for a sale of the whole account.
+  gaveWay?: "whole account";
   // Only with endWhenHiddenHold: the symbols held with no open order visible when the attempt ended early (part A, step 1).
   hiddenHold?: string[];
   // Ruling B (group 1, round 2 of the night release): a cancel this sale sent was not accepted (an error from Alpaca or no answer).
@@ -447,12 +451,21 @@ export class Liquidator {
     const cancelIds = [...new Set(o.cancelIds ?? [])];
     const heldNow = async (): Promise<Position[]> => (await this.d.broker.listPositions()).filter((p) => !only || only.has(p.symbol));
     // Item 6: a remainder sale stops at its next step while the daily loss stop's sale waits or runs; that sale sells these shares too.
-    const yieldNow = (): boolean => o.yieldToPriority === true && !o.priority && this.priorityPending > 0;
+    // Michael's ruling 6 of 2026-11-16 (the speed release, option (a)): a side-by-side missing-exit sale also stops at its next step once any
+    // sale of the whole account (a close-out, `flatten`, the loss stop's sale, a carried-position sale) is asked for, so running side-by-side
+    // sales never hold it up beyond their current step (group 1 measured a `flatten` starting 115 s late with 30 held sales, 27 s before item 2).
+    const lossStopFirst = (): boolean => o.yieldToPriority === true && !o.priority && this.priorityPending > 0;
+    const wholeAccountAsked = (): boolean => o.sideBySide === true && this.runningOthers > 0;
+    const yieldNow = (): boolean => lossStopFirst() || wholeAccountAsked();
     const yielded = (): LiquidateResult => {
       result.yielded = true;
       result.flat = false;
-      result.errors.push("stopped: the daily loss stop's sale goes first and sells these shares");
-      this.d.log?.("liquidation_yielded", { reason: o.reason, only: o.only ?? null });
+      if (lossStopFirst()) result.errors.push("stopped: the daily loss stop's sale goes first and sells these shares");
+      else {
+        result.gaveWay = "whole account";
+        result.errors.push("stopped: a sale of the whole account was asked for and sells these shares");
+      }
+      this.d.log?.("liquidation_yielded", { reason: o.reason, only: o.only ?? null, ...(result.gaveWay ? { to: "a sale of the whole account" } : {}) });
       return done();
     };
     let earlyWakes = 0;
@@ -789,7 +802,9 @@ export class Liquidator {
             continue;
           }
           const id = `cyrus-x-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-${round}`;
-          const r = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: id, reason: o.reason });
+          const r = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: id, reason: o.reason, ...(o.sideBySide ? { stillWanted: () => !yieldNow() } : {}) });
+          // Michael's ruling 6: a side-by-side sale that gave way while its sell waited its turn in the gate sent nothing; it stops here.
+          if (r.status !== "sent" && o.sideBySide && yieldNow()) return yielded();
           if (r.status === "sent") {
             if (own) (result.ownTarget ??= {})[p.symbol] = (soldBy.get(p.symbol) ?? 0) + cap; // fix A: the recount at this sale
             soldBy.set(p.symbol, (soldBy.get(p.symbol) ?? 0) + free);
