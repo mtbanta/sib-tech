@@ -377,6 +377,37 @@ test("item 3, in the worker: while Alpaca is busy, the stuck position whose turn
   assert.equal(w.wk.budget.budgetMinute(), 60, "busy: the minute stayed 60");
 });
 
+// The head rule's bounds, on the sync on its own: only the retry at the head of the waiting list, only inside a wait for room (never within
+// the 2 s after its last try), and only with room now.
+test("item 3: only the retry at the head of the waiting list skips its wait for room; never another, and never inside the 2 s after its last try", async () => {
+  const w = await retryWorld({ streamLive: () => false });
+  w.sim.refuseSellIf = (x: any) => x.symbol === "QXA";
+  const b = w.memory.budget!;
+  const st = w.memory.stuck.get(w.id)!;
+  // Another stuck retry waits ahead of QXA's (both refused for room once: a try far larger than the minute).
+  b.roomFor("P1", 999, true, 0, CAP, "OTHER");
+  b.roomFor("P1", 999, true, 0, CAP, w.id);
+  assert.deepEqual(b.waitingRetries(), ["OTHER", w.id]);
+  st.roomWaits = 3;
+  st.nextAt = w.sim.simMs + 3_000; // inside its growing wait for room; the budget has room now
+  await syncOrders(w.risk, w.dd, { protect: true, streamLive: false });
+  assert.equal(retriesOf(w.evs).length, 0, "not at the head: it waits");
+  b.forgetRetry("OTHER");
+  b.forgetRetry(w.id);
+  await syncOrders(w.risk, w.dd, { protect: true, streamLive: false });
+  assert.equal(retriesOf(w.evs).length, 0, "not in the waiting list at all (no turn to take): it waits");
+  b.roomFor("P1", 999, true, 0, CAP, w.id); // it waits for room again: now at the head
+  assert.deepEqual(b.waitingRetries(), [w.id]);
+  st.roomWaits = 0;
+  st.nextAt = w.sim.simMs + 1_500; // within the 2 s after its last try
+  await syncOrders(w.risk, w.dd, { protect: true, streamLive: false });
+  assert.equal(retriesOf(w.evs).length, 0, "at the head, but within 2 s of its last try: it waits");
+  st.roomWaits = 3;
+  st.nextAt = w.sim.simMs + 3_000; // inside its wait for room, at the head, with room
+  await syncOrders(w.risk, w.dd, { protect: true, streamLive: false });
+  assert.equal(retriesOf(w.evs).length, 1, "at the head with room: it goes at once");
+});
+
 // ---------------- item 2: a retry budget that grows with spare room ----------------
 
 // A budget whose governor reports `seen.n` answers in the last 60 s, with Alpaca's remaining at `rem.n`.
