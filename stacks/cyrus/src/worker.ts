@@ -17,7 +17,7 @@ import { COMMAND_READ_LIMIT } from "./discord-bot.ts";
 import { DIGEST_PERIOD_MS, TradeDigest } from "./digest.ts";
 import { addToRunning, CONTROL_FEES, estimateFees, type FeesRunning } from "./fees.ts";
 import type { Governor } from "./governor.ts";
-import { Liquidator, SIDE_BY_SIDE_SALE_REQUESTS, SellGate, flattenLegs } from "./sells.ts";
+import { Liquidator, SellGate, flattenLegs } from "./sells.ts";
 import { formatLiveList } from "./universe.ts";
 import type { Settings } from "./config.ts";
 import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
@@ -345,7 +345,7 @@ export class Worker {
     this.syncMemory.budget = this.budget;
     this.lossMemory.budget = this.budget;
     deps.governor.setSafetyHold?.(this.budget);
-    this.loop = new ProtectionLoop({ now: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}), ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {}), look: (ids, kind, extra, until) => this.look(ids, kind, extra, until), log: (e, data) => deps.log?.("info", e, data), onActionFailed: (id, label, err) => this.protectionActionFailed(id, label, err), onLagDropped: () => this.lagWaitOver(), roomAt: (need) => {
+    this.loop = new ProtectionLoop({ now: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}), ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {}), look: (ids, kind, extra, until, roomIds) => this.look(ids, kind, extra, until, roomIds), log: (e, data) => deps.log?.("info", e, data), onActionFailed: (id, label, err) => this.protectionActionFailed(id, label, err), onLagDropped: () => this.lagWaitOver(), roomAt: (need) => {
       // Group 1, round 4 of part 2: asked locally (no request): when the shared budget would grant that try with the look's reads ahead of it.
       const r = this.budget.roomFor(need.cls, need.n, true, need.reads, need.minuteCap, need.retryKey);
       return r.ok ? null : r.at;
@@ -359,8 +359,9 @@ export class Worker {
     },
       // Michael's ruling on item 2 of 2026-11-16: one more side-by-side missing-exit sale may start while Alpaca's remaining requests (the
       // governor's estimate), less the room budgeted tries hold unsent and the most each running and the new sale may still send, stay at or
-      // above the urgent floor of 20.
-      sideBySideRoom: (running) => deps.governor.budget() - this.budget.inUse().reservedUnsent - SIDE_BY_SIDE_SALE_REQUESTS * (running + 1) >= P1_FLOOR,
+      // above the urgent floor of 20. Since the fix of the rate-limit storm (2026-11-16) it is asked before each round of a side-by-side sale, and
+      // `most` counts each round in flight at what its steps can send (sells.ts `sideBySideRoundMost`), not a fixed 18 per sale.
+      sideBySideRoom: (most) => deps.governor.budget() - this.budget.inUse().reservedUnsent - most >= P1_FLOOR,
     });
     // The load window's 5 second cancels are part of entering (tagged as entries for the shared request budget's statistics).
     this.entryExpiry = new EntryExpiry({ cancelOrder: (id) => inRequestScope({ tag: "entry" }, () => deps.broker.cancelOrder(id)), wasFilled: (id) => this.orderHandler?.wasFilled(id) ?? false, log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}) });
@@ -1373,7 +1374,7 @@ export class Worker {
   // never resets the regular sync's 10 seconds. A look only for list-lag rechecks runs inside a P2 reservation of its cost (the order list's
   // pages as the last sync read them, the positions, and a lookup per older entry), as in part 1; any other look is routine work, as the
   // sync it replaces was. Without room it waits for room (entries give way meanwhile).
-  private async look(ids: ReadonlySet<string>, kind: WakeKind, extraRequests: number, untilMs = Infinity): Promise<{ outcome: "busy" | "done" | "failed" | "idle" } | { outcome: "wait"; retryAt: number }> {
+  private async look(ids: ReadonlySet<string>, kind: WakeKind, extraRequests: number, untilMs = Infinity, roomIds?: ReadonlySet<string>): Promise<{ outcome: "busy" | "done" | "failed" | "idle" } | { outcome: "wait"; retryAt: number }> {
     const s = this.sessionForSync;
     if (!s || this.d.now() >= s.closeAt) return { outcome: "idle" };
     // Group 1, round 1 of part 2: the regular sync (the record of truth, every 6 s, 2 s while the live updates are down) goes first. When it is due, it starts now and the look
@@ -1405,7 +1406,7 @@ export class Worker {
         const risk = this.riskDeps();
         const protect = () => this.protectNow(s.closeAt);
         const lossStopped = await this.lossStopInForce(s.day.tradeDate);
-        const run = () => syncOrders(risk, s.day, { protect: () => !lossStopped && protect(), streamLive: this.orderStreamLive(), middayOwnsSelling: () => this.middayOwnsSelling, loop: this.loop, only: ids });
+        const run = () => syncOrders(risk, s.day, { protect: () => !lossStopped && protect(), streamLive: this.orderStreamLive(), middayOwnsSelling: () => this.middayOwnsSelling, loop: this.loop, only: ids, ...(roomIds && roomIds.size > 0 ? { roomLookups: roomIds } : {}) });
         const synced = res ? await withReservation(res, run) : await run();
         await this.lostExitsFollowUp(s.day.tradeDate, synced.unprotected);
         await this.stopCancelFollowUp(s.day.tradeDate);

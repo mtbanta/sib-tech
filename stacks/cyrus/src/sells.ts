@@ -322,16 +322,45 @@ export interface LiquidatorDeps {
   // close-out or the afternoon close-out owns selling: no selling action"): the worker's own stand-aside rule (false from the close-out
   // time, and while a close-out, mid-day or carried step owns selling), asked when a one-entry cleanup sale's turn comes.
   ownSalesMayRun?: () => boolean;
-  // Michael's ruling on item 2 of 2026-11-16: may one more side-by-side missing-exit sale start now, with `running` such sales already
-  // running? ("as many at once as the request budget allows at that moment, above the floor for urgent work"). The worker answers from
-  // Alpaca's remaining requests (the governor's estimate). Without it, side-by-side sales run one at a time, as before item 2.
-  sideBySideRoom?: (running: number) => boolean;
+  // Michael's ruling on item 2 of 2026-11-16 ("as many at once as the request budget allows at that moment, above the floor for urgent work"):
+  // may a side-by-side missing-exit sale start, or start its next round, now? `most`: the most the side-by-side rounds in flight and this one
+  // can still send (each counted at `sideBySideRoundMost`). The worker answers from Alpaca's remaining requests (the governor's estimate).
+  // Without it, side-by-side sales run one at a time, as before item 2.
+  sideBySideRoom?: (most: number) => boolean;
 }
 
-// Michael's ruling on item 2 of 2026-11-16: the most requests one missing-exit sale is counted as still able to send when the worker decides
-// whether another may start beside it (measured on 2026-11-16: about 14.5 per fast sale at most, from the `first` tag; 12 in tests, 17 or 18
-// when Alpaca kept the exits).
-export const SIDE_BY_SIDE_SALE_REQUESTS = 18;
+// Michael's ruling on item 2 of 2026-11-16, the room check's count (the fix of the rate-limit storm found on 2026-11-16: with 10 positions
+// whose sales Alpaca refused at once, up to 7 first tries ran their 3 rounds together, each counted at a fixed 18 but sending 25 from its
+// start, and Alpaca's bucket ran dry: 27 to 36 rate-limit answers in the first 30 s, none on v24). The room is now asked before each round of
+// a side-by-side sale, and a round is counted at the most it can send, from the steps of `run`: the positions (1), the open orders
+// (`openPages`), any cancels (one each), the wait's looks (the open orders and the positions each time: once when nothing was cancelled and
+// nothing is waited for, else every look the wait can make up to `waitCancelMs`, plus one for each early wake), the positions again (1), the
+// sell gate's read of the open orders and the positions, and the sell (1); the last round also its last look at the positions (1). The
+// Alpaca client's own retries of a failed request are not in it.
+export function sideBySideRoundMost(o: Pick<LiquidateOptions, "cancelIds" | "waitCancelMs" | "waitForAlpacaCancel">, openPages = 1): number {
+  const pages = Number.isFinite(openPages) && openPages > 1 ? Math.ceil(openPages) : 1;
+  const look = pages + 1; // the open orders, then the positions
+  const cancels = new Set(o.cancelIds ?? []).size;
+  let looks = 1;
+  if (o.waitForAlpacaCancel === true || cancels > 0) {
+    // As the wait in `run`: half a second blind after cancels (a look before it and one after), then looks after pauses of 0.25, 0.4, 0.6,
+    // then 0.8 s until `waitCancelMs` has passed, and at most MAX_EARLY_WAKES pauses ended early by a live update (each can add a look).
+    const waitMs = o.waitCancelMs ?? 6_000;
+    let waited = 0;
+    looks = 0;
+    if (cancels > 0) {
+      looks++;
+      waited += 500;
+    }
+    for (let polls = 0; ; polls++) {
+      looks++;
+      if (waited >= waitMs) break;
+      waited += [250, 400, 600, 800][Math.min(polls, 3)]!;
+    }
+    looks += MAX_EARLY_WAKES;
+  }
+  return 1 + pages + cancels + looks * look + 1 + look + 1;
+}
 
 // At most MAX_EARLY_WAKES early wake-ups in one liquidation, so a burst of updates cannot turn the waits into a run of extra looks (5
 // since Michael's decision of 2026-11-06, early-wake.ts; the worker's waits also ignore updates while the budget is near the reserve).
@@ -343,8 +372,12 @@ export class Liquidator {
   // Item 2 of 2026-11-16: the last side-by-side sale asked per symbol, and every side-by-side sale not yet finished.
   private readonly symbolTails = new Map<string, Promise<unknown>>();
   private readonly sideBySideTails = new Set<Promise<unknown>>();
-  // Michael's ruling on item 2: side-by-side sales running now (started, not finished).
+  // Michael's ruling on item 2: side-by-side sales running now (started, not finished), and the round each has in flight, with the most it can
+  // still send (0 between its rounds).
   private sideBySideRunning = 0;
+  private readonly sideBySideRounds = new Map<LiquidateOptions, number>();
+  // The pages of open orders the last read here returned (each page is one request), for `sideBySideRoundMost`.
+  private openPages = 1;
   private running = 0;
   // Priority sales (the daily loss stop) asked for and not finished yet.
   private priorityPending = 0;
@@ -417,7 +450,8 @@ export class Liquidator {
   private async runSideBySide(o: LiquidateOptions): Promise<LiquidateResult> {
     let wait = 250;
     let waited = 0;
-    while (this.sideBySideRunning > 0 && this.runningOthers === 0 && !(this.d.sideBySideRoom?.(this.sideBySideRunning) ?? false)) {
+    const first = this.roundMost(o, 1);
+    while (this.sideBySideRunning > 0 && this.runningOthers === 0 && !(this.d.sideBySideRoom?.(this.roundsInFlight() + first) ?? false)) {
       await this.sleep(wait);
       // A turn for other work too (a test's pause can return at once), so the running sales this waits for can finish.
       await new Promise<void>((r) => setImmediate(r));
@@ -426,11 +460,25 @@ export class Liquidator {
     }
     if (waited > 0) this.d.log?.("side_by_side_waited", { only: o.only ?? null, waitedMs: waited, running: this.sideBySideRunning });
     this.sideBySideRunning++;
+    this.sideBySideRounds.set(o, first); // its first round is in flight from now
     try {
       return await this.run(o);
     } finally {
       this.sideBySideRunning--;
+      this.sideBySideRounds.delete(o);
     }
+  }
+
+  // The most a side-by-side sale's round `round` can send (`sideBySideRoundMost`, its last round with its last look).
+  private roundMost(o: LiquidateOptions, round: number): number {
+    return sideBySideRoundMost(o, this.openPages) + (round >= (o.maxRounds ?? 4) ? 1 : 0);
+  }
+
+  // The most the side-by-side rounds in flight (other than `except`'s) can still send.
+  private roundsInFlight(except?: LiquidateOptions): number {
+    let n = 0;
+    for (const [k, v] of this.sideBySideRounds) if (k !== except) n += v;
+    return n;
   }
 
   // Side-by-side sales running now (statistics and tests).
@@ -445,6 +493,7 @@ export class Liquidator {
 
   private async openOrders(): Promise<Order[]> {
     const listed = await this.d.broker.listOrdersPaged("open", FAR_PAST, 5);
+    this.openPages = Number.isFinite(listed.pages) && listed.pages > 0 ? listed.pages : 1;
     if (!listed.complete) throw new Error("the list of open orders is longer than I can read");
     return listed.orders;
   }
@@ -553,6 +602,26 @@ export class Liquidator {
     for (let round = 1; round <= rounds; round++) {
       result.lastLookOk = false; // set true below only by this round's successful look (reported only)
       if (yieldNow()) return yielded();
+      // Michael's ruling on item 2 ("as many at once as the request budget allows at that moment"), the fix of the rate-limit storm: a running
+      // side-by-side sale asks for room before each of its rounds, not only at its start (its first round was asked for when it started). It
+      // waits, sending nothing, 0.25 s doubling to 2 s, until the room check says yes. Whenever it is the only side-by-side sale running it
+      // goes ahead, so it is never worse than the one-at-a-time queue. The wait sends nothing and ends when room returns (Alpaca's bucket
+      // refills about 3.3 requests a second, so room for one round above the floor of 20 returns within seconds), when the others have ended,
+      // or when a sale of the whole account is asked (it then gives way, as before).
+      if (round > 1 && this.sideBySideRounds.has(o)) {
+        const most = this.roundMost(o, round);
+        let wait = 250;
+        let waited = 0;
+        while (this.sideBySideRunning > 1 && this.runningOthers === 0 && !(this.d.sideBySideRoom?.(this.roundsInFlight(o) + most) ?? false)) {
+          await this.sleep(wait);
+          await new Promise<void>((r) => setImmediate(r));
+          waited += wait;
+          wait = Math.min(wait * 2, 2_000);
+        }
+        if (yieldNow()) return yielded();
+        if (waited > 0) this.d.log?.("side_by_side_round_waited", { only: o.only ?? null, round, waitedMs: waited, running: this.sideBySideRunning });
+        this.sideBySideRounds.set(o, most);
+      }
       // Nothing is sent while the market is closed: a market sell then queues for the next open (and cancelling the
       // exits first would leave the position bare overnight). If the clock cannot be read, carry on.
       const clock = await this.d.broker.getClock().catch(() => null);
@@ -854,7 +923,9 @@ export class Liquidator {
         break;
       }
 
-      // 4. Look again after the sells have had a moment to fill (sooner if a fill or cancel for these symbols arrives).
+      // 4. Look again after the sells have had a moment to fill (sooner if a fill or cancel for these symbols arrives). A side-by-side sale's
+      // round is over (nothing is sent in the pause); its next round asks for room again. Its last round stays counted until its last look.
+      if (round < rounds && this.sideBySideRounds.has(o)) this.sideBySideRounds.set(o, 0);
       await pauseFor(symbols, 1_000);
     }
 

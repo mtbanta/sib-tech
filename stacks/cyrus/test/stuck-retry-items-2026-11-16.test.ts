@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Liquidator, SellGate } from "../src/sells.ts";
-import { CHEAP_STUCK_TRY_REQUESTS, STUCK_RETRY_MINUTE_CAP, STUCK_TRY_REQUESTS, SyncMemory, syncOrders } from "../src/risk.ts";
+import { CHEAP_STUCK_TRY_REQUESTS, STUCK_RETRY_MINUTE_CAP, STUCK_TRY_REQUESTS, SyncMemory, startingPath, syncOrders } from "../src/risk.ts";
 import { MemoryStore } from "../src/store.ts";
 import { ensureDay } from "../src/morning.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
@@ -297,27 +297,26 @@ test("item 3: a retry that was granted goes to the back: on its next refusal it 
   assert.ok(retry(b, "B") instanceof Reservation, "B gets the room");
 });
 
-test("item 3: a retry not seen for more than 10 s leaves the list, so it can never block the others; one the walk saw keeps its place", () => {
+// Since Michael's answer of 2026-11-16 (3 (a)): a key leaves the list when it has not been seen for 10 s after the later of its last look and
+// the time it was told to look again, so a retry waiting long for room keeps its place (test/older-stuck-2026-11-16.test.ts).
+test("item 3: a retry not seen for more than 10 s after its time to look again leaves the list, so it can never block the others; one the walk saw keeps its place", () => {
   const clock = { t: 0 };
   const b: any = new RequestBudget({ now: () => clock.t });
   p1Minute(b, clock, 40);
   clock.t = 41_000;
-  retry(b, "A");
+  const a = retry(b, "A"); // told to look again when room returns (the 5th oldest urgent request leaves at 64 s)
+  assert.equal(a.at, 64_000);
   clock.t = 42_000;
   retry(b, "B");
   clock.t = 43_000;
   retry(b, "C");
   // A is never seen again (its entry vanished); B is seen by the walk while it waits for its time (no budget check then); C keeps looking.
-  clock.t = 50_000;
-  b.seenRetry("B");
-  clock.t = 51_000;
+  lookUntil(b, clock, 74_000, ["C"], ["B"]);
   look(b, "C");
-  assert.deepEqual(b.waitingRetries(), ["A", "B", "C"], "A was last seen exactly 10 s ago: still waiting");
-  clock.t = 51_001;
-  assert.equal(look(b, "C").why, "class", "C looks (no room yet)");
-  assert.deepEqual(b.waitingRetries(), ["B", "C"], "A, unseen for more than 10 s, was dropped; B kept its place");
-  lookUntil(b, clock, 65_000, ["C"], ["B"]);
-  assert.equal(look(b, "C").why, "turn", "B is ahead of C");
+  assert.deepEqual(b.waitingRetries(), ["A", "B", "C"], "A's time to look again was exactly 10 s ago: still waiting");
+  clock.t = 74_001;
+  assert.equal(look(b, "C").why, "turn", "C looks: B is ahead");
+  assert.deepEqual(b.waitingRetries(), ["B", "C"], "A, unseen for more than 10 s after its time, was dropped; B kept its place");
   assert.ok(retry(b, "B") instanceof Reservation, "B gets the room; a vanished A blocks nobody");
 });
 
@@ -667,6 +666,20 @@ test("item 1: a remainder being given a fresh stop keeps today's full path, with
   assert.deepEqual({ path: rs[0].path, reserved: rs[0].reserved, why: rs[0].why }, { path: "full", reserved: STUCK_TRY_REQUESTS, why: "it would place a fresh stop for a remainder" });
   assert.ok(w.evs.some((e) => e.event === "unprotected_position" && e.asRemainder === true), "seen as a remainder to protect");
   assert.equal(w.sim.oversellAttempts, 0);
+});
+
+// Group 1's note on item 1: the path chosen and the reservation must agree. A try that places a fresh stop for a remainder never takes the
+// one-read path (the liquidator ignores it with a stop to place, and the try can send up to 13), so even if it was decided cheap it starts on
+// today's full path and reserves its 10. The walk decides both from the same stuck record, so this guard does not come into play today.
+test("item 1: the path and the reservation agree: a try that places a fresh stop starts on today's full path with today's reservation, whatever was decided", () => {
+  const cheap = { n: CHEAP_STUCK_TRY_REQUESTS, timedOut: false, cheap: true, why: "decided cheap" };
+  assert.deepEqual(startingPath(cheap, true, true), { n: STUCK_TRY_REQUESTS, timedOut: false, cheap: false, why: "it would place a fresh stop for a remainder" });
+  assert.deepEqual(startingPath(cheap, false, false), { n: STUCK_TRY_REQUESTS, timedOut: false, cheap: false, why: "the live order updates dropped before the try started" });
+  assert.equal(startingPath(cheap, true, false), cheap, "a missing-exit sale with the live updates connected stays cheap");
+  const full = { n: STUCK_TRY_REQUESTS, timedOut: false, cheap: false, why: "x" };
+  assert.equal(startingPath(full, true, true), full);
+  const timedOut = { n: 13, timedOut: true };
+  assert.equal(startingPath(timedOut, true, true), timedOut);
 });
 
 // The sell gate's rule (never sell more than is held, counting sells already open) stays as safe as today: the cheap path never trusts the

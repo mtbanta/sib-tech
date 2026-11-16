@@ -50,7 +50,9 @@ export interface LoopDeps {
   // a list-lag look (tried again at `retryAt`); "failed": the look's reads failed; "done": it ran.
   // "idle": outside the session, nothing read (not counted). `untilMs`: the latest end of the due list-lag wakes' windows (the look waits for
   // room while any of them can still use it; group 2, round 2 of part 2, as part 1's timer did).
-  look: (ids: ReadonlySet<string>, kind: WakeKind, extraRequests: number, untilMs: number) => Promise<{ outcome: "busy" | "done" | "failed" | "idle" } | { outcome: "wait"; retryAt: number }>;
+  // `roomIds` (Michael's answer of 2026-11-16 on the speed release, 3 (a): "when budget room frees up, also look up waiting positions older
+  // than 10 minutes"): the entries this look is for because their room wake found room (their try has room now).
+  look: (ids: ReadonlySet<string>, kind: WakeKind, extraRequests: number, untilMs: number, roomIds?: ReadonlySet<string>) => Promise<{ outcome: "busy" | "done" | "failed" | "idle" } | { outcome: "wait"; retryAt: number }>;
   // Told when a list-lag wake is dropped (its window ended), once the loop's other wakes are back in place: the worker ends its give-way when
   // no list-lag wake is left (`pendingWakes`).
   onLagDropped?: (id: string) => void;
@@ -208,6 +210,7 @@ export class ProtectionLoop implements ProtectionHooks {
     if (now < this.failUntil) return this.arm();
     // Room wakes due: asked of the budget locally (no request); still no room, re-armed at the time room may return; room now, an ordinary
     // protection wake for this look (group 1, round 4 of part 2; rule 6: the wait sends nothing, and the try stays under the budget's cap).
+    const roomReady = new Set<string>();
     for (const [id, w] of [...this.roomWakes]) {
       if (w.at > now || this.running.has(id)) continue;
       const roomAt = this.d.roomAt?.(w.need) ?? null;
@@ -217,6 +220,7 @@ export class ProtectionLoop implements ProtectionHooks {
         continue;
       }
       this.roomWakes.delete(id);
+      roomReady.add(id);
       const cur = this.wakes.get(id);
       if (!cur || now < cur.at) this.wakes.set(id, { at: now, kind: "protect", extra: 0, until: Infinity });
       else cur.kind = "protect";
@@ -252,7 +256,7 @@ export class ProtectionLoop implements ProtectionHooks {
     this.looking = true;
     let r: Awaited<ReturnType<LoopDeps["look"]>>;
     try {
-      r = await this.d.look(ids, kind, extra, until);
+      r = await this.d.look(ids, kind, extra, until, new Set([...roomReady].filter((id) => ids.has(id))));
     } catch (err) {
       r = { outcome: "failed" };
       this.d.log?.("protection_look_failed", { error: (err as Error).message.slice(0, 160) });

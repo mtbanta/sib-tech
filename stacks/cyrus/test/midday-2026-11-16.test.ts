@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SimBroker } from "./sim-broker.ts";
 import { rig } from "./rig.ts";
-import { Liquidator, SellGate } from "../src/sells.ts";
+import { Liquidator, SellGate, sideBySideRoundMost } from "../src/sells.ts";
 import { FakeBroker } from "./helpers.ts";
 
 async function session() {
@@ -132,7 +132,7 @@ test("item 1: outside the session a reconnect brings no sync", async () => {
 
 
 // The queue alone: `run` replaced by a step the test finishes by hand, so only the order in which sales start is under test.
-function queue(room: (running: number) => boolean = () => true) {
+function queue(room: (most: number) => boolean = () => true) {
   const broker = new FakeBroker();
   const liq: any = new Liquidator({ broker, gate: new SellGate({ broker, say: async () => true }), now: () => new Date(), sleep: async () => undefined, sideBySideRoom: room });
   const started: string[] = [];
@@ -217,7 +217,10 @@ test("item 2: a side-by-side sale that throws does not block the next sale of it
 
 // Michael's ruling on item 2: as many at once as the request budget allows above the urgent floor; one always runs when none does.
 test("item 2 (ruling): with room for two, the third waits until one ends; with no room at all they run one at a time", async () => {
-  const q = queue((running) => running < 2);
+  // The fix of the rate-limit storm: the room check is asked for what the rounds in flight and the new one can send (here each sale's first
+  // round, `sideBySideRoundMost`), no longer for a count of sales.
+  const round = sideBySideRoundMost({});
+  const q = queue((most) => most <= 2 * round);
   const a = q.missing("AAL", "AAL");
   const b = q.missing("RIOT", "RIOT");
   const c = q.missing("SOFI", "SOFI");
@@ -270,15 +273,16 @@ test("item 2 (ruling): a close-out request stops a waiting side-by-side sale fro
   await Promise.all([a, w]);
 });
 
-test("item 2 (ruling): the worker's room rule: one more side-by-side sale only while Alpaca's remaining, less 18 for each running and the new one and the budget's unsent room, stays at or above 20", async () => {
+test("item 2 (ruling): the worker's room rule: a side-by-side round only while Alpaca's remaining, less the most the rounds in flight and the new one can send and the budget's unsent room, stays at or above 20", async () => {
+  // The fix of the rate-limit storm: the rule is given what the rounds can send (sells.ts `sideBySideRoundMost`), not a count of sales at 18.
   const s = await session();
-  const room = s.w.liquidator.d.sideBySideRoom as (running: number) => boolean;
+  const room = s.w.liquidator.d.sideBySideRoom as (most: number) => boolean;
   s.w.d.governor.budget = () => 74;
-  assert.equal(room(1), true, "74 - 2 x 18 = 38: room");
-  assert.equal(room(2), true, "74 - 3 x 18 = 20: exactly the floor, room");
-  assert.equal(room(3), false, "74 - 4 x 18 = 2: below the floor of 20, no room");
+  assert.equal(room(36), true, "74 - 36 = 38: room");
+  assert.equal(room(54), true, "74 - 54 = 20: exactly the floor, room");
+  assert.equal(room(55), false, "74 - 55 = 19: below the floor of 20, no room");
   const res = s.w.budget.tryReserve("P1", 10, { label: "stuck retry", force: true });
-  assert.equal(room(2), false, "the budget's 10 reserved and unsent count too: 74 - 10 - 54 = 10");
+  assert.equal(room(54), false, "the budget's 10 reserved and unsent count too: 74 - 10 - 54 = 10");
   res.end();
-  assert.equal(room(2), true);
+  assert.equal(room(54), true);
 });

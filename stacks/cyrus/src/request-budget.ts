@@ -164,7 +164,10 @@ export class RequestBudget {
   // Item 3 of the speed release (fair turns): the ordinary stuck retries (capped, with a key) waiting for room, in the order each first waited
   // (set on its first refusal, kept until it is granted, forgotten, or not seen for TURN_DROP_MS), with what its try asks for and when it was
   // last seen. Timed-out stop tries and urgent work are not in it.
-  private readonly turns = new Map<string, { seen: number; n: number; minuteCap: number; routineAhead: number; fiveSec: boolean }>();
+  // `due`: when it was told to look again (its refusal's time). With Michael's answer of 2026-11-16 (3 (a)): a key is dropped only when it
+  // has not been seen for TURN_DROP_MS after the later of its last look and that time, so a retry waiting a long time for room (an entry
+  // older than the list's window is not walked between its looks) keeps its place, and a retry that vanished still leaves the list.
+  private readonly turns = new Map<string, { seen: number; due: number; n: number; minuteCap: number; routineAhead: number; fiveSec: boolean }>();
   // Statistics only (Michael's approval of 2026-11-15): the time up to which the hold's time in force has been counted, and whether the
   // last refusal `refusal` returned was a P2 refusal that only the hold caused. Neither is read by any decision.
   private holdCountedTo = 0;
@@ -299,20 +302,23 @@ export class RequestBudget {
   // with `turn`, at the time the retry at the head could next get room (no sooner than TURN_RECHECK_MS from now), and joins the list if it is
   // not in it. It changes only the order of retries, never how many run or how much of the budget they use.
   private turnRefusal(key: string, own: Refusal | null, need: { n: number; minuteCap: number; routineAhead: number; fiveSec: boolean }, now: number): Refusal | null {
-    for (const [k, w] of this.turns) if (now - w.seen > TURN_DROP_MS) this.turns.delete(k);
+    this.dropUnseen(now);
     const mine = this.turns.get(key);
     if (mine) Object.assign(mine, need, { seen: now });
     if (own) {
-      if (!mine) this.turns.set(key, { ...need, seen: now });
+      if (!mine) this.turns.set(key, { ...need, seen: now, due: own.at });
+      else mine.due = own.at;
       return own;
     }
     const head = this.turns.entries().next().value;
     if (head === undefined || head[0] === key) return null;
-    if (!mine) this.turns.set(key, { ...need, seen: now });
     const h = head[1];
     const headRoom = this.roomRefusal("P1", h.n, h.fiveSec, now, h.routineAhead, h.minuteCap, head[0], false);
     this.lastRefusalHeldOnly = false; // statistics only: not a P2 refusal
-    return { ok: false, at: Math.max(now + TURN_RECHECK_MS, headRoom ? headRoom.at : now), why: "turn" };
+    const at = Math.max(now + TURN_RECHECK_MS, headRoom ? headRoom.at : now);
+    if (!mine) this.turns.set(key, { ...need, seen: now, due: at });
+    else mine.due = at;
+    return { ok: false, at, why: "turn" };
   }
 
   // Item 3 of the speed release: a key the walk saw while its retry waits for its time (no budget check then), so a retry waiting a long time
@@ -422,10 +428,16 @@ export class RequestBudget {
     return [...this.turns.keys()];
   }
 
+  // Item 3 of the speed release: a key not seen for TURN_DROP_MS after the later of its last look and the time it was told to look again
+  // leaves the list (a vanished retry never blocks the others).
+  private dropUnseen(now: number): void {
+    for (const [k, w] of this.turns) if (now - Math.max(w.seen, w.due) > TURN_DROP_MS) this.turns.delete(k);
+  }
+
   // Item 3 of the speed release: the key at the head of the waiting list (the retry whose turn it is), if any.
   firstWaitingRetry(): string | undefined {
     const now = this.nowMs();
-    for (const [k, w] of this.turns) if (now - w.seen > TURN_DROP_MS) this.turns.delete(k);
+    this.dropUnseen(now);
     return this.turns.keys().next().value;
   }
 
