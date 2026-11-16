@@ -158,7 +158,7 @@ export function beforeLoadWindow(day: (Pick<DayRecord, "phases"> & WindowDay) | 
   return !!w && t < w.start;
 }
 
-// The speed release: a window entry's limit price, at or below the price seen (the print rounded down to the cent).
+// The speed release: a window entry's limit price (before ruling 3 below: the print rounded down to the cent, at or below the price seen).
 // Michael's ruling 3 of 2026-11-16 (the speed release, option A, load windows only for now): the entry is priced at the price seen (rounded
 // down to the cent) plus LOAD_ENTRY_ABOVE_CENTS, so most entries fill and fewer need a 5 second cancel (this morning 58 percent did, each one
 // a request and the cause of the lost exits). Before: at the price seen rounded down. The exits stay 1 cent above and 2 cents below this price.
@@ -171,7 +171,7 @@ export function limitEntryPrice(print: number): number | null {
 
 // The window's rules in one phrase, for the Armed message, the mode line and the summary.
 export function loadWindowRules(): string {
-  return `1 share a trade on any new print, a limit buy at the price seen plus ${LOAD_ENTRY_ABOVE_CENTS} cent, cancelled if not filled in ${LOAD_ENTRY_WAIT_MS / 1000} seconds, take-profit ${LOAD_TAKE_PROFIT_CENTS} cent${LOAD_TAKE_PROFIT_CENTS === 1 ? "" : "s"} up and stop ${LOAD_STOP_CENTS} cents down from that price`;
+  return `1 share a trade on any new print, a limit buy at the price seen plus ${LOAD_ENTRY_ABOVE_CENTS} cent, cancelled if not filled in ${LOAD_ENTRY_WAIT_MS / 1000} seconds, take-profit ${LOAD_TAKE_PROFIT_CENTS} cent${LOAD_TAKE_PROFIT_CENTS === 1 ? "" : "s"} up and stop ${LOAD_STOP_CENTS} cents down from the limit price`;
 }
 
 // The fifth line of the limits request, the morning review and every limits reply.

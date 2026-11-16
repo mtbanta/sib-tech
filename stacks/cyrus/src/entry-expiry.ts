@@ -1,5 +1,5 @@
 // THE LOAD WINDOW'S ENTRY WAIT (the speed release, Michael's decision 4 of 2026-11-05). In the load window every entry is a 1-share
-// LIMIT buy at or below the price seen. One that Alpaca has not filled LOAD_ENTRY_WAIT_MS after it accepted it is cancelled, so its
+// LIMIT buy at the price seen plus 1 cent (Michael's ruling 3 of 2026-11-16; before: at or below the price seen). One that Alpaca has not filled LOAD_ENTRY_WAIT_MS after it accepted it is cancelled, so its
 // symbol is free for the next print instead of waiting on a price that has moved away.
 //
 // Safety:

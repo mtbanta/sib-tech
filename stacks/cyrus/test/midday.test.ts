@@ -656,9 +656,10 @@ test("a retry takes at most 10 positions, in turn; and a retry over some positio
   assert.ok(sim.orders.some((o) => o.symbol === "BBB" && o.legs.some((l) => l.status === "new" || l.status === "held")), "BBB's exits were not touched");
 });
 
-// The speed release, item 2 (Michael's ruling 5 of 2026-11-16): the shared budget's minute grows with Alpaca's spare, so the mid-day retries'
-// "within 60 a minute" holds while Alpaca is busy (`busy`: the governor counts 150 requests a minute the budget did not send, so the minute
-// stays 60), and when quiet they stay within the budget's minute in force (at most Alpaca's spare); no rate-limit answers either way.
+// The speed release, item 2 (Michael's ruling 5 of 2026-11-16): the shared budget's minute grows with Alpaca's spare. Group 2 round 1
+// (choice 5 reverted, Michael's answers on the speed release questions): the mid-day retries stay "within 60 requests a minute" (Michael's
+// ruling of 2026-11-09) both while Alpaca is busy (`busy`: the governor counts 150 requests a minute the budget did not send, so the minute
+// stays 60) and while it is quiet (the minute grows above 60, but urgent work keeps its own 60); no rate-limit answers either way.
 async function middayCannotGetFlat(busy: boolean) {
   const w = await armedDay();
   const { sim, r } = w;
@@ -698,10 +699,9 @@ async function middayCannotGetFlat(busy: boolean) {
   let worst = 0;
   for (let i = 0; i < retryReqs.length; i++) worst = Math.max(worst, retryReqs.filter((x) => x >= retryReqs[i]! && x < retryReqs[i]! + 60_000).length);
   assert.ok(tries() >= 3, `retries happened (${tries()} tries)`);
-  if (busy) {
-    assert.equal(highestMinute, 60, "busy: the budget's minute stayed 60");
-    assert.ok(worst <= 60, `mid-day requests in any 60 seconds after the first try: ${worst}`);
-  } else assert.ok(wk.budget.peak.minute <= highestMinute, `quiet: budgeted requests in any 60 seconds (${wk.budget.peak.minute}) within the budget's highest minute (${highestMinute})`);
+  if (busy) assert.equal(highestMinute, 60, "busy: the budget's minute stayed 60");
+  else assert.ok(highestMinute > 60, `quiet: the budget's minute grew above 60 (${highestMinute}), so the bound below is not the minute's own`);
+  assert.ok(worst <= 60, `mid-day requests in any 60 seconds after the first try: ${worst}`);
   assert.equal(sim.rejected429, rejectedAtMinute, "no rate-limit answers after the first try's minute");
   assert.equal(r.said("alerts").filter((x) => x.includes("mid-day close-out is NOT FLAT yet")).length, 1, "one alert");
   assert.equal(r.said("alerts").filter((x) => x.includes("still NOT FLAT after 5 minutes")).length, 1, "one 5 minute alert");
@@ -728,7 +728,7 @@ test("Michael's ruling on a mid-day close-out that cannot get flat: 40 positions
   await middayCannotGetFlat(true);
 });
 
-test("speed release, item 2: the same mid-day close-out while Alpaca is quiet: its retries stay within the shared budget's minute in force (grown with Alpaca's spare), no rate-limit answers after the first try's minute", { timeout: 120_000 }, async () => {
+test("speed release, item 2 with choice 5 reverted: the same mid-day close-out while Alpaca is quiet (the budget's minute grown above 60): mid-day requests in any 60 seconds after the first try still at most 60, no rate-limit answers after the first try's minute", { timeout: 120_000 }, async () => {
   await middayCannotGetFlat(false);
 });
 

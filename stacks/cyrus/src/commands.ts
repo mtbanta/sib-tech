@@ -325,7 +325,8 @@ export class CommandProcessor {
       case "unknown":
         await this.say(`I did not understand the line "${cmd.text}". Nothing was done for it. Type \`help\` for the list.`);
         return;
-      // Michael's messaging fix of 2026-11-16: acknowledged only; nothing is stored or done.
+      // Michael's messaging fix of 2026-11-16: acknowledged only; nothing is done and nothing any step reads is stored (the usual `command`
+      // row for the line is stored, as for every command).
       case "deployApproval":
         await this.say(`Deploy approval for ${cmd.commit} noted; the builder will deploy it if every check passes.`);
         return;

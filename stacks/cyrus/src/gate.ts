@@ -315,8 +315,8 @@ export class OrderGate {
         return this.refuse(date, symbol, "could not set long only and the approved borrowing cap at Alpaca");
       }
     }
-    // A limit entry (the load window) is checked against its own limit price, at or below the price seen: Alpaca checks its exits
-    // against that limit price too.
+    // A limit entry (the load window) is checked against its own limit price, at most 1 cent above the price seen since Michael's ruling 3
+    // of 2026-11-16 (LOAD_ENTRY_ABOVE_CENTS, below): Alpaca checks its exits against that limit price too.
     const limitPrice = signal.limitPrice !== undefined && signal.load && hasLoadEntries(day) && decision.qty === 1 ? signal.limitPrice : undefined;
     if (signal.limitPrice !== undefined && limitPrice === undefined) return this.refuse(date, symbol, "a limit entry is only sent in the load window, 1 share");
     const base = limitPrice ?? signal.price;
