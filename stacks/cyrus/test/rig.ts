@@ -73,9 +73,9 @@ export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryS
     ramp: async (symbol: string, prices: number[], startT: string) => { for (let i = 0; i < prices.length; i++) { setNow(new Date(z(startT).getTime() + i * 1000)); onTrade({ symbol, price: prices[i]!, size: 100, time: getNow().toISOString() }); await settle(); } },
     counts: () => ({ streamStarts, streamStops, screens, orderStreamStarts, orderStreamStops }),
     timers: () => timers.map((t) => t.due),
-    // Delivers one live order update to the worker (release B), then lets it finish.
     // Sets the fake order stream's status and tells the worker (a drop is "reconnecting", then "live" again).
     orderStreamStatus: async (status: string) => { orderStatus = status; onOrderStatus?.(status); await settle(); },
+    // Delivers one live order update to the worker (release B), then lets it finish.
     orderUpdate: async (u: TradeUpdate) => { if (!onUpdate) throw new Error("no order stream connected"); onUpdate(u); await settle(); },
     screenOpts,
     said: (ch: string) => bot.posts.filter((p) => p.channel === ch).map((p) => p.text),

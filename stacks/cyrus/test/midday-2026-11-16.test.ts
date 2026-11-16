@@ -67,6 +67,56 @@ test("item 1: a reconnect while a sync is running is owed, and the sync starts a
   assert.equal(s.syncs(), before + 1, "it starts once the running one ended");
 });
 
+// Group 1, round 1 (finding 1): a reconnect while a protection look holds "risk" is served when the look ends, and the next regular sync
+// does not bring a second one (before the fix: nothing at the look's end, then two syncs back to back at the next regular sync).
+test("item 1: a reconnect during a protection look gets its sync when the look ends, and no second one after the next regular sync", async () => {
+  const s = await session();
+  await s.r.setNow("14:30:06");
+  const before = s.syncs();
+  // The look's first read waits until the test lets it go, so the reconnect comes while it holds "risk".
+  let letGo!: () => void;
+  const gate = new Promise<void>((res) => (letGo = res));
+  const lossStopInForce = s.w.lossStopInForce.bind(s.w);
+  s.w.lossStopInForce = async (d: string) => { await gate; return lossStopInForce(d); };
+  const look = s.w.look(new Set(["cyrus-20261102-ZZZ-1"]), "protect", 0); // takes "risk" before its first wait
+  assert.equal(s.w.inflight.has("risk"), true, "the look holds risk");
+  await s.r.orderStreamStatus("reconnecting");
+  await s.r.orderStreamStatus("live");
+  assert.equal(s.syncs(), before, "owed while the look runs");
+  assert.equal(s.w.reconnectSyncOwed, true);
+  s.w.lossStopInForce = lossStopInForce;
+  letGo();
+  await look;
+  await new Promise((r) => setImmediate(r));
+  assert.equal(s.syncs(), before + 1, "the owed sync starts when the look ends");
+  assert.equal(s.w.reconnectSyncOwed, false);
+  await new Promise((r) => setImmediate(r));
+  await s.r.at("14:30:20"); // the next regular sync
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(s.syncs(), before + 2, "one regular sync, not a second owed one behind it");
+});
+
+test("item 1: a reconnect during a look that ends when a regular sync is due: that sync serves it, and no second sync follows it", async () => {
+  const s = await session();
+  await s.r.setNow("14:30:06");
+  const before = s.syncs();
+  let letGo!: () => void;
+  const gate = new Promise<void>((res) => (letGo = res));
+  const lossStopInForce = s.w.lossStopInForce.bind(s.w);
+  s.w.lossStopInForce = async (d: string) => { await gate; return lossStopInForce(d); };
+  const look = s.w.look(new Set(["cyrus-20261102-ZZZ-1"]), "protect", 0);
+  await s.r.orderStreamStatus("reconnecting");
+  await s.r.orderStreamStatus("live");
+  assert.equal(s.w.reconnectSyncOwed, true);
+  s.w.lossStopInForce = lossStopInForce;
+  s.r.setNow("14:30:16"); // the regular sync is due by the time the look ends
+  letGo();
+  await look;
+  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(s.syncs(), before + 1, "the regular sync the look's end started is the one owed");
+  assert.equal(s.w.reconnectSyncOwed, false);
+});
+
 test("item 1: outside the session a reconnect brings no sync", async () => {
   const s = await session();
   await s.r.at("21:05:00"); // after the close

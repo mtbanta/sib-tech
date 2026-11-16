@@ -51,7 +51,7 @@ async function hold(sim: SimBroker, store: Store, symbol: string, qty: number, p
 // ---------------- (1) the run log ----------------
 
 test("the fast-sale and fresh-stop events (and the new afternoon and screen events) are stored in the run log", () => {
-  const names = ["lost_exit_fast_start", "lost_exit_fast", "lost_exit_fast_skipped", "lost_exit_fast_failed", "cleanup_covered_by_own_sale", "fresh_stop", "fresh_stop_gone", "fresh_stop_ended", "fresh_stop_recovered", "fresh_stop_unclear", "fresh_stop_refused", "fresh_stop_lookup_failed", "load_afternoon", "afternoon_closeout", "screen_not_tradable"];
+  const names = ["lost_exit_fast_start", "lost_exit_fast", "lost_exit_fast_skipped", "lost_exit_fast_failed", "cleanup_covered_by_own_sale", "fresh_stop", "fresh_stop_gone", "fresh_stop_ended", "fresh_stop_recovered", "fresh_stop_unclear", "fresh_stop_refused", "fresh_stop_lookup_failed", "load_afternoon", "afternoon_closeout", "screen_not_tradable", "lost_exit_fast_ended", "order_stream_reconnect_sync", "unprotected_position_yielded"]; // the last three: Michael's mid-day build of 2026-11-16 (items 1 and 3)
   for (const n of names) {
     assert.ok(STORED_INFO_EVENTS.has(n), n);
     assert.equal(shouldStoreEvent("info", n), true, n);

@@ -852,4 +852,45 @@ test("item 4 of 2026-11-16: the morning line counts entries Alpaca filled that t
   const line2: string = await wk.middayMorningLine(D, dd, z("16:30:00"));
   assert.ok(line2.includes("2 entries sent (1 filled, 1 not yet confirmed)"), line2);
   (sim as any).findOrderByClientId = orig;
+  // Group 1, round 1: an order Alpaca shows but not filled (here cancelled) is not counted as filled.
+  const ccc = clientOrderIdFor(D, "CCC", 1);
+  await sim.submitEntry({ symbol: "CCC", qty: 1, stopPrice: 9, takeProfitPrice: 11, referencePrice: 10, clientOrderId: ccc });
+  await r.store.insertOrder({ clientOrderId: ccc, tradeDate: D, symbol: "CCC", qty: 1, referencePrice: 10, stopPrice: 9, takeProfitPrice: 11, status: "submitted", alpacaOrderId: "y".repeat(36), filledQty: null, filledAvgPrice: null, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+  const realFind = sim.findOrderByClientId.bind(sim);
+  (sim as any).findOrderByClientId = async (id: string) => (id === ccc ? { ...(await realFind(id))!, status: "canceled" } : realFind(id));
+  const line3: string = await wk.middayMorningLine(D, dd, z("16:30:00"));
+  assert.ok(line3.includes("3 entries sent (2 filled)"), line3);
+  (sim as any).findOrderByClientId = orig;
+});
+
+// Groups 1 and 2, round 1: the lookups are bounded: at most 20 (the rest counted as not yet confirmed), and at most 3 s in all, so a stalled
+// lookup never holds the mid-day step up (it runs inside that step).
+test("item 4 of 2026-11-16: at most 20 lookups, and a stalled lookup is cut off after 3 s in all; the rest count as not yet confirmed", async () => {
+  const w = await armedDay();
+  const { sim, r } = w;
+  sim.advanceTo(z("16:00:00").getTime());
+  for (let i = 1; i <= 22; i++) {
+    const id = clientOrderIdFor(D, "BBB", i);
+    await sim.submitEntry({ symbol: "BBB", qty: 1, stopPrice: 9, takeProfitPrice: 11, referencePrice: 10, clientOrderId: id });
+    sim.fillEntry(id, 10);
+    await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "BBB", qty: 1, referencePrice: 10, stopPrice: 9, takeProfitPrice: 11, status: i % 2 ? "submitted" : "intent", alpacaOrderId: "x".repeat(36), filledQty: null, filledAvgPrice: null, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+  }
+  const wk: any = r.worker;
+  const dd = (await r.store.getDay(D))!;
+  let lookups = 0;
+  const orig = sim.findOrderByClientId.bind(sim);
+  (sim as any).findOrderByClientId = (id: string) => (lookups++, orig(id));
+  const line: string = await wk.middayMorningLine(D, dd, z("16:30:00"));
+  assert.equal(lookups, 20, "at most 20 lookups");
+  assert.ok(line.includes("22 entries sent (20 filled, 2 not yet confirmed)"), line);
+  // A lookup that never answers: cut off at 3 s in all; nothing after it is looked up.
+  lookups = 0;
+  (sim as any).findOrderByClientId = () => (lookups++, new Promise(() => undefined));
+  const t0 = Date.now();
+  const line2: string = await wk.middayMorningLine(D, dd, z("16:30:00"));
+  const took = Date.now() - t0;
+  assert.ok(took >= 2_900 && took < 4_500, `cut off after about 3 s (${took} ms)`);
+  assert.equal(lookups, 1, "the first lookup used the whole time; no more were started");
+  assert.ok(line2.includes("22 entries sent (0 filled, 22 not yet confirmed)"), line2);
+  (sim as any).findOrderByClientId = orig;
 });

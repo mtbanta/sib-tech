@@ -2004,8 +2004,9 @@ export async function fastLostExitSale(d: RiskDeps, day: DayRecord, mem: SyncMem
 async function fastLostExitSaleInner(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, fillAtMs: number): Promise<void> {
   try {
     const o = await d.broker.findOrderByClientId(s.clientOrderId);
-    // Michael's mid-day build of 2026-11-16, item 3: these two endings are stored too (`lost_exit_fast_ended`), so every
-    // `lost_exit_fast_start` has an outcome (on 2026-11-16, 24 of 68 had none: their own exit had filled first). Logging only.
+    // Michael's mid-day build of 2026-11-16, item 3: these two endings are stored too (`lost_exit_fast_ended`); with
+    // `unprotected_position_yielded` now stored as well, every way a fast sale ends leaves a stored event (on 2026-11-16, 24 of 68 starts had
+    // none stored). Logging only.
     if (!o || !(o.filledQty > 0) || o.side !== "buy") {
       d.log?.("lost_exit_fast_ended", { symbol: s.symbol, clientOrderId: s.clientOrderId, why: "Alpaca shows no filled buy for it" });
       return;

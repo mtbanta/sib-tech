@@ -102,6 +102,8 @@ export const SUMMARY_MIN_BUDGET = 100;
 export const SYNC_EVERY_MS = 10_000;
 // Michael's mid-day build of 2026-11-16, item 4: the most entries the morning line looks up at Alpaca (those still stored as working).
 export const MORNING_LINE_LOOKUPS = 20;
+// Group 2, round 1: the most time, in all, the morning line's lookups may take (real time).
+export const MORNING_LINE_LOOKUP_MS = 3_000;
 // The speed release, item 8: the gate's cached account and positions are read every 10 seconds while the live order updates are
 // connected (they keep the positions current in between), and every 5 seconds, as before, while they are not. 10, not the
 // proposal's 15: the gate refreshes a view older than 15 seconds inside the order path, and passes run every 5 seconds.
@@ -593,6 +595,9 @@ export class Worker {
     }
     if (status !== "live" || !this.orderStreamWasDown) return;
     this.orderStreamWasDown = false;
+    // Group 2, round 1: logged only when a sync is really owed (in the session).
+    const s = this.sessionForSync;
+    if (!s || this.d.now() >= s.closeAt) return;
     this.reconnectSyncOwed = true;
     this.d.log?.("info", "order_stream_reconnect_sync", { syncRunning: this.inflight.has("risk") });
     this.syncAfterReconnect();
@@ -1270,6 +1275,8 @@ export class Worker {
   private startSync(dayNow: DayRecord, closeAt: Date): void {
     if (!this.backgroundReady("risk")) return;
     this.lastSync = this.d.now().getTime();
+    // Item 1 of 2026-11-16 (group 1, round 1): any full sync that starts after a reconnect is the sync owed for it (never two in a row).
+    this.reconnectSyncOwed = false;
     const risk = this.riskDeps();
     const protect = () => this.protectNow(closeAt);
     const streamLive = this.orderStreamLive();
@@ -1361,6 +1368,8 @@ export class Worker {
       this.inflight.delete("risk");
       // A regular sync that fell due while this look ran (its pass found "risk" held) starts now.
       if (this.d.now().getTime() - this.lastSync >= SYNC_EVERY_MS && this.sessionForSync && this.d.now() < this.sessionForSync.closeAt) this.startSync(this.sessionForSync.day, this.sessionForSync.closeAt);
+      // Item 1 of 2026-11-16 (group 1, round 1): a sync owed after a reconnect that came while this look ran starts now.
+      else if (this.reconnectSyncOwed) this.syncAfterReconnect();
     }
   }
 
@@ -1978,15 +1987,25 @@ export class Worker {
     // stored as working although Alpaca has filled them (on 2026-11-16 it said 3,481 filled; Alpaca and the records later said 3,483). Those
     // are looked up at Alpaca by client id: at most MORNING_LINE_LOOKUPS, once each, no retry (a failed lookup keeps the stored status and the
     // line says how many it could not confirm). Messaging only; read-only lookups while paused and flat.
+    // Group 2, round 1: the lookups run inside the mid-day step, so they stop after MORNING_LINE_LOOKUP_MS in all (each one is also cut
+    // off at what is left of that time; the request itself may finish later, unread): the step is never held up longer than that.
     const notFinal = stored.filter((o) => isSentEntry(o) && (o.status === "intent" || o.status === "submitted"));
     let lateFilled = 0;
+    let looked = 0;
     let unconfirmed = 0;
+    const lookDeadline = Date.now() + MORNING_LINE_LOOKUP_MS;
     for (const o of notFinal.slice(0, MORNING_LINE_LOOKUPS)) {
-      const a = await this.d.broker.findOrderByClientId(o.clientOrderId).catch(() => undefined);
+      const left = lookDeadline - Date.now();
+      if (left <= 0) break;
+      looked++;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cutOff = new Promise<undefined>((res) => (timer = setTimeout(() => res(undefined), left)));
+      const a = await Promise.race([this.d.broker.findOrderByClientId(o.clientOrderId).catch(() => undefined), cutOff]);
+      clearTimeout(timer);
       if (a === undefined) unconfirmed++;
       else if (a && a.status === "filled") lateFilled++;
     }
-    unconfirmed += Math.max(0, notFinal.length - MORNING_LINE_LOOKUPS);
+    unconfirmed += notFinal.length - looked;
     const filled = stored.filter((o) => o.status === "filled").length + lateFilled;
     // Michael's item 3 of 2026-11-13 (afternoon): entries Alpaca refused (status "failed": a definite refusal, nothing sent) shown apart.
     const refused = stored.filter((o) => o.status === "failed").length;

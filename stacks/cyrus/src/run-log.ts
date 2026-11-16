@@ -23,6 +23,9 @@ export const STORED_INFO_EVENTS = new Set([
   "order_stream",
   "order_stream_reconnect_sync",
   "lost_exit_fast_ended",
+  // Item 3 of 2026-11-16 (group 2, round 1): a missing-exit sale (the fast sale's too) that stood aside for a sale of the whole account or
+  // the close-out, with its symbol (the stored `liquidation_result` row has none).
+  "unprotected_position_yielded",
   "order_stream_started",
   // Michael's decision of 2026-11-09 (logging only): why a sale is blocked, and the remainder sales with the age of the order list.
   "sale_blocked",
