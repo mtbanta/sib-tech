@@ -6463,3 +6463,17 @@ Added to the speed-release proposal as item 4 (approved by Michael as written; b
 > Build and review on its own branch this afternoon, group 1 and group 2, up to 8 rounds each. Nothing deploys during market hours without my written yes. After the close, add the end-of-day findings and deploy before 7:30 AM Tuesday only if both groups pass. Never print any token or key.
 
 Built on branch `speed-2026-11-16` from `main` (v24). Proposal: `builds/c2-proposal-speed-2026-11-16.md`. Review rounds are numbered "speed release, round n".
+
+### Speed release, ruling 3: Alpaca's documentation, and the 5 to 10 second fill study (read only, 2026-11-16 afternoon)
+
+- **"Immediate or cancel" on brackets: not allowed.** Alpaca's documentation, read 2026-11-16, https://docs.alpaca.markets/docs/orders-at-alpaca, "Bracket Orders" ("Additional bracket order details include"): "time_in_force must be day or gtc." OTO orders: "the rest of requirements are the same as the bracket orders" (so day or gtc, by that sentence). OCO: no statement (exit-only, not used for entries). The order reference (https://docs.alpaca.markets/reference/postorder) lists ioc among equity time-in-force values without saying which order classes accept it, and the "Order Types vs Supported Time in Force" table marks IOC for whole-share market and limit orders "Yes*" ("Please contact the sales team for any TIF marked with a*"). So the 5 second cancel cannot be handed to Alpaca on a bracket.
+- **How many of this morning's 4,724 cancelled entries would have filled between 5 and 10 s** (Alpaca's IEX trades and quotes per symbol, 14:44:50 to 16:30:30 UTC; rules calibrated on the 3,483 entries that filled and on the cancelled entries' own live windows):
+
+| Rule | Would have filled, 5 to 10 s | Share of cancelled | Agrees with real fills | False alarms |
+| --- | --- | --- | --- | --- |
+| An IEX trade at or below the limit | 867 | 18.4% | 60.8% | 13.9% |
+| An IEX trade below the limit | 448 | 9.5% | 41.7% | 2.6% |
+| The IEX ask at or below the limit at any moment | 1,047 | 22.2% | 98.4% | 12.0% |
+| The IEX ask at or below the limit for 500 ms or more (best) | 829 | 17.5% | 92.4% | 2.7% |
+
+  Best estimate: about 780 (about 16.6 percent of the cancelled entries, 9.5 percent of all entries; a range of about 15 to 20 percent across cut-offs). Fills came a median of about 0.8 s after the IEX ask reached the limit (measured). It holds the rest of the morning fixed (a 10 s wait would change the budget, the gate and which entries were sent), uses IEX only, and is one day. For option B later. Scripts: the scratchpad `fill-study` folder (not kept in the repo).
