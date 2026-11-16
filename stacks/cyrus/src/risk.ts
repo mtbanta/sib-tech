@@ -937,7 +937,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
     await ctx.loop.act(id, "missing-exit sale", async () => {
       if (!stillProtect()) return;
       const c = remainderStop !== null && timedOutIds.length === 0
-        ? await inTry(d, mem, s, due.go, "remainder", (cheap) => timedCleanup(d, day, mem, s, o, "bare", undefined, { stopPrice: remainderStop, stopCancelledAt: stopLeg(o)?.canceledAt ?? null, ...(cheap ? { cheap } : {}) }))
+        ? await inTry(d, mem, s, due.go, "remainder", (cheap) => timedCleanup(d, day, mem, s, o, "bare", undefined, { stopPrice: remainderStop, stopCancelledAt: stopLeg(o)?.canceledAt ?? null, ...(cheap ? { cheap } : {}) }), true)
         : await inTry(d, mem, s, due.go, "missing-exit sale", (cheap) => timedCleanup(d, day, mem, s, o, "missing", undefined, timedOutIds.length > 0 ? { alsoCancel: timedOutIds, alsoCancelStops: timedOutShown.map((x) => x.clientOrderId) } : cheap ? { cheap } : {}));
       if (c.attempted) ctx.unprotected.push(s.symbol);
       return c.recheckAt !== undefined ? { recheckAt: c.recheckAt, ...(c.room ? { room: c.room } : {}) } : undefined;
@@ -1024,7 +1024,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
   };
   await ctx.loop.act(id, "remainder", async () => {
     if (!stillProtect()) return;
-    const c = await inTry(d, mem, s, stuckDue.go, "remainder", (cheap) => timedCleanup(d, day, mem, s, o, "bare", onSellSent, { stopPrice: bare.stop.stopPrice ?? s.stopPrice, stopCancelledAt: cancelTime, ...(cheap ? { cheap } : {}) }));
+    const c = await inTry(d, mem, s, stuckDue.go, "remainder", (cheap) => timedCleanup(d, day, mem, s, o, "bare", onSellSent, { stopPrice: bare.stop.stopPrice ?? s.stopPrice, stopCancelledAt: cancelTime, ...(cheap ? { cheap } : {}) }), true);
     if (c.attempted) ctx.unprotected.push(s.symbol);
     if (!c.stuck) mem.bareSeen.delete(s.clientOrderId);
     return c.recheckAt !== undefined ? { recheckAt: c.recheckAt, ...(c.room ? { room: c.room } : {}) } : undefined;
@@ -1047,7 +1047,7 @@ function backoffStuck(mem: SyncMemory, symbol: string, clientOrderId: string, no
 
 // A retry's reservation (the redesign of 2026-11-14): what `inTry` reserves when the try starts. Item 1 of the speed release: `cheap`, the
 // cheaper path of an ordinary stuck retry, and why the path was chosen (logged with the retry).
-type TrySpec = { n: number; timedOut: boolean; cheap?: boolean; why?: string };
+export type TrySpec = { n: number; timedOut: boolean; cheap?: boolean; why?: string };
 // Group 1, round 4 of part 2: what a P1 try of `n` requests waiting for room will ask the budget, with the look's two reads (the order list
 // and the positions) ahead of it, as `roomWaitUntil` counts them. The loop checks it locally (no request) before it looks again.
 // Item 4 of the speed release: an ordinary stuck retry's room need carries its key (its entry's client order id), so the loop's local room
@@ -1115,11 +1115,22 @@ function waitForRoom(d: RiskDeps, mem: SyncMemory, st: StuckEntry | undefined, c
 
 // Runs one try: inside its P1 reservation (a retry), taken now, or counted as a first try. The reservation ends with the try. A retry that
 // finds no room now (another try took it since the walk looked) sends nothing and waits for room.
-// Item 1 of the speed release: `fn` is told whether the try takes the cheap path. A cheap retry whose live order updates dropped since it was
-// decided takes today's full path, with its reservation. Each retry logs the path it took and what it sent (`stuck_retry`, logging only).
-async function inTry(d: RiskDeps, mem: SyncMemory, s: OrderRecord, spec: TrySpec | null, label: string, fn: (cheap: boolean) => Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }>): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number; room?: RoomNeed }> {
+// Item 1 of the speed release: the path a retry takes when it starts, so its reservation always matches what it can send. A cheap retry
+// whose live order updates dropped since it was decided, or whose try places a fresh stop for a remainder (A4: the liquidator never takes
+// the one-read path with a stop to place, so the try could send up to 13 against the 7 reserved), takes today's full path and reserves for
+// it. The second case cannot come about from the walk today (both choices are made from the same stuck record), so this is a guard.
+export function startingPath(spec: TrySpec, live: boolean, placesFreshStop: boolean): TrySpec {
+  if (!spec.cheap) return spec;
+  if (!live) return { n: STUCK_TRY_REQUESTS, timedOut: false, cheap: false, why: "the live order updates dropped before the try started" };
+  if (placesFreshStop) return { n: STUCK_TRY_REQUESTS, timedOut: false, cheap: false, why: "it would place a fresh stop for a remainder" };
+  return spec;
+}
+
+// Item 1 of the speed release: `fn` is told whether the try takes the cheap path (`startingPath`). Each retry logs the path it took and what
+// it sent (`stuck_retry`, logging only). `placesFreshStop`: the try is a remainder's, which places a fresh stop (A4).
+async function inTry(d: RiskDeps, mem: SyncMemory, s: OrderRecord, spec: TrySpec | null, label: string, fn: (cheap: boolean) => Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }>, placesFreshStop = false): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number; room?: RoomNeed }> {
   if (!spec) return withReservation(budgetOf(d, mem).first(label), () => fn(false), "first");
-  const sp: TrySpec = spec.cheap && !liveNow(d, mem) ? { n: STUCK_TRY_REQUESTS, timedOut: false, cheap: false, why: "the live order updates dropped before the try started" } : spec;
+  const sp: TrySpec = startingPath(spec, liveNow(d, mem), placesFreshStop);
   const r = budgetOf(d, mem).tryReserve("P1", sp.n, { label: sp.timedOut ? "timed-out stop try" : "stuck retry", limitRetries: sp.timedOut, ...(sp.timedOut ? {} : { minuteCap: STUCK_RETRY_MINUTE_CAP, retryKey: s.clientOrderId }) });
   const st = mem.stuck.get(s.clientOrderId);
   if (!(r instanceof Reservation)) return { attempted: true, stuck: true, recheckAt: waitForRoom(d, mem, st, s.clientOrderId, sp.timedOut, sp.n, r.why, d.now().getTime()), room: p1Room(sp.n, retryCap(sp.timedOut), s.clientOrderId) };

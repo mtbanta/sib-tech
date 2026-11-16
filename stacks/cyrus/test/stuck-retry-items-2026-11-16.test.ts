@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Liquidator, SellGate } from "../src/sells.ts";
-import { CHEAP_STUCK_TRY_REQUESTS, STUCK_RETRY_MINUTE_CAP, STUCK_TRY_REQUESTS, SyncMemory, syncOrders } from "../src/risk.ts";
+import { CHEAP_STUCK_TRY_REQUESTS, STUCK_RETRY_MINUTE_CAP, STUCK_TRY_REQUESTS, SyncMemory, startingPath, syncOrders } from "../src/risk.ts";
 import { MemoryStore } from "../src/store.ts";
 import { ensureDay } from "../src/morning.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
@@ -667,6 +667,20 @@ test("item 1: a remainder being given a fresh stop keeps today's full path, with
   assert.deepEqual({ path: rs[0].path, reserved: rs[0].reserved, why: rs[0].why }, { path: "full", reserved: STUCK_TRY_REQUESTS, why: "it would place a fresh stop for a remainder" });
   assert.ok(w.evs.some((e) => e.event === "unprotected_position" && e.asRemainder === true), "seen as a remainder to protect");
   assert.equal(w.sim.oversellAttempts, 0);
+});
+
+// Group 1's note on item 1: the path chosen and the reservation must agree. A try that places a fresh stop for a remainder never takes the
+// one-read path (the liquidator ignores it with a stop to place, and the try can send up to 13), so even if it was decided cheap it starts on
+// today's full path and reserves its 10. The walk decides both from the same stuck record, so this guard does not come into play today.
+test("item 1: the path and the reservation agree: a try that places a fresh stop starts on today's full path with today's reservation, whatever was decided", () => {
+  const cheap = { n: CHEAP_STUCK_TRY_REQUESTS, timedOut: false, cheap: true, why: "decided cheap" };
+  assert.deepEqual(startingPath(cheap, true, true), { n: STUCK_TRY_REQUESTS, timedOut: false, cheap: false, why: "it would place a fresh stop for a remainder" });
+  assert.deepEqual(startingPath(cheap, false, false), { n: STUCK_TRY_REQUESTS, timedOut: false, cheap: false, why: "the live order updates dropped before the try started" });
+  assert.equal(startingPath(cheap, true, false), cheap, "a missing-exit sale with the live updates connected stays cheap");
+  const full = { n: STUCK_TRY_REQUESTS, timedOut: false, cheap: false, why: "x" };
+  assert.equal(startingPath(full, true, true), full);
+  const timedOut = { n: 13, timedOut: true };
+  assert.equal(startingPath(timedOut, true, true), timedOut);
 });
 
 // The sell gate's rule (never sell more than is held, counting sells already open) stays as safe as today: the cheap path never trusts the
