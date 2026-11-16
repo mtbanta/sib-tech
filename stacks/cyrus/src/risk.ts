@@ -1464,6 +1464,8 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     cancelIds,
     yieldToPriority: true,
     ownEntryOnly: { maxQty: { [s.symbol]: ownShares } },
+    // Michael's mid-day build of 2026-11-16, item 2: missing-exit sales (the fast sale's too) of different symbols run side by side.
+    ...(kind === "missing" ? { sideBySide: true } : {}),
     endWhenHiddenHold: !extra.fast,
     onSellSent: sent,
     ...(protectAt !== null ? { protectWithStop: { [s.symbol]: protectAt } } : {}),

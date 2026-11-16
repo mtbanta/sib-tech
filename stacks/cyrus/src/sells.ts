@@ -210,6 +210,9 @@ export interface LiquidateOptions {
   // shares are sold in this liquidation (that entry's own shares), so a newer position on the same symbol keeps its exits and its
   // shares. The wait after the cancels ends as soon as that many shares are free, and there is no wait when nothing was cancelled.
   ownEntryOnly?: { maxQty: Record<string, number> };
+  // Michael's mid-day build of 2026-11-16, item 2: a missing-exit sale of one entry (`only` one symbol, with `ownEntryOnly`) runs side by
+  // side with such sales of other symbols, one at a time per symbol, instead of waiting in the one-at-a-time queue behind them.
+  sideBySide?: boolean;
   // Part A, step 1: end the attempt after a round in which nothing was sold and every symbol still to sell was held with no open
   // order visible (Alpaca reports fewer shares free than held, and no open sell explains it). Those symbols are returned in
   // `hiddenHold`, so the caller can retry them later without holding up its other work.
@@ -316,6 +319,9 @@ export class Liquidator {
   private readonly d: LiquidatorDeps;
   private readonly sleep: (ms: number) => Promise<void>;
   private chain: Promise<unknown> = Promise.resolve();
+  // Item 2 of 2026-11-16: the last side-by-side sale asked per symbol, and every side-by-side sale not yet finished.
+  private readonly symbolTails = new Map<string, Promise<unknown>>();
+  private readonly sideBySideTails = new Set<Promise<unknown>>();
   private running = 0;
   // Priority sales (the daily loss stop) asked for and not finished yet.
   private priorityPending = 0;
@@ -347,13 +353,32 @@ export class Liquidator {
   // One liquidation at a time: a second request waits for the first and then looks again (usually it finds the
   // account flat and has nothing to do), so two can never sell the same shares.
   // A priority sale still waits for the sale running ahead of it, but a remainder sale (`yieldToPriority`) gives way at its next step.
+  // Michael's mid-day build of 2026-11-16, item 2: the exception is a missing-exit sale of one entry (`sideBySide`, `ownEntryOnly`, `only`
+  // one symbol). It waits only for the sales asked before it on its own symbol and for any other kind of sale asked before it (`chain`), so
+  // such sales of different symbols run side by side (on 2026-11-16 at 9:55 SOFI's waited 6.6 s behind AAL's and RIOT's). Every other sale
+  // (a close-out, `flatten`, the loss stop's sale, a carried-position sale, a remainder sale) still runs alone: it waits for every
+  // side-by-side sale asked before it as well as for `chain`, and a side-by-side sale asked after it waits for it. Two sales of one symbol
+  // never run at once, and the sell gate (one at a time, and never more than is held counting open sells) checks every sell as before.
   flatten(o: LiquidateOptions): Promise<LiquidateResult> {
     this.running++;
     const other = !o.ownEntryOnly;
     if (other) this.runningOthers++;
     if (o.priority) this.priorityPending++;
-    const run = this.chain.then(() => this.run(o));
-    this.chain = run.catch(() => undefined);
+    const sym = o.sideBySide && o.ownEntryOnly && o.only?.length === 1 ? o.only[0]! : null;
+    let run: Promise<LiquidateResult>;
+    if (sym !== null) {
+      run = Promise.all([this.chain, this.symbolTails.get(sym)]).then(() => this.run(o));
+      const tail: Promise<unknown> = run.catch(() => undefined);
+      this.symbolTails.set(sym, tail);
+      this.sideBySideTails.add(tail);
+      void tail.then(() => {
+        this.sideBySideTails.delete(tail);
+        if (this.symbolTails.get(sym) === tail) this.symbolTails.delete(sym);
+      });
+    } else {
+      run = Promise.all([this.chain, ...this.sideBySideTails]).then(() => this.run(o));
+      this.chain = run.catch(() => undefined);
+    }
     return run.finally(() => {
       this.running--;
       if (other) this.runningOthers--;
