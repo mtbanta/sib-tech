@@ -6280,3 +6280,9 @@ Under Michael's decision of tonight (saved verbatim above). A normal deploy outs
 - **Monday is the redesign's first session, and a load day** (150 orders a minute in the window, the heaviest case). The daily and mid-day review briefs cover the new statistics (`requestBudget`, `protectionLoop`, `retryHold`).
 
 Paper trading only; research input for a human decision, never an instruction to act.
+
+### Monday's mid-day review wait (Michael, 2026-11-15, night), saved verbatim
+
+> proceed. Monday is a load day. Set a wait for Monday 2026-11-16: from 10:31 AM Central, check every minute until the mid-day close-out is flat, then run builds/midday-review-brief.md on v23 (include the per-source request counts, stuck retries, the hold counter and fresh-stop timings). If not flat by 11:15 AM, run it anyway and say why. Post the "done" line in commands. Read only. Never print any token or key.
+
+Set at about 10:10 PM CT Sunday as a background shell in this Claude session: it sleeps in 60 s steps until 10:31 AM CT, then each minute reads the day record's `middayFlat` (read-only transaction); it exits on `FLAT`, at 11:15 AM CT if not flat, and in any case by 11:20 AM CT (standing rule of 2026-11-13: a time limit, and a check that reads a database field rather than process names). It needs this session open and logged in, and the Mac awake (sleep is held off by `caffeinate`).
