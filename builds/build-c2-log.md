@@ -6449,3 +6449,17 @@ Group 2's round 1 on `0f38508` was stopped (item 2 not shipping today). Under Mi
 > Messaging fix for tonight's release: the bot should recognize a deploy approval line in commands ("Yes, deploy <commit> now.") and reply "Deploy approval for <commit> noted; the builder will deploy it if every check passes." instead of "I did not understand". The bot must not act on it itself; it only acknowledges. Group 2 review.
 
 Added to the speed-release proposal as item 4 (approved by Michael as written; built with tonight's release, group 2 review).
+
+## Michael's approval of the speed release (2026-11-16, about 1 PM), saved verbatim
+
+> Speed release approved, with these rulings:
+> 1. Item 1: the 1-second pass; the order check every 6 s, and every 2 s only while the live updates are down.
+> 2. Item 2, the reserve: pre-approved, use the lowest of 40, 50 or 60 that never gets a rate-limit answer in the 30-position flatten simulation. If none passes, keep 80 and tell me.
+> 3. Item 3a, option A: entries priced at the price seen plus 1 cent, load days only for now. Confirm in Alpaca's documentation that "immediate or cancel" is not allowed on brackets. Also measure, read only, how many of this morning's unfilled entries would have filled between 5 and 10 s, for option B later.
+> 4. Item 3b: only the account and positions view every 20 s while live updates are connected. The loss stop's account read stays at every 5 s.
+> 5. Item 3c: all four stuck-retry items.
+> 6. Item 3d (mid-day item 2): option (a), running sales give way at their next step once a close-out, flatten or the loss stop is asked; connect Alpaca's live remaining count into the room check; test that a flatten partway through 30 held sales starts no slower than 20ba5bd.
+> 7. Item 4: the deploy-approval acknowledgement, as written.
+> Build and review on its own branch this afternoon, group 1 and group 2, up to 8 rounds each. Nothing deploys during market hours without my written yes. After the close, add the end-of-day findings and deploy before 7:30 AM Tuesday only if both groups pass. Never print any token or key.
+
+Built on branch `speed-2026-11-16` from `main` (v24). Proposal: `builds/c2-proposal-speed-2026-11-16.md`. Review rounds are numbered "speed release, round n".
