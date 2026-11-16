@@ -6241,3 +6241,17 @@ Paper trading only; research input for a human decision, never an instruction to
 **Group 2, hold counter round 2: PASS** (no blocking findings; nothing under checks 2, 7, 10; `src` unchanged since 1cd60b5). Round 1 closed: each of its five broken copies (`minuteStrict`, `fiveStrict`, `floorStrict`, `noUnsentMinute`, `noUnsentFive`) now fails one of the new edge tests; the builder's 12 killed copies still fail; the survivors are equivalent (`noHolding`, `noP2`, `holdingUsesLe`) or cannot happen in production (`fiveIgnoresFlag`: no production P2 try passes `fiveSec: false`). Its reference model, seed 41, 320,000 steps: 0 decision differences against `fa357df`, every `retryHold` number exact. The proposal's corrected figures, the briefs' source for per-class refusals, item 4's credit, the log and the state all match the record. Full suite 853 of 853, type check clean. Note, applied after the pass (a document only): the proposal now says "as far as the log records, no one measured v22".
 
 **Standing:** the hold counter has passed group 2 (Michael's choice of review). It deploys with the redesign at Monday's mid-day pause, not before, with Michael's written yes in `commands` and through `tools/midday-deploy.mjs`, otherwise Monday night. The deploy commit is the head of `redesign-2026-11-14-p2`. Its `src` is `fa357df` (group 1 PASS, rulings round 4; group 2 PASS, rulings round 7) plus the counter in `src/request-budget.ts` (group 2 PASS, hold counter round 2). Part 1 (`c414720`) is unchanged and can still ship alone. Paper trading only; research input for a human decision, never an instruction to act.
+
+## Michael's decision of 2026-11-15 (Sunday night): deploy the redesign tonight, saved verbatim
+
+> Thanks for the correction; the v22 comparison test is not needed.
+>
+> Deploy the redesign tonight, not Monday mid-day:
+> 1. Run one group 1 review round on the counter change now (up to 3 if needed).
+> 2. If it passes, deploy that commit tonight. If not, deploy the redesign without the counter (d8a0369).
+> 3. Follow the deploy rules for outside market hours (flat, no open orders, reviewed commit, clean checkout). Tell me if my stop flag needs to be on first.
+> 4. After deploying: one clean start, Healthchecks up, Monday's limits post still waiting, and the "live" line naming the commit.
+> v22 stays the rollback: if Monday morning goes wrong, I will give a written yes to roll back at the mid-day pause.
+> Never print any token or key.
+
+This supersedes "not before v22 has traded Monday morning" and the Monday mid-day target for the redesign deploy. Group 1 rounds for the counter are numbered "hold counter, group 1 round n", up to 3.
