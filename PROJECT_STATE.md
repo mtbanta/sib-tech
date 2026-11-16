@@ -6,7 +6,12 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**BUILD C2: FLY RUNS RELEASE V23, THE REDESIGN (THE SHARED REQUEST BUDGET AND THE PROTECTION LOOP, WITH MICHAEL'S RULINGS OF 2026-11-14) PLUS THE HOLD COUNTER. DEPLOYED SUNDAY 2026-11-15, 9:56 PM CENTRAL, WHILE FLAT, UNDER MICHAEL'S DECISION OF THAT NIGHT. V22 IS THE ROLLBACK.** As of 2026-11-15, about 10 PM.
+**BUILD C2: MONDAY 2026-11-16 (V23, THE REDESIGN'S FIRST SESSION, LOAD DAY) MID-DAY REVIEWED. 0 RATE-LIMIT ANSWERS; HIGHEST 116 ACCEPTED ORDERS A MINUTE (BUSIEST 60 S 121); MID-DAY CLOSE-OUT FLAT AT 10:30:13. DOES NOT HOLD ON ONE EVENT: AT 9:55, AFTER A 2 S ORDER-STREAM RECONNECT, THREE LOST EXITS WENT 16 TO 22 S WITHOUT EXITS. THE MORNING LOST 35.11 DOLLARS. PAUSED; WAITING FOR MICHAEL (`go` OR NOTHING).** As of 2026-11-16, about 10:45 AM.
+- Remaining below 80 in 10 minutes, lowest 61 (fast-sale bursts at 8:46 and 9:01; the rest inconclusive). No stuck retries, no P1 or P2 requests, the hold counter 0 all morning; no fresh stops (1-share entries). Requests 8:45 to 10:30: entries 75 percent, first tries 5.7, routine 22. Fly: CPU balance full, no throttling, CPU at most 3.8 percent.
+- Proposed for tonight (no code): a sync at once after a stream reconnect; side-by-side missing-exit sales for different symbols; store the fast sale's "exit already filled" outcome; the morning line's count.
+- Details: `builds/build-c2-log.md`, "Monday 2026-11-16 mid-day session review". Paper only. Research input for a human decision.
+
+Earlier entry, superseded by the paragraph above: **BUILD C2: FLY RUNS RELEASE V23, THE REDESIGN (THE SHARED REQUEST BUDGET AND THE PROTECTION LOOP, WITH MICHAEL'S RULINGS OF 2026-11-14) PLUS THE HOLD COUNTER. DEPLOYED SUNDAY 2026-11-15, 9:56 PM CENTRAL, WHILE FLAT, UNDER MICHAEL'S DECISION OF THAT NIGHT. V22 IS THE ROLLBACK.** As of 2026-11-15, about 10 PM.
 - **v23:** `main` `e89feac`, stack code identical to `15dd5f7` (`fa357df` plus the hold counter). Reviews: part 1 both groups PASS (round 5); part 2 group 1 PASS (rulings round 4), group 2 PASS (rulings round 7); hold counter group 2 PASS (round 2), group 1 PASS (group 1 round 1). Image `deployment-01M7H7YPGG5W83B8R25BZWSE32`.
 - **Checks:** one clean start (start recorded 03:56:27 UTC); Healthchecks up; Alpaca flat, no open orders, none since; stop flag off; Monday 2026-11-16 approved and unchanged (load day; position 250, loss 500, trades 150, cap 1); "live" line posted in `commands`.
 - **Rollback:** v22 (image `deployment-01M7BQYK2MQR53NCTPVD0WHQMN`, code of `b1bd65c`) at Monday's mid-day pause with Michael's written yes, through `tools/midday-deploy.mjs`.
