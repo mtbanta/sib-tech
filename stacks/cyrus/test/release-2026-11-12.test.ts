@@ -998,3 +998,31 @@ test("item 3 of 2026-11-16: a fast sale that finds an exit already sold, or no f
   assert.deepEqual([e2[1]!.data.symbol, e2[1]!.data.why], ["ZZZ", "Alpaca shows no filled buy for it"]);
   assert.equal(w.sim.sellLog.length, 0);
 });
+
+// Michael's mid-day build of 2026-11-16, item 2, end to end: two load entries on different symbols whose exits Alpaca cancelled are sold
+// side by side (on 2026-11-16 at 9:55 the third waited 6.6 s behind the other two); each sale still goes through the sell gate, nothing is
+// oversold, and a remainder or whole-account sale is not made side by side (the queue tests in midday-2026-11-16.test.ts).
+test("item 2 of 2026-11-16: two lost exits on different symbols are sold side by side, through the sell gate, with no oversell", async () => {
+  const w = world();
+  const dd = await day(w);
+  w.sim.cancelMs = 1_500; // Alpaca's own cancel of the exits lands 1.5 s later
+  const a = await loadEntry(w, "AAL", 12.1, 154);
+  const b = await loadEntry(w, "SOFI", 26.4, 194);
+  const fillAt = w.sim.simMs;
+  for (const id of [a, b]) for (const l of entryOf(w, id).legs) void w.sim.cancelOrder(l.id);
+  const rows = await w.store.listOrders(D);
+  const ra = rows.find((r) => r.clientOrderId === a)!;
+  const rb = rows.find((r) => r.clientOrderId === b)!;
+  // When each sale (the whole liquidation, through its wait for the fill) ended, on the simulator's clock.
+  const ends: Array<{ symbol: string; at: number }> = [];
+  const flatten = w.liquidator.flatten.bind(w.liquidator);
+  (w.liquidator as any).flatten = (o: any) => flatten(o).then((r: any) => (ends.push({ symbol: o.only[0], at: w.sim.simMs }), r));
+  await Promise.all([fastLostExitSale(w.risk, dd, w.memory, ra, fillAt), fastLostExitSale(w.risk, dd, w.memory, rb, fillAt)]);
+  assert.deepEqual(w.sim.sellLog.map((x) => x.symbol).sort(), ["AAL", "SOFI"]);
+  const firstEnd = Math.min(...ends.map((e) => e.at));
+  const secondSent = Math.max(...w.sim.sellLog.map((x) => x.at));
+  assert.ok(secondSent < firstEnd, `the second sale was sent (${secondSent - fillAt} ms) before the first sale ended (${firstEnd - fillAt} ms): side by side, not one after the other`);
+  w.sim.advance(3_000);
+  assert.equal(w.sim.heldQty("AAL") + w.sim.heldQty("SOFI"), 0);
+  assert.equal(w.sim.oversellAttempts, 0);
+});
