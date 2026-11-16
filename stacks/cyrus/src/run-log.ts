@@ -21,6 +21,8 @@ export const STORED_INFO_EVENTS = new Set([
   "order_record_update_failed",
   // The live order updates connecting (every day since the speed release).
   "order_stream",
+  "order_stream_reconnect_sync",
+  "lost_exit_fast_ended",
   "order_stream_started",
   // Michael's decision of 2026-11-09 (logging only): why a sale is blocked, and the remainder sales with the age of the order list.
   "sale_blocked",

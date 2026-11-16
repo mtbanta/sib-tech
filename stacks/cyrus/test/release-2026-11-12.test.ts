@@ -977,3 +977,24 @@ test("A and C: in the afternoon load window the same 1-share limit entries get t
   assert.deepEqual(sim.sellLog.map((x) => [x.symbol, x.qty]), [["RIOT", 1]]);
   assert.equal(sim.oversellAttempts, 0);
 });
+
+// Michael's mid-day build of 2026-11-16, item 3: the fast sale's two silent endings are stored (`lost_exit_fast_ended`), so every
+// `lost_exit_fast_start` has an outcome (on 2026-11-16, 24 of 68 had none: their own exit had filled first).
+test("item 3 of 2026-11-16: a fast sale that finds an exit already sold, or no filled buy at Alpaca, stores why it ended", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await loadEntry(w, "DKNG", 35.7, 357);
+  w.sim.fillExit(id, "take_profit", 35.71);
+  const row = (await w.store.listOrders(D)).find((r) => r.clientOrderId === id)!;
+  await fastLostExitSale(w.risk, dd, w.memory, row, w.sim.simMs);
+  const ended = w.events.filter((e) => e.event === "lost_exit_fast_ended");
+  assert.equal(ended.length, 1);
+  assert.deepEqual([ended[0]!.data.symbol, ended[0]!.data.why, ended[0]!.data.exitFilledQty], ["DKNG", "an exit already sold its shares", 1]);
+  assert.equal(w.sim.sellLog.length, 0, "nothing sold, as before");
+  const ghost = { ...row, clientOrderId: clientOrderIdFor(D, "ZZZ", 1), symbol: "ZZZ" };
+  await fastLostExitSale(w.risk, dd, w.memory, ghost, w.sim.simMs);
+  const e2 = w.events.filter((e) => e.event === "lost_exit_fast_ended");
+  assert.equal(e2.length, 2);
+  assert.deepEqual([e2[1]!.data.symbol, e2[1]!.data.why], ["ZZZ", "Alpaca shows no filled buy for it"]);
+  assert.equal(w.sim.sellLog.length, 0);
+});

@@ -37,6 +37,9 @@ export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryS
   let onTrade: (t: Trade) => void = () => undefined;
   // Release B: a fake of Alpaca's live order updates (only when `orderStream` is set, as main.ts always provides one).
   let onUpdate: ((u: TradeUpdate) => void) | null = null;
+  // Michael's mid-day build of 2026-11-16 (item 1): the stream's status, and the worker's status listener.
+  let orderStatus = "live";
+  let onOrderStatus: ((status: string) => void) | null = null;
   let orderStreamStarts = 0;
   let orderStreamStops = 0;
   let streamStarts = 0;
@@ -58,7 +61,7 @@ export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryS
     log: opts.log as any,
     ...(opts.midday === false ? { middayCycle: false } : {}),
     ...(opts.loadAfternoon ? { loadAfternoon: true } : {}),
-    ...(opts.orderStream ? { makeOrderStream: (cb: (u: TradeUpdate) => void): StreamLike => { onUpdate = cb; return { start: () => void orderStreamStarts++, stop: () => void orderStreamStops++, status: () => "live" }; } } : {}),
+    ...(opts.orderStream ? { makeOrderStream: (cb: (u: TradeUpdate) => void, st?: (status: string) => void): StreamLike => { onUpdate = cb; onOrderStatus = st ?? null; return { start: () => void orderStreamStarts++, stop: () => void orderStreamStops++, status: () => orderStatus }; } } : {}),
   });
   return {
     store, broker, bot, worker, pings, governor,
@@ -71,6 +74,8 @@ export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryS
     counts: () => ({ streamStarts, streamStops, screens, orderStreamStarts, orderStreamStops }),
     timers: () => timers.map((t) => t.due),
     // Delivers one live order update to the worker (release B), then lets it finish.
+    // Sets the fake order stream's status and tells the worker (a drop is "reconnecting", then "live" again).
+    orderStreamStatus: async (status: string) => { orderStatus = status; onOrderStatus?.(status); await settle(); },
     orderUpdate: async (u: TradeUpdate) => { if (!onUpdate) throw new Error("no order stream connected"); onUpdate(u); await settle(); },
     screenOpts,
     said: (ch: string) => bot.posts.filter((p) => p.channel === ch).map((p) => p.text),

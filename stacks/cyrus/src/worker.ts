@@ -77,7 +77,8 @@ export interface WorkerDeps {
   loadAfternoon?: boolean;
   // Alpaca's live order updates (order-stream.ts), connected from "Armed" to the close on every day (the speed release; release B
   // had them on load days only). Optional: without it the order sync alone frees symbols, as before.
-  makeOrderStream?: (onUpdate: (u: TradeUpdate) => void) => StreamLike & { reconnects?: () => number };
+  // `onStatus` (Michael's mid-day build of 2026-11-16, item 1): the stream's status as it changes, so a reconnect can bring an order sync.
+  makeOrderStream?: (onUpdate: (u: TradeUpdate) => void, onStatus?: (status: string) => void) => StreamLike & { reconnects?: () => number };
   sleep?: (ms: number) => Promise<void>;
   log?: (level: "info" | "warn" | "error", event: string, data?: Record<string, unknown>) => void;
   // The timer for the order sync brought forward by a stop's cancel (default setTimeout; the tests run it by hand).
@@ -99,6 +100,8 @@ export const CARRIED_PHASE = "carried";
 // while Alpaca's request budget is below this, so the summary never runs the bucket low and never causes a rate-limit answer.
 export const SUMMARY_MIN_BUDGET = 100;
 export const SYNC_EVERY_MS = 10_000;
+// Michael's mid-day build of 2026-11-16, item 4: the most entries the morning line looks up at Alpaca (those still stored as working).
+export const MORNING_LINE_LOOKUPS = 20;
 // The speed release, item 8: the gate's cached account and positions are read every 10 seconds while the live order updates are
 // connected (they keep the positions current in between), and every 5 seconds, as before, while they are not. 10, not the
 // proposal's 15: the gate refreshes a view older than 15 seconds inside the order path, and passes run every 5 seconds.
@@ -277,6 +280,10 @@ export class Worker {
   private readonly digestTakeProfits = new Set<string>();
   private syncAgain = false;
   private sessionForSync: { day: DayRecord; closeAt: Date } | null = null;
+  // Michael's mid-day build of 2026-11-16, item 1: the live updates went down (a reconnect is under way), and a sync is owed once they are
+  // live again but could not start yet because another sync was running.
+  private orderStreamWasDown = false;
+  private reconnectSyncOwed = false;
   private lastRawSampleAt = 0;
   private rawSample: string | null = null;
   // Decision 4 of 2026-11-06 (shadow only): the estimate's own book of cash and shares, and each loss-stop read's comparison.
@@ -566,8 +573,40 @@ export class Worker {
           void this.say("alerts", `Step "${name}" failed: ${(err as Error).message.slice(0, 150)}`).catch(() => undefined);
         }
       })
-      .finally(() => this.inflight.delete(name));
+      .finally(() => {
+        this.inflight.delete(name);
+        // Item 1 of 2026-11-16: a sync owed after a reconnect starts as soon as the sync that was running then has ended.
+        if (name === "risk" && this.reconnectSyncOwed) this.syncAfterReconnect();
+      });
     return true;
+  }
+
+  // Michael's mid-day build of 2026-11-16, item 1: an order sync at once after Alpaca's live updates reconnect, because updates sent while
+  // they were down are lost (on 2026-11-16 at 9:54:56 three fills were missed, so the 5 second cancels went to filled entries and Alpaca
+  // cancelled their exits; the regular sync found them 14 s later). One sync per reconnect, routine work; it never repeats on its own (a
+  // reconnect itself waits 2, 4, 8, 16, then 30 s, order-stream.ts), so it adds no retry loop. Only in the session; never doubled: if a
+  // sync is running it is owed and starts when that one ends.
+  private onOrderStreamStatus(status: string): void {
+    if (status === "reconnecting") {
+      this.orderStreamWasDown = true;
+      return;
+    }
+    if (status !== "live" || !this.orderStreamWasDown) return;
+    this.orderStreamWasDown = false;
+    this.reconnectSyncOwed = true;
+    this.d.log?.("info", "order_stream_reconnect_sync", { syncRunning: this.inflight.has("risk") });
+    this.syncAfterReconnect();
+  }
+
+  private syncAfterReconnect(): void {
+    const s = this.sessionForSync;
+    if (!s || this.d.now() >= s.closeAt) {
+      this.reconnectSyncOwed = false;
+      return;
+    }
+    if (!this.backgroundReady("risk")) return; // owed: starts when the running sync ends (`background`), or at the next regular sync
+    this.reconnectSyncOwed = false;
+    this.startSync(s.day, s.closeAt);
   }
 
   // Whether `background(name, ...)` would start now (not running, and not waiting out a failure's backoff).
@@ -1727,10 +1766,15 @@ export class Worker {
       log: (e, data) => this.d.log?.("info", e, data),
     });
     const handler = this.orderHandler;
-    this.orderStream = this.d.makeOrderStream!((u) => {
-      handler.handle(u).catch((err) => this.d.log?.("error", "order_stream_update_failed", { error: (err as Error).message.slice(0, 200) }));
-      this.afterOrderUpdate(u);
-    });
+    this.orderStreamWasDown = false;
+    this.reconnectSyncOwed = false;
+    this.orderStream = this.d.makeOrderStream!(
+      (u) => {
+        handler.handle(u).catch((err) => this.d.log?.("error", "order_stream_update_failed", { error: (err as Error).message.slice(0, 200) }));
+        this.afterOrderUpdate(u);
+      },
+      (status) => this.onOrderStreamStatus(status),
+    );
     this.orderStream.start();
     this.d.log?.("info", "order_stream_started", {});
   }
@@ -1930,7 +1974,20 @@ export class Worker {
     const now = this.d.now();
     const stored = await this.d.store.listOrders(date).catch(() => []);
     const sent = stored.filter(isSentEntry).length;
-    const filled = stored.filter((o) => o.status === "filled").length;
+    // Michael's mid-day build of 2026-11-16, item 4: the line is written right after the close-out is flat, when a few entries can still be
+    // stored as working although Alpaca has filled them (on 2026-11-16 it said 3,481 filled; Alpaca and the records later said 3,483). Those
+    // are looked up at Alpaca by client id: at most MORNING_LINE_LOOKUPS, once each, no retry (a failed lookup keeps the stored status and the
+    // line says how many it could not confirm). Messaging only; read-only lookups while paused and flat.
+    const notFinal = stored.filter((o) => isSentEntry(o) && (o.status === "intent" || o.status === "submitted"));
+    let lateFilled = 0;
+    let unconfirmed = 0;
+    for (const o of notFinal.slice(0, MORNING_LINE_LOOKUPS)) {
+      const a = await this.d.broker.findOrderByClientId(o.clientOrderId).catch(() => undefined);
+      if (a === undefined) unconfirmed++;
+      else if (a && a.status === "filled") lateFilled++;
+    }
+    unconfirmed += Math.max(0, notFinal.length - MORNING_LINE_LOOKUPS);
+    const filled = stored.filter((o) => o.status === "filled").length + lateFilled;
     // Michael's item 3 of 2026-11-13 (afternoon): entries Alpaca refused (status "failed": a definite refusal, nothing sent) shown apart.
     const refused = stored.filter((o) => o.status === "failed").length;
     const account = await this.d.broker.getAccount().catch(() => null);
@@ -1948,7 +2005,7 @@ export class Worker {
       (hold
         ? `\`hold\` is set: after a deploy I stay paused. Send \`go\` to trade until ${last} (the last entry).`
         : `Next: after a deploy before ${until} I resume on my own under today's limits, unless you send \`hold\`. Without a deploy, send \`go\` to resume${sameEnd ? ` (last entry ${last})` : `; from ${until} I stay paused unless you send \`go\` (last entry ${last})`}.`);
-    return `Morning (open to ${centralClock(pauseAt)}): ${sent} ${sent === 1 ? "entry" : "entries"} sent (${filled} filled)${refused > 0 ? `, ${refused} refused by Alpaca` : ""}; ${plText}; rate-limit answers from Alpaca: ${this.d.governor.stats().rateLimitAnswers}. ${next}`;
+    return `Morning (open to ${centralClock(pauseAt)}): ${sent} ${sent === 1 ? "entry" : "entries"} sent (${filled} filled${unconfirmed > 0 ? `, ${unconfirmed} not yet confirmed` : ""})${refused > 0 ? `, ${refused} refused by Alpaca` : ""}; ${plText}; rate-limit answers from Alpaca: ${this.d.governor.stats().rateLimitAnswers}. ${next}`;
   }
 
   // After the mid-day close-out is flat: the start-up decision (once per start, after this start's first read of commands, so a

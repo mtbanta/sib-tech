@@ -94,10 +94,11 @@ const worker = new Worker({
     return { start: () => s.start(), stop: () => s.stop(), status: () => status, setSymbols: (list: string[]) => s.setSymbols(list) };
   },
   // Release B: Alpaca's live order updates, used on a load day only (the worker decides when). A listener: it never sends orders.
-  makeOrderStream: (onUpdate) => {
+  makeOrderStream: (onUpdate, onStatus) => {
     let status = "starting";
     const s = new OrderStream(settings, onUpdate, (st, detail) => {
       status = st;
+      onStatus?.(st);
       if (st === "live" || st === "connecting") logAndStore("info", "order_stream", { status: st });
       else if (st !== "stopped") logAndStore("warn", "order_stream", { status: st, detail });
     });

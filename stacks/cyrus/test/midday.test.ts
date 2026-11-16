@@ -828,3 +828,28 @@ test("Michael's decision 'Mid-day owns it': a position stuck from 10:27 across t
   assert.equal(sim.heldQty("IONQ"), 0, "sold once Alpaca freed it");
   assert.equal(r.said("alerts").filter((t) => t.includes("can't confirm a protective stop for IONQ after")).length, 0);
 });
+
+// Michael's mid-day build of 2026-11-16, item 4: the morning line counts an entry the store still shows as working but Alpaca has filled
+// (on 2026-11-16 the line said 3,481 filled; Alpaca and the records later said 3,483). At most 20 lookups, no retry; a lookup that fails
+// keeps the stored status and the line says how many it could not confirm.
+test("item 4 of 2026-11-16: the morning line counts entries Alpaca filled that the store still shows as working, and says how many it could not confirm", async () => {
+  const w = await armedDay();
+  const { sim, r } = w;
+  sim.advanceTo(z("16:00:00").getTime());
+  await hold(sim, r.store, "AAA", 1, 50);
+  // BBB: filled at Alpaca, still stored as submitted (its fill not recorded yet).
+  const bbb = clientOrderIdFor(D, "BBB", 1);
+  await sim.submitEntry({ symbol: "BBB", qty: 1, stopPrice: 9, takeProfitPrice: 11, referencePrice: 10, clientOrderId: bbb });
+  sim.fillEntry(bbb, 10);
+  await r.store.insertOrder({ clientOrderId: bbb, tradeDate: D, symbol: "BBB", qty: 1, referencePrice: 10, stopPrice: 9, takeProfitPrice: 11, status: "submitted", alpacaOrderId: "x".repeat(36), filledQty: null, filledAvgPrice: null, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+  const wk: any = r.worker;
+  const dd = (await r.store.getDay(D))!;
+  const line: string = await wk.middayMorningLine(D, dd, z("16:30:00"));
+  assert.ok(line.includes("2 entries sent (2 filled)"), line);
+  // A lookup that fails: the stored status stands and the line says so.
+  const orig = sim.findOrderByClientId.bind(sim);
+  (sim as any).findOrderByClientId = async () => { throw new Error("lookup failed (test)"); };
+  const line2: string = await wk.middayMorningLine(D, dd, z("16:30:00"));
+  assert.ok(line2.includes("2 entries sent (1 filled, 1 not yet confirmed)"), line2);
+  (sim as any).findOrderByClientId = orig;
+});
