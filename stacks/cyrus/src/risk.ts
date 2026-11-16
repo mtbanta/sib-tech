@@ -122,6 +122,13 @@ export const OLD_LOOKUPS_PER_SYNC = 4;
 // (no slower than the normal-day sync of v9). An entry whose exit Alpaca just reported cancelled, expired or rejected (live updates,
 // `mustLook`) is looked up on the very next sync, outside this budget, so the 3 second stop-gap sale also reaches an older entry.
 export const OLD_LOOKUP_EVERY_MS = 30_000;
+// Michael's answer of 2026-11-16 on the speed release, 3 (a): "when budget room frees up, also look up waiting positions older than 10 minutes".
+// A look made because an entry's room wake found room (its try has room now) looks that entry up too when it is older than the list's
+// window (one routine request), so its retry can run: before, such a look skipped it until its 30 s lookup came, and with steady low-priority
+// demand the room was gone by then (4 of 5 such positions got no retry in 10 minutes). Bounded: at most once every ROOM_LOOKUP_GAP_MS per
+// entry (its retry cannot come more often than every 2 s, STUCK_RETRY_MIN_GAP_MS), and only for a look its room wake started; room wakes
+// themselves fire only when the shared budget has room, and wait longer after each refusal (0.5, 1, 2, then 4 s).
+export const ROOM_LOOKUP_GAP_MS = 2_000;
 
 // Release 1 of 2026-11-09 (Michael's approval of parts A and C, builds/c2-proposal-2026-11-09.md): a cleanup sale that finds the
 // shares held with no open order visible is tried again after 5 seconds, then 10, 20, and at most every 30 (part A, step 1), so a
@@ -215,6 +222,8 @@ export class SyncMemory {
   readonly oldLookedAt = new Map<string, number>();
   // Entries (client ids) whose exit leg the live updates just reported cancelled, expired or rejected: looked up on the next sync.
   readonly mustLook = new Set<string>();
+  // Michael's answer of 2026-11-16, 3 (a): when each older entry was last looked up for its room wake (ROOM_LOOKUP_GAP_MS).
+  readonly roomLookedAt = new Map<string, number>();
   // Release 1 of 2026-11-09: entries (client ids) whose cleanup sale could not sell their shares, with the retry and alert state.
   readonly stuck = new Map<string, StuckEntry>();
   // The redesign of 2026-11-14, part 1: the shared request budget when the deps bring none (a test's own memory; the worker passes its own).
@@ -524,6 +533,9 @@ export interface SyncOptions {
   // A look of the loop: only these entries are walked and looked up; everything else (which entries are open, the newest per symbol, what is
   // forgotten) is still worked out from every open entry.
   only?: ReadonlySet<string>;
+  // A look of the loop for these entries' room wakes (their tries have room now): each one older than the list's window is looked up too,
+  // at most once every ROOM_LOOKUP_GAP_MS (Michael's answer of 2026-11-16, 3 (a)).
+  roomLookups?: ReadonlySet<string>;
 }
 
 // Updates stored entries from Alpaca by looking only at orders newer than the oldest entry still being watched
@@ -599,8 +611,11 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   // Item 3: open entries made before the window read above are looked up by id, a few per sync, oldest look first.
   if (opts.streamLive) {
     const older = active.filter((s) => createdMs(s) < fromMs && !byClientId.has(s.clientOrderId) && (!opts.only || opts.only.has(s.clientOrderId)));
-    const must = older.filter((s) => mem.mustLook.has(s.clientOrderId));
-    const due = older.filter((s) => !mem.mustLook.has(s.clientOrderId) && nowMs - (mem.oldLookedAt.get(s.clientOrderId) ?? 0) >= OLD_LOOKUP_EVERY_MS);
+    // Michael's answer of 2026-11-16, 3 (a): an entry whose room wake found room is looked up now too (at most every ROOM_LOOKUP_GAP_MS).
+    const roomDue = (s: OrderRecord): boolean => opts.roomLookups?.has(s.clientOrderId) === true && nowMs - (mem.roomLookedAt.get(s.clientOrderId) ?? 0) >= ROOM_LOOKUP_GAP_MS;
+    const must = older.filter((s) => mem.mustLook.has(s.clientOrderId) || roomDue(s));
+    for (const s of must) if (opts.roomLookups?.has(s.clientOrderId)) mem.roomLookedAt.set(s.clientOrderId, nowMs);
+    const due = older.filter((s) => !must.includes(s) && nowMs - (mem.oldLookedAt.get(s.clientOrderId) ?? 0) >= OLD_LOOKUP_EVERY_MS);
     due.sort((a, b) => (mem.oldLookedAt.get(a.clientOrderId) ?? 0) - (mem.oldLookedAt.get(b.clientOrderId) ?? 0) || createdMs(a) - createdMs(b));
     const budget = Math.max(OLD_LOOKUPS_PER_SYNC, Math.ceil(older.length / 3));
     for (const s of [...must, ...due.slice(0, budget)]) {

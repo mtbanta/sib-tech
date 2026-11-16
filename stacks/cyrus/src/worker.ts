@@ -345,7 +345,7 @@ export class Worker {
     this.syncMemory.budget = this.budget;
     this.lossMemory.budget = this.budget;
     deps.governor.setSafetyHold?.(this.budget);
-    this.loop = new ProtectionLoop({ now: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}), ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {}), look: (ids, kind, extra, until) => this.look(ids, kind, extra, until), log: (e, data) => deps.log?.("info", e, data), onActionFailed: (id, label, err) => this.protectionActionFailed(id, label, err), onLagDropped: () => this.lagWaitOver(), roomAt: (need) => {
+    this.loop = new ProtectionLoop({ now: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}), ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {}), look: (ids, kind, extra, until, roomIds) => this.look(ids, kind, extra, until, roomIds), log: (e, data) => deps.log?.("info", e, data), onActionFailed: (id, label, err) => this.protectionActionFailed(id, label, err), onLagDropped: () => this.lagWaitOver(), roomAt: (need) => {
       // Group 1, round 4 of part 2: asked locally (no request): when the shared budget would grant that try with the look's reads ahead of it.
       const r = this.budget.roomFor(need.cls, need.n, true, need.reads, need.minuteCap, need.retryKey);
       return r.ok ? null : r.at;
@@ -1374,7 +1374,7 @@ export class Worker {
   // never resets the regular sync's 10 seconds. A look only for list-lag rechecks runs inside a P2 reservation of its cost (the order list's
   // pages as the last sync read them, the positions, and a lookup per older entry), as in part 1; any other look is routine work, as the
   // sync it replaces was. Without room it waits for room (entries give way meanwhile).
-  private async look(ids: ReadonlySet<string>, kind: WakeKind, extraRequests: number, untilMs = Infinity): Promise<{ outcome: "busy" | "done" | "failed" | "idle" } | { outcome: "wait"; retryAt: number }> {
+  private async look(ids: ReadonlySet<string>, kind: WakeKind, extraRequests: number, untilMs = Infinity, roomIds?: ReadonlySet<string>): Promise<{ outcome: "busy" | "done" | "failed" | "idle" } | { outcome: "wait"; retryAt: number }> {
     const s = this.sessionForSync;
     if (!s || this.d.now() >= s.closeAt) return { outcome: "idle" };
     // Group 1, round 1 of part 2: the regular sync (the record of truth, every 10 s) goes first. When it is due, it starts now and the look
@@ -1406,7 +1406,7 @@ export class Worker {
         const risk = this.riskDeps();
         const protect = () => this.protectNow(s.closeAt);
         const lossStopped = await this.lossStopInForce(s.day.tradeDate);
-        const run = () => syncOrders(risk, s.day, { protect: () => !lossStopped && protect(), streamLive: this.orderStreamLive(), middayOwnsSelling: () => this.middayOwnsSelling, loop: this.loop, only: ids });
+        const run = () => syncOrders(risk, s.day, { protect: () => !lossStopped && protect(), streamLive: this.orderStreamLive(), middayOwnsSelling: () => this.middayOwnsSelling, loop: this.loop, only: ids, ...(roomIds && roomIds.size > 0 ? { roomLookups: roomIds } : {}) });
         const synced = res ? await withReservation(res, run) : await run();
         await this.lostExitsFollowUp(s.day.tradeDate, synced.unprotected);
         await this.stopCancelFollowUp(s.day.tradeDate);

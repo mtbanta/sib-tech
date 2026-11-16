@@ -297,27 +297,26 @@ test("item 3: a retry that was granted goes to the back: on its next refusal it 
   assert.ok(retry(b, "B") instanceof Reservation, "B gets the room");
 });
 
-test("item 3: a retry not seen for more than 10 s leaves the list, so it can never block the others; one the walk saw keeps its place", () => {
+// Since Michael's answer of 2026-11-16 (3 (a)): a key leaves the list when it has not been seen for 10 s after the later of its last look and
+// the time it was told to look again, so a retry waiting long for room keeps its place (test/older-stuck-2026-11-16.test.ts).
+test("item 3: a retry not seen for more than 10 s after its time to look again leaves the list, so it can never block the others; one the walk saw keeps its place", () => {
   const clock = { t: 0 };
   const b: any = new RequestBudget({ now: () => clock.t });
   p1Minute(b, clock, 40);
   clock.t = 41_000;
-  retry(b, "A");
+  const a = retry(b, "A"); // told to look again when room returns (the 5th oldest urgent request leaves at 64 s)
+  assert.equal(a.at, 64_000);
   clock.t = 42_000;
   retry(b, "B");
   clock.t = 43_000;
   retry(b, "C");
   // A is never seen again (its entry vanished); B is seen by the walk while it waits for its time (no budget check then); C keeps looking.
-  clock.t = 50_000;
-  b.seenRetry("B");
-  clock.t = 51_000;
+  lookUntil(b, clock, 74_000, ["C"], ["B"]);
   look(b, "C");
-  assert.deepEqual(b.waitingRetries(), ["A", "B", "C"], "A was last seen exactly 10 s ago: still waiting");
-  clock.t = 51_001;
-  assert.equal(look(b, "C").why, "class", "C looks (no room yet)");
-  assert.deepEqual(b.waitingRetries(), ["B", "C"], "A, unseen for more than 10 s, was dropped; B kept its place");
-  lookUntil(b, clock, 65_000, ["C"], ["B"]);
-  assert.equal(look(b, "C").why, "turn", "B is ahead of C");
+  assert.deepEqual(b.waitingRetries(), ["A", "B", "C"], "A's time to look again was exactly 10 s ago: still waiting");
+  clock.t = 74_001;
+  assert.equal(look(b, "C").why, "turn", "C looks: B is ahead");
+  assert.deepEqual(b.waitingRetries(), ["B", "C"], "A, unseen for more than 10 s after its time, was dropped; B kept its place");
   assert.ok(retry(b, "B") instanceof Reservation, "B gets the room; a vanished A blocks nobody");
 });
 
