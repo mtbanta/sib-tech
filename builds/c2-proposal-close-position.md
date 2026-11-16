@@ -32,7 +32,7 @@ The same hold was seen at 2:55 on 2026-11-04 (two sales held 16 s) and 2026-11-1
 
 ## 2. The 2026-11-02 incident: what failed
 
-Sources: build C2 log, "### The close-out bug: what really happened (settled from the Fly logs)"; build C log, "Build C closing section (2026-11-02, evening)", "Faults found in the first paper session"; the old code in git commit `2492a71` (`stacks/cyrus/src/alpaca-trading.ts`).
+Sources: build C2 log, "### The close-out bug: what really happened (settled from the Fly logs)"; build C log, "Build C closing section (2026-11-02, evening)", "Faults found in the first paper session"; the old code in git (`stacks/cyrus/src/alpaca-trading.ts`): `closeAllPositions` in commit `2492a71`; `closePosition` added in `1d97da5` and still present at `44b1971`.
 
 - The close-out then used the **bulk call**, `DELETE /v2/positions?cancel_orders=true` (the old `closeAllPositions`).
 - At 2:55:05 PM, Alpaca answered 207 (one result per position) with an error for **all five** positions (AEM, COO, FIS, HRL, RMD). **It placed no sale, but it had already cancelled the protective stops.**

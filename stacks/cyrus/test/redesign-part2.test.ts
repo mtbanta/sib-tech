@@ -1324,8 +1324,9 @@ async function flattenPartway(flattenAfterMs: number, minutes: number) {
 // The baselines are 20ba5bd's own figures for these same runs (the one-at-a-time queue), measured by the builder with this function on a
 // clean extract of 20ba5bd on 2026-11-16: asked 20 s in, the flatten started 13.0 s later; asked 60 s in, 27.0 s later (group 1 measured 13 s
 // and 27 s). Measured at 9fd9060: 2.0 s in both (side-by-side peak 5 and 7, lowest remaining 73). Since 142cb3b (ruling 1, the order sync every 6 s) and on the
-// merged speed release: 5.0 s in both (side-by-side peak 4 and 7, lowest remaining 65, no rate-limit answer), measured by the builder on
-// 2026-11-16; the cause (more frequent syncs ahead of the flatten) is inferred, not measured.
+// merged speed release before its round 1 fixes: 5.0 s in both (side-by-side peak 4 and 7, lowest remaining 65), measured by the builder on
+// 2026-11-16; the cause (more frequent syncs ahead of the flatten) is inferred, not measured. On e78f79a (the per-round room check): 5.0 s in
+// both, side-by-side peaks 9 and 13, lowest remaining 45, no rate-limit answer (group 2, round 2).
 for (const [after, baselineMs] of [[20_000, 13_000], [60_000, 27_000]] as const) {
   test(`speed release, item 3d (Michael's ruling 6): a flatten asked ${after / 1000} s into 30 held sales starts no slower than on 20ba5bd (${baselineMs / 1000} s)`, async () => {
     const r = await flattenPartway(after, after === 20_000 ? 2 : 3);

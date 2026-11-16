@@ -191,7 +191,7 @@ export class RequestBudget {
   // The latest end among the keys.
   private holdEnd = 0;
   // Item 3 of the speed release (fair turns): the ordinary stuck retries (capped, with a key) waiting for room, in the order each first waited
-  // (set on its first refusal, kept until it is granted, forgotten, or not seen for TURN_DROP_MS), with what its try asks for and when it was
+  // (set on its first refusal, kept until it is granted, forgotten, or not seen for TURN_DROP_MS after the later of its last look and its next look time), with what its try asks for and when it was
   // last seen. Timed-out stop tries and urgent work are not in it.
   // `due`: when it was told to look again (its refusal's time). With Michael's answer of 2026-11-16 (3 (a)): a key is dropped only when it
   // has not been seen for TURN_DROP_MS after the later of its last look and that time, so a retry waiting a long time for room (an entry

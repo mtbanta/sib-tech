@@ -1555,7 +1555,7 @@ export class Worker {
       // most budgeted requests in any minute and any 5 seconds, and entries refused while a P2 try waited on its floor. Since the speed
       // release (item 2) the minute grows with Alpaca's spare: judge `mostBudgetedInMinute` against `minuteInForce.highest` (or its
       // `ceilingHighest` after the minute fell) and `mostCappedIn5s` against a quarter of `minuteInForce.highest`, not a flat 60 and 15,
-      // unless forced or overdrawn; urgent work's own `mostUrgentInMinute` and `mostUrgentIn5s` against its 60 and 15 (group 2, round 1).
+      // unless forced or overdrawn; urgent work's own `mostUrgentInMinute` against its 60, and `mostUrgentIn5s` against its 15 only in minutes with no close-out retry running (close-out retries are counted in it but do not reserve against the 5 seconds, as on 20ba5bd) (group 2, rounds 1 and 2).
       requestBudget: this.budget.takeMinute(),
       // The redesign of 2026-11-14, part 2: the protection loop this minute (looks run, list-lag looks, failed, put off while a sync ran,
       // waited for room, actions started, wakes asked for; wakes pending and actions running now).

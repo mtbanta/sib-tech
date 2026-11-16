@@ -7,7 +7,7 @@ Asked by Michael on 2026-11-16 (saved verbatim in `builds/build-c2-log.md`, "Mic
 ## The numbers everything below uses (measured this morning)
 
 - **Requests by source, 8:45 to 10:30:** entries and their 5 second cancels 12,925 (75 percent); routine reads 3,815 (22 percent; 30 to 55 a minute, median 37); first tries of safety work 987 (5.7 percent); budgeted retries (P1, P2) 0. Alpaca's clock 527 (a separate bucket).
-- **Requests per entry:** 12,925 / 8,207 = **1.58** (each entry, plus a cancel for the 58 percent that did not fill in 5 seconds). So at the peak, when the governor holds entries back to keep the reserve, **every request a minute taken from entries costs about 0.63 accepted entries a minute** (1 / 1.58), and every request a minute given back gains about 0.63.
+- **Requests per entry:** 12,925 / 8,207 = **1.57** (1.575) (each entry, plus a cancel for the 58 percent that did not fill in 5 seconds). So at the peak, when the governor holds entries back to keep the reserve, **every request a minute taken from entries costs about 0.63 accepted entries a minute** (1 / 1.57), and every request a minute given back gains about 0.63.
 - **Peak:** 116 accepted entries in the busiest calendar minute (8:49), 121 in the busiest 60 seconds; the governor held entries back 448 times (it, not the 150 ceiling, set the pace in the first 20 minutes).
 - **Routine reads, from the code:** the loss stop's account read every 5 s (12 a minute); the account and positions view every 10 s, checked on the 5 second pass, so every 10 to 15 s (about 10 a minute); settings every 30 s (2 a minute); the order sync every 10 s, also started only by the 5 second pass, so 10 to 15 s apart (about 5 a minute, 2 to 5 requests each: the order list's pages, positions, older lookups).
 - **Lost exits noticed late:** 9 `late_notice` cases, found by the order sync 6.4 to 14.1 s after Alpaca's cancel with no live report of it (6 with the stream live, 3 at the 9:54 reconnect, which v24 now covers with a sync at once).
@@ -58,7 +58,7 @@ About 4,700 runs in two harnesses: the real worker in a busy load window then Mi
 
 ### 3a. Cheaper entries (fewer expiry cancels)
 
-**Today (measured):** 42 percent of entries filled within 5 s; the other 58 percent each needed a cancel, so an entry costs 1.58 requests. The cancels also cause lost exits: an entry that fills just as its cancel lands loses both exits (25 this morning, all sold; 3 sat 16 to 22 s).
+**Today (measured):** 42 percent of entries filled within 5 s; the other 58 percent each needed a cancel, so an entry costs about 1.57 requests. The cancels also cause lost exits: an entry that fills just as its cancel lands loses both exits (25 this morning, all sold; 3 sat 16 to 22 s).
 
 **Option A (recommended to try on one load day): price entries to fill.** The load window's limit buy at or below the last price seen becomes a limit at the price seen plus 1 cent (still a limit order with its bracket at Alpaca). If the fill rate rises from 42 to about 85 percent (an estimate; to measure), cancels fall from 0.58 to about 0.15 an entry and an entry costs about 1.15 requests.
 - **Gain (estimate):** at this morning's entry request rate in the peak minutes (about 165 to 180 a minute), accepted entries rise from about 110 to the 150 ceiling (about +35 to +40 a minute), or the same entries for about 27 percent fewer requests. Lost exits from late cancels fall roughly with the cancels (about 25 to about 7 a load morning, an estimate), which also cuts protection time.

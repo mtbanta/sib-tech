@@ -106,9 +106,11 @@ test("item 4: a side-by-side sale running when `flatten` is asked gives way at i
   // A give-way is logged at info level, not as a failed sale.
   assert.ok([...yielded, ...gaveWay, ...results].every((l) => l.level === "info"));
   assert.equal(run.of("unprotected_position_failed").length + run.of("sell_failed").filter((l) => /whole account/.test(JSON.stringify(l.data))).length, 0);
-  // The database's run log keeps the yield (with its symbol and `to`) and the result (with the error). (liquidation_yielded and
-  // side_by_side_waited are logged at info level and are not in STORED_INFO_EVENTS: Fly's log only; reported, not pinned here.)
+  // The database's run log keeps the yield (with its symbol and `to`), the result (with the error), and since group 2 round 1 also
+  // liquidation_yielded and side_by_side_waited (in STORED_INFO_EVENTS).
   assert.equal(shouldStoreEvent("info", "unprotected_position_yielded"), true);
+  assert.equal(shouldStoreEvent("info", "liquidation_yielded"), true);
+  assert.equal(shouldStoreEvent("info", "side_by_side_waited"), true);
   assert.equal(shouldStoreEvent("info", "liquidation_result"), true);
 });
 
