@@ -20,7 +20,7 @@ const iso = (ms: number) => new Date(ms).toISOString();
 // to explain it, as on 2026-11-09) or whose every sale Alpaca refuses (`refused`), for `minutes`, with steady low-priority demand when `p2`
 // (a P2 try of 3 requests asked every half second). Alpaca's live remaining reaches the governor, as main.ts wires it. Returns each position's
 // try times (the start of each of its sales) and the order of all tries.
-export async function stuckWorld(o: { n: number; minutes: number; p2: boolean; shape: "hidden" | "refused"; stream?: boolean; log?: (event: string, data: any) => void; onStep?: (x: { sim: SimBroker; r: any; wk: any; tMs: number }) => void }) {
+export async function stuckWorld(o: { n: number; minutes: number; p2: boolean; shape: "hidden" | "refused"; stream?: boolean; busy?: boolean; log?: (event: string, data: any) => void; onStep?: (x: { sim: SimBroker; r: any; wk: any; tMs: number }) => void }) {
   const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
   const bot = new FakeBot();
   const holds: Array<{ until: number; res: () => void }> = [];
@@ -38,6 +38,11 @@ export async function stuckWorld(o: { n: number; minutes: number; p2: boolean; s
     r.governor.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: k, reset: null });
     prev?.(k);
   };
+  if (o.busy) {
+    // Alpaca busy (entries): the governor counts 150 requests a minute the budget did not send, so the budgeted minute stays 60 (item 2).
+    const realStats = r.governor.stats.bind(r.governor);
+    r.governor.stats = () => ({ ...realStats(), requestsLastMinute: wk.budget.inUse().minute + 150 });
+  }
   await r.at("15:00:00");
   const syms = Array.from({ length: o.n }, (_, i) => "QX" + String.fromCharCode(65 + i));
   for (const s of syms) {
@@ -362,6 +367,16 @@ test("item 3, in the worker: 5 stuck positions under steady low-priority demand 
   }
 });
 
+// The same shape while Alpaca is busy (the budgeted minute stays 60) and the live updates are down (today's full path), the case where the
+// turns alone did worst: the retry at the head of the waiting list must take the room when it returns, though it is inside its growing wait
+// for room. Measured: 117.5 s longest; with turns but without that rule 182 s; before item 3c (b995c17) 167.5 s.
+test("item 3, in the worker: while Alpaca is busy, the stuck position whose turn it is takes the room when it returns, inside its growing wait for room", async () => {
+  const w = await stuckWorld({ n: 5, minutes: 10, p2: true, shape: "hidden", busy: true });
+  assert.equal(w.rateLimited, 0);
+  assert.ok(w.longest <= 150_000, `longest wait between one position's tries ${Math.round(w.longest / 1000)} s (average ${Math.round(w.mean / 1000)} s)`);
+  assert.equal(w.wk.budget.budgetMinute(), 60, "busy: the minute stayed 60");
+});
+
 // ---------------- item 2: a retry budget that grows with spare room ----------------
 
 // A budget whose governor reports `seen.n` answers in the last 60 s, with Alpaca's remaining at `rem.n`.
@@ -588,6 +603,25 @@ test("item 1: a cheap retry whose sale waits in the sell gate past its read's on
   assert.equal(w.memory.budget!.totals.overdraft, 0);
   assert.deepEqual(w.sim.sellLog.filter((x: any) => x.symbol === "QXA").map((x: any) => x.qty), [5], "sold");
   assert.equal(w.sim.oversellAttempts, 0);
+});
+
+test("item 1: a retry whose entry still shows an exit open to cancel (a remainder's take-profit) takes today's full path at once, with the live updates connected", async () => {
+  const w = await retryWorld({ streamLive: () => true });
+  // QXA's stop is cancelled after a partial take-profit; the take-profit still rests (the remainder case, A4).
+  const entry = w.sim.orders.find((o: any) => o.clientOrderId === w.id)!;
+  for (const l of entry.legs) {
+    if (l.type === "limit") {
+      l.status = "new";
+      l.canceledAt = null;
+    }
+  }
+  w.sim.refuseStops = true; // its fresh stop is refused, then its sale too: it stays stuck
+  w.sim.refuseSellIf = (x: any) => x.symbol === "QXA";
+  await syncOrders(w.risk, w.dd, { protect: true, streamLive: true });
+  const rs = retriesOf(w.evs);
+  assert.ok(rs.length >= 1, JSON.stringify(w.evs.map((e) => e.event)));
+  assert.deepEqual({ path: rs[0].path, reserved: rs[0].reserved, why: rs[0].why }, { path: "full", reserved: STUCK_TRY_REQUESTS, why: "something of its entry's is open to cancel" });
+  assert.ok(!w.evs.some((e) => e.event === "stuck_retry_full_next"), "no cheap try first");
 });
 
 test("item 1: a cheap retry whose own lookup shows something of its entry's still open to cancel sends nothing more, and the next retry takes today's full path", async () => {

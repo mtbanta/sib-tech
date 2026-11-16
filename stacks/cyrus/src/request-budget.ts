@@ -422,6 +422,13 @@ export class RequestBudget {
     return [...this.turns.keys()];
   }
 
+  // Item 3 of the speed release: the key at the head of the waiting list (the retry whose turn it is), if any.
+  firstWaitingRetry(): string | undefined {
+    const now = this.nowMs();
+    for (const [k, w] of this.turns) if (now - w.seen > TURN_DROP_MS) this.turns.delete(k);
+    return this.turns.keys().next().value;
+  }
+
   // The older tests read and set the hold as one record. Kept as views of it: the latest end, and the most restrictive ceilings among the
   // keys (in force or not; Infinity when there is none). Setting one sets the anonymous key's.
   get retryWaitUntil(): number {

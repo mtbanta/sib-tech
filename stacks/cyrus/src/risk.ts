@@ -55,13 +55,9 @@ export interface RiskDeps {
 export const ROOM_WAIT_FIRST_MS = 500;
 export const ROOM_WAIT_MAX_MS = 4_000;
 function roomWaitUntil(d: Pick<RiskDeps, "budget" | "now" | "governor">, holder: { budget?: RequestBudget }, cls: "P1" | "P2", n: number, waits: number, nowMs: number, syncReads = 2, fiveSec = true, minuteCap?: number, retryKey?: string): number {
-  return roomWait(d, holder, cls, n, waits, nowMs, syncReads, fiveSec, minuteCap, retryKey).at;
-}
-// The same, with the moment the budget itself says room returns (`roomAt`, now when there is room now).
-function roomWait(d: Pick<RiskDeps, "budget" | "now" | "governor">, holder: { budget?: RequestBudget }, cls: "P1" | "P2", n: number, waits: number, nowMs: number, syncReads = 2, fiveSec = true, minuteCap?: number, retryKey?: string): { at: number; roomAt: number } {
   const room = budgetOf(d, holder).roomFor(cls, n, fiveSec, syncReads, minuteCap, retryKey);
   const roomAt = room.ok ? nowMs : room.at;
-  return { at: Math.max(roomAt, nowMs + Math.min(ROOM_WAIT_FIRST_MS * 2 ** Math.max(0, waits - 1), ROOM_WAIT_MAX_MS)), roomAt };
+  return Math.max(roomAt, nowMs + Math.min(ROOM_WAIT_FIRST_MS * 2 ** Math.max(0, waits - 1), ROOM_WAIT_MAX_MS));
 }
 
 // The shared request budget for these deps: the worker's, else one kept in `holder` (a test's own memory), on the deps' clock.
@@ -1084,7 +1080,16 @@ function retryDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string, nowMs: nu
   const ordinaryN = path?.cheap ? CHEAP_STUCK_TRY_REQUESTS : STUCK_TRY_REQUESTS;
   // Group 1, round 4 of part 2: any wait of a retry ends in a try that needs room for its whole try, so the loop's wake for it is a room
   // wake: checked against the budget locally, with no look (and no request) until the try would have room.
-  if (st && st.nextAt > nowMs) {
+  // Item 3 of the speed release (fair turns): the retry at the head of the shared budget's waiting list takes the room the moment it returns,
+  // even inside its growing wait for room (0.5, 1, 2, then 4 s after refusals in a row): otherwise the look the loop makes when room returns
+  // finds it not yet due, it misses its turn, and the room goes to low-priority work. Only while it waits for room (`roomWaits`, so never
+  // inside the 2 s after its last try), only at the head, and only when the budget says it has room now (a local check, no request).
+  const headWithRoom = (): boolean => {
+    if (timedOut || !st || !(st.roomWaits ?? 0)) return false;
+    const budget = budgetOf(d, mem);
+    return budget.firstWaitingRetry() === clientOrderId && budget.roomFor("P1", ordinaryN, true, 0, retryCap(timedOut), clientOrderId).ok;
+  };
+  if (st && st.nextAt > nowMs && !headWithRoom()) {
     // Item 3 of the speed release: the walk saw this retry while it waits (no budget check now), so it keeps its place in the waiting list.
     if (!timedOut) budgetOf(d, mem).seenRetry(clientOrderId);
     return { wait: st.nextAt, room: p1Room(timedOut ? TIMED_OUT_TRY_REQUESTS : ordinaryN, retryCap(timedOut), clientOrderId) };
@@ -1103,12 +1108,8 @@ function retryDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string, nowMs: nu
 // 2, then 4 s after refusals in a row (group 2, round 2 of the redesign).
 function waitForRoom(d: RiskDeps, mem: SyncMemory, st: StuckEntry | undefined, clientOrderId: string, timedOut: boolean, n: number, why: string, nowMs: number): number {
   const waits = st ? (st.roomWaits = (st.roomWaits ?? 0) + 1) : 1;
-  const { at, roomAt } = roomWait(d, mem, "P1", n, waits, nowMs, 2, true, retryCap(timedOut), clientOrderId);
-  // Item 3 of the speed release (fair turns): an ordinary stuck retry is due again when the budget says room returns. The growing wait (0.5,
-  // 1, 2, then 4 s) spaces the loop's local room checks (its room wake starts at `at`), not the try: else a look the loop makes the moment
-  // room returns finds the retry not yet due, and the position at the head of the waiting list misses its turn (the room then goes to
-  // low-priority work). A look is made only when the local check finds room, so this adds no request. A timed-out stop's try is unchanged.
-  if (st) st.nextAt = timedOut ? at : roomAt;
+  const at = roomWaitUntil(d, mem, "P1", n, waits, nowMs, 2, true, retryCap(timedOut), clientOrderId);
+  if (st) st.nextAt = at;
   if (timedOut && waits === 1) d.log?.("timed_out_try_out_of_room", { clientOrderId, why, retryInMs: at - nowMs });
   return at;
 }
