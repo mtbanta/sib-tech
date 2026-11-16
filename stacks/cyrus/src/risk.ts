@@ -51,8 +51,8 @@ export interface RiskDeps {
 // this, such a wait brought a whole sync forward about every half second, whose reads spent the refill the try was waiting for.
 export const ROOM_WAIT_FIRST_MS = 500;
 export const ROOM_WAIT_MAX_MS = 4_000;
-function roomWaitUntil(d: Pick<RiskDeps, "budget" | "now" | "governor">, holder: { budget?: RequestBudget }, cls: "P1" | "P2", n: number, waits: number, nowMs: number, syncReads = 2, fiveSec = true, minuteCap?: number): number {
-  const room = budgetOf(d, holder).roomFor(cls, n, fiveSec, syncReads, minuteCap);
+function roomWaitUntil(d: Pick<RiskDeps, "budget" | "now" | "governor">, holder: { budget?: RequestBudget }, cls: "P1" | "P2", n: number, waits: number, nowMs: number, syncReads = 2, fiveSec = true, minuteCap?: number, retryKey?: string): number {
+  const room = budgetOf(d, holder).roomFor(cls, n, fiveSec, syncReads, minuteCap, retryKey);
   const roomAt = room.ok ? nowMs : room.at;
   return Math.max(roomAt, nowMs + Math.min(ROOM_WAIT_FIRST_MS * 2 ** Math.max(0, waits - 1), ROOM_WAIT_MAX_MS));
 }
@@ -1039,7 +1039,9 @@ function backoffStuck(mem: SyncMemory, symbol: string, clientOrderId: string, no
 type TrySpec = { n: number; timedOut: boolean };
 // Group 1, round 4 of part 2: what a P1 try of `n` requests waiting for room will ask the budget, with the look's two reads (the order list
 // and the positions) ahead of it, as `roomWaitUntil` counts them. The loop checks it locally (no request) before it looks again.
-const p1Room = (n: number, minuteCap?: number): RoomNeed => ({ cls: "P1", n, reads: 2, ...(minuteCap !== undefined ? { minuteCap } : {}) });
+// Item 4 of the speed release: an ordinary stuck retry's room need carries its key (its entry's client order id), so the loop's local room
+// check and the budget's hold know which retry is waiting.
+const p1Room = (n: number, minuteCap?: number, retryKey?: string): RoomNeed => ({ cls: "P1", n, reads: 2, ...(minuteCap !== undefined ? { minuteCap } : {}), ...(minuteCap !== undefined && retryKey !== undefined ? { retryKey } : {}) });
 // An ordinary stuck retry's ceiling on the budgeted minute (none for a timed-out stop's try).
 const retryCap = (timedOut: boolean): number | undefined => (timedOut ? undefined : STUCK_RETRY_MINUTE_CAP);
 function retryDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string, nowMs: number): { wait: number; room: RoomNeed } | { go: TrySpec | null } {
@@ -1050,22 +1052,22 @@ function retryDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string, nowMs: nu
   if (!timedOut && (!st || st.nextAt === 0)) return { go: null };
   // Group 1, round 4 of part 2: any wait of a retry ends in a try that needs room for its whole try, so the loop's wake for it is a room
   // wake: checked against the budget locally, with no look (and no request) until the try would have room.
-  if (st && st.nextAt > nowMs) return { wait: st.nextAt, room: p1Room(timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS, retryCap(timedOut)) };
+  if (st && st.nextAt > nowMs) return { wait: st.nextAt, room: p1Room(timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS, retryCap(timedOut), clientOrderId) };
   // The redesign of 2026-11-14, part 1: a retry is class P1 of the shared request budget. It starts only with room for its whole try
   // (TIMED_OUT_TRY_REQUESTS for an entry with a timed-out stop, else STUCK_TRY_REQUESTS); what it sends is counted as it is sent. Part 2
   // (the advisor's point, and group 1's leak note): here the room is only looked at; the reservation is taken when the try starts (`inTry`,
   // inside the loop's action, after its busy check and the stand-aside rules are asked again).
   const n = timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS;
-  const room = budgetOf(d, mem).roomFor("P1", n, true, 0, retryCap(timedOut));
+  const room = budgetOf(d, mem).roomFor("P1", n, true, 0, retryCap(timedOut), clientOrderId);
   if (room.ok) return { go: { n, timedOut } };
-  return { wait: waitForRoom(d, mem, st, clientOrderId, timedOut, n, room.why, nowMs), room: p1Room(n, retryCap(timedOut)) };
+  return { wait: waitForRoom(d, mem, st, clientOrderId, timedOut, n, room.why, nowMs), room: p1Room(n, retryCap(timedOut), clientOrderId) };
 }
 
 // Waiting for room (not a backoff step of the try itself): until there is room for the coming sync's reads and the try, and at least 0.5, 1,
 // 2, then 4 s after refusals in a row (group 2, round 2 of the redesign).
 function waitForRoom(d: RiskDeps, mem: SyncMemory, st: StuckEntry | undefined, clientOrderId: string, timedOut: boolean, n: number, why: string, nowMs: number): number {
   const waits = st ? (st.roomWaits = (st.roomWaits ?? 0) + 1) : 1;
-  const at = roomWaitUntil(d, mem, "P1", n, waits, nowMs, 2, true, retryCap(timedOut));
+  const at = roomWaitUntil(d, mem, "P1", n, waits, nowMs, 2, true, retryCap(timedOut), clientOrderId);
   if (st) st.nextAt = at;
   if (timedOut && waits === 1) d.log?.("timed_out_try_out_of_room", { clientOrderId, why, retryInMs: at - nowMs });
   return at;
@@ -1075,9 +1077,9 @@ function waitForRoom(d: RiskDeps, mem: SyncMemory, st: StuckEntry | undefined, c
 // finds no room now (another try took it since the walk looked) sends nothing and waits for room.
 async function inTry(d: RiskDeps, mem: SyncMemory, s: OrderRecord, spec: TrySpec | null, label: string, fn: () => Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }>): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number; room?: RoomNeed }> {
   if (!spec) return withReservation(budgetOf(d, mem).first(label), fn, "first");
-  const r = budgetOf(d, mem).tryReserve("P1", spec.n, { label: spec.timedOut ? "timed-out stop try" : "stuck retry", limitRetries: spec.timedOut, ...(spec.timedOut ? {} : { minuteCap: STUCK_RETRY_MINUTE_CAP }) });
+  const r = budgetOf(d, mem).tryReserve("P1", spec.n, { label: spec.timedOut ? "timed-out stop try" : "stuck retry", limitRetries: spec.timedOut, ...(spec.timedOut ? {} : { minuteCap: STUCK_RETRY_MINUTE_CAP, retryKey: s.clientOrderId }) });
   const st = mem.stuck.get(s.clientOrderId);
-  if (!(r instanceof Reservation)) return { attempted: true, stuck: true, recheckAt: waitForRoom(d, mem, st, s.clientOrderId, spec.timedOut, spec.n, r.why, d.now().getTime()), room: p1Room(spec.n, retryCap(spec.timedOut)) };
+  if (!(r instanceof Reservation)) return { attempted: true, stuck: true, recheckAt: waitForRoom(d, mem, st, s.clientOrderId, spec.timedOut, spec.n, r.why, d.now().getTime()), room: p1Room(spec.n, retryCap(spec.timedOut), s.clientOrderId) };
   if (st) st.roomWaits = 0;
   return withReservation(r, fn);
 }
@@ -1377,6 +1379,8 @@ async function freshStopTimeout(d: RiskDeps, day: DayRecord, mem: SyncMemory, s:
 async function resolveStuck(d: RiskDeps, mem: SyncMemory, clientOrderId: string, how: string): Promise<boolean> {
   const st = mem.stuck.get(clientOrderId);
   mem.stuck.delete(clientOrderId);
+  // Item 4 of the speed release: its retry no longer waits, so the shared budget's hold for it ends.
+  budgetOf(d, mem).forgetRetry(clientOrderId);
   if (!st?.alerted) return false;
   // Messaging only: the shares left after a sale of ours went out (ruling 1's one-round retries): they were sold.
   if (how === "no longer held" && st.saleSentAt !== undefined && d.now().getTime() - st.saleSentAt <= AWAITING_FILL_MAX_MS) how = "sold";

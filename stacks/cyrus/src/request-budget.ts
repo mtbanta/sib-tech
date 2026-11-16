@@ -37,6 +37,10 @@ export const GIVE_WAY_MAX_MS = 2_000;
 // for that retry (its share is in effect 45 less the retry's size, 35, instead of 40), until the retry looks again (when room may return)
 // and at least this long; each refused look of the retry renews it.
 export const RETRY_WAIT_HOLD_MS = 2_500;
+// Item 4 of the speed release (Michael's ruling 5 of 2026-11-16, "all four stuck-retry items"): the hold is kept per waiting capped retry,
+// by its key (its entry's client order id, `retryKey`), and it ends for a key as soon as that retry is granted or its stuck record resolves
+// (`forgetRetry`). A capped retry with no key (the older tests) holds under this one shared key.
+export const ANONYMOUS_RETRY = "(a capped retry with no key)";
 const REFILL_PER_MS = ALPACA_REQUESTS_PER_MINUTE / 60_000;
 
 export type Refusal = { ok: false; at: number; why: "minute" | "five" | "class" | "floor" };
@@ -48,6 +52,8 @@ export interface ReserveOptions {
   force?: boolean;
   // What the try is, for the log.
   label: string;
+  // Item 4 of the speed release: a capped retry's identity (its entry's client order id). Its hold ends when it is granted or forgotten.
+  retryKey?: string;
   // A P2 try that will be tried again when room returns (the list-lag recheck): while it waits on its floor, entries give way.
   waitKey?: string;
   // Michael's answer of 2026-11-14 (night) on rulings 1 and 2: a lower ceiling on the budgeted minute for this try (an ordinary stuck retry:
@@ -134,11 +140,13 @@ export class RequestBudget {
   // Every budgeted request sent in the last 60 seconds, oldest first (its time and class).
   // `capped`: sent by a try that reserved against the 5 seconds too (every budgeted try but a close-out retry).
   private sent: Array<{ t: number; cls: BudgetClass; capped: boolean }> = [];
-  // Michael's answer after group 1's rulings round 2: until when a capped retry is waiting that P2 holding back would let in, and the
-  // ceiling P2 must then leave the minute at (the retry's ceiling less its size).
-  private retryWaitUntil = 0;
-  private retryWaitRoom = Infinity;
-  private retryWaitFive = Infinity;
+  // Michael's answer after group 1's rulings round 2, kept per waiting retry since item 4 of the speed release: for each capped retry that is
+  // waiting with P2 in its way, until when P2 holds back for it (renewed by each refused look, as before), and the ceilings P2 must then
+  // leave the minute and the 5 seconds at (the retry's ceiling less its size, and the 5 seconds less its size). The hold is in force while
+  // any key's end is in the future; P2 is held to the most restrictive of the keys in force.
+  private readonly holds = new Map<string, { until: number; room: number; five: number }>();
+  // The latest end among the keys.
+  private holdEnd = 0;
   // Statistics only (Michael's approval of 2026-11-15): the time up to which the hold's time in force has been counted, and whether the
   // last refusal `refusal` returned was a P2 refusal that only the hold caused. Neither is read by any decision.
   private holdCountedTo = 0;
@@ -187,7 +195,7 @@ export class RequestBudget {
     const size = Math.max(0, Math.ceil(n));
     const fiveSec = opts.fiveSec !== false;
     if (!opts.force) {
-      const refusal = this.refusal(cls, size, fiveSec, now, 0, opts.minuteCap);
+      const refusal = this.refusal(cls, size, fiveSec, now, 0, opts.minuteCap, opts.retryKey);
       if (refusal) {
         this.minute.refused[refusal.why]++;
         if (this.lastRefusalHeldOnly) this.minute.retryHold.p2Refused++; // statistics only
@@ -200,6 +208,8 @@ export class RequestBudget {
       }
     } else this.minute.forced++;
     if (opts.waitKey) this.floorWaits.delete(opts.waitKey);
+    // Item 4 of the speed release: a capped retry that gets in no longer needs P2 to hold back for it.
+    if (opts.minuteCap !== undefined) this.endHold(opts.retryKey ?? ANONYMOUS_RETRY);
     const r = new Reservation(this, cls, size, opts.label, fiveSec, opts.limitRetries === true);
     this.open.add(r);
     this.minute.granted++;
@@ -209,17 +219,20 @@ export class RequestBudget {
   // Would `tryReserve` grant this now? (For scheduling; it reserves nothing. A capped retry's look that is refused with P2 in the way sets or
   // renews P2's hold for it, as `tryReserve` would, Michael's answer of 2026-11-14 night.) `routineAhead`: routine requests that will be sent first from the same
   // Alpaca bucket (the reads of the sync that comes for the try), counted against the floor only (group 2, round 2 of the redesign).
-  roomFor(cls: BudgetClass, n: number, fiveSec = true, routineAhead = 0, minuteCap?: number): { ok: true } | Refusal {
-    return this.refusal(cls, Math.max(0, Math.ceil(n)), fiveSec, this.nowMs(), routineAhead, minuteCap) ?? { ok: true };
+  // `retryKey` (item 4 of the speed release): the capped retry's key. A look that finds room ends nothing (only a grant does).
+  roomFor(cls: BudgetClass, n: number, fiveSec = true, routineAhead = 0, minuteCap?: number, retryKey?: string): { ok: true } | Refusal {
+    return this.refusal(cls, Math.max(0, Math.ceil(n)), fiveSec, this.nowMs(), routineAhead, minuteCap, retryKey) ?? { ok: true };
   }
 
-  private refusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead = 0, minuteCap?: number): Refusal | null {
+  private refusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead = 0, minuteCap?: number, retryKey?: string): Refusal | null {
     const u = this.usage(now);
-    // P2 leaves room, in the minute and in the 5 seconds, for a waiting capped retry (Michael's answer after group 1's rulings round 2).
-    const holding = now < this.retryWaitUntil;
-    const p2Cap = holding ? Math.min(BUDGET_PER_MINUTE - P1_KEEP, this.retryWaitRoom) : BUDGET_PER_MINUTE - P1_KEEP;
+    // P2 leaves room, in the minute and in the 5 seconds, for a waiting capped retry (Michael's answer after group 1's rulings round 2); since
+    // item 4 of the speed release, for every waiting retry whose hold is in force, held to the most restrictive of them.
+    const holding = now < this.holdEnd;
+    const held = holding ? this.heldCeilings(now) : { room: Infinity, five: Infinity };
+    const p2Cap = holding ? Math.min(BUDGET_PER_MINUTE - P1_KEEP, held.room) : BUDGET_PER_MINUTE - P1_KEEP;
     const cap = Math.min(cls === "P1" ? BUDGET_PER_MINUTE : p2Cap, minuteCap ?? Infinity);
-    const fiveCap = cls === "P2" && holding ? Math.min(BUDGET_PER_5S, this.retryWaitFive) : BUDGET_PER_5S;
+    const fiveCap = cls === "P2" && holding ? Math.min(BUDGET_PER_5S, held.five) : BUDGET_PER_5S;
     const at: number[] = [];
     let why: Refusal["why"] | null = null;
     const minuteShort = u.minute + u.unsentMinute + n > cap;
@@ -247,20 +260,87 @@ export class RequestBudget {
     // Statistics only: a P2 refusal the hold alone caused (P2's usual share, the 15 in 5 seconds and the floor would all have let it in).
     this.lastRefusalHeldOnly = cls === "P2" && holding && u.minute + u.unsentMinute + n <= Math.min(BUDGET_PER_MINUTE - P1_KEEP, minuteCap ?? Infinity) && (!fiveSec || u.five + u.unsentFive + n <= BUDGET_PER_5S) && left >= floor;
     // The hold lasts until the retry looks again (when room may return, plus a moment), and at least RETRY_WAIT_HOLD_MS; each look renews it.
+    // Item 4 of the speed release: per retry (its key), each with its own end; a later look never shortens a key's end.
     if (holdForRetry && minuteCap !== undefined) {
       this.countHold(now); // statistics only
       if (holding) this.minute.retryHold.renewed++;
       else this.minute.retryHold.started++;
-      this.retryWaitUntil = Math.max(this.retryWaitUntil, now + RETRY_WAIT_HOLD_MS, when + 500);
-      this.retryWaitRoom = minuteCap - n;
-      this.retryWaitFive = BUDGET_PER_5S - n;
+      const key = retryKey ?? ANONYMOUS_RETRY;
+      const until = Math.max(this.holds.get(key)?.until ?? 0, now + RETRY_WAIT_HOLD_MS, when + 500);
+      this.holds.set(key, { until, room: minuteCap - n, five: BUDGET_PER_5S - n });
+      this.holdEnd = Math.max(this.holdEnd, until);
     }
     return { ok: false, at: when, why };
   }
 
+  // Item 4 of the speed release: the ceilings P2 is held to now, the most restrictive among the keys whose hold is in force.
+  private heldCeilings(now: number): { room: number; five: number } {
+    let room = Infinity;
+    let five = Infinity;
+    for (const h of this.holds.values()) {
+      if (h.until <= now) continue;
+      room = Math.min(room, h.room);
+      five = Math.min(five, h.five);
+    }
+    return { room, five };
+  }
+
+  // Item 4 of the speed release: the hold for this retry ends now (it was granted, or its stuck record resolved). It goes on for any other
+  // retry still waiting. The time in force is counted up to now first, so it stops when the last key goes.
+  private endHold(key: string): void {
+    if (!this.holds.has(key)) return;
+    const now = this.nowMs();
+    this.countHold(now); // statistics only
+    this.holds.delete(key);
+    let end = 0;
+    for (const [k, h] of this.holds) {
+      if (h.until <= now) this.holds.delete(k);
+      else end = Math.max(end, h.until);
+    }
+    this.holdEnd = end;
+  }
+
+  // Item 4 of the speed release: a stuck record resolved (risk.ts `resolveStuck`): its retry no longer waits.
+  forgetRetry(key: string): void {
+    this.endHold(key);
+  }
+
+  // The older tests read and set the hold as one record. Kept as views of it: the latest end, and the most restrictive ceilings among the
+  // keys (in force or not; Infinity when there is none). Setting one sets the anonymous key's.
+  get retryWaitUntil(): number {
+    return this.holdEnd;
+  }
+  set retryWaitUntil(v: number) {
+    this.anonymousHold().until = v;
+    let end = 0;
+    for (const h of this.holds.values()) end = Math.max(end, h.until);
+    this.holdEnd = end;
+  }
+  get retryWaitRoom(): number {
+    let room = Infinity;
+    for (const h of this.holds.values()) room = Math.min(room, h.room);
+    return room;
+  }
+  set retryWaitRoom(v: number) {
+    this.anonymousHold().room = v;
+  }
+  get retryWaitFive(): number {
+    let five = Infinity;
+    for (const h of this.holds.values()) five = Math.min(five, h.five);
+    return five;
+  }
+  set retryWaitFive(v: number) {
+    this.anonymousHold().five = v;
+  }
+  private anonymousHold(): { until: number; room: number; five: number } {
+    let h = this.holds.get(ANONYMOUS_RETRY);
+    if (!h) this.holds.set(ANONYMOUS_RETRY, (h = { until: 0, room: Infinity, five: Infinity }));
+    return h;
+  }
+
   // Statistics only: adds the time the hold was in force since it was last counted, up to `now` or the hold's end, whichever is first.
   private countHold(now: number): void {
-    const end = Math.min(now, this.retryWaitUntil);
+    const end = Math.min(now, this.holdEnd);
     if (end > this.holdCountedTo) this.minute.retryHold.inForceMs += end - this.holdCountedTo;
     if (now > this.holdCountedTo) this.holdCountedTo = now;
   }

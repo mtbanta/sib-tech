@@ -26,6 +26,8 @@ export interface RoomNeed {
   reads: number;
   // A lower ceiling on the budgeted minute for this try (an ordinary stuck retry: 45, Michael's answer of 2026-11-14, night).
   minuteCap?: number;
+  // Item 4 of the speed release: an ordinary stuck retry's key (its entry's client order id), passed to the budget's local room check.
+  retryKey?: string;
 }
 
 export interface ProtectionHooks {
