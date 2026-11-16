@@ -1171,11 +1171,11 @@ test("part 2 (group 2, round 5): a stuck retry's backoff wait and its wait for r
   const w = await roomWorld();
   w.mem.stuck.set(w.id, { symbol: "AAA", since: w.sim.simMs - 60_000, nextAt: w.sim.simMs + 5_000, delayMs: 5_000, alerted: true, escalated: false, lastTriedAt: w.sim.simMs - 5_000, why: "x" } as any);
   await w.sync();
-  assert.deepEqual(w.wakes.at(-1)?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 45 }, "its backoff wait");
+  assert.deepEqual(w.wakes.at(-1)?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 45, retryKey: w.id }, "its backoff wait");
   w.mem.stuck.get(w.id)!.nextAt = w.sim.simMs - 1;
   w.box.remaining = 25; // no room for the retry's 10
   await w.sync();
-  assert.deepEqual(w.wakes.at(-1)?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 45 }, "its wait for room");
+  assert.deepEqual(w.wakes.at(-1)?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 45, retryKey: w.id }, "its wait for room");
   assert.equal(w.acts.length, 0, "no action without room");
 });
 
@@ -1187,7 +1187,7 @@ test("part 2 (group 2, round 5): a retry refused at its action's start (room gon
   w.box.remaining = 25; // gone before the action starts
   const sells0 = w.sim.sellLog.length;
   const r = await w.acts[0]!.run();
-  assert.deepEqual(r?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 45 });
+  assert.deepEqual(r?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 45, retryKey: w.id });
   assert.ok(r?.recheckAt > w.sim.simMs);
   assert.equal(w.sim.sellLog.length, sells0, "nothing sold");
 });

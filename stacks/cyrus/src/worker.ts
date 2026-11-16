@@ -341,13 +341,13 @@ export class Worker {
 
   constructor(deps: WorkerDeps) {
     this.d = deps;
-    this.budget = deps.budget ?? new RequestBudget({ now: () => deps.now().getTime(), remaining: () => deps.governor.budget(), log: (e, data) => deps.log?.("info", e, data) });
+    this.budget = deps.budget ?? new RequestBudget({ now: () => deps.now().getTime(), remaining: () => deps.governor.budget(), requestsLastMinute: () => deps.governor.stats().requestsLastMinute, log: (e, data) => deps.log?.("info", e, data) });
     this.syncMemory.budget = this.budget;
     this.lossMemory.budget = this.budget;
     deps.governor.setSafetyHold?.(this.budget);
     this.loop = new ProtectionLoop({ now: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}), ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {}), look: (ids, kind, extra, until) => this.look(ids, kind, extra, until), log: (e, data) => deps.log?.("info", e, data), onActionFailed: (id, label, err) => this.protectionActionFailed(id, label, err), onLagDropped: () => this.lagWaitOver(), roomAt: (need) => {
       // Group 1, round 4 of part 2: asked locally (no request): when the shared budget would grant that try with the look's reads ahead of it.
-      const r = this.budget.roomFor(need.cls, need.n, true, need.reads, need.minuteCap);
+      const r = this.budget.roomFor(need.cls, need.n, true, need.reads, need.minuteCap, need.retryKey);
       return r.ok ? null : r.at;
     } });
     this.sessions = new NextSessionFinder(deps.broker);
@@ -478,6 +478,8 @@ export class Worker {
       onBareSale: (sale: { symbol: string; shares: number; takeProfit: number | null; atMs: number; clientOrderId?: string }) => this.stopGap.onSale(sale),
       onFreshStop: (x: { symbol: string; shares: number }) => this.stopGap.onFreshStop(x),
       budget: this.budget,
+      // Item 1 of the speed release: an ordinary stuck retry takes its cheaper path only while the live order updates are connected.
+      streamLive: () => this.orderStreamLive(),
       onRemainderSold: (symbol: string, shares: number) => void this.remainderSales.push({ symbol, shares }),
       onAccountRead: (account: { equity: number; cash: number }) => this.shadowEstimate(account),
       lateNoticeContext: (symbol: string) => this.lateNoticeContext(symbol),

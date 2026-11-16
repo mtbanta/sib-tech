@@ -43,6 +43,9 @@ export interface RiskDeps {
   // The redesign of 2026-11-14, part 1: the shared request budget every retry, recheck and status check draws from (request-budget.ts).
   // The worker passes its own; without one, a budget of their own is kept in the sync's or the loss stop's memory.
   budget?: RequestBudget;
+  // Item 1 of the speed release: whether Alpaca's live order updates are connected now (the worker's). Without it, as the current sync
+  // found them (`SyncMemory.streamLive`).
+  streamLive?: () => boolean;
 }
 
 // Group 2, round 2 of the redesign (rule 6): when a budgeted try finds no room, the sync that comes for its next try first reads the order
@@ -51,8 +54,8 @@ export interface RiskDeps {
 // this, such a wait brought a whole sync forward about every half second, whose reads spent the refill the try was waiting for.
 export const ROOM_WAIT_FIRST_MS = 500;
 export const ROOM_WAIT_MAX_MS = 4_000;
-function roomWaitUntil(d: Pick<RiskDeps, "budget" | "now" | "governor">, holder: { budget?: RequestBudget }, cls: "P1" | "P2", n: number, waits: number, nowMs: number, syncReads = 2, fiveSec = true, minuteCap?: number): number {
-  const room = budgetOf(d, holder).roomFor(cls, n, fiveSec, syncReads, minuteCap);
+function roomWaitUntil(d: Pick<RiskDeps, "budget" | "now" | "governor">, holder: { budget?: RequestBudget }, cls: "P1" | "P2", n: number, waits: number, nowMs: number, syncReads = 2, fiveSec = true, minuteCap?: number, retryKey?: string): number {
+  const room = budgetOf(d, holder).roomFor(cls, n, fiveSec, syncReads, minuteCap, retryKey);
   const roomAt = room.ok ? nowMs : room.at;
   return Math.max(roomAt, nowMs + Math.min(ROOM_WAIT_FIRST_MS * 2 ** Math.max(0, waits - 1), ROOM_WAIT_MAX_MS));
 }
@@ -160,6 +163,13 @@ export const STUCK_ESCALATE_MS = 5 * 60_000;
 // on 2026-11-09, the 2 more are margin); what it really sends is counted as it is sent. A retry that does not fit waits for room. A
 // position's first sale is never refused (it is counted, as a first try).
 export const STUCK_TRY_REQUESTS = 10;
+// Item 1 of the speed release (Michael's ruling 5 of 2026-11-16, item 3c; the draft's option 1, built only as far as it keeps the sell gate's
+// check as safe as today): an ordinary stuck retry made while Alpaca's live order updates are connected, with nothing of its entry's open to
+// cancel, reads the open orders and the positions once, through the sell gate's own read (open orders first, then positions; the gate's
+// check reuses that read while it is under a second old, as it does in any burst of sells), instead of reading them again at each step. It
+// reserves the most it can send, measured in the simulator: its lookup (1), the gate's read (2), the gate's read again when the sale's turn
+// in the gate comes after that read is a second old (2), the sale (1) and the last look (1). A try that sends no sale sends 3.
+export const CHEAP_STUCK_TRY_REQUESTS = 7;
 export interface StuckEntry {
   // Group 2 review of 2026-11-12: true when the stuck case is a remainder the stack is trying to give a fresh stop (A4), so the alerts say
   // "protect or sell", not only "sell". Since Michael's answer of 2026-11-14 (night) on ruling 1 it is also read by the order sync: such a
@@ -903,7 +913,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
         return;
       }
     }
-    const due = retryDue(d, mem, s.clientOrderId, d.now().getTime());
+    const due = retryDue(d, mem, s.clientOrderId, d.now().getTime(), o);
     if ("wait" in due) {
       // Part A, step 1: tried moments ago and stuck; it is tried again at `due` (or when the shared request budget has room), and the
       // sync carries on with the others.
@@ -927,8 +937,8 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
     await ctx.loop.act(id, "missing-exit sale", async () => {
       if (!stillProtect()) return;
       const c = remainderStop !== null && timedOutIds.length === 0
-        ? await inTry(d, mem, s, due.go, "remainder", () => timedCleanup(d, day, mem, s, o, "bare", undefined, { stopPrice: remainderStop, stopCancelledAt: stopLeg(o)?.canceledAt ?? null }))
-        : await inTry(d, mem, s, due.go, "missing-exit sale", () => timedCleanup(d, day, mem, s, o, "missing", undefined, timedOutIds.length > 0 ? { alsoCancel: timedOutIds, alsoCancelStops: timedOutShown.map((x) => x.clientOrderId) } : {}));
+        ? await inTry(d, mem, s, due.go, "remainder", (cheap) => timedCleanup(d, day, mem, s, o, "bare", undefined, { stopPrice: remainderStop, stopCancelledAt: stopLeg(o)?.canceledAt ?? null, ...(cheap ? { cheap } : {}) }))
+        : await inTry(d, mem, s, due.go, "missing-exit sale", (cheap) => timedCleanup(d, day, mem, s, o, "missing", undefined, timedOutIds.length > 0 ? { alsoCancel: timedOutIds, alsoCancelStops: timedOutShown.map((x) => x.clientOrderId) } : cheap ? { cheap } : {}));
       if (c.attempted) ctx.unprotected.push(s.symbol);
       return c.recheckAt !== undefined ? { recheckAt: c.recheckAt, ...(c.room ? { room: c.room } : {}) } : undefined;
     });
@@ -991,7 +1001,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
     mem.mustLook.add(s.clientOrderId);
     return;
   }
-  const stuckDue = retryDue(d, mem, s.clientOrderId, d.now().getTime());
+  const stuckDue = retryDue(d, mem, s.clientOrderId, d.now().getTime(), o);
   if ("wait" in stuckDue) {
     // Part A, step 1: tried moments ago and stuck; it is tried again then (or when the shared request budget has room), and the sync
     // carries on with the others.
@@ -1014,7 +1024,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
   };
   await ctx.loop.act(id, "remainder", async () => {
     if (!stillProtect()) return;
-    const c = await inTry(d, mem, s, stuckDue.go, "remainder", () => timedCleanup(d, day, mem, s, o, "bare", onSellSent, { stopPrice: bare.stop.stopPrice ?? s.stopPrice, stopCancelledAt: cancelTime }));
+    const c = await inTry(d, mem, s, stuckDue.go, "remainder", (cheap) => timedCleanup(d, day, mem, s, o, "bare", onSellSent, { stopPrice: bare.stop.stopPrice ?? s.stopPrice, stopCancelledAt: cancelTime, ...(cheap ? { cheap } : {}) }));
     if (c.attempted) ctx.unprotected.push(s.symbol);
     if (!c.stuck) mem.bareSeen.delete(s.clientOrderId);
     return c.recheckAt !== undefined ? { recheckAt: c.recheckAt, ...(c.room ? { room: c.room } : {}) } : undefined;
@@ -1035,37 +1045,69 @@ function backoffStuck(mem: SyncMemory, symbol: string, clientOrderId: string, no
   return st;
 }
 
-// A retry's reservation (the redesign of 2026-11-14): what `inTry` reserves when the try starts.
-type TrySpec = { n: number; timedOut: boolean };
+// A retry's reservation (the redesign of 2026-11-14): what `inTry` reserves when the try starts. Item 1 of the speed release: `cheap`, the
+// cheaper path of an ordinary stuck retry, and why the path was chosen (logged with the retry).
+type TrySpec = { n: number; timedOut: boolean; cheap?: boolean; why?: string };
 // Group 1, round 4 of part 2: what a P1 try of `n` requests waiting for room will ask the budget, with the look's two reads (the order list
 // and the positions) ahead of it, as `roomWaitUntil` counts them. The loop checks it locally (no request) before it looks again.
-const p1Room = (n: number, minuteCap?: number): RoomNeed => ({ cls: "P1", n, reads: 2, ...(minuteCap !== undefined ? { minuteCap } : {}) });
+// Item 4 of the speed release: an ordinary stuck retry's room need carries its key (its entry's client order id), so the loop's local room
+// check and the budget's hold know which retry is waiting.
+const p1Room = (n: number, minuteCap?: number, retryKey?: string): RoomNeed => ({ cls: "P1", n, reads: 2, ...(minuteCap !== undefined ? { minuteCap } : {}), ...(minuteCap !== undefined && retryKey !== undefined ? { retryKey } : {}) });
 // An ordinary stuck retry's ceiling on the budgeted minute (none for a timed-out stop's try).
 const retryCap = (timedOut: boolean): number | undefined => (timedOut ? undefined : STUCK_RETRY_MINUTE_CAP);
-function retryDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string, nowMs: number): { wait: number; room: RoomNeed } | { go: TrySpec | null } {
+// Item 1 of the speed release: Alpaca's live order updates are connected now.
+const liveNow = (d: RiskDeps, mem: SyncMemory): boolean => (d.streamLive ? d.streamLive() : mem.streamLive);
+// Item 1 of the speed release: which path an ordinary stuck retry takes. The cheap path only while the live order updates are connected and
+// nothing of its entry's is open to cancel (the entry's copy from the look or sync that decided the retry; the try's own lookup checks it
+// again); otherwise today's full path.
+function retryPath(d: RiskDeps, mem: SyncMemory, st: StuckEntry | undefined, o: Order | undefined): { cheap: boolean; why: string } {
+  if (!liveNow(d, mem)) return { cheap: false, why: "the live order updates are not connected" };
+  // A remainder being given a fresh stop (A4): its stop may be refused and then sold at market, which reads the gate again (measured up to
+  // 8, more than the cheap path reserves), so it keeps today's full path.
+  if (st?.protecting === true && st.freshStopRecorded !== true) return { cheap: false, why: "it would place a fresh stop for a remainder" };
+  if (!o) return { cheap: false, why: "no copy of the entry" };
+  if (flattenLegs(o).some((l) => l.side === "sell" && OPEN_STATUSES.has(l.status))) return { cheap: false, why: "something of its entry's is open to cancel" };
+  return { cheap: true, why: "the live order updates are connected and nothing of its entry's is open to cancel" };
+}
+function retryDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string, nowMs: number, o?: Order): { wait: number; room: RoomNeed } | { go: TrySpec | null } {
   const st = mem.stuck.get(clientOrderId);
   const timedOut = hasTimedOut(mem, clientOrderId);
   // A first try (no stuck record, or due at once) goes ahead, never refused (decision 4): counted as a first try. Since group 1's round 1
   // of the weekend build, a try for an entry with a timed-out stop is never a first try: it always needs room for a whole try.
   if (!timedOut && (!st || st.nextAt === 0)) return { go: null };
+  const path = timedOut ? null : retryPath(d, mem, st, o);
+  const ordinaryN = path?.cheap ? CHEAP_STUCK_TRY_REQUESTS : STUCK_TRY_REQUESTS;
   // Group 1, round 4 of part 2: any wait of a retry ends in a try that needs room for its whole try, so the loop's wake for it is a room
   // wake: checked against the budget locally, with no look (and no request) until the try would have room.
-  if (st && st.nextAt > nowMs) return { wait: st.nextAt, room: p1Room(timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS, retryCap(timedOut)) };
+  // Item 3 of the speed release (fair turns): the retry at the head of the shared budget's waiting list takes the room the moment it returns,
+  // even inside its growing wait for room (0.5, 1, 2, then 4 s after refusals in a row): otherwise the look the loop makes when room returns
+  // finds it not yet due, it misses its turn, and the room goes to low-priority work. Only while it waits for room (`roomWaits`, so never
+  // inside the 2 s after its last try), only at the head, and only when the budget says it has room now (a local check, no request).
+  const headWithRoom = (): boolean => {
+    if (timedOut || !st || !(st.roomWaits ?? 0)) return false;
+    const budget = budgetOf(d, mem);
+    return budget.firstWaitingRetry() === clientOrderId && budget.roomFor("P1", ordinaryN, true, 0, retryCap(timedOut), clientOrderId).ok;
+  };
+  if (st && st.nextAt > nowMs && !headWithRoom()) {
+    // Item 3 of the speed release: the walk saw this retry while it waits (no budget check now), so it keeps its place in the waiting list.
+    if (!timedOut) budgetOf(d, mem).seenRetry(clientOrderId);
+    return { wait: st.nextAt, room: p1Room(timedOut ? TIMED_OUT_TRY_REQUESTS : ordinaryN, retryCap(timedOut), clientOrderId) };
+  }
   // The redesign of 2026-11-14, part 1: a retry is class P1 of the shared request budget. It starts only with room for its whole try
   // (TIMED_OUT_TRY_REQUESTS for an entry with a timed-out stop, else STUCK_TRY_REQUESTS); what it sends is counted as it is sent. Part 2
   // (the advisor's point, and group 1's leak note): here the room is only looked at; the reservation is taken when the try starts (`inTry`,
   // inside the loop's action, after its busy check and the stand-aside rules are asked again).
-  const n = timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS;
-  const room = budgetOf(d, mem).roomFor("P1", n, true, 0, retryCap(timedOut));
-  if (room.ok) return { go: { n, timedOut } };
-  return { wait: waitForRoom(d, mem, st, clientOrderId, timedOut, n, room.why, nowMs), room: p1Room(n, retryCap(timedOut)) };
+  const n = timedOut ? TIMED_OUT_TRY_REQUESTS : ordinaryN;
+  const room = budgetOf(d, mem).roomFor("P1", n, true, 0, retryCap(timedOut), clientOrderId);
+  if (room.ok) return { go: { n, timedOut, ...(path ? { cheap: path.cheap, why: path.why } : {}) } };
+  return { wait: waitForRoom(d, mem, st, clientOrderId, timedOut, n, room.why, nowMs), room: p1Room(n, retryCap(timedOut), clientOrderId) };
 }
 
 // Waiting for room (not a backoff step of the try itself): until there is room for the coming sync's reads and the try, and at least 0.5, 1,
 // 2, then 4 s after refusals in a row (group 2, round 2 of the redesign).
 function waitForRoom(d: RiskDeps, mem: SyncMemory, st: StuckEntry | undefined, clientOrderId: string, timedOut: boolean, n: number, why: string, nowMs: number): number {
   const waits = st ? (st.roomWaits = (st.roomWaits ?? 0) + 1) : 1;
-  const at = roomWaitUntil(d, mem, "P1", n, waits, nowMs, 2, true, retryCap(timedOut));
+  const at = roomWaitUntil(d, mem, "P1", n, waits, nowMs, 2, true, retryCap(timedOut), clientOrderId);
   if (st) st.nextAt = at;
   if (timedOut && waits === 1) d.log?.("timed_out_try_out_of_room", { clientOrderId, why, retryInMs: at - nowMs });
   return at;
@@ -1073,13 +1115,18 @@ function waitForRoom(d: RiskDeps, mem: SyncMemory, st: StuckEntry | undefined, c
 
 // Runs one try: inside its P1 reservation (a retry), taken now, or counted as a first try. The reservation ends with the try. A retry that
 // finds no room now (another try took it since the walk looked) sends nothing and waits for room.
-async function inTry(d: RiskDeps, mem: SyncMemory, s: OrderRecord, spec: TrySpec | null, label: string, fn: () => Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }>): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number; room?: RoomNeed }> {
-  if (!spec) return withReservation(budgetOf(d, mem).first(label), fn, "first");
-  const r = budgetOf(d, mem).tryReserve("P1", spec.n, { label: spec.timedOut ? "timed-out stop try" : "stuck retry", limitRetries: spec.timedOut, ...(spec.timedOut ? {} : { minuteCap: STUCK_RETRY_MINUTE_CAP }) });
+// Item 1 of the speed release: `fn` is told whether the try takes the cheap path. A cheap retry whose live order updates dropped since it was
+// decided takes today's full path, with its reservation. Each retry logs the path it took and what it sent (`stuck_retry`, logging only).
+async function inTry(d: RiskDeps, mem: SyncMemory, s: OrderRecord, spec: TrySpec | null, label: string, fn: (cheap: boolean) => Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }>): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number; room?: RoomNeed }> {
+  if (!spec) return withReservation(budgetOf(d, mem).first(label), () => fn(false), "first");
+  const sp: TrySpec = spec.cheap && !liveNow(d, mem) ? { n: STUCK_TRY_REQUESTS, timedOut: false, cheap: false, why: "the live order updates dropped before the try started" } : spec;
+  const r = budgetOf(d, mem).tryReserve("P1", sp.n, { label: sp.timedOut ? "timed-out stop try" : "stuck retry", limitRetries: sp.timedOut, ...(sp.timedOut ? {} : { minuteCap: STUCK_RETRY_MINUTE_CAP, retryKey: s.clientOrderId }) });
   const st = mem.stuck.get(s.clientOrderId);
-  if (!(r instanceof Reservation)) return { attempted: true, stuck: true, recheckAt: waitForRoom(d, mem, st, s.clientOrderId, spec.timedOut, spec.n, r.why, d.now().getTime()), room: p1Room(spec.n, retryCap(spec.timedOut)) };
+  if (!(r instanceof Reservation)) return { attempted: true, stuck: true, recheckAt: waitForRoom(d, mem, st, s.clientOrderId, sp.timedOut, sp.n, r.why, d.now().getTime()), room: p1Room(sp.n, retryCap(sp.timedOut), s.clientOrderId) };
   if (st) st.roomWaits = 0;
-  return withReservation(r, fn);
+  const out = await withReservation(r, () => fn(sp.cheap === true));
+  d.log?.("stuck_retry", { symbol: s.symbol, clientOrderId: s.clientOrderId, path: sp.timedOut ? "timed-out stop" : sp.cheap ? "cheap" : "full", why: sp.why ?? null, reserved: sp.n, sent: r.used });
+  return out;
 }
 const plural = (n: number, one: string, many: string = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
 const minutesText = (ms: number): string => (ms < 60_000 ? plural(Math.max(1, Math.round(ms / 1000)), "second") : plural(Math.round(ms / 60_000), "minute"));
@@ -1377,6 +1424,8 @@ async function freshStopTimeout(d: RiskDeps, day: DayRecord, mem: SyncMemory, s:
 async function resolveStuck(d: RiskDeps, mem: SyncMemory, clientOrderId: string, how: string): Promise<boolean> {
   const st = mem.stuck.get(clientOrderId);
   mem.stuck.delete(clientOrderId);
+  // Item 4 of the speed release: its retry no longer waits, so the shared budget's hold for it ends.
+  budgetOf(d, mem).forgetRetry(clientOrderId);
   if (!st?.alerted) return false;
   // Messaging only: the shares left after a sale of ours went out (ruling 1's one-round retries): they were sold.
   if (how === "no longer held" && st.saleSentAt !== undefined && d.now().getTime() - st.saleSentAt <= AWAITING_FILL_MAX_MS) how = "sold";
@@ -1397,7 +1446,7 @@ async function resolveStuck(d: RiskDeps, mem: SyncMemory, clientOrderId: string,
 // A4: `extra.stopPrice` (a "bare" remainder): a fresh stop at that price instead of the market sale (sells.ts protectWithStop).
 // A5: `extra.fast` (a "missing" entry that filled as the stack's 5 second cancel reached Alpaca): sold at once, without waiting for
 // Alpaca's cancel of its exits to show; the sale waits in sells.ts until that cancel frees the share, and nothing happens if Alpaca kept them.
-async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, listedCopy: Order, kind: "missing" | "bare", onSellSent?: (x: { symbol: string; qty: number; clientOrderId: string; atMs: number }) => void, extra: { stopPrice?: number | null; stopCancelledAt?: string | null; fast?: { fillAtMs: number }; alsoCancel?: string[]; alsoCancelStops?: string[]; alsoCancelBy?: string } = {}): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }> {
+async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, listedCopy: Order, kind: "missing" | "bare", onSellSent?: (x: { symbol: string; qty: number; clientOrderId: string; atMs: number }) => void, extra: { stopPrice?: number | null; stopCancelledAt?: string | null; fast?: { fillAtMs: number }; alsoCancel?: string[]; alsoCancelStops?: string[]; alsoCancelBy?: string; cheap?: boolean } = {}): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }> {
   let o = listedCopy;
   // Group 1, round 5: a live update during this try that the entry's timed-out stop ended overrides any backoff this try would set.
   const tryStartMs = d.now().getTime();
@@ -1439,6 +1488,10 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   // A5: nothing is cancelled by the fast sale (the exits are Alpaca's to cancel, or to keep).
   // Ruling B of 2026-11-12: `alsoCancel`, a fresh stop that was not confirmed in time (cancelled here, and never counted as protection).
   const cancelIds = extra.fast ? [] : [...flattenLegs(o).filter((l) => l.side === "sell" && OPEN_STATUSES.has(l.status)).map((l) => l.id), ...(extra.alsoCancel ?? [])];
+  // Item 1 of the speed release: the cheap path of an ordinary stuck retry. It is chosen only for a missing-exit sale (a remainder being given
+  // a fresh stop, or one whose take-profit still rests, keeps today's path), whose own lookup above ends the try if any exit is open again, so
+  // it has nothing to cancel here; the liquidator also takes its full path whenever there is something to cancel.
+  const cheap = extra.cheap === true && ordinaryRetry && !extra.fast;
   // Michael's decision 2 of 2026-11-13 (group 2, round 1 of the weekend build): this reason reaches Discord in the sell gate's refusal
   // alert, so it says only what the stack knows. Nothing branches on it.
   const reason = kind === "missing" ? "protective stop not confirmed" : "stop cancelled after a partial take-profit";
@@ -1474,6 +1527,8 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     // most about 13 requests) fits; after that the stop's status checks take over (timedOutWait).
     ...(timedOutTry ? { waitCancelMs: 500 } : {}),
     ...(extra.fast ? { waitForAlpacaCancel: true, waitCancelMs: FAST_LOST_EXIT_WAIT_MS } : {}),
+    // Item 1 of the speed release: the cheap path of an ordinary stuck retry (one read of the open orders and positions, the sell gate's).
+    ...(cheap ? { cheapRetry: true } : {}),
   });
   const soldQty = r.sold.filter((x) => x.symbol === s.symbol).reduce((n, x) => n + x.qty, 0);
   const now = d.now().getTime();

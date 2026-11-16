@@ -356,7 +356,8 @@ test("item 6: the daily loss stop's sale is marked priority, the order sync's on
   assert.equal((risk.match(/only: \[s\.symbol\],[\s\S]*?maxRounds: extra\.fast \|\| timedOutTry \|\| ordinaryRetry \? 1 : 3,[^)]*yieldToPriority: true/g) ?? []).length, 1);
   // The redesign of 2026-11-14: each runs inside its try's reservation (a retry) or a first try's counter (`inTry`).
   // Michael's answer of 2026-11-14 (night) on ruling 1: a third, the remainder seen with no exits after its own take-profit cancel landed.
-  assert.equal((risk.match(/\(\) => timedCleanup\(d, day, mem, s, o, "(missing|bare)"/g) ?? []).length, 3); // 2026-11-10: timed for the late-notice log
+  // Item 1 of the speed release of 2026-11-16 (item 3c): each is told whether its retry takes the cheap path (`cheap`).
+  assert.equal((risk.match(/\(cheap\) => timedCleanup\(d, day, mem, s, o, "(missing|bare)"/g) ?? []).length, 3); // 2026-11-10: timed for the late-notice log
 });
 
 // ------------------------------------------------ decision 5: the refusal backoff ---------------------------------------------------

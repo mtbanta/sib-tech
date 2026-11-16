@@ -37,9 +37,27 @@ export const GIVE_WAY_MAX_MS = 2_000;
 // for that retry (its share is in effect 45 less the retry's size, 35, instead of 40), until the retry looks again (when room may return)
 // and at least this long; each refused look of the retry renews it.
 export const RETRY_WAIT_HOLD_MS = 2_500;
+// Item 4 of the speed release (Michael's ruling 5 of 2026-11-16, "all four stuck-retry items"): the hold is kept per waiting capped retry,
+// by its key (its entry's client order id, `retryKey`), and it ends for a key as soon as that retry is granted or its stuck record resolves
+// (`forgetRetry`). A capped retry with no key (the older tests) holds under this one shared key.
+export const ANONYMOUS_RETRY = "(a capped retry with no key)";
+// Item 3 of the speed release (fair turns among stuck positions): a capped retry's key not seen (no look and no try) for longer than this
+// leaves the waiting list, so a retry that vanished can never block the others; and a retry told to wait its turn while the one ahead of it
+// already has room looks again no sooner than this (the one ahead takes the room at its own look).
+export const TURN_DROP_MS = 10_000;
+export const TURN_RECHECK_MS = 250;
+// Item 2 of the speed release (a retry budget that grows with spare room): the budgeted minute is the larger of BUDGET_PER_MINUTE and
+// Alpaca's spare, its 200 a minute less every request sent in the last 60 s that the budget did not count (the governor's count of answers
+// in the last 60 s, less the budget's own sent count over the same window). Computed at most once a BUDGET_RECOMPUTE_MS; it rises by at most
+// BUDGET_RISE_PER_S at a time and may fall at once. The 5 seconds are a quarter of it; P2's share is it less P1_KEEP; an ordinary stuck
+// retry's ceiling keeps its distance below it (45 of 60: it less 15, always kept for urgent work). The floors on Alpaca's remaining (P1_FLOOR
+// and P2_FLOOR) and the entries' reserve are unchanged. When busy it is BUDGET_PER_MINUTE, as before.
+export const BUDGET_RECOMPUTE_MS = 1_000;
+export const BUDGET_RISE_PER_S = 20;
 const REFILL_PER_MS = ALPACA_REQUESTS_PER_MINUTE / 60_000;
 
-export type Refusal = { ok: false; at: number; why: "minute" | "five" | "class" | "floor" };
+// `turn` (item 3 of the speed release): a capped retry with room that waits because another stuck retry has waited longer.
+export type Refusal = { ok: false; at: number; why: "minute" | "five" | "class" | "floor" | "turn" };
 
 export interface ReserveOptions {
   // False for the close-out retries (they cannot fit 15 in 5 seconds; their burst is bounded by their own single round). Default true.
@@ -48,6 +66,8 @@ export interface ReserveOptions {
   force?: boolean;
   // What the try is, for the log.
   label: string;
+  // Item 4 of the speed release: a capped retry's identity (its entry's client order id). Its hold ends when it is granted or forgotten.
+  retryKey?: string;
   // A P2 try that will be tried again when room returns (the list-lag recheck): while it waits on its floor, entries give way.
   waitKey?: string;
   // Michael's answer of 2026-11-14 (night) on rulings 1 and 2: a lower ceiling on the budgeted minute for this try (an ordinary stuck retry:
@@ -107,7 +127,7 @@ export class Reservation implements ScopeReservation {
 export interface BudgetMinute {
   sent: Record<Tag | "clock", number>;
   granted: number;
-  refused: { minute: number; five: number; class: number; floor: number };
+  refused: { minute: number; five: number; class: number; floor: number; turn: number };
   forced: number;
   overdrafts: number;
   sentAfterEnd: number;
@@ -125,7 +145,7 @@ export interface BudgetMinute {
   retryHold: { started: number; renewed: number; inForceMs: number; p2Refused: number };
 }
 
-const emptyMinute = (): BudgetMinute => ({ sent: { entry: 0, first: 0, P1: 0, P2: 0, routine: 0, clock: 0 }, granted: 0, refused: { minute: 0, five: 0, class: 0, floor: 0 }, forced: 0, overdrafts: 0, sentAfterEnd: 0, mostBudgetedInMinute: 0, mostBudgetedIn5s: 0, mostCappedIn5s: 0, givingWayRefusals: 0, retryHold: { started: 0, renewed: 0, inForceMs: 0, p2Refused: 0 } });
+const emptyMinute = (): BudgetMinute => ({ sent: { entry: 0, first: 0, P1: 0, P2: 0, routine: 0, clock: 0 }, granted: 0, refused: { minute: 0, five: 0, class: 0, floor: 0, turn: 0 }, forced: 0, overdrafts: 0, sentAfterEnd: 0, mostBudgetedInMinute: 0, mostBudgetedIn5s: 0, mostCappedIn5s: 0, givingWayRefusals: 0, retryHold: { started: 0, renewed: 0, inForceMs: 0, p2Refused: 0 } });
 
 export class RequestBudget {
   readonly nowMs: () => number;
@@ -134,11 +154,17 @@ export class RequestBudget {
   // Every budgeted request sent in the last 60 seconds, oldest first (its time and class).
   // `capped`: sent by a try that reserved against the 5 seconds too (every budgeted try but a close-out retry).
   private sent: Array<{ t: number; cls: BudgetClass; capped: boolean }> = [];
-  // Michael's answer after group 1's rulings round 2: until when a capped retry is waiting that P2 holding back would let in, and the
-  // ceiling P2 must then leave the minute at (the retry's ceiling less its size).
-  private retryWaitUntil = 0;
-  private retryWaitRoom = Infinity;
-  private retryWaitFive = Infinity;
+  // Michael's answer after group 1's rulings round 2, kept per waiting retry since item 4 of the speed release: for each capped retry that is
+  // waiting with P2 in its way, until when P2 holds back for it (renewed by each refused look, as before), and the ceilings P2 must then
+  // leave the minute and the 5 seconds at (the retry's ceiling less its size, and the 5 seconds less its size). The hold is in force while
+  // any key's end is in the future; P2 is held to the most restrictive of the keys in force.
+  private readonly holds = new Map<string, { until: number; room: number; five: number }>();
+  // The latest end among the keys.
+  private holdEnd = 0;
+  // Item 3 of the speed release (fair turns): the ordinary stuck retries (capped, with a key) waiting for room, in the order each first waited
+  // (set on its first refusal, kept until it is granted, forgotten, or not seen for TURN_DROP_MS), with what its try asks for and when it was
+  // last seen. Timed-out stop tries and urgent work are not in it.
+  private readonly turns = new Map<string, { seen: number; n: number; minuteCap: number; routineAhead: number; fiveSec: boolean }>();
   // Statistics only (Michael's approval of 2026-11-15): the time up to which the hold's time in force has been counted, and whether the
   // last refusal `refusal` returned was a P2 refusal that only the hold caused. Neither is read by any decision.
   private holdCountedTo = 0;
@@ -153,11 +179,53 @@ export class RequestBudget {
   // When each request beyond its try's reservation was sent (the last 10 minutes; statistics and tests).
   readonly overdraftAt: number[] = [];
 
-  constructor(opts: { now?: () => number; remaining?: () => number; log?: (event: string, data?: Record<string, unknown>) => void } = {}) {
+  // Item 2 of the speed release: the governor's count of Alpaca answers in the last 60 s (its `stats().requestsLastMinute`). Without it (a
+  // test's own budget) the minute stays BUDGET_PER_MINUTE.
+  private readonly requestsLastMinute: (() => number) | undefined;
+  // The budgeted minute in force, when it was last computed, the figure it moves toward, and each value with the time it took effect (the
+  // last 60 s and the one in force at their start), for urgent work's ceiling.
+  private minuteNow = BUDGET_PER_MINUTE;
+  private minuteAt = -Infinity;
+  private minuteTarget = BUDGET_PER_MINUTE;
+  private readonly minuteHistory: Array<{ t: number; m: number }> = [];
+
+  constructor(opts: { now?: () => number; remaining?: () => number; requestsLastMinute?: () => number; log?: (event: string, data?: Record<string, unknown>) => void } = {}) {
     this.nowMs = opts.now ?? Date.now;
     // Alpaca's remaining requests as the governor estimates them (the last figure Alpaca gave, plus the refill since).
     this.remaining = opts.remaining ?? (() => ALPACA_REQUESTS_PER_MINUTE);
+    this.requestsLastMinute = opts.requestsLastMinute;
     this.log = opts.log;
+  }
+
+  // Item 2 of the speed release: the budgeted minute now (see BUDGET_RECOMPUTE_MS). While the governor has seen no answer in the last 60 s,
+  // Alpaca's spare cannot be measured, so the minute stays BUDGET_PER_MINUTE. Requests in flight are counted by the budget when sent and by
+  // the governor when answered, so the requests the budget did not count are never taken below 0.
+  budgetMinute(now: number = this.nowMs()): number {
+    if (!this.requestsLastMinute) return BUDGET_PER_MINUTE;
+    if (now - this.minuteAt < BUDGET_RECOMPUTE_MS) return this.minuteNow;
+    this.prune(now);
+    const seen = this.requestsLastMinute();
+    const notBudgeted = Math.max(0, seen - this.sent.length);
+    const target = seen > 0 ? Math.max(BUDGET_PER_MINUTE, ALPACA_REQUESTS_PER_MINUTE - notBudgeted) : BUDGET_PER_MINUTE;
+    const next = target <= this.minuteNow ? target : Math.min(target, this.minuteNow + BUDGET_RISE_PER_S);
+    this.minuteTarget = target;
+    this.minuteAt = now;
+    if (next !== this.minuteNow || this.minuteHistory.length === 0) this.minuteHistory.push({ t: now, m: next });
+    while (this.minuteHistory.length > 1 && this.minuteHistory[1]!.t <= now - 60_000) this.minuteHistory.shift();
+    this.minuteNow = next;
+    return next;
+  }
+
+  // Item 2 of the speed release: urgent work's ceiling, the largest minute in force at any moment of the last 60 s. Stuck retries and P2 were
+  // let in under the minute in force when they started, so when the minute falls, the requests they sent still leave urgent work its 15 (it
+  // falls for urgent work only as those requests leave the window).
+  private urgentMinute(now: number): number {
+    let m = this.minuteNow;
+    for (let i = 0; i < this.minuteHistory.length; i++) {
+      const nextAt = this.minuteHistory[i + 1]?.t ?? Infinity;
+      if (nextAt > now - 60_000) m = Math.max(m, this.minuteHistory[i]!.m);
+    }
+    return m;
   }
 
   private prune(now: number): void {
@@ -187,7 +255,7 @@ export class RequestBudget {
     const size = Math.max(0, Math.ceil(n));
     const fiveSec = opts.fiveSec !== false;
     if (!opts.force) {
-      const refusal = this.refusal(cls, size, fiveSec, now, 0, opts.minuteCap);
+      const refusal = this.refusal(cls, size, fiveSec, now, 0, opts.minuteCap, opts.retryKey);
       if (refusal) {
         this.minute.refused[refusal.why]++;
         if (this.lastRefusalHeldOnly) this.minute.retryHold.p2Refused++; // statistics only
@@ -200,6 +268,12 @@ export class RequestBudget {
       }
     } else this.minute.forced++;
     if (opts.waitKey) this.floorWaits.delete(opts.waitKey);
+    // Item 4 of the speed release: a capped retry that gets in no longer needs P2 to hold back for it. Item 3: it leaves the waiting list
+    // (it joins again at the back on its next refusal), so a position that cannot be sold never keeps the turn.
+    if (opts.minuteCap !== undefined) {
+      this.endHold(opts.retryKey ?? ANONYMOUS_RETRY);
+      if (opts.retryKey !== undefined) this.turns.delete(opts.retryKey);
+    }
     const r = new Reservation(this, cls, size, opts.label, fiveSec, opts.limitRetries === true);
     this.open.add(r);
     this.minute.granted++;
@@ -209,33 +283,81 @@ export class RequestBudget {
   // Would `tryReserve` grant this now? (For scheduling; it reserves nothing. A capped retry's look that is refused with P2 in the way sets or
   // renews P2's hold for it, as `tryReserve` would, Michael's answer of 2026-11-14 night.) `routineAhead`: routine requests that will be sent first from the same
   // Alpaca bucket (the reads of the sync that comes for the try), counted against the floor only (group 2, round 2 of the redesign).
-  roomFor(cls: BudgetClass, n: number, fiveSec = true, routineAhead = 0, minuteCap?: number): { ok: true } | Refusal {
-    return this.refusal(cls, Math.max(0, Math.ceil(n)), fiveSec, this.nowMs(), routineAhead, minuteCap) ?? { ok: true };
+  // `retryKey` (item 4 of the speed release): the capped retry's key. A look that finds room ends nothing (only a grant does).
+  roomFor(cls: BudgetClass, n: number, fiveSec = true, routineAhead = 0, minuteCap?: number, retryKey?: string): { ok: true } | Refusal {
+    return this.refusal(cls, Math.max(0, Math.ceil(n)), fiveSec, this.nowMs(), routineAhead, minuteCap, retryKey) ?? { ok: true };
   }
 
-  private refusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead = 0, minuteCap?: number): Refusal | null {
+  private refusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead = 0, minuteCap?: number, retryKey?: string): Refusal | null {
+    const own = this.roomRefusal(cls, n, fiveSec, now, routineAhead, minuteCap, retryKey, true);
+    if (cls !== "P1" || minuteCap === undefined || retryKey === undefined) return own;
+    return this.turnRefusal(retryKey, own, { n, minuteCap, routineAhead, fiveSec }, now);
+  }
+
+  // Item 3 of the speed release (fair turns among stuck positions): an ordinary stuck retry refused for room joins the waiting list (at the
+  // back, on its first refusal). One with room is granted only if no retry ahead of it in the list is still waiting; otherwise it is refused
+  // with `turn`, at the time the retry at the head could next get room (no sooner than TURN_RECHECK_MS from now), and joins the list if it is
+  // not in it. It changes only the order of retries, never how many run or how much of the budget they use.
+  private turnRefusal(key: string, own: Refusal | null, need: { n: number; minuteCap: number; routineAhead: number; fiveSec: boolean }, now: number): Refusal | null {
+    for (const [k, w] of this.turns) if (now - w.seen > TURN_DROP_MS) this.turns.delete(k);
+    const mine = this.turns.get(key);
+    if (mine) Object.assign(mine, need, { seen: now });
+    if (own) {
+      if (!mine) this.turns.set(key, { ...need, seen: now });
+      return own;
+    }
+    const head = this.turns.entries().next().value;
+    if (head === undefined || head[0] === key) return null;
+    if (!mine) this.turns.set(key, { ...need, seen: now });
+    const h = head[1];
+    const headRoom = this.roomRefusal("P1", h.n, h.fiveSec, now, h.routineAhead, h.minuteCap, head[0], false);
+    this.lastRefusalHeldOnly = false; // statistics only: not a P2 refusal
+    return { ok: false, at: Math.max(now + TURN_RECHECK_MS, headRoom ? headRoom.at : now), why: "turn" };
+  }
+
+  // Item 3 of the speed release: a key the walk saw while its retry waits for its time (no budget check then), so a retry waiting a long time
+  // for room keeps its place in the waiting list.
+  seenRetry(key: string): void {
+    const w = this.turns.get(key);
+    if (w) w.seen = this.nowMs();
+  }
+
+  // The room check itself. `effects` false: nothing is changed (no hold set, no statistics), for asking when the retry at the head of the
+  // waiting list could next get room.
+  private roomRefusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead: number, minuteCap: number | undefined, retryKey: string | undefined, effects: boolean): Refusal | null {
     const u = this.usage(now);
-    // P2 leaves room, in the minute and in the 5 seconds, for a waiting capped retry (Michael's answer after group 1's rulings round 2).
-    const holding = now < this.retryWaitUntil;
-    const p2Cap = holding ? Math.min(BUDGET_PER_MINUTE - P1_KEEP, this.retryWaitRoom) : BUDGET_PER_MINUTE - P1_KEEP;
-    const cap = Math.min(cls === "P1" ? BUDGET_PER_MINUTE : p2Cap, minuteCap ?? Infinity);
-    const fiveCap = cls === "P2" && holding ? Math.min(BUDGET_PER_5S, this.retryWaitFive) : BUDGET_PER_5S;
+    // Item 2 of the speed release: the minute and what scales with it, at this moment (all as before while it is BUDGET_PER_MINUTE).
+    const minute = this.budgetMinute(now);
+    const grow = minute - BUDGET_PER_MINUTE;
+    const five = Math.floor(minute / 4);
+    const p2Share = minute - P1_KEEP;
+    const ownCap = minuteCap === undefined ? undefined : minuteCap + grow;
+    // P2 leaves room, in the minute and in the 5 seconds, for a waiting capped retry (Michael's answer after group 1's rulings round 2); since
+    // item 4 of the speed release, for every waiting retry whose hold is in force, held to the most restrictive of them.
+    const holding = now < this.holdEnd;
+    const held = holding ? this.heldCeilings(now) : { room: Infinity, five: Infinity };
+    const p2Cap = holding ? Math.min(p2Share, held.room + grow) : p2Share;
+    const cap = Math.min(cls === "P1" ? (ownCap === undefined ? this.urgentMinute(now) : minute) : p2Cap, ownCap ?? Infinity);
+    const fiveCap = cls === "P2" && holding ? Math.min(five, held.five + (five - BUDGET_PER_5S)) : five;
     const at: number[] = [];
     let why: Refusal["why"] | null = null;
     const minuteShort = u.minute + u.unsentMinute + n > cap;
     const fiveShort = fiveSec && u.five + u.unsentFive + n > fiveCap;
+    // Item 2 of the speed release: while the minute is still rising toward Alpaca's spare, room in the minute and the 5 seconds may come with
+    // its next step, so such a refusal is looked at again then at the latest (a local check, no request).
+    const rising = this.minuteTarget > minute ? Math.max(now + 1, this.minuteAt + BUDGET_RECOMPUTE_MS) : Infinity;
     if (minuteShort) {
-      why = u.minute + u.unsentMinute + n <= BUDGET_PER_MINUTE ? "class" : "minute";
-      at.push(this.agedOutAt(u.minute + u.unsentMinute + n - cap, 60_000, now, u.unsentMinute));
+      why = u.minute + u.unsentMinute + n <= minute ? "class" : "minute";
+      at.push(Math.min(rising, this.agedOutAt(u.minute + u.unsentMinute + n - cap, 60_000, now, u.unsentMinute)));
     }
     if (fiveShort) {
       why ??= "five";
-      at.push(this.agedOutAt(u.five + u.unsentFive + n - fiveCap, 5_000, now, u.unsentFive));
+      at.push(Math.min(rising, this.agedOutAt(u.five + u.unsentFive + n - fiveCap, 5_000, now, u.unsentFive)));
     }
     // A capped retry (an ordinary stuck retry, under its ceiling of 45) kept out by the minute or the 5 seconds: if the urgent work alone (P1,
     // sent and reserved) leaves it room in both, P2's use is what keeps it out, so P2 holds back for it until it looks again. If P1 alone already
     // fills either, holding P2 back would not help, and P2 keeps its share.
-    const holdForRetry = cls === "P1" && minuteCap !== undefined && (minuteShort || fiveShort) && (!minuteShort || (cap === minuteCap && this.p1Use(now, 60_000) + n <= minuteCap)) && (!fiveShort || this.p1Use(now, 5_000, true) + n <= BUDGET_PER_5S);
+    const holdForRetry = cls === "P1" && ownCap !== undefined && (minuteShort || fiveShort) && (!minuteShort || (cap === ownCap && this.p1Use(now, 60_000) + n <= ownCap)) && (!fiveShort || this.p1Use(now, 5_000, true) + n <= five);
     const floor = cls === "P1" ? P1_FLOOR : P2_FLOOR;
     const left = this.remaining() - u.unsentMinute - n - routineAhead;
     if (left < floor) {
@@ -244,23 +366,105 @@ export class RequestBudget {
     }
     if (why === null) return null;
     const when = Math.max(now + 1, ...at);
+    if (!effects) return { ok: false, at: when, why };
     // Statistics only: a P2 refusal the hold alone caused (P2's usual share, the 15 in 5 seconds and the floor would all have let it in).
-    this.lastRefusalHeldOnly = cls === "P2" && holding && u.minute + u.unsentMinute + n <= Math.min(BUDGET_PER_MINUTE - P1_KEEP, minuteCap ?? Infinity) && (!fiveSec || u.five + u.unsentFive + n <= BUDGET_PER_5S) && left >= floor;
+    this.lastRefusalHeldOnly = cls === "P2" && holding && u.minute + u.unsentMinute + n <= Math.min(p2Share, ownCap ?? Infinity) && (!fiveSec || u.five + u.unsentFive + n <= five) && left >= floor;
     // The hold lasts until the retry looks again (when room may return, plus a moment), and at least RETRY_WAIT_HOLD_MS; each look renews it.
+    // Item 4 of the speed release: per retry (its key), each with its own end; a later look never shortens a key's end.
     if (holdForRetry && minuteCap !== undefined) {
       this.countHold(now); // statistics only
       if (holding) this.minute.retryHold.renewed++;
       else this.minute.retryHold.started++;
-      this.retryWaitUntil = Math.max(this.retryWaitUntil, now + RETRY_WAIT_HOLD_MS, when + 500);
-      this.retryWaitRoom = minuteCap - n;
-      this.retryWaitFive = BUDGET_PER_5S - n;
+      const key = retryKey ?? ANONYMOUS_RETRY;
+      const until = Math.max(this.holds.get(key)?.until ?? 0, now + RETRY_WAIT_HOLD_MS, when + 500);
+      this.holds.set(key, { until, room: minuteCap - n, five: BUDGET_PER_5S - n });
+      this.holdEnd = Math.max(this.holdEnd, until);
     }
     return { ok: false, at: when, why };
   }
 
+  // Item 4 of the speed release: the ceilings P2 is held to now, the most restrictive among the keys whose hold is in force.
+  private heldCeilings(now: number): { room: number; five: number } {
+    let room = Infinity;
+    let five = Infinity;
+    for (const h of this.holds.values()) {
+      if (h.until <= now) continue;
+      room = Math.min(room, h.room);
+      five = Math.min(five, h.five);
+    }
+    return { room, five };
+  }
+
+  // Item 4 of the speed release: the hold for this retry ends now (it was granted, or its stuck record resolved). It goes on for any other
+  // retry still waiting. The time in force is counted up to now first, so it stops when the last key goes.
+  private endHold(key: string): void {
+    if (!this.holds.has(key)) return;
+    const now = this.nowMs();
+    this.countHold(now); // statistics only
+    this.holds.delete(key);
+    let end = 0;
+    for (const [k, h] of this.holds) {
+      if (h.until <= now) this.holds.delete(k);
+      else end = Math.max(end, h.until);
+    }
+    this.holdEnd = end;
+  }
+
+  // Items 3 and 4 of the speed release: a stuck record resolved (risk.ts `resolveStuck`): its retry no longer waits (its hold ends, and it
+  // leaves the waiting list).
+  forgetRetry(key: string): void {
+    this.endHold(key);
+    this.turns.delete(key);
+  }
+
+  // Item 3 of the speed release (statistics and tests): the keys waiting their turn, longest-waiting first.
+  waitingRetries(): string[] {
+    return [...this.turns.keys()];
+  }
+
+  // Item 3 of the speed release: the key at the head of the waiting list (the retry whose turn it is), if any.
+  firstWaitingRetry(): string | undefined {
+    const now = this.nowMs();
+    for (const [k, w] of this.turns) if (now - w.seen > TURN_DROP_MS) this.turns.delete(k);
+    return this.turns.keys().next().value;
+  }
+
+  // The older tests read and set the hold as one record. Kept as views of it: the latest end, and the most restrictive ceilings among the
+  // keys (in force or not; Infinity when there is none). Setting one sets the anonymous key's.
+  get retryWaitUntil(): number {
+    return this.holdEnd;
+  }
+  set retryWaitUntil(v: number) {
+    this.anonymousHold().until = v;
+    let end = 0;
+    for (const h of this.holds.values()) end = Math.max(end, h.until);
+    this.holdEnd = end;
+  }
+  get retryWaitRoom(): number {
+    let room = Infinity;
+    for (const h of this.holds.values()) room = Math.min(room, h.room);
+    return room;
+  }
+  set retryWaitRoom(v: number) {
+    this.anonymousHold().room = v;
+  }
+  get retryWaitFive(): number {
+    let five = Infinity;
+    for (const h of this.holds.values()) five = Math.min(five, h.five);
+    return five;
+  }
+  set retryWaitFive(v: number) {
+    this.anonymousHold().five = v;
+  }
+  private anonymousHold(): { until: number; room: number; five: number } {
+    let h = this.holds.get(ANONYMOUS_RETRY);
+    if (!h) this.holds.set(ANONYMOUS_RETRY, (h = { until: 0, room: Infinity, five: Infinity }));
+    return h;
+  }
+
   // Statistics only: adds the time the hold was in force since it was last counted, up to `now` or the hold's end, whichever is first.
   private countHold(now: number): void {
-    const end = Math.min(now, this.retryWaitUntil);
+    const end = Math.min(now, this.holdEnd);
     if (end > this.holdCountedTo) this.minute.retryHold.inForceMs += end - this.holdCountedTo;
     if (now > this.holdCountedTo) this.holdCountedTo = now;
   }
