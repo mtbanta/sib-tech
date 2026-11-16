@@ -146,3 +146,53 @@ test("item 1: with the switch on (choice 5), urgent work goes above 60 under the
   assert.ok(w.b.roomFor("P1", 37).ok && !w.b.roomFor("P1", 38).ok, "the 5 seconds: a quarter of 150");
   assert.ok(w.b.roomFor("P1", 150, false).ok && !w.b.roomFor("P1", 151, false).ok, "the minute: 150");
 });
+
+// ---------------- item 3: the minute in force in the stored row (logging only) ----------------
+
+test("item 3: a quiet minute's row stores the minute in force (lowest, highest, the ceiling urgent work was checked against, urgent work's own 60 and 15), with mostBudgetedInMinute at or below its highest, and refused.turn", () => {
+  const w = world(50); // spare 150
+  w.b.takeMinute(); // start a fresh stored minute
+  w.climb(); // 80, 100, 120, 140, 150
+  for (let i = 0; i < 20; i++) {
+    send(w.b, "P1", 5, { minuteCap: CAP });
+    w.seen.n = 50 + w.b.inUse().minute;
+    w.clock.t += 1_000;
+  }
+  send(w.b, "P1", 3); // urgent work
+  w.b.roomFor("P1", 1, false); // urgent work's ceiling looked at
+  const row = w.b.takeMinute();
+  assert.deepEqual(row.minuteInForce, { lowest: 60, highest: 150, ceilingHighest: 150, urgent: { minute: 60, five: 15 } });
+  assert.equal(row.mostBudgetedInMinute, 103);
+  assert.ok(row.mostBudgetedInMinute <= row.minuteInForce.highest);
+  assert.equal(row.mostUrgentInMinute, 3);
+  assert.equal(row.mostUrgentIn5s, 3);
+  assert.equal(typeof row.refused.turn, "number");
+  // The next stored minute starts from the minute in force (150), not 60, and storing it changed no decision (the minute is not recomputed).
+  const next = w.b.takeMinute();
+  assert.deepEqual(next.minuteInForce, { lowest: 150, highest: 150, ceilingHighest: 150, urgent: { minute: 60, five: 15 } });
+});
+
+test("item 3: after the minute falls, the row keeps the higher ceiling urgent work was checked against, which bounds mostBudgetedInMinute", () => {
+  const w = world(50);
+  w.climb();
+  for (let i = 0; i < 27; i++) {
+    send(w.b, "P1", 5, { minuteCap: CAP });
+    w.seen.n = 50 + w.b.inUse().minute;
+    w.clock.t += 1_500;
+  }
+  w.b.takeMinute();
+  w.seen.n = 135 + 170; // spare 30
+  w.clock.t += 6_000;
+  assert.ok(send(w.b, "P1", 15)); // urgent work takes its 15 above the stuck retries' 135
+  const row = w.b.takeMinute();
+  assert.equal(row.minuteInForce.lowest, 60);
+  assert.equal(row.minuteInForce.highest, 150, "the 150 was in force when the stored minute began");
+  assert.equal(row.minuteInForce.ceilingHighest, 150);
+  assert.equal(row.mostBudgetedInMinute, 150);
+  assert.ok(row.mostBudgetedInMinute <= row.minuteInForce.ceilingHighest);
+});
+
+test("item 3: with choice 5 switched on, the row says urgent work has no own ceiling (null)", () => {
+  const w = world(50, { urgentGrownMinute: true });
+  assert.equal(w.b.takeMinute().minuteInForce.urgent, null);
+});

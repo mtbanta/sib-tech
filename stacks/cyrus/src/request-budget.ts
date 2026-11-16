@@ -161,9 +161,19 @@ export interface BudgetMinute {
   // the minute the hold was in force, up to its end (not up to the read). `p2Refused`: P2 tries (`tryReserve` only, as `refused` counts them)
   // refused that would have been granted without the hold; each is also counted once in `refused.class` or `refused.five`.
   retryHold: { started: number; renewed: number; inForceMs: number; p2Refused: number };
+  // Group 2, round 1 of the speed release (logging only): the budgeted minute in force during this stored minute (item 2), to judge
+  // `mostBudgetedInMinute` and `mostCappedIn5s` against. `lowest` and `highest`: the lowest and highest `budgetMinute()` in force (the one in
+  // force when the stored minute began, and each value computed in it). `ceilingHighest`: the highest ceiling on the total that urgent work
+  // was checked against (the largest minute in force in the 60 s before each check; at least `highest`'s value at the start); the rolling
+  // 60 s crosses stored minutes, so after the minute falls `mostBudgetedInMinute` may exceed this minute's `highest` but not this.
+  // `urgent`: urgent work's own ceilings (60 a minute and 15 in 5 s), or null while choice 5 is switched on (URGENT_GROWN_MINUTE).
+  minuteInForce: { lowest: number; highest: number; ceilingHighest: number; urgent: { minute: number; five: number } | null };
+  // The most requests urgent work itself sent in any 60 s and any 5 s (counted at each of its sends), against `minuteInForce.urgent`.
+  mostUrgentInMinute: number;
+  mostUrgentIn5s: number;
 }
 
-const emptyMinute = (): BudgetMinute => ({ sent: { entry: 0, first: 0, P1: 0, P2: 0, routine: 0, clock: 0 }, granted: 0, refused: { minute: 0, five: 0, class: 0, floor: 0, turn: 0 }, forced: 0, overdrafts: 0, sentAfterEnd: 0, mostBudgetedInMinute: 0, mostBudgetedIn5s: 0, mostCappedIn5s: 0, givingWayRefusals: 0, retryHold: { started: 0, renewed: 0, inForceMs: 0, p2Refused: 0 } });
+const emptyMinute = (m = BUDGET_PER_MINUTE, ceiling = m, urgentOwn = true): BudgetMinute => ({ sent: { entry: 0, first: 0, P1: 0, P2: 0, routine: 0, clock: 0 }, granted: 0, refused: { minute: 0, five: 0, class: 0, floor: 0, turn: 0 }, forced: 0, overdrafts: 0, sentAfterEnd: 0, mostBudgetedInMinute: 0, mostBudgetedIn5s: 0, mostCappedIn5s: 0, givingWayRefusals: 0, retryHold: { started: 0, renewed: 0, inForceMs: 0, p2Refused: 0 }, minuteInForce: { lowest: m, highest: m, ceilingHighest: Math.max(m, ceiling), urgent: urgentOwn ? { minute: BUDGET_PER_MINUTE, five: BUDGET_PER_5S } : null }, mostUrgentInMinute: 0, mostUrgentIn5s: 0 });
 
 export class RequestBudget {
   readonly nowMs: () => number;
@@ -190,7 +200,7 @@ export class RequestBudget {
   private lastRefusalHeldOnly = false;
   private readonly open = new Set<Reservation>();
   private readonly floorWaits = new Map<string, number>();
-  private minute = emptyMinute();
+  private minute: BudgetMinute;
   // Since the start (statistics and tests): budgeted requests sent per class, and the most budgeted requests seen in any minute and any 5
   // seconds (forced and overdrawn requests included).
   readonly totals = { P1: 0, P2: 0, overdraft: 0 };
@@ -214,6 +224,7 @@ export class RequestBudget {
   constructor(opts: { now?: () => number; remaining?: () => number; requestsLastMinute?: () => number; log?: (event: string, data?: Record<string, unknown>) => void; urgentGrownMinute?: boolean } = {}) {
     this.nowMs = opts.now ?? Date.now;
     this.urgentGrown = opts.urgentGrownMinute ?? URGENT_GROWN_MINUTE;
+    this.minute = emptyMinute(BUDGET_PER_MINUTE, BUDGET_PER_MINUTE, !this.urgentGrown);
     // Alpaca's remaining requests as the governor estimates them (the last figure Alpaca gave, plus the refill since).
     this.remaining = opts.remaining ?? (() => ALPACA_REQUESTS_PER_MINUTE);
     this.requestsLastMinute = opts.requestsLastMinute;
@@ -236,6 +247,11 @@ export class RequestBudget {
     if (next !== this.minuteNow || this.minuteHistory.length === 0) this.minuteHistory.push({ t: now, m: next });
     while (this.minuteHistory.length > 1 && this.minuteHistory[1]!.t <= now - 60_000) this.minuteHistory.shift();
     this.minuteNow = next;
+    // Statistics only: the minute in force this stored minute.
+    const mif = this.minute.minuteInForce;
+    mif.lowest = Math.min(mif.lowest, next);
+    mif.highest = Math.max(mif.highest, next);
+    mif.ceilingHighest = Math.max(mif.ceilingHighest, next);
     return next;
   }
 
@@ -382,7 +398,9 @@ export class RequestBudget {
     const holding = now < this.holdEnd;
     const held = holding ? this.heldCeilings(now) : { room: Infinity, five: Infinity };
     const p2Cap = holding ? Math.min(p2Share, held.room + grow) : p2Share;
-    const cap = Math.min(cls === "P1" ? (ownCap === undefined ? this.urgentMinute(now) : minute) : p2Cap, ownCap ?? Infinity);
+    const urgentCeiling = cls === "P1" && ownCap === undefined ? this.urgentMinute(now) : minute;
+    if (effects && cls === "P1" && ownCap === undefined) this.minute.minuteInForce.ceilingHighest = Math.max(this.minute.minuteInForce.ceilingHighest, urgentCeiling); // statistics only
+    const cap = Math.min(cls === "P1" ? urgentCeiling : p2Cap, ownCap ?? Infinity);
     const fiveCap = cls === "P2" && holding ? Math.min(five, held.five + (five - BUDGET_PER_5S)) : five;
     const at: number[] = [];
     let why: Refusal["why"] | null = null;
@@ -563,6 +581,18 @@ export class RequestBudget {
       this.minute.mostCappedIn5s = Math.max(this.minute.mostCappedIn5s, capped5);
       this.minute.mostBudgetedInMinute = Math.max(this.minute.mostBudgetedInMinute, u.minute);
       this.minute.mostBudgetedIn5s = Math.max(this.minute.mostBudgetedIn5s, u.five);
+      if (r.urgent) {
+        // Statistics only: urgent work's own requests in the last minute and 5 s.
+        let um = 0;
+        let u5 = 0;
+        for (const x of this.sent) {
+          if (!x.urgent) continue;
+          um++;
+          if (now - x.t < 5_000) u5++;
+        }
+        this.minute.mostUrgentInMinute = Math.max(this.minute.mostUrgentInMinute, um);
+        this.minute.mostUrgentIn5s = Math.max(this.minute.mostUrgentIn5s, u5);
+      }
       this.totals[r.cls]++;
       this.peak.minute = Math.max(this.peak.minute, u.minute);
       this.peak.five = Math.max(this.peak.five, u.five);
@@ -623,7 +653,8 @@ export class RequestBudget {
   takeMinute(): BudgetMinute & { inUseNow: ReturnType<RequestBudget["inUse"]> } {
     this.countHold(this.nowMs()); // statistics only
     const out = { ...this.minute, inUseNow: this.inUse() };
-    this.minute = emptyMinute();
+    // The next stored minute starts with the minute in force now (not recomputed here: that would move the minute's rise).
+    this.minute = emptyMinute(this.minuteNow, this.urgentMinute(this.nowMs()), !this.urgentGrown);
     return out;
   }
 }
