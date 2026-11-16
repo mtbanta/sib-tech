@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SimBroker } from "./sim-broker.ts";
 import { rig } from "./rig.ts";
-import { Liquidator, SellGate, sideBySideRoundMost } from "../src/sells.ts";
+import { Liquidator, SIDE_BY_SIDE_HEADROOM, SellGate, sideBySideRoundMost } from "../src/sells.ts";
 import { FakeBroker } from "./helpers.ts";
 
 async function session() {
@@ -273,16 +273,18 @@ test("item 2 (ruling): a close-out request stops a waiting side-by-side sale fro
   await Promise.all([a, w]);
 });
 
-test("item 2 (ruling): the worker's room rule: a side-by-side round only while Alpaca's remaining, less the most the rounds in flight and the new one can send and the budget's unsent room, stays at or above 20", async () => {
+test("item 2 (ruling): the worker's room rule: a side-by-side round only while Alpaca's remaining, less the most the rounds in flight and the new one can send and the budget's unsent room, stays at or above 120", async () => {
   // The fix of the rate-limit storm: the rule is given what the rounds can send (sells.ts `sideBySideRoundMost`), not a count of sales at 18.
+  // Michael's answer on the round 4 blocker: "Every side-by-side sale after the first needs 120 left, not 20".
+  assert.equal(SIDE_BY_SIDE_HEADROOM, 120);
   const s = await session();
   const room = s.w.liquidator.d.sideBySideRoom as (most: number) => boolean;
-  s.w.d.governor.budget = () => 74;
-  assert.equal(room(36), true, "74 - 36 = 38: room");
-  assert.equal(room(54), true, "74 - 54 = 20: exactly the floor, room");
-  assert.equal(room(55), false, "74 - 55 = 19: below the floor of 20, no room");
+  s.w.d.governor.budget = () => 174;
+  assert.equal(room(36), true, "174 - 36 = 138: room");
+  assert.equal(room(54), true, "174 - 54 = 120: exactly the headroom, room");
+  assert.equal(room(55), false, "174 - 55 = 119: below the headroom of 120, no room");
   const res = s.w.budget.tryReserve("P1", 10, { label: "stuck retry", force: true });
-  assert.equal(room(54), false, "the budget's 10 reserved and unsent count too: 74 - 10 - 54 = 10");
+  assert.equal(room(54), false, "the budget's 10 reserved and unsent count too: 174 - 10 - 54 = 110");
   res.end();
   assert.equal(room(54), true);
 });

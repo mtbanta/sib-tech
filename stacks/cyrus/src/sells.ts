@@ -327,6 +327,10 @@ export interface LiquidatorDeps {
   // can still send (each counted at `sideBySideRoundMost`). The worker answers from Alpaca's remaining requests (the governor's estimate).
   // Without it, side-by-side sales run one at a time, as before item 2.
   sideBySideRoom?: (most: number) => boolean;
+  // Michael's answer of 2026-11-16 ("Lone sale waits above 20"): may the only side-by-side sale running (or a first one starting when none
+  // runs) start, or start its next round, now? `most`: the most that round can send. The worker answers above the urgent floor of 20.
+  // Without it, such a sale goes ahead at once, as before.
+  sideBySideRoomAlone?: (most: number) => boolean;
 }
 
 // Michael's ruling on item 2 of 2026-11-16, the room check's count (the fix of the rate-limit storm found on 2026-11-16: with 10 positions
@@ -337,6 +341,21 @@ export interface LiquidatorDeps {
 // nothing is waited for, else every look the wait can make up to `waitCancelMs`, plus one for each early wake), the positions again (1), the
 // sell gate's read of the open orders and the positions, and the sell (1); the last round also its last look at the positions (1). The
 // Alpaca client's own retries of a failed request are not in it.
+// Michael's answer of 2026-11-16 on the round 4 blocker: "Every side-by-side sale after the first needs 120 left, not 20". The room check
+// for a side-by-side sale (at its start and before each of its rounds, whenever another side-by-side sale is running) asks that Alpaca's
+// remaining, less the room budgeted tries hold unsent and the most the rounds in flight and the new one can send, stays at or above this.
+// Group 1 (round 4) measured lost-exit sales running side by side just before a sale of the whole account leaving Alpaca's remaining at 41 to
+// 52 when that sale started (59 to 72 rate-limit answers on its sells and cancels, against 0 to 20 on v24). The sale running alone always goes
+// ahead, as before.
+export const SIDE_BY_SIDE_HEADROOM = 120;
+// Michael's answer of 2026-11-16 ("Lone sale waits above 20"): the only side-by-side sale running, or a first one starting when none runs,
+// waits (sending nothing) until Alpaca has room for its round above the urgent floor of 20 (`sideBySideRoomAlone`). Measured: with the
+// headroom of 120 alone, first tries ran back to back with no floor and drained the bucket (30 refused: 144 rate-limit answers in 2 minutes;
+// 0 on f9a4254). Its wait is bounded: the governor's estimate refills about 3.3 requests a second while nothing is sent, so room above 20
+// for one round (at most about 50) returns within about 20 s from an empty bucket; and whatever the estimate says, a lone sale goes ahead
+// after waiting this long, as the one-at-a-time queue would.
+export const SIDE_BY_SIDE_LONE_WAIT_MAX_MS = 30_000;
+
 export function sideBySideRoundMost(o: Pick<LiquidateOptions, "cancelIds" | "waitCancelMs" | "waitForAlpacaCancel">, openPages = 1): number {
   const pages = Number.isFinite(openPages) && openPages > 1 ? Math.ceil(openPages) : 1;
   const look = pages + 1; // the open orders, then the positions
@@ -381,6 +400,10 @@ export class Liquidator {
   private running = 0;
   // Priority sales (the daily loss stop) asked for and not finished yet.
   private priorityPending = 0;
+  // Michael's answer of 2026-11-16 on the round 4 blocker ("end the wait at once"): side-by-side sales waiting for room (at their start, or
+  // before a round), woken the moment a sale of the whole account is asked (`flatten` wakes them), so they stand aside or give way at once
+  // instead of noticing it only when their pause of up to 2 s ends.
+  private readonly roomWaiters = new Set<() => void>();
   constructor(deps: LiquidatorDeps) {
     this.d = deps;
     this.sleep = deps.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -419,6 +442,8 @@ export class Liquidator {
     this.running++;
     const other = !o.ownEntryOnly;
     if (other) this.runningOthers++;
+    // A sale of the whole account (a close-out, `flatten`, the loss stop, a carried position): side-by-side sales waiting for room wake now.
+    if (other) for (const wake of [...this.roomWaiters]) wake();
     if (o.priority) this.priorityPending++;
     const sym = o.sideBySide && o.ownEntryOnly && o.only?.length === 1 ? o.only[0]! : null;
     let run: Promise<LiquidateResult>;
@@ -443,7 +468,8 @@ export class Liquidator {
   }
 
   // Michael's ruling on item 2 of 2026-11-16: a side-by-side sale starts when no other is running (never worse than the one-at-a-time queue)
-  // or while the request budget allows one more above the urgent floor (`sideBySideRoom`). Otherwise it waits, 0.25 s doubling to 2 s, with
+  // or while the request budget allows one more above the headroom of SIDE_BY_SIDE_HEADROOM (`sideBySideRoom`, Michael's answer on the round
+  // 4 blocker). Otherwise it waits, 0.25 s doubling to 2 s (woken at once when a sale of the whole account is asked, `roomWait`), with
   // no request: the wait ends when room comes, when every running side-by-side sale has ended (each is bounded by its rounds and waits), or
   // at once when a sale of the whole account (a close-out, `flatten`, the loss stop, a carried position) is asked for, in which case
   // `run` stands aside before sending anything: a close-out request stops new ones from starting. Sales already running carry on.
@@ -451,11 +477,22 @@ export class Liquidator {
     let wait = 250;
     let waited = 0;
     const first = this.roundMost(o, 1);
-    while (this.sideBySideRunning > 0 && this.runningOthers === 0 && !(this.d.sideBySideRoom?.(this.roundsInFlight() + first) ?? false)) {
-      await this.sleep(wait);
+    // A second or later side-by-side sale needs the headroom of 120; a first one starting when none runs, room above the urgent floor of 20,
+    // and goes ahead anyway after SIDE_BY_SIDE_LONE_WAIT_MAX_MS of waiting alone (Michael's answer of 2026-11-16, "Lone sale waits above 20").
+    // Only the time it waited with no side-by-side sale running counts toward that bound, not time queued behind others.
+    const room = (): boolean => (this.sideBySideRunning > 0 ? (this.d.sideBySideRoom?.(this.roundsInFlight() + first) ?? false) : (this.d.sideBySideRoomAlone?.(first) ?? true));
+    let waitedAlone = 0;
+    while (this.runningOthers === 0 && !room()) {
+      const alone = this.sideBySideRunning === 0;
+      if (alone && waitedAlone >= SIDE_BY_SIDE_LONE_WAIT_MAX_MS) {
+        this.d.log?.("side_by_side_lone_wait_over", { only: o.only ?? null, waitedMs: waited, waitedAloneMs: waitedAlone, at: "start" });
+        break;
+      }
+      await this.roomWait(wait);
       // A turn for other work too (a test's pause can return at once), so the running sales this waits for can finish.
       await new Promise<void>((r) => setImmediate(r));
       waited += wait;
+      if (alone) waitedAlone += wait;
       wait = Math.min(wait * 2, 2_000);
     }
     if (waited > 0) this.d.log?.("side_by_side_waited", { only: o.only ?? null, waitedMs: waited, running: this.sideBySideRunning });
@@ -467,6 +504,19 @@ export class Liquidator {
       this.sideBySideRunning--;
       this.sideBySideRounds.delete(o);
     }
+  }
+
+  // A side-by-side sale's wait for room: `ms` (0.25 s doubling to 2 s, sending nothing), or less: it ends at once when a sale of the whole
+  // account is asked (Michael's answer on the round 4 blocker). No polling: the asking side wakes it.
+  private roomWait(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const wake = (): void => {
+        if (!this.roomWaiters.delete(wake)) return;
+        resolve();
+      };
+      this.roomWaiters.add(wake);
+      void this.sleep(ms).then(wake);
+    });
   }
 
   // The most a side-by-side sale's round `round` can send (`sideBySideRoundMost`, its last round with its last look).
@@ -604,18 +654,29 @@ export class Liquidator {
       if (yieldNow()) return yielded();
       // Michael's ruling on item 2 ("as many at once as the request budget allows at that moment"), the fix of the rate-limit storm: a running
       // side-by-side sale asks for room before each of its rounds, not only at its start (its first round was asked for when it started). It
-      // waits, sending nothing, 0.25 s doubling to 2 s, until the room check says yes. Whenever it is the only side-by-side sale running it
-      // goes ahead, so it is never worse than the one-at-a-time queue. The wait sends nothing and ends when room returns (Alpaca's bucket
-      // refills about 3.3 requests a second, so room for one round above the floor of 20 returns within seconds), when the others have ended,
-      // or when a sale of the whole account is asked (it then gives way, as before).
+      // waits, sending nothing, 0.25 s doubling to 2 s, until the room check says yes: the headroom of 120 beside other side-by-side sales;
+      // running alone, room above the urgent floor of 20 (Michael's answer of 2026-11-16, "Lone sale waits above 20"), going ahead anyway after
+      // SIDE_BY_SIDE_LONE_WAIT_MAX_MS. The wait sends nothing and ends when room returns (Alpaca's bucket refills about 3.3 requests a
+      // second), when the others have ended, or at once when a sale of the whole account is asked (it then gives way, as before).
       if (round > 1 && this.sideBySideRounds.has(o)) {
         const most = this.roundMost(o, round);
         let wait = 250;
         let waited = 0;
-        while (this.sideBySideRunning > 1 && this.runningOthers === 0 && !(this.d.sideBySideRoom?.(this.roundsInFlight(o) + most) ?? false)) {
-          await this.sleep(wait);
+        // Running beside others: the headroom of 120. Running alone: room above the urgent floor of 20, and it goes ahead anyway after
+        // SIDE_BY_SIDE_LONE_WAIT_MAX_MS of waiting alone (Michael's answer of 2026-11-16, "Lone sale waits above 20"); time waited beside
+        // others does not count toward that bound.
+        const room = (): boolean => (this.sideBySideRunning > 1 ? (this.d.sideBySideRoom?.(this.roundsInFlight(o) + most) ?? false) : (this.d.sideBySideRoomAlone?.(most) ?? true));
+        let waitedAlone = 0;
+        while (this.runningOthers === 0 && !room()) {
+          const alone = this.sideBySideRunning <= 1;
+          if (alone && waitedAlone >= SIDE_BY_SIDE_LONE_WAIT_MAX_MS) {
+            this.d.log?.("side_by_side_lone_wait_over", { only: o.only ?? null, waitedMs: waited, waitedAloneMs: waitedAlone, at: `round ${round}` });
+            break;
+          }
+          await this.roomWait(wait);
           await new Promise<void>((r) => setImmediate(r));
           waited += wait;
+          if (alone) waitedAlone += wait;
           wait = Math.min(wait * 2, 2_000);
         }
         if (yieldNow()) return yielded();
