@@ -636,7 +636,7 @@ test("item 1: a cheap retry whose sale waits in the sell gate past its read's on
   assert.equal(w.sim.oversellAttempts, 0);
 });
 
-test("item 1: a retry whose entry still shows an exit open to cancel (a remainder's take-profit) takes today's full path at once, with the live updates connected", async () => {
+test("item 1: a retry whose entry still shows an exit open to cancel (a remainder's take-profit) takes today's full path, with the live updates connected", async () => {
   const w = await retryWorld({ streamLive: () => true });
   // QXA's stop is cancelled after a partial take-profit; the take-profit still rests (the remainder case, A4).
   const entry = w.sim.orders.find((o: any) => o.clientOrderId === w.id)!;
@@ -652,34 +652,21 @@ test("item 1: a retry whose entry still shows an exit open to cancel (a remainde
   const rs = retriesOf(w.evs);
   assert.ok(rs.length >= 1, JSON.stringify(w.evs.map((e) => e.event)));
   assert.deepEqual({ path: rs[0].path, reserved: rs[0].reserved, why: rs[0].why }, { path: "full", reserved: STUCK_TRY_REQUESTS, why: "something of its entry's is open to cancel" });
-  assert.ok(!w.evs.some((e) => e.event === "stuck_retry_full_next"), "no cheap try first");
 });
 
-test("item 1: a cheap retry whose own lookup shows something of its entry's still open to cancel sends nothing more, and the next retry takes today's full path", async () => {
+// A remainder being given a fresh stop (A4) whose stop Alpaca refuses is then sold at market, and the gate reads again between the two: up to
+// 8 requests on the one-read path (measured in the random-fault test), more than the cheap path reserves. It keeps today's full path.
+test("item 1: a remainder being given a fresh stop keeps today's full path, with the live updates connected", async () => {
   const w = await retryWorld({ streamLive: () => true });
-  // A remainder being protected (A4): the sync's list shows its take-profit cancelled (no exits), Alpaca's lookup still shows it open.
-  const st = w.memory.stuck.get(w.id)!;
-  st.protecting = true;
-  const entry = w.sim.orders.find((o: any) => o.clientOrderId === w.id)!;
-  const tp = entry.legs.find((l: any) => l.type === "limit")!;
-  const realFind = w.sim.findOrderByClientId.bind(w.sim);
-  (w.sim as any).findOrderByClientId = async (cid: string) => {
-    const o = await realFind(cid);
-    return o && cid === w.id ? { ...o, legs: o.legs.map((l: any) => (l.id === tp.id ? { ...l, status: "pending_cancel" } : l)) } : o;
-  };
+  w.memory.stuck.get(w.id)!.protecting = true; // no exits left (its take-profit's cancel landed); no fresh stop recorded yet
+  w.sim.refuseStops = true;
   w.sim.refuseSellIf = (x: any) => x.symbol === "QXA";
   await syncOrders(w.risk, w.dd, { protect: true, streamLive: true });
-  let rs = retriesOf(w.evs);
+  const rs = retriesOf(w.evs);
   assert.equal(rs.length, 1);
-  assert.deepEqual({ path: rs[0].path, sent: rs[0].sent }, { path: "cheap", sent: 1 }, "only its lookup");
-  assert.ok(w.evs.some((e) => e.event === "stuck_retry_full_next"));
-  assert.equal(w.memory.stuck.get(w.id)!.fullNext, true);
-  w.sim.advance(3_000);
-  await syncOrders(w.risk, w.dd, { protect: true, streamLive: true });
-  rs = retriesOf(w.evs);
-  assert.equal(rs.length, 2);
-  assert.deepEqual({ path: rs[1].path, reserved: rs[1].reserved, why: rs[1].why }, { path: "full", reserved: STUCK_TRY_REQUESTS, why: "the last retry found something of its entry's open to cancel" });
-  assert.equal(w.memory.stuck.get(w.id)?.fullNext, undefined, "cleared by the full retry");
+  assert.deepEqual({ path: rs[0].path, reserved: rs[0].reserved, why: rs[0].why }, { path: "full", reserved: STUCK_TRY_REQUESTS, why: "it would place a fresh stop for a remainder" });
+  assert.ok(w.evs.some((e) => e.event === "unprotected_position" && e.asRemainder === true), "seen as a remainder to protect");
+  assert.equal(w.sim.oversellAttempts, 0);
 });
 
 // The sell gate's rule (never sell more than is held, counting sells already open) stays as safe as today: the cheap path never trusts the

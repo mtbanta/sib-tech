@@ -200,9 +200,6 @@ export interface StuckEntry {
   saleSentAt?: number;
   // The redesign of 2026-11-14 (group 2, round 2): retries refused for lack of room in a row (their wait grows); reset when one starts.
   roomWaits?: number;
-  // Item 1 of the speed release: a cheap retry found something of its entry's still open to cancel, so the next retry takes today's full
-  // path (cleared when a full retry runs).
-  fullNext?: boolean;
 }
 
 export class SyncMemory {
@@ -1065,7 +1062,9 @@ const liveNow = (d: RiskDeps, mem: SyncMemory): boolean => (d.streamLive ? d.str
 // again); otherwise today's full path.
 function retryPath(d: RiskDeps, mem: SyncMemory, st: StuckEntry | undefined, o: Order | undefined): { cheap: boolean; why: string } {
   if (!liveNow(d, mem)) return { cheap: false, why: "the live order updates are not connected" };
-  if (st?.fullNext) return { cheap: false, why: "the last retry found something of its entry's open to cancel" };
+  // A remainder being given a fresh stop (A4): its stop may be refused and then sold at market, which reads the gate again (measured up to
+  // 8, more than the cheap path reserves), so it keeps today's full path.
+  if (st?.protecting === true && st.freshStopRecorded !== true) return { cheap: false, why: "it would place a fresh stop for a remainder" };
   if (!o) return { cheap: false, why: "no copy of the entry" };
   if (flattenLegs(o).some((l) => l.side === "sell" && OPEN_STATUSES.has(l.status))) return { cheap: false, why: "something of its entry's is open to cancel" };
   return { cheap: true, why: "the live order updates are connected and nothing of its entry's is open to cancel" };
@@ -1489,21 +1488,10 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   // A5: nothing is cancelled by the fast sale (the exits are Alpaca's to cancel, or to keep).
   // Ruling B of 2026-11-12: `alsoCancel`, a fresh stop that was not confirmed in time (cancelled here, and never counted as protection).
   const cancelIds = extra.fast ? [] : [...flattenLegs(o).filter((l) => l.side === "sell" && OPEN_STATUSES.has(l.status)).map((l) => l.id), ...(extra.alsoCancel ?? [])];
-  // Item 1 of the speed release: a cheap retry cancels nothing. If its lookup shows something of its entry's still open to cancel, it stops
-  // here (it sent only the lookup) and the next retry takes today's full path, due at once (when the budget has room for it).
+  // Item 1 of the speed release: the cheap path of an ordinary stuck retry. It is chosen only for a missing-exit sale (a remainder being given
+  // a fresh stop, or one whose take-profit still rests, keeps today's path), whose own lookup above ends the try if any exit is open again, so
+  // it has nothing to cancel here; the liquidator also takes its full path whenever there is something to cancel.
   const cheap = extra.cheap === true && ordinaryRetry && !extra.fast;
-  if (cheap && cancelIds.length > 0) {
-    const st = mem.stuck.get(s.clientOrderId);
-    const now = d.now().getTime();
-    if (st) {
-      st.fullNext = true;
-      st.nextAt = now;
-    }
-    d.log?.("stuck_retry_full_next", { symbol: s.symbol, clientOrderId: s.clientOrderId, kind, toCancel: cancelIds.length });
-    return { attempted: true, stuck: true, recheckAt: now };
-  }
-  // Item 1: a full retry clears the ask for one.
-  if (ordinaryRetry && !cheap) delete mem.stuck.get(s.clientOrderId)?.fullNext;
   // Michael's decision 2 of 2026-11-13 (group 2, round 1 of the weekend build): this reason reaches Discord in the sell gate's refusal
   // alert, so it says only what the stack knows. Nothing branches on it.
   const reason = kind === "missing" ? "protective stop not confirmed" : "stop cancelled after a partial take-profit";

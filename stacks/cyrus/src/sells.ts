@@ -479,7 +479,7 @@ export class Liquidator {
     let earlyWakes = 0;
     let blocked = 0; // logging only: symbols skipped in step 3 because their shares were not free
     // Item 1 of the speed release: the cheap path (see `cheapRetry`), with the read it acts on (the gate's view) and the positions in it.
-    const cheap = o.cheapRetry === true && !!o.ownEntryOnly && only !== null && only.size === 1 && rounds === 1 && cancelIds.length === 0 && !o.waitForAlpacaCancel && !o.endOnCancelFail;
+    const cheap = o.cheapRetry === true && !!o.ownEntryOnly && only !== null && only.size === 1 && rounds === 1 && cancelIds.length === 0 && !o.waitForAlpacaCancel && !o.endOnCancelFail && !o.protectWithStop;
     let cheapView: { positions: Position[]; open: Order[] } | null = null;
     let cheapPositions: Position[] | null = null;
     let sellsTried = 0; // item 1: sells handed to the gate in this liquidation, sent or not
