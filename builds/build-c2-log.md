@@ -6408,3 +6408,17 @@ Built on branch `midday-2026-11-16-item2` (`5fd09ba`, on top of `b99fa6a`; not f
 **Group 2, round 2: PASS** (no blocking findings; checks 2, 7, 8, 10 clean). Both round 1 findings fixed (the three stored names tested; both briefs list every fast-sale ending, the reconnect sync, "not yet confirmed"). Notes: an older brief sentence ("a fast sale that stood aside has ... no stored end") qualified after the pass (documents only); M1e survives (logging only).
 
 **Deploy:** the reviewed commit itself, `20ba5bd` (Michael asked in `commands` at 11:45 AM for his yes), through `tools/midday-deploy.mjs`, mid-day pause route, from a clean clone at `20ba5bd`. Check-only at 11:47: flat, no open orders, pause on, mid-day flat, stop flag off; refused only for his yes.
+
+## Michael's ruling on item 2 and the afternoon plan (2026-11-16, about 11:50 AM), saved verbatim
+
+> Before I give my yes: add item 2 now, with my ruling: missing-exit sales for different stocks run side by side, as many at once as the request budget allows at that moment, above the floor for urgent work. One at a time per stock. A close-out request stops new ones from starting. Test with 30 stuck sales held at Alpaca: no rate-limit answers, remaining never below the urgent floor of 20.
+> Group 1 and group 2 review, as many rounds as fit. Deadline 1:10 PM Central: if it has passed both groups, post the new commit for my yes. If not, post 20ba5bd again and I will give my yes for that instead.
+>
+> Then, after the deploy, write this afternoon's speed-release proposal (no code until I approve), from this morning's per-source counts:
+> 1. A 1-second worker pass, so checks start on time. Request math for the order check at 5, 7 and 10 seconds; recommend one.
+> 2. The reserve: simulate a full flatten of 30 positions with slow cancels at reserves of 40, 50 and 60, and recommend the lowest that never gets a rate-limit answer.
+> 3. Cheaper entries (fewer expiry cancels), fewer routine reads, and the stuck-retry items already drafted.
+> For each: the expected gain in accepted orders a minute and in protection time, the request math, and the risk. After approval, build and review on its own branch this afternoon (up to 8 rounds per group). Nothing deploys during market hours without my written yes. After the close, add the end-of-day findings and deploy before 7:30 AM Tuesday only if both groups pass.
+> Never print any token or key.
+
+Built on branch `midday-2026-11-16-b`, from `94d72f2` (stack code identical to the reviewed `20ba5bd`), with item 2 from `5fd09ba` reworked to the ruling.
