@@ -1,6 +1,6 @@
 // The speed release of 2026-11-16, item 3c (Michael's ruling 5: "Item 3c: all four stuck-retry items"; builds/c2-proposal-stuck-retry-cost.md,
 // items 1 to 4). Item 4: the low-priority hold ends as soon as the stuck retry it was set for gets in (or its stuck record resolves), and
-// with several retries waiting, one getting in keeps the hold for the others.
+// with several retries waiting, one getting in keeps the hold for the others. Item 3: fair turns among stuck positions.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Liquidator, SellGate } from "../src/sells.ts";
@@ -8,11 +8,101 @@ import { STUCK_RETRY_MINUTE_CAP, SyncMemory, syncOrders } from "../src/risk.ts";
 import { MemoryStore } from "../src/store.ts";
 import { ensureDay } from "../src/morning.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
-import { RequestBudget, Reservation } from "../src/request-budget.ts";
+import { RequestBudget, Reservation, withReservation } from "../src/request-budget.ts";
 import { SimBroker } from "./sim-broker.ts";
-import { D } from "./rig.ts";
+import { D, rig, settle } from "./rig.ts";
+import { FakeBot } from "./helpers.ts";
 
 const CAP = STUCK_RETRY_MINUTE_CAP;
+const iso = (ms: number) => new Date(ms).toISOString();
+
+// The worker with `n` positions whose exits are gone and whose shares Alpaca keeps holding (`hidden`: reported not free with no open order
+// to explain it, as on 2026-11-09) or whose every sale Alpaca refuses (`refused`), for `minutes`, with steady low-priority demand when `p2`
+// (a P2 try of 3 requests asked every half second). Alpaca's live remaining reaches the governor, as main.ts wires it. Returns each position's
+// try times (the start of each of its sales) and the order of all tries.
+export async function stuckWorld(o: { n: number; minutes: number; p2: boolean; shape: "hidden" | "refused"; stream?: boolean; quietMs?: number; onStep?: (x: { sim: SimBroker; r: any; wk: any; tMs: number }) => void }) {
+  const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
+  const bot = new FakeBot();
+  const holds: Array<{ until: number; res: () => void }> = [];
+  let timed = false;
+  const tsleep = (ms: number): Promise<void> => (timed ? new Promise<void>((res) => holds.push({ until: sim.simMs + ms, res })) : sim.sleep(ms));
+  const r: any = rig<SimBroker>({ broker: sim, sleep: tsleep, simClock: sim, bot, orderStream: o.stream === true });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("cap 2\napprove", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:25:00");
+  await r.at("14:30:05");
+  const wk: any = r.worker;
+  const prev = sim.onRate;
+  sim.onRate = (k: number) => {
+    r.governor.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: k, reset: null });
+    prev?.(k);
+  };
+  await r.at("15:00:00");
+  const syms = Array.from({ length: o.n }, (_, i) => "QX" + String.fromCharCode(65 + i));
+  for (const s of syms) {
+    const id = clientOrderIdFor(D, s, 1);
+    await sim.submitEntry({ symbol: s, qty: 5, stopPrice: 11.87, takeProfitPrice: 12.08, referencePrice: 12, clientOrderId: id });
+    sim.fillEntry(id, 12);
+    await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: s, qty: 5, referencePrice: 12, stopPrice: 11.87, takeProfitPrice: 12.08, status: "filled", alpacaOrderId: null, filledQty: 5, filledAvgPrice: 12, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+  }
+  await r.at("15:00:01");
+  for (const s of syms) for (const l of sim.orders.find((x: any) => x.clientOrderId === clientOrderIdFor(D, s, 1))!.legs) await sim.cancelOrder(l.id);
+  if (o.shape === "refused") sim.refuseSellIf = (x: any) => syms.includes(x.symbol);
+  else for (const s of syms) sim.staleHeld.set(s, 5);
+  const tries = new Map<string, number[]>();
+  const order: string[] = [];
+  const liq: any = wk.liquidator;
+  const realRun = liq.run.bind(liq);
+  liq.run = (x: any) => {
+    if (x.ownEntryOnly && x.only?.length === 1) {
+      tries.set(x.only[0], [...(tries.get(x.only[0]) ?? []), sim.simMs]);
+      order.push(x.only[0]);
+    }
+    return realRun(x);
+  };
+  timed = true;
+  const r429 = sim.rejected429;
+  const start = sim.simMs;
+  const end = start + o.minutes * 60_000;
+  let nextPass = start + 5_000;
+  let nextTimed = start + 1_000;
+  let nextP2 = start + 500;
+  while (sim.simMs < end) {
+    if (sim.simMs >= nextPass) {
+      void r.at(iso(sim.simMs));
+      nextPass += 5_000;
+    } else r.setNow(iso(sim.simMs + 100));
+    if (sim.simMs >= nextTimed) {
+      nextTimed += 1_000;
+      void wk.timedTick();
+    }
+    if (o.p2 && sim.simMs >= nextP2) {
+      nextP2 += 500;
+      const res = wk.budget.tryReserve("P2", 3, { label: "test low-priority load" });
+      if (res instanceof Reservation)
+        void withReservation(res, async () => {
+          for (let i = 0; i < 3; i++) await sim.listPositions();
+        }).catch(() => undefined);
+    }
+    for (const h of holds.filter((h) => h.until <= sim.simMs)) {
+      holds.splice(holds.indexOf(h), 1);
+      h.res();
+    }
+    o.onStep?.({ sim, r, wk, tMs: sim.simMs - start });
+    await settle();
+  }
+  timed = false;
+  for (const h of holds.splice(0)) h.res();
+  wk.stop?.();
+  // From each position's first retry on (its first try is three rounds, counted, never refused).
+  const gaps = syms.map((s) => {
+    const t = tries.get(s) ?? [];
+    return t.slice(1).map((x, i) => x - t[i]!).slice(1);
+  });
+  const all = gaps.flat();
+  return { syms, tries, order, gaps, longest: Math.max(...all), mean: all.reduce((a, b) => a + b, 0) / all.length, rateLimited: sim.rejected429 - r429, oversell: sim.oversellAttempts, wk, sim };
+}
 
 // P2 sends `n` requests, one a second from `fromMs`, outside the 5 seconds by the time the test looks.
 function p2Minute(b: RequestBudget, clock: { t: number }, n: number, fromMs = 0): void {
@@ -114,4 +204,158 @@ test("item 4: a stuck record that resolves ends its retry's hold (resolveStuck c
   await syncOrders(risk, dd, { protect: true });
   assert.ok(!memory.stuck.has(id), "resolved");
   assert.ok(forgotten.includes(id), "its key was forgotten by the budget");
+});
+
+// ---------------- item 3: fair turns among stuck positions ----------------
+
+// Fills the budgeted minute with urgent P1 work sent one a second from `fromMs` (out of the 5 seconds by the time the test looks), so stuck
+// retries wait for the minute and room returns one request a second.
+function p1Minute(b: RequestBudget, clock: { t: number }, n: number, fromMs = 0): void {
+  for (let i = 0; i < n; i++) {
+    clock.t = fromMs + i * 1_000;
+    const r = b.tryReserve("P1", 1, { label: "urgent", fiveSec: false }) as Reservation;
+    assert.ok(r instanceof Reservation);
+    r.charge("/v2/test");
+    r.end();
+  }
+}
+const retry = (b: any, key: string) => b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: CAP, retryKey: key });
+const look = (b: any, key: string) => b.roomFor("P1", 10, true, 0, CAP, key);
+// While they wait, the retries look again every 4 s (their room wakes; in the worker the walk also sees them), `keys` in that order each
+// time; `seenOnly` are seen by the walk without a budget check. The clock ends at `until`, with no look then.
+function lookUntil(b: any, clock: { t: number }, until: number, keys: string[], seenOnly: string[] = []): void {
+  for (let t = clock.t + 4_000; t < until; t += 4_000) {
+    clock.t = t;
+    for (const k of keys) look(b, k);
+    for (const k of seenOnly) b.seenRetry(k);
+  }
+  clock.t = until;
+}
+
+test("item 3: when room comes back, the stuck retry that waited longest gets it, though another looks first; the other is told `turn`", () => {
+  const clock = { t: 0 };
+  const b: any = new RequestBudget({ now: () => clock.t });
+  p1Minute(b, clock, 40);
+  clock.t = 41_000;
+  assert.equal(retry(b, "A").why, "class", "A waits first (40 + 10 passes 45)");
+  clock.t = 42_000;
+  assert.equal(look(b, "B").why, "class", "B waits second");
+  assert.deepEqual(b.waitingRetries(), ["A", "B"]);
+  lookUntil(b, clock, 65_000, ["B", "A"]); // 34 used at 65 s: room for one retry of 10 under 45
+  const bFirst = look(b, "B");
+  assert.ok(!bFirst.ok && bFirst.why === "turn", "B looks first but waits its turn");
+  assert.ok(bFirst.at >= clock.t + 250, "and looks again no sooner than a quarter second later");
+  const bTry = retry(b, "B");
+  assert.ok(!(bTry instanceof Reservation) && bTry.why === "turn", "B's try is refused too");
+  const a = retry(b, "A");
+  assert.ok(a instanceof Reservation, "A, which waited longest, gets the room");
+  assert.deepEqual(b.waitingRetries(), ["B"], "A left the list");
+  a.end();
+});
+
+test("item 3: a refusal for its turn is counted in the per-minute statistics (once, under `turn`) and logged; it sets no hold", () => {
+  const clock = { t: 0 };
+  const logged: any[] = [];
+  const b: any = new RequestBudget({ now: () => clock.t, log: (e, d) => void logged.push({ e, d }) });
+  p1Minute(b, clock, 40);
+  clock.t = 41_000;
+  retry(b, "A");
+  lookUntil(b, clock, 65_000, ["A"]);
+  b.takeMinute();
+  const r = retry(b, "B");
+  assert.equal(r.why, "turn");
+  const m = b.takeMinute();
+  assert.equal(m.refused.turn, 1);
+  assert.equal(m.refused.class + m.refused.minute + m.refused.five + m.refused.floor, 0, "counted once, under `turn` only");
+  assert.ok(logged.some((x) => x.e === "budget_refused" && x.d.why === "turn" && x.d.label === "stuck retry"));
+  assert.equal(m.retryHold.started + m.retryHold.renewed, 0, "a retry with room waiting its turn sets no hold");
+});
+
+test("item 3: a retry that was granted goes to the back: on its next refusal it waits behind the others", () => {
+  const clock = { t: 0 };
+  const b: any = new RequestBudget({ now: () => clock.t });
+  p1Minute(b, clock, 40);
+  clock.t = 41_000;
+  retry(b, "A");
+  clock.t = 42_000;
+  retry(b, "B");
+  lookUntil(b, clock, 65_000, ["B", "A"]);
+  const a = retry(b, "A") as Reservation;
+  assert.ok(a instanceof Reservation);
+  for (let i = 0; i < 10; i++) a.charge("/v2/test");
+  a.end(); // A's try sent 10
+  clock.t = 67_500;
+  assert.equal(retry(b, "A").why, "class", "A is stuck again and waits");
+  assert.deepEqual(b.waitingRetries(), ["B", "A"], "behind B");
+  lookUntil(b, clock, 76_000, ["A", "B"]); // the urgent requests sent up to 16 s have left: room for one retry
+  assert.equal(look(b, "A").why, "turn", "A looks first, but B has waited longer");
+  assert.ok(retry(b, "B") instanceof Reservation, "B gets the room");
+});
+
+test("item 3: a retry not seen for more than 10 s leaves the list, so it can never block the others; one the walk saw keeps its place", () => {
+  const clock = { t: 0 };
+  const b: any = new RequestBudget({ now: () => clock.t });
+  p1Minute(b, clock, 40);
+  clock.t = 41_000;
+  retry(b, "A");
+  clock.t = 42_000;
+  retry(b, "B");
+  clock.t = 43_000;
+  retry(b, "C");
+  // A is never seen again (its entry vanished); B is seen by the walk while it waits for its time (no budget check then); C keeps looking.
+  clock.t = 50_000;
+  b.seenRetry("B");
+  clock.t = 51_000;
+  look(b, "C");
+  assert.deepEqual(b.waitingRetries(), ["A", "B", "C"], "A was last seen exactly 10 s ago: still waiting");
+  clock.t = 51_001;
+  assert.equal(look(b, "C").why, "class", "C looks (no room yet)");
+  assert.deepEqual(b.waitingRetries(), ["B", "C"], "A, unseen for more than 10 s, was dropped; B kept its place");
+  lookUntil(b, clock, 65_000, ["C"], ["B"]);
+  assert.equal(look(b, "C").why, "turn", "B is ahead of C");
+  assert.ok(retry(b, "B") instanceof Reservation, "B gets the room; a vanished A blocks nobody");
+});
+
+test("item 3: urgent work, timed-out stop tries and low-priority work are not in the list and never wait for a turn", () => {
+  const clock = { t: 0 };
+  const b: any = new RequestBudget({ now: () => clock.t });
+  p1Minute(b, clock, 30);
+  clock.t = 41_000;
+  b.tryReserve("P1", 20, { label: "stuck retry", minuteCap: CAP, retryKey: "A" }); // 30 + 20 passes 45: A waits
+  assert.deepEqual(b.waitingRetries(), ["A"]);
+  const t = b.tryReserve("P1", 13, { label: "timed-out stop try", limitRetries: true });
+  assert.ok(t instanceof Reservation, "a timed-out stop's try (no cap, no key) goes ahead");
+  t.end();
+  assert.ok(b.tryReserve("P2", 1, { label: "list lag recheck", fiveSec: false }) instanceof Reservation, "P2 is not in the list");
+  assert.deepEqual(b.waitingRetries(), ["A"]);
+});
+
+test("item 3: forgetting a retry (its stuck record resolved) takes it out of the list", () => {
+  const clock = { t: 0 };
+  const b: any = new RequestBudget({ now: () => clock.t });
+  p1Minute(b, clock, 40);
+  clock.t = 41_000;
+  retry(b, "A");
+  retry(b, "B");
+  b.forgetRetry("A");
+  assert.deepEqual(b.waitingRetries(), ["B"]);
+  lookUntil(b, clock, 65_000, ["B"]);
+  assert.ok(retry(b, "B") instanceof Reservation);
+});
+
+// In the worker, 10 minutes, 5 positions whose shares Alpaca keeps holding, with steady low-priority demand. Before item 3 (b995c17's code,
+// measured with this same shape): the longest wait between one position's tries was 167.5 s against an average of about 95 s, and the turns
+// were uneven (5 to 8 tries each). With turns: the longest is close to the average and the positions are tried in turn.
+test("item 3, in the worker: 5 stuck positions under steady low-priority demand are tried in turn, and the longest wait stays close to the average", async () => {
+  const w = await stuckWorld({ n: 5, minutes: 10, p2: true, shape: "hidden" });
+  assert.equal(w.rateLimited, 0);
+  assert.ok(w.longest <= 1.4 * w.mean, `longest ${Math.round(w.longest / 1000)} s, average ${Math.round(w.mean / 1000)} s`);
+  const counts = w.syms.map((s) => w.tries.get(s)?.length ?? 0);
+  assert.ok(Math.max(...counts) - Math.min(...counts) <= 1, `tries per position ${counts.join(", ")}`);
+  // In turn: after every position's first try, no position is tried twice while another waits without a try between.
+  const later = w.order.slice(w.syms.length);
+  for (let i = 0; i + w.syms.length <= later.length; i++) {
+    const window = later.slice(i, i + w.syms.length);
+    assert.equal(new Set(window).size, w.syms.length, `in turn: ${window.join(", ")}`);
+  }
 });
