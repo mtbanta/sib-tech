@@ -6443,3 +6443,9 @@ Group 2's round 1 on `0f38508` was stopped (item 2 not shipping today). Under Mi
 - **After it:** one start (12:46:50; `start_history` 18:46:50.284 UTC); the start note and "Release ZT522T3T started while flat and paused. `hold` is set, so I stay paused."; the pause still on (`deployedAt` recorded), `hold` on; Alpaca 0 positions, 0 open orders, 0 orders since; Healthchecks up (pinged 12:46:52); the order stream connected once (connecting, authenticating, live in 0.3 s; no reconnect sync, as designed for a first connection); stop flag off. Michael's yes line drew the bot's usual "I did not understand the line" reply (not a command; nothing done).
 - **Merged:** `midday-2026-11-16` fast-forwarded to `main` (stack code identical to `20ba5bd`). Item 2 stays on `midday-2026-11-16-b` for Michael's ruling on running sales giving way.
 - Next: Michael sends `load afternoon` (accepted until 1:30 PM). Paper trading only; research input for a human decision, never an instruction to act.
+
+## Michael's messaging fix for tonight's release (2026-11-16, about 12:55 PM), saved verbatim
+
+> Messaging fix for tonight's release: the bot should recognize a deploy approval line in commands ("Yes, deploy <commit> now.") and reply "Deploy approval for <commit> noted; the builder will deploy it if every check passes." instead of "I did not understand". The bot must not act on it itself; it only acknowledges. Group 2 review.
+
+Added to the speed-release proposal as item 4 (approved by Michael as written; built with tonight's release, group 2 review).
