@@ -483,7 +483,7 @@ test("item 10: one statistics line a minute, all session, with the live updates,
   await r.at("15:01:05");
   const stats = r.store.events.filter((e) => e.event === "governor_stats").map((e) => e.data as any);
   const last = stats.at(-1)!;
-  for (const k of ["orderStream", "freesThisMinute", "databaseCloses", "entryExpiry", "lossStopShadow", "viewEveryMs", "viewReads", "rawUpdate"]) assert.ok(k in last, `${k} in ${JSON.stringify(last).slice(0, 400)}`);
+  for (const k of ["orderStream", "freesThisMinute", "databaseCloses", "entryExpiry", "lossStopShadow", "viewEveryMs", "rawUpdate"]) assert.ok(k in last, `${k} in ${JSON.stringify(last).slice(0, 400)}`);
   assert.equal(last.freesThisMinute.n, 1);
   const shadowed = stats.filter((s) => s.lossStopShadow?.n >= 1);
   assert.ok(shadowed.length >= 1, "the estimate was logged beside the loss stop's reads");

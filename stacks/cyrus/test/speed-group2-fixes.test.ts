@@ -333,15 +333,6 @@ async function viewReads(withEntries: boolean) {
     where.now = "carried-position scan";
     try { return await fresh(maxAgeMs); } finally { where.now = was; }
   };
-  // The stored per-minute counts (governor_stats.viewReads), summed over the run.
-  const stored = { gate: 0, freshPositions: 0, worker: 0, failed: 0 };
-  const take = w.view.takeReadCounts.bind(w.view);
-  take();
-  w.view.takeReadCounts = () => {
-    const c = take();
-    for (const k of Object.keys(stored) as Array<keyof typeof stored>) stored[k] += c[k];
-    return c;
-  };
   let entries = 0;
   const realSubmit = sim.submitEntry.bind(sim);
   sim.submitEntry = async (e: any) => (entries++, realSubmit(e));
@@ -369,11 +360,10 @@ async function viewReads(withEntries: boolean) {
     sim.prices.set(symbols[i]!, price[i]!);
     await r.trade(symbols[i]!, price[i]!, iso);
   }
-  w.view.takeReadCounts();
   const from = (f: string) => reads.filter((x) => x.from === f).length;
   const gaps = reads.slice(1).map((x, i) => Math.round((x.t - reads[i]!.t) / 100) / 10);
   const line = `${entries} entries sent; ${reads.length} view reads (gate ${from("gate")}, timed pass ${from("timed pass")}, carried-position scan ${from("carried-position scan")}, full pass's own ${from("full pass")}, other ${from("other")}); at +${reads.map((x) => (x.t - t0) / 1000).join(", +")} s; gaps ${gaps.join(", ")} s`;
-  return { entries, reads, from, gaps, line, stored, live: w.orderStreamLive() as boolean };
+  return { entries, reads, from, gaps, line, live: w.orderStreamLive() as boolean };
 }
 
 test("item 7 (measured): entries flowing for 60 s on a load window with the live updates connected: the view is read about every 15 s, by the gate inside entry decisions and by the 30 s carried-position scan, not every 20 s", { timeout: 120_000 }, async () => {
@@ -387,8 +377,6 @@ test("item 7 (measured): entries flowing for 60 s on a load window with the live
   assert.equal(m.from("timed pass"), 0, "the timed pass's 20 s never comes due");
   assert.ok(m.reads.length >= 4 && m.reads.length <= 5, `about every 15 s: ${m.reads.length} reads in 60 s`);
   assert.ok(m.gaps.every((g) => g >= 14 && g < 20), `gaps about 15 s: ${m.gaps.join(", ")}`);
-  // The stored counts say the same, by who asked (logging only).
-  assert.deepEqual(m.stored, { gate: m.from("gate"), freshPositions: m.from("carried-position scan"), worker: m.from("timed pass") + m.from("full pass") + m.from("other"), failed: 0 });
 });
 
 test("item 7 (measured): the same 60 s without entries: the view is read every 20 s (here by the full pass and the carried-position scan, which run first at the same moment as the timed pass)", { timeout: 120_000 }, async () => {

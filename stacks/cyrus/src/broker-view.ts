@@ -27,11 +27,6 @@ export class BrokerView {
   // positions that STARTED before such an update is overlaid with it, so the read (which may be older than the update) cannot bring
   // back a position an exit just closed, or hide one an entry just opened. Updates older than a minute are forgotten.
   private fromUpdates = new Map<string, { qty: number; price: number | null; at: number }>();
-  // Group 2, round 1 of the speed release (logging only): account and positions reads since the last `takeReadCounts`, by who asked: the
-  // gate inside an entry decision (`snapshot`, a view older than its 15 s), the carried-position scan (`freshPositions`), or the worker's
-  // timed and full passes (a direct `refreshFast`). Ruling 4's 20 s is the worker's; with entries flowing the gate's 15 s comes first.
-  private reads = { gate: 0, freshPositions: 0, worker: 0, failed: 0 };
-  private readFrom: "gate" | "freshPositions" | null = null;
 
   constructor(broker: BrokerView["broker"], now: () => number = Date.now) {
     this.broker = broker;
@@ -41,14 +36,7 @@ export class BrokerView {
   // Account and positions: the two things that change as the stack trades.
   async refreshFast(): Promise<void> {
     const started = this.now();
-    this.reads[this.readFrom ?? "worker"]++; // statistics only
-    let account: Account, positions: Position[];
-    try {
-      [account, positions] = await Promise.all([this.broker.getAccount(), this.broker.listPositions()]);
-    } catch (err) {
-      this.reads.failed++; // statistics only
-      throw err;
-    }
+    const [account, positions] = await Promise.all([this.broker.getAccount(), this.broker.listPositions()]);
     this.account = account;
     this.positions = positions;
     for (const [symbol, u] of [...this.fromUpdates]) {
@@ -113,25 +101,8 @@ export class BrokerView {
 
   // The positions as last seen, if no older than maxAgeMs, else read fresh.
   async freshPositions(maxAgeMs: number): Promise<Position[]> {
-    if (this.fastAgeMs() > maxAgeMs) await this.tagged("freshPositions", () => this.refreshFast());
+    if (this.fastAgeMs() > maxAgeMs) await this.refreshFast();
     return this.positions!;
-  }
-
-  // Statistics only: the reads since the last call, by who asked (the worker's per-minute `governor_stats`).
-  takeReadCounts(): { gate: number; freshPositions: number; worker: number; failed: number } {
-    const out = this.reads;
-    this.reads = { gate: 0, freshPositions: 0, worker: 0, failed: 0 };
-    return out;
-  }
-
-  // Statistics only: counts the read that starts now under `from` (set only for the synchronous start of the read).
-  private tagged(from: "gate" | "freshPositions", read: () => Promise<void>): Promise<void> {
-    this.readFrom = from;
-    try {
-      return read();
-    } finally {
-      this.readFrom = null;
-    }
   }
 
   // Would a snapshot with these limits have to ask Alpaca for something?
@@ -142,7 +113,7 @@ export class BrokerView {
   // Everything an entry decision needs, none of it older than the limits. Refreshes whichever part is too old.
   async snapshot(limits: { fastMs: number; configMs: number; clockMs: number }): Promise<Snapshot> {
     const jobs: Promise<void>[] = [];
-    if (this.fastAgeMs() > limits.fastMs) jobs.push(this.tagged("gate", () => this.refreshFast()));
+    if (this.fastAgeMs() > limits.fastMs) jobs.push(this.refreshFast());
     if (!this.config || this.now() - this.configAt > limits.configMs) jobs.push(this.refreshConfig());
     if (!this.clock || this.now() - this.clockAt > limits.clockMs) jobs.push(this.refreshClock());
     if (jobs.length > 0) await Promise.all(jobs);

@@ -122,7 +122,7 @@ export const MORNING_LINE_LOOKUP_MS = 3_000;
 // round 1): with entries flowing, the gate (gate.ts, VIEW.fastMs) reads a view older than 15 s inside an entry decision first, and the
 // carried-position scan (every 30 s, a view no older than 10 s) reads it too, so the view is read about every 15 s, partly inside entry
 // decisions, and the worker's 20 s does not come due; with no entries it is read every 20 s. Michael's answer: about 15 s with entries
-// flowing is fine, and the gate is left alone. The reads by who asked are stored each minute (`governor_stats.viewReads`).
+// flowing is fine, and the gate is left alone.
 export const VIEW_EVERY_MS = 20_000;
 export const VIEW_EVERY_NO_STREAM_MS = 5_000;
 // The speed release, item 10: the request and stream statistics are written every minute of the session (they were every 5 minutes,
@@ -1548,10 +1548,6 @@ export class Worker {
       // Decision 7 of 2026-11-06: the request reserve's range this minute.
       ...(reserve ? { reserveThisMinute: reserve } : {}),
       viewEveryMs: this.orderStreamLive() ? VIEW_EVERY_MS : VIEW_EVERY_NO_STREAM_MS,
-      // Group 2, round 1 of the speed release (logging only): the account and positions reads this minute by who asked (the gate inside an
-      // entry decision, the carried-position scan, the worker's own passes) and how many failed; with entries flowing the gate's 15 s comes
-      // before `viewEveryMs`.
-      viewReads: this.view.takeReadCounts(),
       ...(raw ? { rawUpdate: raw } : {}),
       // The redesign of 2026-11-14, part 1: the shared request budget this minute: requests sent by tag (entries, first tries, P1, P2,
       // routine, and the clock's separate bucket), tries granted and refused (and why), forced (the 2:55 retry from 2:58), overdrafts, the
