@@ -513,7 +513,8 @@ export class AlpacaTrading {
       throw new AlpacaError("Take-profit must be above the reference price", 0);
     }
     if (entry.limitPrice !== undefined) {
-      if (!(entry.limitPrice > 0) || !Number.isFinite(entry.limitPrice) || entry.limitPrice > entry.referencePrice) throw new AlpacaError("Limit price must be positive and at or below the reference price", 0);
+      // Michael's ruling 3 of 2026-11-16: a load entry may be priced up to 1 cent above the price seen (the reference price), never more.
+      if (!(entry.limitPrice > 0) || !Number.isFinite(entry.limitPrice) || entry.limitPrice > entry.referencePrice + 0.01 + 1e-9) throw new AlpacaError("Limit price must be positive and at most 1 cent above the reference price", 0);
       if (!(entry.stopPrice < entry.limitPrice) || (entry.takeProfitPrice !== undefined && !(entry.takeProfitPrice > entry.limitPrice))) throw new AlpacaError("The exits must be on either side of the limit price", 0);
     }
     if (!/^[\w.-]{8,128}$/.test(entry.clientOrderId)) throw new AlpacaError("Bad client order id", 0);

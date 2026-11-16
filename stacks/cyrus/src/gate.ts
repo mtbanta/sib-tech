@@ -18,7 +18,7 @@ import type { BrokerView } from "./broker-view.ts";
 import type { GateBroker } from "./broker.ts";
 import type { Governor } from "./governor.ts";
 import { MAX_TRADES_PER_MINUTE_LOAD_DAY, checkEntry, tradesCeiling, type EntryContext } from "./limits.ts";
-import { LOAD_MAX_POSITION_USD, LOAD_WINDOW_SHARES, afternoonCloseoutPending, beforeLoadWindow, hasLoadEntries, inAfternoonLoad, loadCeilingOn, loadRulesApply, loadWindow } from "./load-mode.ts";
+import { LOAD_ENTRY_ABOVE_CENTS, LOAD_MAX_POSITION_USD, LOAD_WINDOW_SHARES, afternoonCloseoutPending, beforeLoadWindow, hasLoadEntries, inAfternoonLoad, loadCeilingOn, loadRulesApply, loadWindow } from "./load-mode.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, type NotFlatState, type OrderRecord, type StopFlag, type Store } from "./store.ts";
 import { readPause, type MiddayPause } from "./midday.ts";
 import { dayOrderIndex, isActiveOrder } from "./order-index.ts";
@@ -320,7 +320,8 @@ export class OrderGate {
     const limitPrice = signal.limitPrice !== undefined && signal.load && hasLoadEntries(day) && decision.qty === 1 ? signal.limitPrice : undefined;
     if (signal.limitPrice !== undefined && limitPrice === undefined) return this.refuse(date, symbol, "a limit entry is only sent in the load window, 1 share");
     const base = limitPrice ?? signal.price;
-    if (limitPrice !== undefined && !(limitPrice > 0 && limitPrice <= signal.price)) return this.refuse(date, symbol, "the limit price is not at or below the price seen");
+    // Michael's ruling 3 of 2026-11-16: at most LOAD_ENTRY_ABOVE_CENTS above the price seen (before: at or below it).
+    if (limitPrice !== undefined && !(limitPrice > 0 && limitPrice <= signal.price + LOAD_ENTRY_ABOVE_CENTS / 100 + 1e-9)) return this.refuse(date, symbol, "the limit price is more than 1 cent above the price seen");
     if (!(signal.stopPrice > 0 && signal.stopPrice < base && signal.takeProfitPrice > base && signal.stopPrice < signal.price && signal.takeProfitPrice > signal.price)) return this.refuse(date, symbol, "the exits are not on the right sides of the price");
 
     // Decision 7: the governor's reserve scales with the symbols open (held, or with an entry working), counting this entry.

@@ -325,6 +325,10 @@ export class CommandProcessor {
       case "unknown":
         await this.say(`I did not understand the line "${cmd.text}". Nothing was done for it. Type \`help\` for the list.`);
         return;
+      // Michael's messaging fix of 2026-11-16: acknowledged only; nothing is stored or done.
+      case "deployApproval":
+        await this.say(`Deploy approval for ${cmd.commit} noted; the builder will deploy it if every check passes.`);
+        return;
       case "stop": {
         // Fix of 2026-11-12 (group 2, round 3): the pending afternoon window is cancelled before the stop is saved, so a screen finishing
         // during the save is already cancelled (it says nothing) and this reply keeps its cancel line.

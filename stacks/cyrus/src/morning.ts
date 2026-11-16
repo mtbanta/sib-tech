@@ -213,9 +213,16 @@ export type Command =
   | { kind: "loadAfternoon" }
   | { kind: "go" }
   | { kind: "hold" }
+  | { kind: "deployApproval"; commit: string }
   | { kind: "unknown"; text: string };
 
+// Michael's messaging fix of 2026-11-16 (item 4 of the speed release): his deploy approval line, "Yes, deploy <commit> now.", is
+// recognised and only acknowledged. The worker never acts on it: the builder checks every deploy condition and passes the yes on itself.
+const DEPLOY_APPROVAL = /^yes,?\s+deploy\s+([0-9a-f]{7,40})\s+now\.?$/i;
+
 export function parseCommand(content: string): Command {
+  const approval = DEPLOY_APPROVAL.exec(content.trim());
+  if (approval) return { kind: "deployApproval", commit: approval[1]!.toLowerCase() };
   const text = content.trim().replace(/^[/!]/, "").toLowerCase();
   const [word = "", arg1, arg2] = text.split(/\s+/);
   switch (word) {

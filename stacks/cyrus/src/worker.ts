@@ -99,7 +99,14 @@ export const CARRIED_PHASE = "carried";
 // Decision 2 of 2026-11-06: the summary's reads (on a day of 10,000 fills or more, a few hundred: the fills' pages and the lookups) wait
 // while Alpaca's request budget is below this, so the summary never runs the bucket low and never causes a rate-limit answer.
 export const SUMMARY_MIN_BUDGET = 100;
-export const SYNC_EVERY_MS = 10_000;
+// Michael's ruling 1 of 2026-11-16 (the speed release): the order sync every 6 s, and every 2 s only while the live updates are down
+// (connected before and not live now); started on time by the 1-second timed pass (`timedTick`). Before: every 10 s, started only by the
+// 5 second pass, so 10 to 15 s apart.
+export const SYNC_EVERY_MS = 6_000;
+export const SYNC_EVERY_STREAM_DOWN_MS = 2_000;
+// The timed pass: every second it starts the timed checks that are due (the order sync, the account and positions view). The full pass
+// (commands, the day record, the heartbeat) stays every 5 s (Michael's answer of 2026-11-16: "Timed checks only").
+export const TIMED_PASS_MS = 1_000;
 // Michael's mid-day build of 2026-11-16, item 4: the most entries the morning line looks up at Alpaca (those still stored as working).
 export const MORNING_LINE_LOOKUPS = 20;
 // Group 2, round 1: the most time, in all, the morning line's lookups may take (real time).
@@ -107,7 +114,9 @@ export const MORNING_LINE_LOOKUP_MS = 3_000;
 // The speed release, item 8: the gate's cached account and positions are read every 10 seconds while the live order updates are
 // connected (they keep the positions current in between), and every 5 seconds, as before, while they are not. 10, not the
 // proposal's 15: the gate refreshes a view older than 15 seconds inside the order path, and passes run every 5 seconds.
-export const VIEW_EVERY_MS = 10_000;
+// Michael's ruling 4 of 2026-11-16: the account and positions view every 20 s while the live updates are connected (they keep the
+// positions current in between); every 5 s while they are not. The loss stop's own account read stays every 5 s.
+export const VIEW_EVERY_MS = 20_000;
 export const VIEW_EVERY_NO_STREAM_MS = 5_000;
 // The speed release, item 10: the request and stream statistics are written every minute of the session (they were every 5 minutes,
 // and every minute only around a load window).
@@ -174,6 +183,10 @@ export class Worker {
   private lastTradeAt: Date | null = null;
   private lastTickError: string | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private timedTimer: ReturnType<typeof setInterval> | null = null;
+  private timedTicking = false;
+  // The timed pass refreshes the view only on a day the full pass has armed and refreshed it at least once (it keeps the same rule).
+  private lastArmedRefresh = false;
   private ticking = false;
   private failedTicks = 0;
   private lastOkPing = 0;
@@ -546,10 +559,41 @@ export class Worker {
   start(everyMs = 5_000): void {
     void this.tick();
     this.timer = setInterval(() => void this.tick(), everyMs);
+    this.timedTimer = setInterval(() => void this.timedTick(), TIMED_PASS_MS);
+  }
+
+  // Michael's ruling 1 of 2026-11-16 ("Timed checks only"): every second, the order sync when it is due (6 s, or 2 s while the live
+  // updates are down) and the account and positions view when it is due. Only in the session (the full pass sets `sessionForSync`), one at a
+  // time with everything else that holds "risk" (a sync running or a protection look: `startSync` waits for it), and nothing else.
+  // It never throws.
+  async timedTick(): Promise<void> {
+    if (this.timedTicking) return;
+    this.timedTicking = true;
+    try {
+      const s = this.sessionForSync;
+      const now = this.d.now();
+      if (!s || now >= s.closeAt) return;
+      if (now.getTime() - this.lastSync >= this.syncEveryMs()) this.startSync(s.day, s.closeAt);
+      if (this.lastArmedRefresh && this.view.fastAgeMs() >= (this.orderStreamLive() ? VIEW_EVERY_MS : VIEW_EVERY_NO_STREAM_MS) - 500 && this.d.governor.canSpend()) {
+        const readFrom = now.getTime();
+        await this.view.refreshFast();
+        this.shadowRebase(readFrom, this.d.now().getTime());
+      }
+    } catch (err) {
+      this.d.log?.("warn", "timed_pass_failed", { error: (err as Error).message.slice(0, 120) });
+    } finally {
+      this.timedTicking = false;
+    }
+  }
+
+  // Ruling 1: 6 s, or 2 s while the live updates are down (a stream that exists and is not live; without one, as in a test, 6 s).
+  private syncEveryMs(): number {
+    return this.orderStream !== null && !this.orderStreamLive() ? SYNC_EVERY_STREAM_DOWN_MS : SYNC_EVERY_MS;
   }
 
   stop(): void {
     if (this.timer) clearInterval(this.timer);
+    if (this.timedTimer) clearInterval(this.timedTimer);
     this.loop.stop();
     this.stream?.stop();
     this.orderStream?.stop();
@@ -1103,10 +1147,13 @@ export class Worker {
     // Closes the live updates wrote to memory but could not write to the database yet are tried again (item 1). Never waited on.
     void this.d.store.retrySoonWrites?.().catch(() => undefined);
     this.sessionForSync = inSession ? { day: current, closeAt: day.closeAt } : null;
-    if (inSession && current.phases.armed) await this.refreshView(now, date);
+    if (inSession && current.phases.armed) {
+      await this.refreshView(now, date);
+      this.lastArmedRefresh = true;
+    } else this.lastArmedRefresh = false;
     // The regular order sync, every 10 seconds (the record of truth). Since the redesign of 2026-11-14 (part 2) protection work never brings it
     // forward: the protection loop looks at the entries that are due (`look`).
-    if (inSession && now.getTime() - this.lastSync >= SYNC_EVERY_MS) this.startSync(current, day.closeAt);
+    if (inSession && now.getTime() - this.lastSync >= this.syncEveryMs()) this.startSync(current, day.closeAt);
     if (inSession || (day.closeAt && now < addMinutes(day.closeAt, 10))) {
       await this.flushDigest();
       await this.stopGapStep(date, now);
@@ -1329,7 +1376,7 @@ export class Worker {
     if (!s || this.d.now() >= s.closeAt) return { outcome: "idle" };
     // Group 1, round 1 of part 2: the regular sync (the record of truth, every 10 s) goes first. When it is due, it starts now and the look
     // waits a quarter second (its wakes kept), so looks can never crowd it out.
-    if (this.d.now().getTime() - this.lastSync >= SYNC_EVERY_MS) {
+    if (this.d.now().getTime() - this.lastSync >= this.syncEveryMs()) {
       this.startSync(s.day, s.closeAt);
       return { outcome: "busy" };
     }
@@ -1372,7 +1419,7 @@ export class Worker {
       res?.end();
       this.inflight.delete("risk");
       // A regular sync that fell due while this look ran (its pass found "risk" held) starts now.
-      if (this.d.now().getTime() - this.lastSync >= SYNC_EVERY_MS && this.sessionForSync && this.d.now() < this.sessionForSync.closeAt) this.startSync(this.sessionForSync.day, this.sessionForSync.closeAt);
+      if (this.d.now().getTime() - this.lastSync >= this.syncEveryMs() && this.sessionForSync && this.d.now() < this.sessionForSync.closeAt) this.startSync(this.sessionForSync.day, this.sessionForSync.closeAt);
       // Item 1 of 2026-11-16 (group 1, round 1): a sync owed after a reconnect that came while this look ran starts now.
       else if (this.reconnectSyncOwed) this.syncAfterReconnect();
     }
