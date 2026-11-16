@@ -81,6 +81,7 @@ Not recommended: making the loss stop rely on the shadow book (its largest gap t
 
 From `builds/c2-proposal-stuck-retry-cost.md` (items 1 to 4). This morning had no stuck retries at all (P1 and P2 0), so none of them would have changed today's numbers; they matter on days when positions get stuck (2026-11-09: four positions for 16 to 28 minutes).
 - **Item 1, a retry costing about 3 requests instead of 10:** average wait between one position's tries with 5 stuck, about 75 s to about 20 s (estimate); touches the sell path; needs the gate tested against late and lost live updates.
+  - **As built (2026-11-16 afternoon):** 3 requests when Alpaca holds the shares, 5 for a try that sells, 7 reserved (the most it can send); about 3 for a sale would need the gate to trust cached positions or the live updates, which was not built (it could oversell on a late update). The gate still checks every sell against a read no older than 1 s.
 - **Item 2, a retry budget that grows with spare room (60 at least):** when quiet, about 75 s to about 23 s with 5 stuck (estimate); no help in busy minutes; touches only the request budget.
 - **Item 3, fair turns among stuck positions:** the longest single wait close to the average (5 stuck: up to 257 s in one sweep, about 75 s average); order only.
 - **Item 4, ending the low-priority hold when the waiting retry gets in:** gives low-priority work its room back sooner; the hold counter (v23) measures its time in force (0 this morning).
@@ -104,6 +105,6 @@ Michael's words: "Messaging fix for tonight's release: the bot should recognize 
 | 2, the reserve | 0 (stays 80: none of 40, 50, 60 passed) | none |
 | 3a, entries priced to fill | +35 to +40 (to the 150 ceiling) | about 70 percent fewer lost exits from late cancels |
 | 3b, fewer routine reads | about +7 | the loss stop up to 5 s later (if that part is taken) |
-| 3c, stuck retries | 0 | 5 stuck: average wait about 75 s down to about 20 s |
+| 3c, stuck retries | 0 | 5 stuck: average wait about 75 s down to about 20 s (estimate). As built, simulator, positions younger than the 10-minute list window: 5 stuck, quiet, 48 to 95 s down to 10 to 22 s; busy 26 s with live updates on, 100 s with them down. Positions older than the window (the 2026-11-09 case) are not covered: see the log, item 3c's open finding |
 
 Paper trading only. Research input for a human decision, never an instruction to act.

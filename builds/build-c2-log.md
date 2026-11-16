@@ -6481,3 +6481,38 @@ Built on branch `speed-2026-11-16` from `main` (v24). Proposal: `builds/c2-propo
 ### Speed release, ruling 2 (the reserve): none of 40, 50, 60 passes; the reserve stays 80
 
 Simulated 2026-11-16 afternoon (about 4,700 runs; details and the table in `builds/c2-proposal-speed-2026-11-16.md`, section 2; scripts `builds/reserve-sim-2026-11-16.diff`): a full `flatten` of 30 positions after a busy load window got rate-limit answers at 40, 50 and 60 with cancels up to 8 or 11 s (60 was clean only with 3 s cancels); 70 was clean up to 8 s cancels; 80 got them only with 11 s cancels from a forced low start. A lower reserve adds about 20 to 45 entries per 15 minute window (the busiest minute is 150 at every reserve). Under Michael's ruling 2, `SAFETY_RESERVE` stays 80 and he is told. Side finding for him: the flatten command's own polling (64 to 85 requests with 11 s cancels) is the larger margin problem; lighter polling there would add more margin than any reserve value (money-touching, not in this release).
+
+### Speed release, item 3c (ruling 5): the four stuck-retry items, built and merged (2026-11-16 afternoon)
+
+Built on branch `speed-3c` (from `09dab92`) and merged into `speed-2026-11-16` (merge of `04ef086`); corrected flatten figure `47a67ed`. Full suite 911 of 911 on the merge; `npx tsc --noEmit` clean. Mutants: 33 of 33 killed by `test/stuck-retry-items-2026-11-16.test.ts`. Some figures in the messages of `73d4ff1`, `0e6aa55` and `8e9e49e` come from a rule that `0d5efbd` replaced; the figures here supersede them.
+
+- **Item 4, the hold ends when its retry gets in** (`src/request-budget.ts`): `tryReserve` and `roomFor` take a `retryKey` (the entry's client order id); the hold is a map of key to end time, in force while any key's end is ahead; a grant removes its key, `forgetRetry` (from `resolveStuck`) too; the time-in-force counter counts to the removal.
+- **Item 3, fair turns:** the waiting list keeps the order keys first waited; a capped retry with room but a key ahead of it is refused with the new reason `turn` (`refused.turn`), next check when the head could next get room, no sooner than 250 ms; a key unseen for 10 s is dropped (`TURN_DROP_MS`). Plus the head-with-room rule in `retryDue` (below, choice 1).
+- **Item 2, a budget that grows with spare room** (`budgetMinute()`): the larger of 60 and 200 less the governor's requests in the last minute less the budget's own sends in the same 60 s; recomputed at most once a second, rising at most 20 at a time, falling at once; the 5 seconds a quarter of it; the stuck retries' ceiling the minute less 15 (the 15 for urgent work not scaled, as the draft said); P2's share the minute less 20. Floors and the entries' reserve unchanged.
+- **Item 1, a cheaper stuck retry** (`src/risk.ts` `retryPath`, `CHEAP_STUCK_TRY_REQUESTS = 7`; `src/sells.ts` `cheapRetry`): only while the live updates are connected and only for an ordinary missing-exit retry with nothing of its entry open to cancel. The try reads open orders and positions once, through the sell gate's own read (`SellGate.look()`), and acts on it; the gate still checks every sell against a read no older than its 1 s limit, less the sells it sent since (unchanged; the cheap path never trusts the live updates or cached positions for the check). Measured: 3 requests when Alpaca holds the shares (7 before), 5 for a try that sells (10 before), 7 reserved. "About 3" for a sale is not reached and was not built (it would need the gate to trust cached positions or the live updates; a late or lost update could then oversell). Remainders being given a fresh stop keep today's path. Each retry logs `stuck_retry` (path, reason, reserved, sent; logging only).
+
+**Measured (simulator, 10 minutes, Alpaca's remaining fed to the governor, P2 demand 3 requests every 0.5 s when on; the builder's reconstructed harness, not comparable with the 257 s figure). Longest / average wait between one position's tries, seconds, before (`09dab92`) then after:**
+
+| Shape, quiet, live updates connected | P2 demand | 2 stuck | 5 stuck | 10 stuck |
+| --- | --- | --- | --- | --- |
+| Sales refused | none | 50/29 to 41/6 | 105/71 to 54/18 | 175/147 to 41/34 |
+| Sales refused | steady | 170/41 to 50/10 | 181/92 to 61/22 | 229/200 to 50/39 |
+| Shares held | none | 45/19 to 28/4 | 105/48 to 49/10 | 215/87 to 51/22 |
+| Shares held | steady | 62/40 to 48/8 | 168/95 to 53/14 | 288/177 to 58/28 |
+
+Busy (minute held at 60), live updates connected, shares held, steady P2: 5 stuck 50.5/26, 10 stuck 57/40. Busy, live updates down (items 2 to 4 only): 5 stuck 117.5/100, 10 stuck 230/201. No overdraft and no oversell in any run; lowest remaining 39 (base 44 to 46). The owner's 30-stuck test: no rate-limit answer, lowest remaining 65. Flatten partway: 5.0 s after the ask (20ba5bd 13.0 and 27.0 s); the "2.0 s" measured at `9fd9060` became 5.0 s at `142cb3b` (ruling 1), measured by the builder at each commit.
+
+**Choices the rulings did not settle (for Michael):**
+1. The head of the waiting list goes ahead inside its growing wait for room when the budget has room now, never within 2 s of its last try (busy, live updates down, 5 stuck: longest 117.5 s with it, 182 s without, base 167.5 s).
+2. When the minute falls, urgent work's ceiling is the largest minute in force in the last 60 s, so it keeps its 15.
+3. The minute stays 60 when the governor has seen no answer in 60 s.
+4. While the minute rises, a refusal on the minute or the 5 seconds is checked again at its next step.
+5. **Urgent work also gets the grown minute**: the mid-day, 2:55, afternoon and carried close-out retries, the loss stop's re-sells and the timed-out stop's tries. Michael's ruling of 2026-11-09 held mid-day retries "within 60 requests a minute"; under item 2 they stay within 60 while busy and may go above 60 (within the minute in force, at most Alpaca's spare) when quiet. The mid-day test is split into a busy run (still within 60) and a quiet run. A question for Michael.
+6. The hold's 5-second cap on P2 is computed (the 5-second cap less the retry's size: 5 for a full retry, 8 for a cheap one, scaling with item 2), not a literal 5. A question for Michael.
+7. A `turn` refusal sets no hold.
+
+**Open findings, being measured on v24 (`20ba5bd`) before review:**
+- **Positions older than the 10-minute list window starve under steady P2 demand** (live updates connected): the sync looks such entries up about every 30 s, and a protection look made for a room wake does not look them up, so the walk skips the retry. 5 positions held at Alpaca, steady P2: base 4 of 5 got no retry in 10 minutes; after, busy, none of 5; after, quiet, 0 to 2 each; without P2 demand 19 to 20 tries each. 2026-11-09's positions (stuck 16 to 28 minutes) are this case, so the table above does not cover it. A probable fix (a look made for a wake also looks up the woken entries older than the window, one routine request more) is outside the approval and not built; scratch experiment 16 to 34 tries per position.
+- **Rate-limit answers with 10 positions whose sales Alpaca refuses at once:** 41 in the first 30 s on `09dab92` and after; `09dab92` already holds the side-by-side sales, so whether v24 has them too is being measured.
+
+Paper trading only; research input for a human decision, never an instruction to act.
