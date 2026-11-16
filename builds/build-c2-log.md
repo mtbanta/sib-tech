@@ -6400,3 +6400,11 @@ Built on branch `midday-2026-11-16-item2` (`5fd09ba`, on top of `b99fa6a`; not f
 - Item 3: `unprotected_position_yielded` stored (the stand-aside ending, with its symbol); the stored-events test names all three new stored events.
 - Both briefs: every event that ends a fast-sale start, `order_stream_reconnect_sync`, and "N not yet confirmed".
 - Checked that each new test fails with its fix removed (look serve, the debt cleared at a sync, the time cap, the 20 cap).
+
+### Mid-day build, round 2 (20ba5bd): group 1 PASS, group 2 PASS
+
+**Group 1, round 2: PASS** (no blocking findings; checks 2, 7, 10 clean). Both round 1 findings fixed and tested: one sync per reconnect, never two at once or in a row, no new loop; the failure-backoff case also resolves; the morning line holds the mid-day step at most about 3 s longer. Its mutants `lookfinally`, `startclear`, `nobreak`, `cap20`, `filledstatus`, `storedyield` fail; `nocutoff` hangs. Item 3 stays logging only; item 1 stays exactly an order check after a reconnect; item 2 (`5fd09ba`) is not an ancestor. Notes: a lookup cut off at 3 s keeps running unread (at most a `budget_sent_after_end` line); `sessionlog` survives (logging only).
+
+**Group 2, round 2: PASS** (no blocking findings; checks 2, 7, 8, 10 clean). Both round 1 findings fixed (the three stored names tested; both briefs list every fast-sale ending, the reconnect sync, "not yet confirmed"). Notes: an older brief sentence ("a fast sale that stood aside has ... no stored end") qualified after the pass (documents only); M1e survives (logging only).
+
+**Deploy:** the reviewed commit itself, `20ba5bd` (Michael asked in `commands` at 11:45 AM for his yes), through `tools/midday-deploy.mjs`, mid-day pause route, from a clean clone at `20ba5bd`. Check-only at 11:47: flat, no open orders, pause on, mid-day flat, stop flag off; refused only for his yes.
