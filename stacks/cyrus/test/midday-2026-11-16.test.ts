@@ -132,9 +132,9 @@ test("item 1: outside the session a reconnect brings no sync", async () => {
 
 
 // The queue alone: `run` replaced by a step the test finishes by hand, so only the order in which sales start is under test.
-function queue() {
+function queue(room: (running: number) => boolean = () => true) {
   const broker = new FakeBroker();
-  const liq: any = new Liquidator({ broker, gate: new SellGate({ broker, say: async () => true }), now: () => new Date(), sleep: async () => undefined });
+  const liq: any = new Liquidator({ broker, gate: new SellGate({ broker, say: async () => true }), now: () => new Date(), sleep: async () => undefined, sideBySideRoom: room });
   const started: string[] = [];
   const finish = new Map<string, () => void>();
   liq.run = (o: any) => {
@@ -203,7 +203,7 @@ test("item 2: a sale of the whole account asked while side-by-side sales run wai
 
 test("item 2: a side-by-side sale that throws does not block the next sale of its symbol or the others", async () => {
   const broker = new FakeBroker();
-  const liq: any = new Liquidator({ broker, gate: new SellGate({ broker, say: async () => true }), now: () => new Date(), sleep: async () => undefined });
+  const liq: any = new Liquidator({ broker, gate: new SellGate({ broker, say: async () => true }), now: () => new Date(), sleep: async () => undefined, sideBySideRoom: () => true });
   const started: string[] = [];
   liq.run = async (o: any) => { started.push(o.reason); if (o.reason === "bad") throw new Error("boom (test)"); return { flat: true, remaining: [], sold: [], errors: [] }; };
   const bad = liq.flatten({ reason: "bad", only: ["AAL"], ownEntryOnly: { maxQty: { AAL: 1 } }, sideBySide: true }).catch(() => "threw");
@@ -213,4 +213,72 @@ test("item 2: a side-by-side sale that throws does not block the next sale of it
   await next;
   await w;
   assert.deepEqual(started, ["bad", "next", "close-out"]);
+});
+
+// Michael's ruling on item 2: as many at once as the request budget allows above the urgent floor; one always runs when none does.
+test("item 2 (ruling): with room for two, the third waits until one ends; with no room at all they run one at a time", async () => {
+  const q = queue((running) => running < 2);
+  const a = q.missing("AAL", "AAL");
+  const b = q.missing("RIOT", "RIOT");
+  const c = q.missing("SOFI", "SOFI");
+  await q.tick();
+  assert.deepEqual(q.started, ["AAL", "RIOT"], "room for two");
+  q.finish.get("AAL")!();
+  await q.tick();
+  assert.deepEqual(q.started, ["AAL", "RIOT", "SOFI"], "the third starts when one ends");
+  q.finish.get("RIOT")!();
+  q.finish.get("SOFI")!();
+  await Promise.all([a, b, c]);
+  const z = queue(() => false);
+  const x = z.missing("AAL", "AAL");
+  const y = z.missing("RIOT", "RIOT");
+  await z.tick();
+  assert.deepEqual(z.started, ["AAL"], "no room: one at a time (never worse than before)");
+  z.finish.get("AAL")!();
+  await z.tick();
+  assert.deepEqual(z.started, ["AAL", "RIOT"]);
+  z.finish.get("RIOT")!();
+  await Promise.all([x, y]);
+});
+
+test("item 2 (ruling): a close-out request stops a waiting side-by-side sale from starting (it stands aside); the running one carries on", async () => {
+  const broker = new FakeBroker();
+  const liq: any = new Liquidator({ broker, gate: new SellGate({ broker, say: async () => true }), now: () => new Date(), sleep: async () => undefined, sideBySideRoom: () => false });
+  const started: string[] = [];
+  const finish = new Map<string, () => void>();
+  const realRun = liq.run.bind(liq);
+  liq.run = (o: any) => {
+    started.push(o.reason);
+    if (o.reason === "RIOT") return realRun(o); // the real start: it must stand aside before sending anything
+    return new Promise((res) => finish.set(o.reason, () => res({ flat: true, remaining: [], sold: [], errors: [] })));
+  };
+  const tick = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
+  const a = liq.flatten({ reason: "AAL", only: ["AAL"], ownEntryOnly: { maxQty: { AAL: 1 } }, sideBySide: true });
+  const b = liq.flatten({ reason: "RIOT", only: ["RIOT"], ownEntryOnly: { maxQty: { RIOT: 1 } }, sideBySide: true });
+  await tick();
+  assert.deepEqual(started, ["AAL"], "RIOT waits for room");
+  const w = liq.flatten({ reason: "close-out" });
+  await tick();
+  const rb = await b;
+  assert.equal(rb.stoodAside, "whole account", "RIOT stood aside: the close-out was asked before it could start");
+  assert.equal(broker.calls.length, 0, "it sent nothing");
+  assert.deepEqual(started, ["AAL", "RIOT"], "AAL still running; the close-out waits for it");
+  finish.get("AAL")!();
+  await tick();
+  assert.deepEqual(started, ["AAL", "RIOT", "close-out"]);
+  finish.get("close-out")!();
+  await Promise.all([a, w]);
+});
+
+test("item 2 (ruling): the worker's room rule: one more side-by-side sale only while Alpaca's remaining, less 18 for each running and the new one and the budget's unsent room, stays at or above 20", async () => {
+  const s = await session();
+  const room = s.w.liquidator.d.sideBySideRoom as (running: number) => boolean;
+  s.w.d.governor.budget = () => 74;
+  assert.equal(room(1), true, "74 - 2 x 18 = 38: room");
+  assert.equal(room(2), true, "74 - 3 x 18 = 20: exactly the floor, room");
+  assert.equal(room(3), false, "74 - 4 x 18 = 2: below the floor of 20, no room");
+  const res = s.w.budget.tryReserve("P1", 10, { label: "stuck retry", force: true });
+  assert.equal(room(2), false, "the budget's 10 reserved and unsent count too: 74 - 10 - 54 = 10");
+  res.end();
+  assert.equal(room(2), true);
 });

@@ -791,6 +791,10 @@ for (const reason of ["close-out", "flatten command"]) {
     sim.advance(15_000);
     wk.lastSync = sim.simMs; // no regular sync during the test
     const liq: any = wk.liquidator;
+    // Michael's ruling on item 2 of 2026-11-16: side by side only while the request budget has room above the urgent floor; here none for a
+    // second sale, so the other three wait (not started) when the sale of the whole account is asked for: "A close-out request stops new ones
+    // from starting".
+    liq.d.sideBySideRoom = () => false;
     let current: any = null;
     const realRun = liq.run.bind(liq);
     liq.run = async (o: any) => {
@@ -918,6 +922,10 @@ for (const when of ["2:55", "mid-day pause", "mid-day step", "carried step", "st
     const stuckD = { symbol: "QXD", since: sim.simMs - 120_000, nextAt: 0, delayMs: 10_000, alerted: true, escalated: false, lastTriedAt: sim.simMs - 30_000, why: "x" };
     wk.syncMemory.stuck.set(ids[3], { ...stuckD });
     const liq: any = wk.liquidator;
+    // Michael's ruling on item 2 of 2026-11-16: side by side only while the request budget has room above the urgent floor; here none for a
+    // second sale, so the other three wait (not started) when the sale of the whole account is asked for: "A close-out request stops new ones
+    // from starting".
+    liq.d.sideBySideRoom = () => false;
     let current: any = null;
     const realRun = liq.run.bind(liq);
     liq.run = async (o: any) => {
@@ -994,7 +1002,10 @@ for (const when of ["2:55", "mid-day pause", "mid-day step", "carried step", "st
 // waits locally (no request) and makes a look only once its try would have room. Before: each refused retry re-read the order list and the
 // positions every 0.5 to 4 s with no end (group 1 measured 470 s below 80 left, 280 s below 20, and 49 rate-limit answers; v22 never below
 // 120). Now: no rate-limit answer, and Alpaca's remaining never below 80.
-test("part 2 (group 1, round 4, B1): 30 stuck sales held 8 s at Alpaca for 12 minutes: retries waiting for room wait locally; no rate-limit answer, remaining never below 80", async () => {
+// Michael's ruling on item 2 of 2026-11-16: missing-exit sales of different stocks run side by side "as many at once as the request budget
+// allows at that moment, above the floor for urgent work"; his test: "30 stuck sales held at Alpaca: no rate-limit answers, remaining never
+// below the urgent floor of 20" (before item 2 this test held remaining at 80 or more; the time below 80 is still reported).
+test("part 2 (group 1, round 4, B1; item 2 of 2026-11-16): 30 stuck sales held 8 s at Alpaca for 12 minutes: no rate-limit answer, remaining never below the urgent floor of 20", async () => {
   const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
   const bot = new FakeBot();
   const holds: Array<{ until: number; res: () => void }> = [];
@@ -1025,12 +1036,14 @@ test("part 2 (group 1, round 4, B1): 30 stuck sales held 8 s at Alpaca for 12 mi
   let lastTok = 200;
   let lastTokAt = sim.simMs;
   let below80 = 0;
+  let below20 = 0;
   let lowest = 200;
   const prev = (sim as any).onRate;
   (sim as any).onRate = (k: number) => {
     const now = sim.simMs;
     if (now > loseAt) {
       if (lastTok < 80) below80 += now - lastTokAt;
+      if (lastTok < 20) below20 += now - lastTokAt;
       lowest = Math.min(lowest, k);
     }
     lastTok = k;
@@ -1057,7 +1070,7 @@ test("part 2 (group 1, round 4, B1): 30 stuck sales held 8 s at Alpaca for 12 mi
   }
   assert.ok(lost);
   assert.equal(sim.rejected429 - r429, 0, "no rate-limit answer");
-  assert.equal(below80, 0, `remaining never below 80 (lowest ${Math.round(lowest)}, ${Math.round(below80 / 1000)} s below 80)`);
+  assert.ok(lowest >= 20 && below20 === 0, `remaining never below the urgent floor of 20 (lowest ${Math.round(lowest)}, ${Math.round(below80 / 1000)} s below 80)`);
   timed = false;
   for (const h of holds.splice(0)) h.res();
   r.worker.stop?.();

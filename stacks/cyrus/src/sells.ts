@@ -310,7 +310,16 @@ export interface LiquidatorDeps {
   // close-out or the afternoon close-out owns selling: no selling action"): the worker's own stand-aside rule (false from the close-out
   // time, and while a close-out, mid-day or carried step owns selling), asked when a one-entry cleanup sale's turn comes.
   ownSalesMayRun?: () => boolean;
+  // Michael's ruling on item 2 of 2026-11-16: may one more side-by-side missing-exit sale start now, with `running` such sales already
+  // running? ("as many at once as the request budget allows at that moment, above the floor for urgent work"). The worker answers from
+  // Alpaca's remaining requests (the governor's estimate). Without it, side-by-side sales run one at a time, as before item 2.
+  sideBySideRoom?: (running: number) => boolean;
 }
+
+// Michael's ruling on item 2 of 2026-11-16: the most requests one missing-exit sale is counted as still able to send when the worker decides
+// whether another may start beside it (measured on 2026-11-16: about 14.5 per fast sale at most, from the `first` tag; 12 in tests, 17 or 18
+// when Alpaca kept the exits).
+export const SIDE_BY_SIDE_SALE_REQUESTS = 18;
 
 // At most MAX_EARLY_WAKES early wake-ups in one liquidation, so a burst of updates cannot turn the waits into a run of extra looks (5
 // since Michael's decision of 2026-11-06, early-wake.ts; the worker's waits also ignore updates while the budget is near the reserve).
@@ -322,6 +331,8 @@ export class Liquidator {
   // Item 2 of 2026-11-16: the last side-by-side sale asked per symbol, and every side-by-side sale not yet finished.
   private readonly symbolTails = new Map<string, Promise<unknown>>();
   private readonly sideBySideTails = new Set<Promise<unknown>>();
+  // Michael's ruling on item 2: side-by-side sales running now (started, not finished).
+  private sideBySideRunning = 0;
   private running = 0;
   // Priority sales (the daily loss stop) asked for and not finished yet.
   private priorityPending = 0;
@@ -367,7 +378,7 @@ export class Liquidator {
     const sym = o.sideBySide && o.ownEntryOnly && o.only?.length === 1 ? o.only[0]! : null;
     let run: Promise<LiquidateResult>;
     if (sym !== null) {
-      run = Promise.all([this.chain, this.symbolTails.get(sym)]).then(() => this.run(o));
+      run = Promise.all([this.chain, this.symbolTails.get(sym)]).then(() => this.runSideBySide(o));
       const tail: Promise<unknown> = run.catch(() => undefined);
       this.symbolTails.set(sym, tail);
       this.sideBySideTails.add(tail);
@@ -384,6 +395,35 @@ export class Liquidator {
       if (other) this.runningOthers--;
       if (o.priority) this.priorityPending--;
     });
+  }
+
+  // Michael's ruling on item 2 of 2026-11-16: a side-by-side sale starts when no other is running (never worse than the one-at-a-time queue)
+  // or while the request budget allows one more above the urgent floor (`sideBySideRoom`). Otherwise it waits, 0.25 s doubling to 2 s, with
+  // no request: the wait ends when room comes, when every running side-by-side sale has ended (each is bounded by its rounds and waits), or
+  // at once when a sale of the whole account (a close-out, `flatten`, the loss stop, a carried position) is asked for, in which case
+  // `run` stands aside before sending anything: a close-out request stops new ones from starting. Sales already running carry on.
+  private async runSideBySide(o: LiquidateOptions): Promise<LiquidateResult> {
+    let wait = 250;
+    let waited = 0;
+    while (this.sideBySideRunning > 0 && this.runningOthers === 0 && !(this.d.sideBySideRoom?.(this.sideBySideRunning) ?? false)) {
+      await this.sleep(wait);
+      // A turn for other work too (a test's pause can return at once), so the running sales this waits for can finish.
+      await new Promise<void>((r) => setImmediate(r));
+      waited += wait;
+      wait = Math.min(wait * 2, 2_000);
+    }
+    if (waited > 0) this.d.log?.("side_by_side_waited", { only: o.only ?? null, waitedMs: waited, running: this.sideBySideRunning });
+    this.sideBySideRunning++;
+    try {
+      return await this.run(o);
+    } finally {
+      this.sideBySideRunning--;
+    }
+  }
+
+  // Side-by-side sales running now (statistics and tests).
+  sideBySideNow(): number {
+    return this.sideBySideRunning;
   }
 
   // True while a priority sale (the daily loss stop) is waiting or running.
