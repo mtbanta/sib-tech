@@ -54,6 +54,21 @@ export const TURN_RECHECK_MS = 250;
 // and P2_FLOOR) and the entries' reserve are unchanged. When busy it is BUDGET_PER_MINUTE, as before.
 export const BUDGET_RECOMPUTE_MS = 1_000;
 export const BUDGET_RISE_PER_S = 20;
+// Group 2, round 1 of the speed release (choice 5 reverted, Michael's answers on the speed release questions): urgent work (P1 without a
+// `minuteCap`: the mid-day, 2:55, afternoon and carried close-out retries, the loss stop's re-sells, the timed-out stop's tries, checks and
+// cancels, an unclear fresh stop's lookup) is held to BUDGET_PER_MINUTE of its OWN requests in any 60 seconds and BUDGET_PER_5S of its own in
+// any 5 seconds (the 5 seconds only for tries that reserve against them; the close-out retries do not, as on 20ba5bd), as on 20ba5bd, where
+// every budgeted request shared 60 and 15 (Michael's ruling of 2026-11-09: mid-day retries "within 60 requests a minute").
+// The design: two ceilings on urgent work's own count are ADDED to the checks it already had; nothing is replaced.
+//  - Its own: its sends in the window plus its tries' room reserved and not yet sent plus the new try, at most 60 (and 15 in 5 s). Stuck
+//    retries' and P2's sends are not in this count, so a stuck retry can never use up urgent work's 60.
+//  - The total, as before item 1 of this round: every budgeted request in the window, at most the largest minute in force in the last 60 s
+//    (and a quarter of the minute in the 5 s). Stuck retries stop at the minute less 15 and P2 at the minute less 20, both counted on the
+//    total, so the total always leaves urgent work at least 15 of the minute, whatever the stuck retries have used of a grown minute.
+//  So urgent work always has at least 15 of the minute (as on 20ba5bd, where stuck retries stopped at 45 of 60), and never more than 60 of its
+//  own. While the minute is 60 (Alpaca busy) the own ceilings are implied by the total and the result is exactly 20ba5bd's.
+// URGENT_GROWN_MINUTE true brings choice 5 back (urgent work under the grown minute only, as at 9e48f2f); only with Michael's yes.
+export const URGENT_GROWN_MINUTE = false;
 const REFILL_PER_MS = ALPACA_REQUESTS_PER_MINUTE / 60_000;
 
 // `turn` (item 3 of the speed release): a capped retry with room that waits because another stuck retry has waited longer.
@@ -90,8 +105,11 @@ export class Reservation implements ScopeReservation {
   readonly label: string;
   readonly fiveSec: boolean;
   readonly limitRetries: boolean;
-  constructor(budget: RequestBudget, cls: BudgetClass | null, size: number, label: string, fiveSec: boolean, limitRetries = false) {
+  // Urgent work (P1 without a `minuteCap`), held to its own 60 a minute and 15 in 5 s (URGENT_GROWN_MINUTE).
+  readonly urgent: boolean;
+  constructor(budget: RequestBudget, cls: BudgetClass | null, size: number, label: string, fiveSec: boolean, limitRetries = false, urgent = false) {
     this.limitRetries = limitRetries;
+    this.urgent = urgent;
     this.budget = budget;
     this.cls = cls;
     this.size = size;
@@ -152,8 +170,9 @@ export class RequestBudget {
   private readonly remaining: () => number;
   private readonly log: ((event: string, data?: Record<string, unknown>) => void) | undefined;
   // Every budgeted request sent in the last 60 seconds, oldest first (its time and class).
-  // `capped`: sent by a try that reserved against the 5 seconds too (every budgeted try but a close-out retry).
-  private sent: Array<{ t: number; cls: BudgetClass; capped: boolean }> = [];
+  // `capped`: sent by a try that reserved against the 5 seconds too (every budgeted try but a close-out retry). `urgent`: sent by urgent
+  // work (P1 without a `minuteCap`, URGENT_GROWN_MINUTE).
+  private sent: Array<{ t: number; cls: BudgetClass; capped: boolean; urgent: boolean }> = [];
   // Michael's answer after group 1's rulings round 2, kept per waiting retry since item 4 of the speed release: for each capped retry that is
   // waiting with P2 in its way, until when P2 holds back for it (renewed by each refused look, as before), and the ceilings P2 must then
   // leave the minute and the 5 seconds at (the retry's ceiling less its size, and the 5 seconds less its size). The hold is in force while
@@ -189,8 +208,12 @@ export class RequestBudget {
   private minuteTarget = BUDGET_PER_MINUTE;
   private readonly minuteHistory: Array<{ t: number; m: number }> = [];
 
-  constructor(opts: { now?: () => number; remaining?: () => number; requestsLastMinute?: () => number; log?: (event: string, data?: Record<string, unknown>) => void } = {}) {
+  // Choice 5 (URGENT_GROWN_MINUTE): false holds urgent work to its own 60 a minute and 15 in 5 s.
+  private readonly urgentGrown: boolean;
+
+  constructor(opts: { now?: () => number; remaining?: () => number; requestsLastMinute?: () => number; log?: (event: string, data?: Record<string, unknown>) => void; urgentGrownMinute?: boolean } = {}) {
     this.nowMs = opts.now ?? Date.now;
+    this.urgentGrown = opts.urgentGrownMinute ?? URGENT_GROWN_MINUTE;
     // Alpaca's remaining requests as the governor estimates them (the last figure Alpaca gave, plus the refill since).
     this.remaining = opts.remaining ?? (() => ALPACA_REQUESTS_PER_MINUTE);
     this.requestsLastMinute = opts.requestsLastMinute;
@@ -218,7 +241,8 @@ export class RequestBudget {
 
   // Item 2 of the speed release: urgent work's ceiling, the largest minute in force at any moment of the last 60 s. Stuck retries and P2 were
   // let in under the minute in force when they started, so when the minute falls, the requests they sent still leave urgent work its 15 (it
-  // falls for urgent work only as those requests leave the window).
+  // falls for urgent work only as those requests leave the window). This is the ceiling on the TOTAL when urgent work asks; since group 2
+  // round 1 urgent work is also held to its own 60 and 15 (URGENT_GROWN_MINUTE), which this never raises.
   private urgentMinute(now: number): number {
     let m = this.minuteNow;
     for (let i = 0; i < this.minuteHistory.length; i++) {
@@ -248,6 +272,27 @@ export class RequestBudget {
     return { minute: this.sent.length, five, unsentMinute, unsentFive };
   }
 
+  // Urgent work's own requests (URGENT_GROWN_MINUTE): sent in the last minute and the last 5 seconds, and its tries' room reserved and not
+  // yet sent (for the 5 seconds, only the tries that reserve against them), as `usage` counts the total.
+  private urgentUsage(now: number): { minute: number; five: number; unsentMinute: number; unsentFive: number } {
+    this.prune(now);
+    let minute = 0;
+    let five = 0;
+    for (const x of this.sent) {
+      if (!x.urgent) continue;
+      minute++;
+      if (now - x.t < 5_000) five++;
+    }
+    let unsentMinute = 0;
+    let unsentFive = 0;
+    for (const r of this.open) {
+      if (!r.urgent) continue;
+      unsentMinute += r.unsent();
+      if (r.fiveSec) unsentFive += r.unsent();
+    }
+    return { minute, five, unsentMinute, unsentFive };
+  }
+
   // May a budgeted try of class `cls` needing at most `n` requests start now? Granted: a reservation (end it when the try ends). Refused:
   // the earliest moment room may return, and why.
   tryReserve(cls: BudgetClass, n: number, opts: ReserveOptions): Reservation | Refusal {
@@ -274,7 +319,7 @@ export class RequestBudget {
       this.endHold(opts.retryKey ?? ANONYMOUS_RETRY);
       if (opts.retryKey !== undefined) this.turns.delete(opts.retryKey);
     }
-    const r = new Reservation(this, cls, size, opts.label, fiveSec, opts.limitRetries === true);
+    const r = new Reservation(this, cls, size, opts.label, fiveSec, opts.limitRetries === true, cls === "P1" && opts.minuteCap === undefined);
     this.open.add(r);
     this.minute.granted++;
     return r;
@@ -353,6 +398,19 @@ export class RequestBudget {
     if (fiveShort) {
       why ??= "five";
       at.push(Math.min(rising, this.agedOutAt(u.five + u.unsentFive + n - fiveCap, 5_000, now, u.unsentFive)));
+    }
+    // Group 2, round 1 (choice 5 reverted): urgent work's own 60 a minute and 15 in 5 s, on its own sends only (URGENT_GROWN_MINUTE). A rising
+    // minute never frees these, so the time is only when urgent work's own requests leave the window.
+    if (cls === "P1" && minuteCap === undefined && !this.urgentGrown) {
+      const uu = this.urgentUsage(now);
+      if (uu.minute + uu.unsentMinute + n > BUDGET_PER_MINUTE) {
+        why ??= "minute";
+        at.push(this.agedOutAt(uu.minute + uu.unsentMinute + n - BUDGET_PER_MINUTE, 60_000, now, uu.unsentMinute, true));
+      }
+      if (fiveSec && uu.five + uu.unsentFive + n > BUDGET_PER_5S) {
+        why ??= "five";
+        at.push(this.agedOutAt(uu.five + uu.unsentFive + n - BUDGET_PER_5S, 5_000, now, uu.unsentFive, true));
+      }
     }
     // A capped retry (an ordinary stuck retry, under its ceiling of 45) kept out by the minute or the 5 seconds: if the urgent work alone (P1,
     // sent and reserved) leaves it room in both, P2's use is what keeps it out, so P2 holds back for it until it looks again. If P1 alone already
@@ -472,8 +530,9 @@ export class RequestBudget {
 
   // When `excess` budgeted requests will have left the window (oldest first). Room reserved by a try still running is released only when
   // that try ends, which cannot be known: then a quarter of a second from now, the earliest a look is worth it.
-  private agedOutAt(excess: number, windowMs: number, now: number, unsent: number): number {
-    const inWindow = this.sent.filter((s) => now - s.t < windowMs);
+  // `urgentOnly`: counts urgent work's own requests only (its own ceilings).
+  private agedOutAt(excess: number, windowMs: number, now: number, unsent: number, urgentOnly = false): number {
+    const inWindow = this.sent.filter((s) => now - s.t < windowMs && (!urgentOnly || s.urgent));
     if (excess > inWindow.length) return now + Math.max(250, unsent > 0 ? 250 : windowMs);
     return Math.max(now + (unsent > 0 ? 250 : 1), inWindow[excess - 1]!.t + windowMs);
   }
@@ -497,7 +556,7 @@ export class RequestBudget {
     if (separateBucket(path)) return;
     const now = this.nowMs();
     if (r.cls !== null) {
-      this.sent.push({ t: now, cls: r.cls, capped: r.fiveSec });
+      this.sent.push({ t: now, cls: r.cls, capped: r.fiveSec, urgent: r.urgent });
       const u = this.usage(now);
       let capped5 = 0;
       for (let i = this.sent.length - 1; i >= 0 && now - this.sent[i]!.t < 5_000; i--) if (this.sent[i]!.capped) capped5++;

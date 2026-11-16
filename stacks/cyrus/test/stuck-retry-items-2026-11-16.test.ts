@@ -449,15 +449,17 @@ test("item 2: when quiet the minute grows to Alpaca's spare (200 less what the b
   const w = growWorld(50); // spare 150
   climb(w, 10);
   assert.equal(w.b.budgetMinute(), 150);
-  assert.ok(w.b.roomFor("P1", 37).ok && !w.b.roomFor("P1", 38).ok, "the 5 seconds: 37 (a quarter of 150)");
-  sendNow(w.b, "P1", 125);
+  assert.ok(w.b.roomFor("P2", 37).ok && !w.b.roomFor("P2", 38).ok, "the 5 seconds: 37 (a quarter of 150)");
+  // Group 2, round 1 (choice 5 reverted): urgent work keeps its own 15 in 5 seconds when the minute grows.
+  assert.ok(w.b.roomFor("P1", 15).ok && !w.b.roomFor("P1", 16).ok, "urgent work: its own 15 in 5 seconds");
+  sendNow(w.b, "P1", 125, CAP); // stuck retries' requests
   w.seen.n = 50 + 125; // the governor sees the budget's own 125 too: still 50 not budgeted
   w.clock.t += 6_000; // out of the 5 seconds, still in the minute
   assert.equal(w.b.budgetMinute(), 150, "its own requests do not count against the spare");
   assert.ok(w.b.roomFor("P1", 10, false, 0, CAP, "A").ok, "a stuck retry fits at 125 + 10 = 135 (150 less 15)");
   assert.ok(!w.b.roomFor("P1", 11, false, 0, CAP, "A").ok, "not at 136: 15 always kept for urgent work");
   assert.ok(w.b.roomFor("P2", 5, false).ok && !w.b.roomFor("P2", 6, false).ok, "P2 up to 130 (150 less 20)");
-  assert.ok(w.b.roomFor("P1", 25, false).ok && !w.b.roomFor("P1", 26, false).ok, "urgent work up to 150");
+  assert.ok(w.b.roomFor("P1", 25, false).ok && !w.b.roomFor("P1", 26, false).ok, "urgent work up to 150 in all (its own 60 not reached)");
 });
 
 test("item 2: the minute is computed at most once a second and rises by at most 20 at a time; it falls at once", () => {
