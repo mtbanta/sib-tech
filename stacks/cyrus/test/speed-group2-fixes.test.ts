@@ -47,7 +47,11 @@ test("item 1: at a grown minute (150), urgent work alone stops at its own 60 a m
   assert.ok(w.b.roomFor("P1", 60, false).ok, "a close-out retry of 60 (no 5 s cap)");
   const r = w.b.roomFor("P1", 61, false);
   assert.ok(!r.ok && r.why === "minute", "not 61");
-  // Urgent work sends 50 one a second (out of the 5 s by the time it looks), then 10 more fit and 11 do not.
+  // A stuck retry's 5 requests first (not urgent work's), then urgent work sends 50 one a second (out of the 5 s by the time it looks);
+  // then 10 more fit and 11 do not.
+  assert.ok(send(w.b, "P1", 5, { minuteCap: CAP }));
+  w.seen.n = 55;
+  w.clock.t += 1_000;
   for (let i = 0; i < 50; i++) {
     assert.ok(send(w.b, "P1", 1), `urgent request ${i}`);
     w.seen.n = 50 + w.b.inUse().minute;
@@ -56,10 +60,10 @@ test("item 1: at a grown minute (150), urgent work alone stops at its own 60 a m
   w.clock.t += 5_000;
   assert.equal(w.b.budgetMinute(), 150, "still 150");
   assert.ok(w.b.roomFor("P1", 10, false).ok && !w.b.roomFor("P1", 11, false).ok, "its own 60 in the minute");
-  // The refusal says when its own oldest request leaves the window (not when any request does).
+  // The refusal says when urgent work's own oldest request leaves the window (not when the stuck retry's older ones do).
   const no = w.b.roomFor("P1", 11, false);
   assert.ok(!no.ok);
-  const oldest = 1_000_000 + 10_000; // its first request, after the 10 s climb
+  const oldest = 1_000_000 + 11_000; // its first request: after the 10 s climb and the stuck retry's second
   assert.equal(no.at, oldest + 60_000);
 });
 
@@ -98,6 +102,23 @@ test("item 1: after the minute falls, urgent work still has its 15 above the stu
   assert.ok(w.b.roomFor("P1", 15, false).ok && !w.b.roomFor("P1", 16, false).ok, "urgent work has exactly its 15");
   assert.ok(!w.b.roomFor("P1", 1, false, 0, CAP, "S").ok, "stuck retries wait");
   assert.ok(!w.b.roomFor("P2", 1, false).ok, "P2 waits");
+});
+
+test("item 1 (known, as on 20ba5bd): the guarantee is for the minute; in the 5 seconds stuck retries may use the quarter of the minute, and an urgent try that does not fit waits for the 5 seconds (at most 5 s)", () => {
+  const w = world(50);
+  w.climb();
+  assert.equal(w.b.budgetMinute(), 150);
+  // Stuck retries send 35 of the 5 seconds' 37 (a quarter of 150), within 5 s.
+  for (let i = 0; i < 7; i++) {
+    assert.ok(send(w.b, "P1", 5, { minuteCap: CAP, fiveSec: true }), `stuck try ${i}`);
+    w.seen.n = 50 + w.b.inUse().minute;
+    w.clock.t += 500;
+  }
+  assert.ok(w.b.roomFor("P1", 2).ok, "urgent work: 2 fit in the 5 seconds");
+  const no = w.b.roomFor("P1", 3);
+  assert.ok(!no.ok && no.why === "five", "3 do not (35 + 3 above 37)");
+  assert.ok(no.at - w.clock.t <= 5_000, `it waits at most 5 s: ${no.at - w.clock.t} ms`);
+  assert.ok(w.b.roomFor("P1", 3, false).ok, "a close-out retry (no 5 s cap) is not held by it");
 });
 
 test("item 1: while busy (the minute 60), urgent work's room is exactly 20ba5bd's: 60 in all, 15 in 5 s, 15 left when stuck retries used 45", () => {
