@@ -1,0 +1,299 @@
+diff -ruN -x node_modules pristine/stacks/cyrus/src/governor.ts reserve-sim/stacks/cyrus/src/governor.ts
+--- pristine/stacks/cyrus/src/governor.ts	2026-11-16 12:51:33
++++ reserve-sim/stacks/cyrus/src/governor.ts	2026-11-16 12:53:52
+@@ -22,7 +22,7 @@
+ 
+ export const ALPACA_REQUESTS_PER_MINUTE = 200;
+ // The cap of the reserve (and its old fixed value).
+-export const SAFETY_RESERVE = 80;
++export const SAFETY_RESERVE = Number(process.env.SIM_RESERVE ?? 80); // RESERVE-SIM: overridable in this copy only
+ // 34 (the flatten command's own draw with routine work beside it) + 8 (the shortfall at sustained load) + 10 (left at the bottom).
+ export const RESERVE_FLOOR = 52;
+ // Michael's decision of 2026-11-06 (after group 1 review round 2): the scaled reserve is NOT in force yet. The reserve stays at the
+diff -ruN -x node_modules pristine/stacks/cyrus/test/reserve-sim-a.ts reserve-sim/stacks/cyrus/test/reserve-sim-a.ts
+--- pristine/stacks/cyrus/test/reserve-sim-a.ts	1969-12-31 18:00:00
++++ reserve-sim/stacks/cyrus/test/reserve-sim-a.ts	2026-11-16 13:00:30
+@@ -0,0 +1,76 @@
++// RESERVE-SIM, harness A (liquidator level): wake-fix.test.ts's flatten() copied, with the start of the bucket, the routine work beside
++// it (as a lower refill) and the cancel time as parameters. 30 positions, Michael's `flatten` (4 rounds), early wake-ups limited by the
++// worker's rule (earlyLookAllowed against the governor's budget and reserve), cancels and sell fills spread at random over their delays.
++// Env: SIM_RESERVE. Prints one JSON line per case.
++import { Liquidator, SellGate } from "../src/sells.ts";
++import { Governor, SAFETY_RESERVE } from "../src/governor.ts";
++import { earlyLookAllowed } from "../src/early-wake.ts";
++import { SimBroker } from "./sim-broker.ts";
++import { D } from "./rig.ts";
++
++const MID = Date.UTC(2026, 10, 2, 15, 0);
++
++async function flatten(n: number, cancelMs: number, o: { seed: number; startOffset: number; refillPerMinute: number; sellMs: number }) {
++  const sim = new SimBroker(MID);
++  const inner = sim as unknown as { cancels: Array<{ id: string; doneAt: number }>; sellFills: Array<{ id: string; at: number }> };
++  sim.cancelMs = cancelMs;
++  sim.sellFillDelayMs = o.sellMs;
++  for (let i = 0; i < n; i++) {
++    const id = `cyrus-20261102-S${i}-1`;
++    await sim.submitEntry({ symbol: `S${i}`, qty: 1, stopPrice: 9.9, takeProfitPrice: 10.1, referencePrice: 10, clientOrderId: id });
++    sim.fillEntry(id, 10);
++  }
++  const gov = new Governor(() => sim.simMs, { scaleReserve: false });
++  gov.setOpenSymbols(n);
++  sim.onRate = (remaining) => gov.observe({ path: "/v2/orders", status: 200, limit: 200, remaining, reset: null });
++  let seed = o.seed;
++  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
++  const seen = new WeakSet<object>();
++  const jitter = () => {
++    for (const c of inner.cancels) if (!seen.has(c)) { seen.add(c); c.doneAt = sim.simMs + Math.max(50, rnd() * cancelMs); }
++    for (const f of inner.sellFills) if (!seen.has(f)) { seen.add(f); f.at = sim.simMs + Math.max(100, rnd() * o.sellMs); }
++  };
++  const adv = sim.advance.bind(sim);
++  sim.advance = (ms: number) => { jitter(); adv(ms); };
++  const symOf = (id: string) => { for (const x of sim.orders) { if (x.id === id) return x.symbol; for (const l of x.legs) if (l.id === id) return l.symbol; } return null; };
++  let earlyLooks = 0;
++  const waitEvent = async (syms: ReadonlySet<string>, ms: number): Promise<boolean> => {
++    jitter();
++    const end = sim.simMs + ms;
++    const times = [...inner.cancels.map((c) => [c.doneAt, c.id] as const), ...inner.sellFills.map((f) => [f.at, f.id] as const)]
++      .filter(([t, id]) => t > sim.simMs && t <= end && syms.has(symOf(id) ?? "")).map(([t]) => t).sort((a, b) => a - b);
++    for (const t of times) {
++      if (t + 40 > end) break;
++      sim.advance(t + 40 - sim.simMs);
++      if (earlyLookAllowed(gov.budget(), gov.reserve())) { earlyLooks++; return true; }
++    }
++    if (end > sim.simMs) sim.advance(end - sim.simMs);
++    return false;
++  };
++  const start = gov.reserve() + o.startOffset;
++  sim.tokens = start;
++  sim.lowestTokens = start;
++  sim.refillPerMinute = o.refillPerMinute;
++  sim.rejected429 = 0;
++  const t0 = sim.simMs;
++  let flatAt: number | null = null;
++  const say = async () => true;
++  const gate = new SellGate({ broker: sim, say, nowMs: () => sim.simMs });
++  const liq = new Liquidator({ broker: sim, gate, now: () => new Date(sim.simMs), sleep: sim.sleep, waitEvent });
++  const req0 = sim.requests;
++  const res = await liq.flatten({ reason: "flatten", tradeDate: D, maxRounds: 4 });
++  const liqEnd = sim.simMs;
++  const liqRequests = sim.requests - req0;
++  for (let k = 0; k < 400 && flatAt === null; k++) { if ([...Array(n).keys()].every((i) => sim.heldQty(`S${i}`) === 0)) flatAt = sim.simMs; else sim.advance(100); }
++  return { start, lowest: Math.floor(sim.lowestTokens), draw: start - Math.floor(sim.lowestTokens), r429: sim.rejected429, r429AtSec: sim.r429Times.map((x) => Math.round((x - t0) / 100) / 10).slice(0, 6), liqSec: Math.round((liqEnd - t0) / 100) / 10, secToFlat: flatAt === null ? null : Math.round((flatAt - t0) / 100) / 10, liqRequests, earlyLooks, reportedFlat: res.flat, oversell: sim.oversellAttempts };
++}
++
++const offsets = (process.env.OFFSETS ?? "-8,0").split(",").map(Number);
++const refills = (process.env.REFILLS ?? "125,175").split(",").map(Number);
++const cancels = (process.env.CANCELS ?? "3000,8000").split(",").map(Number);
++const sells = (process.env.SELLS ?? "16000").split(",").map(Number);
++const seeds = Array.from({ length: Number(process.env.NSEEDS ?? 30) }, (_, i) => i + 1);
++for (const startOffset of offsets) for (const refillPerMinute of refills) for (const cancelMs of cancels) for (const sellMs of sells) for (const seed of seeds) {
++  const r = await flatten(30, cancelMs, { seed, startOffset, refillPerMinute, sellMs });
++  console.log(JSON.stringify({ reserve: SAFETY_RESERVE, startOffset, routinePerMin: 200 - refillPerMinute, cancelMs, sellMs, seed, ...r }));
++}
+diff -ruN -x node_modules pristine/stacks/cyrus/test/reserve-sim-b.ts reserve-sim/stacks/cyrus/test/reserve-sim-b.ts
+--- pristine/stacks/cyrus/test/reserve-sim-b.ts	1969-12-31 18:00:00
++++ reserve-sim/stacks/cyrus/test/reserve-sim-b.ts	2026-11-16 13:17:47
+@@ -0,0 +1,184 @@
++// RESERVE-SIM, harness B (worker-driven). A load window at 150 orders a minute on the simulated broker (as rehearsal-150), then exits
++// stop firing so the 30 live names all become held, then Michael's `flatten` command through the bot, with slow, spread cancels.
++// Every wait in the worker parks until this loop's clock reaches it (the "timed" sleep of redesign-part2's 30 stuck sales test), so the
++// order sync, the account view, the loss-stop reads and the entry flow keep running beside the flatten.
++// Env: SIM_RESERVE (governor), CANCEL_MS (cancel time at and after the command), SELL_MS (sell fill spread), SEED, BUSY_MIN (minutes of
++// busy window before the freeze), TRIGGER ("held30" or "open30").
++import { MemoryStore } from "../src/store.ts";
++import { SAFETY_RESERVE } from "../src/governor.ts";
++import { currentTag } from "../src/request-scope.ts";
++import { SimBroker } from "./sim-broker.ts";
++import { D, rig, settle } from "./rig.ts";
++
++const CANCEL_MS = Number(process.env.CANCEL_MS ?? 3000);
++const SELL_MS = Number(process.env.SELL_MS ?? 16000);
++const SEED = Number(process.env.SEED ?? 7);
++const BUSY_MIN = Number(process.env.BUSY_MIN ?? 5);
++const TRIGGER = process.env.TRIGGER ?? "held30";
++
++const OPEN_MS = Date.UTC(2026, 10, 2, 14, 30);
++const W0 = OPEN_MS + 15 * 60_000;
++const { CachingStore } = await import("../src/caching-store.ts");
++const mem = new MemoryStore();
++const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
++const store = new CachingStore(mem, () => sim.simMs, { controlTtlMs: 1_500, dayTtlMs: 2_000 });
++sim.bucketOn = false;
++const holds: Array<{ until: number; res: () => void }> = [];
++let timed = false;
++const tsleep = (ms: number): Promise<void> => (timed ? new Promise<void>((res) => holds.push({ until: sim.simMs + ms, res })) : sim.sleep(ms));
++const symbols = Array.from({ length: 30 }, (_, i) => `S${String(i).padStart(2, "0")}`);
++const r = rig<SimBroker, InstanceType<typeof CachingStore>>({ broker: sim, store, sleep: tsleep, simClock: sim, liveList: symbols, orderStream: true });
++const iso = (ms: number) => new Date(ms).toISOString();
++// Requests by tag (the flatten's are "first"), counted from the command on.
++let countFrom = Infinity;
++const byTag: Record<string, number> = {};
++const perSec: Record<number, Record<string, number>> = {};
++const callLog: string[] = [];
++sim.onSend = () => { if (sim.simMs >= countFrom) { const t = currentTag(); byTag[t] = (byTag[t] ?? 0) + 1; const s = Math.floor((sim.simMs - countFrom) / 1000); (perSec[s] ??= {})[t] = (perSec[s]![t] ?? 0) + 1; if (process.env.TRACE) callLog.push(`${((sim.simMs - countFrom) / 1000).toFixed(2)} ${t} ${new Error().stack!.split("\n").slice(3, 6).map((x) => x.trim().replace(/^at /, "").replace(/\(.*\/(\w[\w-]*\.ts):(\d+):\d+\)/, "$1:$2")).join(" < ")}`); } };
++sim.onRate = (remaining) => r.governor.observe({ path: "/v2/orders", status: 200, limit: 200, remaining, reset: null });
++
++await r.at("2026-11-01T22:10:00Z");
++r.ownerSays("load on\nposition 400\nloss 5000\ntrades 150\ncap 1", "2026-11-01T22:20:00Z");
++await r.at("2026-11-01T22:20:10Z");
++if ((await mem.getDay(D))!.limits.maxTradesPerMinute !== 150) throw new Error("limits not set");
++await r.at("14:15:00");
++sim.clockOpen = true;
++await r.at("14:25:00");
++if (!(await mem.getDay(D))!.phases.armed) throw new Error("not armed");
++sim.bucketOn = true;
++sim.tokens = 200;
++sim.lowestTokens = 200;
++timed = true;
++
++let seed = SEED;
++const rng = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
++const price = symbols.map((_, i) => 10 + i * 0.5);
++const entryTimes: number[] = [];
++const realSubmit = sim.submitEntry.bind(sim);
++const working = new Map<string, { id: string; limit: number; at: number }>();
++sim.submitEntry = async (e) => {
++  const o = await realSubmit(e);
++  entryTimes.push(sim.simMs);
++  working.set(e.symbol, { id: e.clientOrderId, limit: e.limitPrice ?? e.referencePrice, at: sim.simMs });
++  return o;
++};
++const live = new Map<string, { id: string; tp: number; stop: number }>();
++// Every order's last status this loop has reported to the worker (a live update per change to canceled or filled).
++const told = new Map<string, string>();
++const inner = sim as unknown as { cancels: Array<{ id: string; doneAt: number }>; sellFills: Array<{ id: string; at: number }> };
++const spreadSeen = new WeakSet<object>();
++let spreading = false;
++const jitter = () => {
++  if (!spreading) return;
++  for (const c of inner.cancels) if (!spreadSeen.has(c)) { spreadSeen.add(c); c.doneAt = sim.simMs + Math.max(50, rng() * CANCEL_MS); }
++  for (const f of inner.sellFills) if (!spreadSeen.has(f)) { spreadSeen.add(f); f.at = sim.simMs + Math.max(100, rng() * SELL_MS); }
++};
++const adv = sim.advance.bind(sim);
++sim.advance = (ms: number) => { jitter(); adv(ms); };
++const tellChanges = async (t: number) => {
++  // As Alpaca does (and rehearsal-150): a cancelled unfilled bracket entry takes its two waiting exits with it.
++  for (const o of sim.orders) if (o.side === "buy" && o.status === "canceled" && o.filledQty === 0) for (const l of o.legs) if (l.status === "held") l.status = "canceled";
++  for (const o of sim.orders) for (const x of [o, ...o.legs]) {
++    if (told.get(x.id) === x.status) continue;
++    if (x.status === "canceled") {
++      told.set(x.id, x.status);
++      await r.orderUpdate({ event: "canceled", order: { ...structuredClone(x), legs: [] }, positionQty: x.side === "sell" ? sim.heldQty(x.symbol) : null, atMs: t });
++    } else if (x.status === "filled") {
++      told.set(x.id, x.status);
++      await r.orderUpdate({ event: "fill", order: { ...structuredClone(x), legs: [] }, positionQty: sim.heldQty(x.symbol), atMs: t, price: x.filledAvgPrice, fillQty: x.filledQty });
++    } else told.set(x.id, x.status);
++  }
++};
++
++const step = 60;
++let lastTick = 0;
++const freezeAt = W0 + BUSY_MIN * 60_000;
++let cmdAt = 0;
++let cmdInfo: Record<string, unknown> = {};
++let flatAt = 0;
++let endAt = Infinity;
++const heldCount = () => symbols.filter((s) => sim.heldQty(s) > 0).length;
++const minuteLow = new Map<number, number>();
++for (let t = OPEN_MS + 14 * 60_000; t < endAt && t < freezeAt + 10 * 60_000; t += step) {
++  // HOLD_STEP_MS (default 60, the print step): parked waits are released at this finer step inside each print step.
++  const HS = Number(process.env.HOLD_STEP_MS ?? step);
++  for (let sub = t - step + HS; sub < t; sub += HS) {
++    if (sub > sim.simMs) r.setNow(iso(sub));
++    const due = holds.filter((h) => h.until <= sim.simMs);
++    for (const h of due) { holds.splice(holds.indexOf(h), 1); h.res(); }
++    if (due.length) { await settle(); await tellChanges(sim.simMs); }
++  }
++  if (t > sim.simMs) r.setNow(iso(t)); // runs the rig's timers too
++  for (const h of holds.filter((h) => h.until <= sim.simMs)) { holds.splice(holds.indexOf(h), 1); h.res(); }
++  const now = sim.simMs;
++  const i = Math.floor(rng() * symbols.length);
++  const sym = symbols[i]!;
++  price[i] = Math.round((price[i]! + (rng() < 0.5 ? -0.01 : 0.01)) * 100) / 100;
++  sim.prices.set(sym, price[i]!);
++  if (now - lastTick >= 5_000) { lastTick = now; void r.at(iso(now)); }
++  await r.trade(sym, price[i]!, iso(now));
++  // A working entry fills when a later print is at or below its limit.
++  for (const [s, w] of [...working]) {
++    const o = sim.orders.find((x) => x.clientOrderId === w.id)!;
++    if (o.status !== "accepted" && o.status !== "new") { working.delete(s); continue; }
++    if (s === sym && now - w.at >= 300 && price[i]! <= w.limit) {
++      working.delete(s);
++      sim.fillEntry(w.id, w.limit);
++      live.set(s, { id: w.id, tp: o.legs.find((l) => l.type === "limit")!.limitPrice!, stop: o.legs.find((l) => l.type === "stop")!.stopPrice! });
++    }
++  }
++  // Exits fire only before the freeze.
++  const l = live.get(sym);
++  if (l && !cmdAt && (TRIGGER === "busy" || now < freezeAt) && (price[i]! >= l.tp || price[i]! <= l.stop)) {
++    const which = price[i]! >= l.tp ? "take_profit" : "stop";
++    sim.fillExit(l.id, which, which === "take_profit" ? l.tp : l.stop);
++    live.delete(sym);
++  }
++  await tellChanges(now);
++  const m = Math.floor((now - W0) / 60_000);
++  minuteLow.set(m, Math.min(minuteLow.get(m) ?? Infinity, sim.tokens));
++  if (!cmdAt && now >= freezeAt) {
++    const held = heldCount();
++    const open = new Set([...symbols.filter((s) => sim.heldQty(s) > 0), ...working.keys()]).size;
++    if ((TRIGGER === "held30" ? held >= 30 : TRIGGER === "busy" ? open >= 28 : open >= 30) || now >= freezeAt + 180_000) {
++      cmdAt = now;
++      countFrom = now;
++      cmdInfo = { held, open, tokensAtCmd: Math.floor(sim.tokens), governorBudget: Math.floor(r.governor.budget()), reserve: r.governor.reserve(), freezeSec: Math.round((now - freezeAt) / 1000) };
++      sim.cancelMs = CANCEL_MS;
++      sim.sellFillDelayMs = SELL_MS;
++      spreading = true;
++      // START_OFFSET: the bucket put at the reserve plus this at the command (as if other work had spent it), told to the governor.
++      if (process.env.START_OFFSET !== undefined) { sim.tokens = r.governor.reserve() + Number(process.env.START_OFFSET); r.governor.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: Math.floor(sim.tokens), reset: null }); cmdInfo.tokensAtCmd = Math.floor(sim.tokens); cmdInfo.startOffset = Number(process.env.START_OFFSET); }
++      sim.lowestTokens = sim.tokens;
++      r.ownerSays("flatten", iso(now));
++      void r.at(iso(now));
++      lastTick = now;
++    }
++  }
++  if (cmdAt && !flatAt && heldCount() === 0 && sim.orders.every((o) => ![o, ...o.legs].some((x) => ["new", "accepted", "held", "pending_cancel", "partially_filled"].includes(x.status)))) flatAt = now;
++  if (flatAt && endAt === Infinity) endAt = now + 30_000;
++  await settle();
++}
++const inWindow = entryTimes.filter((x) => x >= W0 && x < (cmdAt || Infinity));
++let best = 0;
++for (let a = 0, b = 0; a < inWindow.length; a++) { while (inWindow[a]! - inWindow[b]! >= 60_000) b++; best = Math.max(best, a - b + 1); }
++const perMin = Array.from({ length: BUSY_MIN }, (_, m) => inWindow.filter((x) => x >= W0 + m * 60_000 && x < W0 + (m + 1) * 60_000).length);
++const held = (await mem.listRefusals(D)).filter((x) => /holding back for safety/.test(x.reason)).reduce((n, x) => n + (typeof x.detail?.count === "number" ? (x.detail.count as number) : 1), 0);
++const reply = r.said("commands").find((x) => /^Stopped, and sold|not flat yet|^Sold everything/.test(x)) ?? null;
++const r429After = sim.r429Times.filter((x) => x >= cmdAt).map((x) => Math.round((x - cmdAt) / 100) / 10);
++const r429Before = sim.r429Times.filter((x) => x < cmdAt).length;
++const flatReqs = sim.bucketTimes.filter((x) => x >= cmdAt && x < (flatAt || Infinity)).length;
++console.log(JSON.stringify({
++  reserve: SAFETY_RESERVE, cancelMs: CANCEL_MS, sellMs: SELL_MS, seed: SEED, trigger: TRIGGER, ...cmdInfo,
++  r429AfterCmd: r429After.length, r429AtSec: r429After.slice(0, 10), r429BeforeCmd: r429Before,
++  lowestAfterCmd: Math.floor(sim.lowestTokens), drawFromCmd: (cmdInfo.tokensAtCmd as number) - Math.floor(sim.lowestTokens),
++  secToFlat: flatAt ? Math.round((flatAt - cmdAt) / 100) / 10 : null, stillHeld: heldCount(), reply: reply?.slice(0, 90) ?? null,
++  requestsCmdToFlat: flatReqs, byTagFromCmd: byTag,
++  entriesPerMinute: perMin, busiest60s: best, heldBackBeforeCmd: held, lowestBeforeCmd: Math.floor(Math.min(...[...minuteLow].filter(([m]) => m >= 0 && m < BUSY_MIN).map(([, v]) => v))),
++  oversell: sim.oversellAttempts,
++}));
++if (process.env.TRACE) { console.log(JSON.stringify(perSec)); console.log(callLog.join("\n")); }
++timed = false;
++for (const h of holds.splice(0)) h.res();
++r.worker.stop?.();
++process.exit(0);
+diff -ruN -x node_modules pristine/stacks/cyrus/test/sim-broker.ts reserve-sim/stacks/cyrus/test/sim-broker.ts
+--- pristine/stacks/cyrus/test/sim-broker.ts	2026-11-16 12:51:33
++++ reserve-sim/stacks/cyrus/test/sim-broker.ts	2026-11-16 12:53:52
+@@ -41,6 +41,7 @@
+   // four sales that day; a test fault).
+   staleHeld = new Map<string, number>();
+   rejected429 = 0;
++  r429Times: number[] = []; // RESERVE-SIM: simulated time of every rate-limit answer
+   // Fault injection.
+   cancelAllFailsAfterCancelling = false;
+   refuseSellsTimes = 0;
+@@ -120,6 +121,7 @@
+         return;
+       }
+       this.rejected429++;
++      this.r429Times.push(this.simMs);
+       if (i < attempts - 1) this.advance(kind === "read" ? 500 * 2 ** i : Math.min(2000, 250 * 2 ** i));
+     }
+     throw new AlpacaError("rate limit exceeded", 429);

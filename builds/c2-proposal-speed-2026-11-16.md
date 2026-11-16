@@ -36,7 +36,23 @@ All rows are estimates from the measured cost per check; the worst-case notice i
 
 ## 2. The reserve
 
-*(Simulated results to follow: a full flatten of 30 positions with slow cancels at reserves of 40, 50 and 60, against today's 80; the lowest that never got a rate-limit answer.)*
+**Result (simulated, 2026-11-16 afternoon; Michael's ruling 2: "use the lowest of 40, 50 or 60 that never gets a rate-limit answer ... If none passes, keep 80 and tell me"): none passes, so the reserve stays 80.**
+
+About 4,700 runs in two harnesses: the real worker in a busy load window then Michael's `flatten` with 30 positions (harness B, 576 runs at the finer time step), and the liquidator alone with set starting points and routine traffic (harness A). Rate-limit answers (runs with one / runs), harness B:
+
+| Reserve | Cancels up to 3 s | up to 8 s | up to 11 s |
+| --- | --- | --- | --- |
+| 40 | (coarse runs only) rate-limit answers in 9 of 48 natural runs and every forced run | | |
+| 50 | 0 of 24 | 2 of 24 | 11 of 24 |
+| 60 | 0 of 56 | 5 of 56 (forced starts) | 40 of 56 |
+| 70 | 0 of 56 | 0 of 56 | 20 of 56 |
+| 80 | 0 of 56 | 0 of 56 | 5 of 56 (forced start 6 below the reserve) |
+
+- The flatten draws about 48 to 58 requests with 3 s cancels, 54 to 66 with 8 s, 64 to 85 with 11 s (2026-11-04 measured cancels near 11 s). Time to flat does not change with the reserve.
+- **The gain from a lower reserve is small:** total entries in a 15 minute load window at 150 a minute: 1,962 at 80, 1,982 at 60, 2,006 at 40 (the busiest 60 s was 150 at every reserve; the steady rate about 125 a minute at every reserve).
+- **What the simulator does not model:** Alpaca's real refill (smooth here), request latency (none here, so bursts are sharper than live: pessimistic), Alpaca's holds and real cancel times.
+- **Side finding:** even 80 gets rate-limit answers with 11 s cancels from a low start; the flatten command's own polling is the larger margin problem. Lighter polling in `flatten` would add more margin than any reserve value; it is money-touching code and is not in this release (for Michael).
+- Scripts and patches to re-run: `builds/reserve-sim-2026-11-16.diff` (apply to an archive of `main` at `1940292`; the reserve is read from `SIM_RESERVE` there, in the copy only).
 
 ## 3. Cheaper entries, fewer routine reads, and the stuck-retry items
 
@@ -85,7 +101,7 @@ Michael's words: "Messaging fix for tonight's release: the bot should recognize 
 | Item | Accepted entries a minute at peak | Protection time |
 | --- | --- | --- |
 | 1, 1 s pass with checks every 6 s (2 s while the updates are down) | -10 to -17 | worst notice of an unreported lost exit 15 to 20 s down to 7 to 11 s |
-| 2, the reserve | (from the simulation) | (from the simulation: time to flat in a full flatten) |
+| 2, the reserve | 0 (stays 80: none of 40, 50, 60 passed) | none |
 | 3a, entries priced to fill | +35 to +40 (to the 150 ceiling) | about 70 percent fewer lost exits from late cancels |
 | 3b, fewer routine reads | about +7 | the loss stop up to 5 s later (if that part is taken) |
 | 3c, stuck retries | 0 | 5 stuck: average wait about 75 s down to about 20 s |
