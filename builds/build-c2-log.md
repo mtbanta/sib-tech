@@ -6546,3 +6546,163 @@ Nothing under checks 2, 7 or 10. Item 4 (the deploy-approval reply) passes: Mich
 > From here, keep building and reviewing without waiting on me. If new questions come up, collect them and send them together, with your recommendation for each, unless one blocks all progress. Never print any token or key.
 
 So: the room-wake look also looks up the waited-for entries older than the 10-minute list window (B2's fix, approved); choice 5 reverted (urgent work at 60 a minute and 15 in 5 seconds); choice 6 kept; the gate's own 15 s refresh unchanged (comments and log state it). Question 6 (ruling 3's plus 1 cent in a normal day's afternoon load window) is unanswered and joins the next batch of questions.
+
+### Monday 2026-11-16 end-of-day session review
+
+Run from `builds/daily-review-brief.md` at about 3:15 PM Central, after the 2:55 close-out (flat at 2:55:35) and the daily summary (posted 3:06:28). Read only on Fly, Alpaca, Supabase, Discord and Healthchecks: no code changed, nothing deployed, no orders, nothing posted. Times are Central. "Measured" means read from a timestamp or counter; "inferred" means worked out from the code and the measured times; "estimate" means a calculation the day did not test. The morning (release v23, 8:30 to the 10:30 pause) is in "Monday 2026-11-16 mid-day session review" and is not repeated; this section adds the afternoon on release v24 (`20ba5bd`, deployed 12:46 PM at the mid-day pause with Michael's written yes; see "Deploy (2026-11-16, 12:46 PM Central, market hours, flat and paused)"). Limits (Michael, load day): largest position 250 dollars (75 in a load window), daily loss stop 500 dollars, 150 orders a minute in a load window (100 otherwise), cap 1. Day start equity 17,765.00. Paper only.
+
+**Verdict for the whole day under Michael's pass rule: does not hold, on one criterion, the morning's 9:55 event only** (three positions 16 to 22 s without exits after an order-stream reconnect; mid-day review, section 2). **The afternoon on its own holds on every criterion:** highest accepted orders a minute 78 (1:08 PM, afternoon load window; busiest 60 seconds 82), **0 rate-limit answers**, remaining never below 176 after the 12:46 restart (reserve 80), no safety sale waited on the stack beyond its designed steps, the 1:20 PM afternoon close-out flat at 1:20:50 and the 2:55 close-out flat at 2:55:35. **Waits inside Alpaca (not scored, for Michael):** at 2:55 Alpaca took 5.0 s to cancel the take-profits and fresh stops, then held every one of the 13 sales 11.5 to 11.9 s before submitting it, so positions went 15.0 to 27.1 s without a stop (the stack's own part 1.5 to 2.5 s; section 4). **The day lost 34.48 dollars** (morning -35.11, afternoon load window -3.64, normal afternoon +4.27); equity 17,730.52, and the summary matches the account and the fills to the cent. **0 alerts mentioned Michael all day.** At 3:14 PM: 0 positions, 0 open orders, stop flag off, `not_flat` off, cap at Alpaca 1, Healthchecks up.
+
+#### What Michael sent after the mid-day review (Discord `commands`, measured)
+
+`hold` 11:11:06; "Yes, deploy 20ba5bd now." 12:45:39 (the bot answered "I did not understand", as known; nothing done; the speed release's item 4 fixes the wording); after the deploy, `load afternoon` at 12:50:36 (accepted 12:50:41, window to 1:20 PM); `go` at 1:45:08 (resumed 1:45:13.6, `resumedBy: go`). No `stop`, `flatten` or `resume` today.
+
+#### 1. The afternoon load window (12:50:42 to 1:20:38; the morning window is in the mid-day review, section 1)
+
+- **Entries (Alpaca's records, distinct ids, read in 1 minute windows):** 1,387 sent, none refused by Alpaca; 435 filled, 952 cancelled unfilled after 5 s. Busiest calendar minutes: 1:08 PM 78, 1:04 66, 12:55 64, 1:07 60; busiest 60 s 82 (from 1:08:36). All 1-share limit buys; the dearest 29.00 dollars, under the 75 dollar cap. The ceiling was 150; the rate stayed far below it (the gate's one-entry-per-symbol rule on 30 names and the afternoon's prints set the pace; why lower than the morning's 116 is not measured).
+- **Requests (measured, `governor_stats`, 12:51 to 1:21 PM):** at most 177 in a minute (the row at 1:09:26), lowest remaining **176** (12:59:11), against the reserve of 80. By source: entries and their 5 second cancels 2,341 (64 percent), first tries 76 (the fast sale and the 1:20 close-out), P1 0, P2 0, routine 1,110 (30 percent), clock 124. Governor holds 0; 0 rate-limit answers.
+- **Exits of the 435 filled:** 174 take-profit, 243 stop, 17 sold by the 1:20 close-out, 1 lost exit (IREN-597, below).
+- **Decision to acceptance (stored):** median 118 to 121 ms, 95th percentile about 283 ms, slowest 970 ms. Decision time (`self_monitor`): 90th percentile 101 to 147 ms at 8,233 to 9,594 stored orders; longest queue wait 955 ms (the row at 1:00 PM); 0 signals dropped.
+- **The one lost exit (measured):** IREN-597 filled at 12:58:13.396 as its 5 second cancel went out; Alpaca cancelled both exits at 12:58:13.44 to 13.45. The fast sale started 79 ms after the fill, the sale was created at 12:58:15.19 and filled at 12:58:16.64: **3.2 s without exits**. One more fast-sale start, CDE-338 (12:58:16.67, filled just as its cancel went out), ended `lost_exit_fast_skipped` "Alpaca kept the exits" at 12:58:22.04 (5.4 s; the day's range for that ending is 5.1 to 36.8 s); Alpaca's records show CDE's exits stayed live and its stop filled at 1:03:19. Both afternoon fast-sale starts have a stored end.
+- **Cost:** -3.64 dollars (the fills' cash flow, 12:50 to 1:25 PM), about 0.26 cents an entry (the morning window: about 0.43 cents).
+- **Verdict for this window: holds** (0 rate-limit answers, remaining never below the reserve, the one lost exit sold in 1.8 s and filled in 3.2 s, flat at 1:20:50).
+
+#### 2. The afternoon close-out at 1:20, and the pause after it
+
+- Entries paused at 1:20:46.14 (the window's 30 minutes ran from 12:50:41; the last entry was at 1:20:38.45, so none after). 17 positions (all 1 share). One cancel of everything sent 1:20:46.56, answered 1:20:46.64; Alpaca cancelled the exits by 1:20:46.65. 17 sales created 1:20:47.69 to 1:20:49.10 (Alpaca submitted each within 22 ms), filled 1:20:48.63 to 1:20:50.16; flat recorded 1:20:50.29 (`waitedMs` 914): **4.2 s from the pause to flat**, at most 3.5 s without a stop. The minute had 117 requests (34 the close-out's first try), lowest remaining 176, 0 rate-limit answers. Cap unchanged. "Afternoon load window over: entries paused and the account is flat." in `commands` and `trading`.
+- **The 1:30 PM note** was not posted, as designed (the phase was written at 1:30:00; the code posts it only on a day with no deploy and no afternoon load window).
+- **`go`** at 1:45:08 resumed a normal afternoon at 1:45:13.6.
+
+#### 3. The normal afternoon (1:45 PM to the 2:00 PM last entry)
+
+- **Entries: 56, all accepted, all filled** (market entries), 1:45:14.7 to 1:58:46.9; busiest minute 21 (1:45), busiest 60 s 22, under the 100 ceiling (not 150). Largest at the decision 249.86 dollars (JOBY-107, 52 shares at the price seen of 4.805), largest filled 250.12 (JOBY-107 and ONDS-192, market entries that filled half a cent above the price seen; the gate checks the price seen, so a fill a few cents above 250 is expected, not a breach); not 75. Decision to acceptance: median 181 ms, 95th percentile 345 ms, slowest 434 ms. From 2:00:01 every signal was refused "too close to the close for a new entry".
+- **Exits of the 56:** 23 take-profit, 15 stop, 17 remainders given a fresh stop (5 of those stops later filled, 12 were cancelled by the 2:55 close-out), and AGNC-52 (30 shares), whose bracket stayed live until 2:55.
+- **Remainders (a take-profit partly filled and Alpaca cancelled the stop): 19.** 17 got a fresh stop; for WULF-430 and T-236 the take-profit filled the rest 2.0 and 1.9 s after the stop cancel, so nothing was left (T-236's `remainder_recount` recounted 0 and sold 0; WULF-430 was closed before the stack acted). **Every fresh stop was confirmed by Alpaca's answer** (211 to 320 ms), none unclear, none refused, no 15 second limit reached, no `fresh_stop_timeout*` event, no 5 minute alert. Of the 17 sent: 17 confirmed within 15 s (100 percent); 0 after 15 s; 0 Alpaca did not have; 0 cancelled at the limit; 0 ended first. By status at Alpaca: 5 filled (stop exits, so no `fresh_stop_ended`, which is stored only for a cancel, expiry or refusal), 12 cancelled by the close-out (12 `fresh_stop_ended`, "canceled", 2:55:06.72 to 2:55:06.93).
+
+  | Entry | Shares | Taken by the take-profit | Stop cancelled | List lag (range) | Take-profit cancelled | Fresh stop accepted (shares) | Without a stop | The fresh stop |
+  | :-- | --: | --: | :-- | :-- | :-- | :-- | --: | :-- |
+  | TTD-350 | 16 | 1 | 1:47:55.83 | 0.07 to 0.70 s | 1:47:56.99 | 1:47:58.18 (15) | 2.3 s | cancelled at 2:55 |
+  | IREN-664 | 15 | 14 | 1:49:45.86 | 0.55 to 1.71 s | 1:49:48.08 | 1:49:49.28 (1) | 3.4 s | cancelled at 2:55 |
+  | APLD-462 | 17 | 16 | 1:49:50.00 | 0.04 to 0.75 s | 1:49:51.26 | 1:49:52.49 (1) | 2.5 s | cancelled at 2:55 |
+  | RIOT-482 | 14 | 13 | 1:50:00.56 | 0.55 to 1.85 s | 1:50:03.78 | 1:50:05.40 (1) | 4.8 s | cancelled at 2:55 |
+  | CIFR-377 | 38 | 35 | 1:50:14.11 | 0.04 to 0.77 s | 1:50:15.47 | 1:50:16.64 (3) | 2.5 s | cancelled at 2:55 |
+  | AAL-237 | 19 | 16 | 1:51:42.25 | 0.05 to 0.97 s | 1:51:43.79 | 1:51:45.49 (3) | 3.2 s | cancelled at 2:55 |
+  | SMCI-626 | 9 | 3 | 1:51:53.59 | no lag | 1:51:54.22 | 1:51:55.47 (6) | 1.9 s | filled 2:30:52.92 |
+  | HL-247 | 20 | 16 | 1:52:37.29 | 0.07 to 0.81 s | 1:52:38.59 | 1:52:39.75 (4) | 2.4 s | filled 2:17:13.72 |
+  | WULF-432 | 21 | 11 | 1:53:31.35 | 0.04 to 0.80 s | 1:53:32.67 | 1:53:33.85 (10) | 2.5 s | cancelled at 2:55 |
+  | SOFI-334 | 16 | 1 | 1:53:42.30 | 0.04 to 0.57 s | 1:53:43.42 | 1:53:44.60 (15) | 2.3 s | cancelled at 2:55 |
+  | JOBY-107 | 52 | 11 | 1:54:14.12 | 0.05 to 0.75 s | 1:54:15.37 | 1:54:16.57 (41) | 2.4 s | filled 2:04:44.68 |
+  | BMNR-480 | 15 | 5 | 1:54:43.88 | 0.77 to 2.04 s | 1:54:46.47 | 1:54:47.66 (10) | 3.8 s | filled 2:37:04.84 |
+  | RKT-208 | 18 | 5 | 1:55:00.90 | 0.04 to 0.96 s | 1:55:02.53 | 1:55:03.85 (13) | 2.9 s | cancelled at 2:55 |
+  | F-138 | 21 | 18 | 1:55:31.36 | 0.05 to 0.76 s | 1:55:32.68 | 1:55:33.88 (3) | 2.5 s | cancelled at 2:55 |
+  | DKNG-410 | 13 | 12 | 1:56:59.56 | 0.07 to 0.76 s | 1:57:00.85 | 1:57:02.03 (1) | 2.5 s | cancelled at 2:55 |
+  | CTVA-227 | 27 | 25 | 2:00:16.47 | 0.05 to 1.55 s | 2:00:18.55 | 2:00:20.06 (2) | 3.6 s | filled 2:33:49.63 |
+  | CMCSA-292 | 9 | 8 | 2:44:49.04 | no lag | 2:44:50.03 | 2:44:51.34 (1) | 2.1 s | cancelled at 2:55 |
+
+  - **Without a stop, Alpaca's stop cancel to the fresh stop accepted: 1.9 to 4.8 s, median 2.5 s** (measured, `msFromStopCancel`), against 11 to 16 s on 2026-11-13. The list lag (Alpaca's order list still showing the cancelled stop open) is a bound, not a measurement: it lay between 0.04 and 0.77 s at the low end and 0.57 and 2.04 s at the high end (`stop_cancel_list_lag` 22, `stop_cancel_list_cleared` 16; the 6 without a cleared event, WULF-431, NU-281, DKNG-409, MARA-253, JHX-331 and IONQ-554, had their take-profit fill the rest before the list caught up). Each fresh stop came within the lag plus about 2.4 s (the stack's take-profit cancel, then the stop); RIOT-482's 4.8 s, the slowest, had its take-profit still filling until 1:50:02.95. No `timed_out_try_out_of_room`; the protection loop put 23 looks off a quarter second while a sync ran (`putOff`), as designed.
+  - Stop-gap record (`stop_gap:2026-11-16`): 17 fresh stops, 130 shares, 0 remainders sold at market.
+- **Lost exits after the pause:** IREN-597 only (section 1). None in the normal afternoon.
+- **The daily loss stop did not fire.** Lowest equity (Alpaca's 1 minute history) 17,715.39 at 1:48 PM: a loss of 49.61, 10 percent of the 500 limit. The stop flag stayed off all day (last set off 2026-11-11).
+- **Cost:** +4.27 dollars (the fills' cash flow from 1:44 PM, including the 2:55 sales). Peak exposure 7,258.54 dollars, 0.41 times equity (1:49:31 PM).
+
+#### 4. The 2:55 close-out
+
+- **Held at 2:55:** 13 positions (12 remainders on fresh stops, and AGNC-52, 30 shares, on its bracket). One cancel of everything sent 2:55:01.59, answered 2:55:01.73. AGNC's stop was cancelled at 2:55:01.64; **AGNC's take-profit and the 12 fresh stops only at 2:55:06.66 to 2:55:06.73 (Alpaca, 5.0 s)**.
+- **Sales** (one each, measured from Alpaca's records):
+
+  | Symbol | Shares | Stop ended | Sale created | Alpaca submitted it (held) | Filled (after submit) | Without a stop |
+  | :-- | --: | :-- | :-- | :-- | :-- | --: |
+  | AAL | 3 | fresh stop 2:55:06.68 | 2:55:08.20 | 2:55:19.75 (11.5 s) | 2:55:24.21 (4.5 s) | 17.5 s |
+  | AGNC | 30 | bracket stop 2:55:01.64 | 2:55:08.27 | 2:55:19.84 (11.6 s) | 2:55:21.43 (1.6 s) | 19.8 s |
+  | APLD | 1 | fresh stop 2:55:06.66 | 2:55:08.34 | 2:55:19.94 (11.6 s) | 2:55:21.61 (1.7 s) | 15.0 s |
+  | CIFR | 3 | fresh stop 2:55:06.68 | 2:55:08.42 | 2:55:20.08 (11.7 s) | 2:55:26.01 (5.9 s) | 19.3 s |
+  | CMCSA | 1 | fresh stop 2:55:06.70 | 2:55:08.50 | 2:55:20.17 (11.7 s) | 2:55:23.02 (2.8 s) | 16.3 s |
+  | DKNG | 1 | fresh stop 2:55:06.70 | 2:55:08.57 | 2:55:20.30 (11.7 s) | 2:55:22.65 (2.3 s) | 15.9 s |
+  | F | 3 | fresh stop 2:55:06.71 | 2:55:08.65 | 2:55:20.41 (11.8 s) | 2:55:26.72 (6.3 s) | 20.0 s |
+  | IREN | 1 | fresh stop 2:55:06.71 | 2:55:08.72 | 2:55:20.52 (11.8 s) | 2:55:21.76 (1.2 s) | 15.1 s |
+  | RIOT | 1 | fresh stop 2:55:06.72 | 2:55:08.81 | 2:55:20.63 (11.8 s) | 2:55:22.10 (1.5 s) | 15.4 s |
+  | RKT | 13 | fresh stop 2:55:06.72 | 2:55:08.88 | 2:55:20.75 (11.9 s) | 2:55:24.18 (3.4 s) | 17.5 s |
+  | SOFI | 15 | fresh stop 2:55:06.69 | 2:55:08.97 | 2:55:20.85 (11.9 s) | 2:55:33.79 (12.9 s) | **27.1 s** |
+  | TTD | 15 | fresh stop 2:55:06.69 | 2:55:09.19 | 2:55:21.05 (11.9 s) | 2:55:26.49 (5.4 s) | 19.8 s |
+  | WULF | 10 | fresh stop 2:55:06.66 | 2:55:09.25 | 2:55:21.15 (11.9 s) | 2:55:27.99 (6.8 s) | 21.3 s |
+
+- **The stack's own part:** 1.5 s from the last cancel landing to the first sale, 2.5 s to the last (sent one after another, about 80 ms apart). **Alpaca's part:** the 5.0 s cancel, the 11.5 to 11.9 s hold before submitting (all 13 submitted in creation order, about 100 ms apart, as if queued), and fills of 1.2 to 12.9 s. At 1:20 the same kind of sale was submitted within 22 ms, so the hold is specific to the 2:55 moment so far; 2026-11-11 showed the same at 2:55 (PCG's sale held 14.6 s). Two days are not proof of a pattern.
+- **The wait for its own sales ended flat, not early:** the liquidator returned at 2:55:09.54 with all 13 `working`; the close-out waited 25,668 ms and recorded flat at 2:55:35.20, 1.4 s after the last fill (SOFI). No NOT FLAT alert, no retry, `not_flat` off. "Close-out done: the account is flat." at 2:55:35. Cap at Alpaca 1 (multiplier 1). Requests in the minute: 100 (59 the close-out's first try), lowest remaining 177, 0 rate-limit answers.
+- **Score:** holds on the stack's own steps (2.5 s at most). The 15 to 27 s without a stop were Alpaca's waits; for Michael to rule, as on 2026-11-11.
+
+#### 5. Alerts that mentioned Michael
+
+**None all day** (`alerts`, `trading`, `commands`). The builder's own "Michael: ..." status posts in `commands` carry his name as text, not a mention, and are not alerts. Alerts after the pause without a mention: 2, both true and needed: "IREN: I could not confirm a live protective stop. I sent a sell for its 1 share; Alpaca has not filled it yet." (12:58:15) and its closing line "IREN: the sale of its 1 share has filled." (12:58:21, 5 s after the fill at 12:58:16.6). No message used any wording the brief calls a fault. No Healthchecks alert in Discord.
+
+#### 6. Blocked sales and late notices
+
+- **`sale_blocked`: none all day** (A step 3 still has no new data).
+- **`late_notice`: one after the pause.** IREN-597, 12:58:21.96, kind "missing", found by the order listing 8.5 s after Alpaca's cancel (`streamReportedCancel` null, stream live, `saleRunning: true`, previous sync 7.1 s before). The fast sale had already handled it (sale sent 1.8 s and filled 3.2 s after the cancel), and the next step logged `unprotected_position_already_gone`. So this "late" notice records the order sync's own later sighting, not a delay (a logging point, section 12 C).
+- **Stuck retries: none.** P1 0 all afternoon; the `requestBudget` granted 946 tries, all P2; refused 0 (minute, five, class, floor), overdrafts 0, `sentAfterEnd` 0, forced 0, `givingWayRefusals` 0; `mostBudgetedInMinute` at most 27 (2:12 PM) against 60; `mostCappedIn5s` at most 9 against 15. **Hold counter (`retryHold`): 0 in every minute** (`started`, `renewed`, `inForceMs`, `p2Refused` all 0). No `fresh_stop_lookup_skipped`, `budget_overdraft`, `list_lag_recheck_failed` or `protection_action_failed`. Protection loop, afternoon totals: looks 50, list-lag looks 24, actions 21, wakes 55, put off 23, failed 0, room checks 0.
+- **`sync_slow`: 5 after the pause:** 1:10:08 (2.1 s) and 1:15:10 (4.8 s), each spent on Alpaca's order list and positions read (1.9 and 4.6 s); 2:00:09 (2.9 s: older lookups 1.3 s, list 1.3 s); 2:30:04 (2.9 s: the in-memory walk 1.6 s and older lookups 1.2 s; why the walk took 1.6 s is not established; the event loop's delay that minute was under 5 ms); **2:31:12 (11.5 s, of which 10.8 s was Alpaca's list and positions read** with 19 entries active; inferred a first try cut off at the 10 second limit and a quick second try; nothing was waiting on that sync). None tied to a sale.
+
+#### 7. The daily summary against the account, to the cent
+
+Posted 3:06:28 to 3:06:29 PM in `trading` (two messages); its listing read 10,685 orders in 87 windows with 265 requests, no failed window (Fly's log, 3:06:03).
+
+| Summary line | Alpaca, or the stack's records | Match |
+| :-- | :-- | :-- |
+| 9,650 entry orders sent (3,974 filled) | 9,650 stored, all with an Alpaca id, none refused; Alpaca's orders: 9,650 entries, 3,974 filled, 5,676 cancelled; fills: 3,974 distinct buy orders | yes |
+| 3,991 sells filled | 3,991 distinct sell orders in the day's 8,121 fills | yes |
+| 1,586 won, 2,357 lost, 48 broke even | the summary's own rule (sells matched to buys first in, first out, per symbol) re-run on Alpaca's orders: 1,586, 2,357, 48 | yes |
+| Per symbol (SMCI -4.91, IONQ -3.21, ONDS -2.99, HIMS -2.81, IREN -2.56, RIVN -2.24, RIOT -2.19, BMNR -1.97) | the same eight, same figures | yes |
+| -34.48 from closed trades; equity 17,765.00 to 17,730.52 (-34.48) | the fills' cash flow -34.48; Alpaca `last_equity` 17,765.00, `equity` and cash 17,730.52; 0 positions, 0 open orders | **to the cent** |
+| Speed: 9,650 orders, typical 120 ms, 95th percentile 292 ms, slowest 4,121 ms | stored `accept_ms`: the same slowest (4,121 ms, morning) | yes |
+| Fees 1.69 (SEC 1.65, TAF 0.00 paused, CAT 0.04); running 32.14 | SEC: 79,838.24 dollars of sales times 20.60 per million is 1.6447, rounded up to 1.65; CAT: 10,298 shares times 0.000003 is 0.0309, rounded up to 0.04; total 1.69. Friday's posted fees (REG 2.58, CAT 0.04) equal Friday's estimate of 2.62. Today's post at about 7 PM. `fees_running` 30.45 + 1.69 = 32.14 | yes |
+| Peak exposure 7,259 dollars, 0.41 times equity | `peak_exposure:2026-11-16`: 7,258.54, 0.41 (1:49:31 PM) | yes |
+| Fresh stops: 17 placed (130 shares); none sold at market | 17 `fresh_stop`, 130 shares; Alpaca 17 `cyrus-p-` stops | yes |
+| Requests: lowest budget 176, busiest minute 82, governor 0, rate-limit answers 0 | true since the 12:46 restart, as the summary's restart line says; the whole day's lowest was 61 (morning) and busiest 60 s 121 (mid-day review) | yes, with the restart note |
+| Load window (8:45 to 10:30): 8,206 sent (3,483 filled), busiest minute 121; take-profit 1,349, stop 2,095 (-34.85), later or open 39; 4,723 cancelled unfilled | the mid-day review's 8,207 counted JOBY-90 (10:30:00.15), which the summary puts in the rest of the day (its window ends at 10:30:00); 39 = 25 lost exits + 14 sold at the mid-day close-out | yes |
+| Rest of the day: 1,444 sent (491 filled), busiest 82; take-profit 197, stop 258 (-7.28), later or open 36 | 1,387 + 56 + JOBY-90; filled 435 + 56; take-profit 174 + 23, stop 243 + 15; 36 = 17 + IREN-597 (load window), 17 remainders + AGNC-52 (normal) | yes |
+| Live order updates: 11,916 received, 491 freed, 0 reconnects | since the restart; 0 reconnects matches `governor_stats` | yes |
+| Refused entries 27,798 (already holding 15,332; entry still working 4,887; paused 4,330; too close 2,020; before 8:45 724) | the `refusals` table keeps every "paused" row (4,330, equal) and only a sample of the others, so those counts cannot be checked row by row | paused yes; others not checkable |
+| Mid-day cycle: paused 10:30, flat 10:30, resumed 1:45 PM by `go` | `midday_pause:2026-11-16` | yes |
+| Restarted at 12:46 PM (figures since then) | `start_history` 12:46:50; exactly one restart | yes |
+| Stop flag off; end of day flat | yes | yes |
+
+#### 8. The shadow loss-stop book
+
+Largest gap in the afternoon **2.06 dollars at 2:55:11** (during the close-out's sales: estimate 17,732.80 against the account read 17,730.74; the estimate higher, so it would have fired later by that much); before the close-out 1.66 at 1:51:51 (the estimate lower, so sooner). The morning's largest was 0.15 (mid-day review). Against 450 dollars of room at the day's low, neither matters. Shadow only, as ruled.
+
+#### 9. Discord volume and Healthchecks
+
+- **Discord (6:00 AM to about 3:10 PM):** `alerts` 47, `trading` 46, `commands` 21. After the 10:30 pause: `alerts` 2, `trading` 24 (trade batches, the close-out lines, the summary), `commands` 19 (Michael's 4 lines, the bot's replies, the start note, the builder's status posts, the evening limits post at 3:10).
+- **Healthchecks (cyrus check):** up, last ping 3:14:01 PM. Flips today: down 12:46:11, up 12:46:28, the deploy (the deploy tool pauses the check before the restart). No Healthchecks alert reached Discord.
+
+#### 10. The Fly machine
+
+- **Fly's metrics** (read with the read-only metrics token from the Mac, never printed; 8:30 AM to 3:15 PM): **no throttling** in any minute; steal at most 0.22 percent; memory available at least 319 MB; 1 minute load at most 0.31. CPU in use (all modes but idle and steal), every 10 minutes in the busy afternoon stretch: 12:50 1.5, 1:00 2.6, 1:10 2.8, 1:20 2.2 percent of a CPU (afternoon most 3.2; morning most 3.8 at 8:50).
+- **The CPU burst balance:** full (50,000) all morning, then **reset to about 4,900 by the 12:46 restart** (lowest 4,912 at 12:47), and it rose steadily from there (5,791 at 12:50, 12,820 at 1:20, 43,862 at 3:05). The afternoon load window ran on a tenth of a full balance without throttling, because its use stayed below the rate the balance refills (measured: it rose throughout). On 2026-11-11 a full balance ran out at 10:21 in a heavier morning window, so a mid-day deploy before a heavy afternoon window starts with little in reserve (a note, section 12 E).
+- **Self-monitoring (the worker's own rows, afternoon):** worker CPU at most 2.5 percent in the load window (17.5 percent in the 2.4 second first row after the start, the start itself); RSS at most 170 MB; event-loop delay at most 28 ms in the window (53.5 ms in the start row); decision 90th percentile 101 to 147 ms at 8,233 to 9,594 stored orders (morning: 102 to 172 ms up to 7,576), 223 ms at most in the normal afternoon (market entries); 0 dropped. No long-window row after the start.
+
+#### 11. Anything else that did not behave as designed, or is new
+
+1. **v24's new pieces were not exercised** (not "worked"): no order-stream reconnect after 12:46 (`reconnects` 0), so no `order_stream_reconnect_sync`; no `lost_exit_fast_ended` and no `unprotected_position_yielded` (neither ending occurred); the morning line's late-fill lookups ran under v23 this morning ("3481 filled" against 3,483), so tomorrow's mid-day line is the first test.
+2. **The 2:55 close-out's Alpaca waits** (section 4): 5.0 s cancels and an 11.5 to 11.9 s hold of every sale; second day seen.
+3. **The cost of watching on a quiet normal afternoon** (measured): from 2:00 to 2:55, with no entries, routine reads ran 50 to 75 a minute (inferred: mostly order lookups by id for the 19 entries older than the 10 minute list window, 5 to 7 a sync, `olderLookups` in `sync_slow`) and P2 lookups of the resting fresh stops 14 to 25 a minute, about 70 to 90 requests a minute in all. Harmless today (no entries after 2:00), but on a busy normal day that room would come out of entries.
+4. **The 2:31:12 order sync took 11.5 s** on Alpaca's read (section 6).
+5. **The IREN `late_notice`** reads as an 8.5 s delay that did not happen (section 6).
+6. **The bot's "I did not understand" reply to Michael's deploy yes** (known; the speed release's item 4).
+
+#### 12. Recommended fixes, as a proposal only (no code)
+
+- **A. The 2:55 close-out's waits at Alpaca (money-touching: the close-out's timing; Michael's ruling, and group 1 if built).** What it would change: start the close-out earlier (for example 2:50) or cancel the exits of the remainders on fresh stops a little before 2:55, so Alpaca's 5 s cancel and its hold of the sales end well before the close. What it would have changed today: an estimate only; if Alpaca's 2:55 hold is tied to the clock it might not move with the start time, and nothing today measures that. Cost: no extra requests. Question for Michael: are 15 to 27 s without a stop inside the 2:55 close-out acceptable as Alpaca's wait (as scored today), or does he want the close-out moved? A read-only check first: compare tomorrow's 2:55 sales with today's to see whether the hold repeats.
+- **B. Lighter watching when nothing is being entered (money-touching: protection reads; group 1).** What it would change: while the live updates are connected, look up resting confirmed fresh stops and older entries less often than every sync (for example every 30 s), relying on the live updates in between. Today it would have saved an estimated 40 to 60 requests a minute from 2:00 to 2:55, which bought nothing today. Risk: it pulls against the speed release's open finding that positions older than the list window starve for stuck retries under steady P2 demand ("Speed release, item 3c", open findings), so it needs designing with that, not as a bolt-on. Question for Michael: whether to study it for a later release.
+- **C. Logging: the `late_notice` for a position the fast sale already sold (logging only; group 2).** Mark such a notice (for example `fastSaleFilled: true`) or skip it, so the review does not read it as a delay. Today: 1 notice. Cost: no requests.
+- **D. Nothing to change for the remainders:** fresh stops in 1.9 to 4.8 s, all confirmed by answer, against 11 to 16 s on Friday.
+- **E. A note, not a fix:** a deploy resets Fly's CPU burst balance to about a tenth; today's afternoon window used less than the refill rate. If a mid-day deploy is ever followed by a heavier window, read the balance during it.
+
+**Tuesday's limits (Michael's decision):** the evening post (3:10 PM) suggests a normal day, largest position 250 dollars, daily loss stop 500, 100 orders a minute, cap 1, all waiting for him. Today's costs: the morning load window about 0.43 cents an entry (8,206 entries, -35.11), the afternoon window about 0.26 cents (1,387, -3.64), the normal afternoon +4.27 on 56 entries (too few to read); the day's worst point was 49.61 down, 10 percent of the loss stop. Lowering a limit is a tightening he can make; raising the loss stop or a ceiling is a hard stop, his alone.
+
+**For a deploy before 7:30 AM Tuesday (state at 3:14 PM, measured):** the account is flat (0 positions), 0 open orders, the stop flag is off, `not_flat` is off, the cap at Alpaca is 1, Healthchecks is up, and no alert today is unexplained. Nothing from today's session stands in the way; the speed release's own reviews decide it.
+
+Scripts and outputs: the scratchpad folder `eod1116` (not kept in the repo). `PROJECT_STATE.md` is left to the builder.
+
+Paper trading only; research input for a human decision, never an instruction to act.
+
+**Michael's answer to question 6 (2026-11-16, afternoon), saved verbatim:** "Question 6: yes, plus 1 cent applies in the afternoon load window too, as built." So ruling 3's entry price (the price seen plus 1 cent) applies in every load window, the afternoon load window on a normal day included; no change.
