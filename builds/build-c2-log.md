@@ -6262,3 +6262,21 @@ This supersedes "not before v22 has traded Monday morning" and the Monday mid-da
 - Notes: `p2Refused` is within "logging only" but goes beyond Michael's words and was not named to him before it was built: to be told plainly; the `inForceMs` comment and the log say "up to its end (not up to the read)", but a hold still in force at a minute's read is counted to the read and the rest goes into the next minute (as tested; documentation only, the source comment left as reviewed so the deployed code is the reviewed code); no production P2 try passes `fiveSec: false`.
 
 **Standing:** the counter has passed group 1 (hold counter group 1 round 1) and group 2 (hold counter round 2). Under Michael's decision of tonight, the redesign deploys tonight with the counter, from `stacks/cyrus` identical to `15dd5f7`.
+
+## Deploy (2026-11-15, Sunday 9:56 PM Central, market closed): Fly release v23, the redesign with the hold counter
+
+Under Michael's decision of tonight (saved verbatim above). A normal deploy outside market hours (CLAUDE.md: flat, no open orders, the reviewed commit, a clean checkout). The stop flag was off (Michael's `resume` of 2026-11-11) and did not need to be on: both routes of `tools/midday-deploy.mjs` and the stop flag condition are for market hours only, and v21 and v22 were deployed the same way.
+- **Merge:** `redesign-2026-11-14-p2` fast-forwarded to `main` at `e89feac`. `git diff 15dd5f7 e89feac -- stacks/cyrus` is empty: the stack code is exactly what group 1 passed (hold counter group 1 round 1) and group 2 passed (hold counter round 2), which is `fa357df` plus the counter.
+- **Checks right before the deploy** (a scratchpad copy of the market-hours tool's read-only checks, run against a fresh clone of `main` from GitHub with no key file): Alpaca's clock closed (next open Monday 8:30 AM CT); 0 positions; 0 open orders; today not a trading day; checkout `e89feac`, clean.
+- **Deploy:** started 03:55:56 UTC; Healthchecks paused (200); `fly deploy --ha=false` from the clean clone; image `deployment-01M7H7YPGG5W83B8R25BZWSE32`; complete 03:56:37 UTC; machine `847319a2d79518` on release **v23**.
+- **After the deploy (read only):**
+  - one clean start: the old worker logged `worker_stopping` (SIGINT) and exited 0 at 03:56:23; the new one logged `worker_started` (`deploy: true`, `recentStarts` 1) at 03:56:28; the database's `start_history` recorded 03:56:27.822 UTC; the only warning is Fly's own network-interface notice at machine start; no error or warning events stored;
+  - Healthchecks `up`, last ping 03:56:29 UTC (the first ping un-paused it);
+  - Discord `commands`: the designed start note ("Worker started at 9:56 PM CT (paper): new release 5BZWSE32 (was VD0WHQMN): a deploy. Starts in the last hour: 1."), no repeated limits post;
+  - Monday 2026-11-16's day record unchanged: `approved` (Michael's `load on position 250 loss 500 trades 150 cap 1` at 8:52 PM CT), all four decided, `load` on. Michael asked to check that Monday's limits post was "still waiting"; it had already been answered and approved before the deploy, and the deploy left it as it was;
+  - Alpaca: 0 positions, 0 open orders, 0 orders since the deploy; stop flag off.
+- **"Live" line** posted in `commands` (HTTP 200), naming `e89feac` and the reviewed `15dd5f7`.
+- **Rollback (Michael):** v22, image `deployment-01M7BQYK2MQR53NCTPVD0WHQMN` (code of `b1bd65c`, `main` was `2dbdb9c`), at the mid-day pause with his written yes, through `tools/midday-deploy.mjs` from a clean checkout of v22's commit.
+- **Monday is the redesign's first session, and a load day** (150 orders a minute in the window, the heaviest case). The daily and mid-day review briefs cover the new statistics (`requestBudget`, `protectionLoop`, `retryHold`).
+
+Paper trading only; research input for a human decision, never an instruction to act.
