@@ -1398,7 +1398,7 @@ export class Worker {
 
   // The redesign of 2026-11-14, part 2: one look of the protection loop for the entries that are due: the reads the order sync makes, for
   // those entries only, and their decisions (risk.ts `syncOrders` with `only`). One at a time with the regular sync (both are "risk"); it
-  // never resets the regular sync's 10 seconds. A look only for list-lag rechecks runs inside a P2 reservation of its cost (the order list's
+  // never resets the regular sync's 6 seconds (2 s while the live updates are down). A look only for list-lag rechecks runs inside a P2 reservation of its cost (the order list's
   // pages as the last sync read them, the positions, and a lookup per older entry), as in part 1; any other look is routine work, as the
   // sync it replaces was. Without room it waits for room (entries give way meanwhile).
   private async look(ids: ReadonlySet<string>, kind: WakeKind, extraRequests: number, untilMs = Infinity, roomIds?: ReadonlySet<string>): Promise<{ outcome: "busy" | "done" | "failed" | "idle" } | { outcome: "wait"; retryAt: number }> {

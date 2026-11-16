@@ -5,6 +5,9 @@
 // sent) are NOT stored here: the orders table already holds every entry, and a busy day would bury this log.
 export const STORED_INFO_EVENTS = new Set([
   "command",
+  // The speed release (group 2, round 1): a sale giving way and a side-by-side sale waiting for room are stored, so the reviews can count them.
+  "liquidation_yielded",
+  "side_by_side_waited",
   "limits_decision",
   "stream_started",
   "worker_started",
