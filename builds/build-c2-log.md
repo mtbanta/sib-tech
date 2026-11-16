@@ -6535,3 +6535,14 @@ The seven choices: 1 to 4, 6 and 7 within ruling 5 (6 is 20ba5bd's own formula, 
 ### Speed release, round 1 (79f52ec): group 2 CHANGES REQUIRED
 
 Nothing under checks 2, 7 or 10. Item 4 (the deploy-approval reply) passes: Michael's real line gets exactly the agreed reply, nothing stored but the command row, no order, account or cancel call; near misses refused. **Blocking:** (1) the review briefs and the stored `governor_stats` row do not follow item 2's growing minute (no minute in force stored; `turn`, the cheap retry's 7, the hold ending at the grant, the 6 s sync and the plus 1 cent entries missing from the briefs); (2) three alerts say "within 60 Alpaca requests a minute" while the quiet mid-day test reached 104 in 60 s (follows choice 5; the builder reverts to 60); (3) the timed pass retries a failed view read every second with no backoff and stores a warning each time (60 s: 44 to 59 reads, 32 to 44 rows; 20ba5bd about 12 reads and no row); (4) ruling 4's "every 20 s" holds only without entries: the gate reads the view itself inside the order path once it is 15 s old (`VIEW.fastMs`), so with entries flowing it was read at 16, 30, 46 and 60 s, two inside entry decisions (changing the gate is money-touching: a question for Michael); (5) no test of the give-way texts; (6) stale figures in comments. Fixes in progress on `speed-g2fix` (from `9e48f2f`); the side-by-side room fix on `speed-rl`.
+
+### Michael's answers on the speed release questions (2026-11-16, afternoon), saved verbatim
+
+> Answers, all at once:
+> 3. Option (a): when budget room frees up, also look up waiting positions older than 10 minutes.
+> 4. Close-out retries stay at 60 a minute, as you defaulted.
+> 5. Keep the cap that changes with the waiting retry's size.
+> 7. Option (b): leave the gate alone; about 15 s with entries flowing is fine.
+> From here, keep building and reviewing without waiting on me. If new questions come up, collect them and send them together, with your recommendation for each, unless one blocks all progress. Never print any token or key.
+
+So: the room-wake look also looks up the waited-for entries older than the 10-minute list window (B2's fix, approved); choice 5 reverted (urgent work at 60 a minute and 15 in 5 seconds); choice 6 kept; the gate's own 15 s refresh unchanged (comments and log state it). Question 6 (ruling 3's plus 1 cent in a normal day's afternoon load window) is unanswered and joins the next batch of questions.
