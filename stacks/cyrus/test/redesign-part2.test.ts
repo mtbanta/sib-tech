@@ -622,6 +622,7 @@ test("part 2 (part 1, round 4): a list-lag look refused on its floor keeps entri
   assert.ok(waitEnds <= next + 500 && waitEnds <= t0 + 20_000, `the wait ends by the next look and within the window (${waitEnds - t0} ms)`);
   // A protection wake for the same entry: the look that serves it is not a lag look, and it ends the wait.
   wk.budget.remaining = realRemaining;
+  wk.lastSync = sim.simMs; // no regular sync due (since ruling 1 of 2026-11-16 one falls due after 6 s, and the look lets it go first)
   wk.loop.wake(id, sim.simMs, "protect");
   r.setNow(iso(sim.simMs));
   await settle();

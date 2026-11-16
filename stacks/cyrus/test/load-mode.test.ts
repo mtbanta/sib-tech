@@ -122,14 +122,15 @@ test("a load day: no entry before 8:45, release B churn in the window (1 share, 
   const inWindow = entries(r).at(-1)!;
   assert.equal(inWindow.symbol, "BBB");
   assert.equal(inWindow.qty, 1, "release B: 1 share in the window");
-  assert.equal(inWindow.takeProfitPrice, 50.01, "release B: any new print signals, here the first one at 50.00; 1 cent up");
-  assert.equal(inWindow.stopPrice, 49.98, "and 2 cents down");
+  // Ruling 3 of 2026-11-16: the entry is priced at the print plus 1 cent (50.01), and its exits sit 1 cent above and 2 below that price.
+  assert.equal(inWindow.takeProfitPrice, 50.02, "release B: any new print signals, here the first one at 50.00; 1 cent up from the entry at 50.01");
+  assert.equal(inWindow.stopPrice, 49.99, "and 2 cents down");
   await signal(r, "CCC", "15:10:00");
   const later = entries(r).at(-1)!;
   assert.equal(later.symbol, "CCC");
   assert.equal(later.qty, 1, "still 1 share");
-  assert.equal(later.takeProfitPrice, 50.01, "Michael's decision of 2026-11-10: at 9:10 the window is still on (it runs to 10:30), so window exits");
-  assert.equal(later.stopPrice, 49.98);
+  assert.equal(later.takeProfitPrice, 50.02, "Michael's decision of 2026-11-10: at 9:10 the window is still on (it runs to 10:30), so window exits");
+  assert.equal(later.stopPrice, 49.99);
 });
 
 test("the strategy's churn rules apply only while the load window is on (release B: any new print after 1 second, exits 1 cent up and 2 down)", () => {
@@ -138,7 +139,7 @@ test("the strategy's churn rules apply only while the load window is on (release
   const at = (sec: number, price: number) => s.onTrade({ symbol: "X", price, size: 100, time: new Date(sec * 1000).toISOString() });
   const a = at(0, 50)!;
   assert.ok(a, "the very first print signals: no warm-up and no uptick needed in the window");
-  assert.deepEqual([a.takeProfitPrice, a.stopPrice, a.load], [50.01, 49.98, true]);
+  assert.deepEqual([a.takeProfitPrice, a.stopPrice, a.load], [50.02, 49.99, true], "ruling 3 of 2026-11-16: from the entry at the print plus 1 cent");
   assert.equal(at(0.5, 50.1), null, "1 second cooldown");
   const b = at(1, 49.9);
   assert.ok(b, "a down-tick 1 second later still signals in the window");

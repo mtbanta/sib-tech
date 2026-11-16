@@ -168,9 +168,10 @@ test("after `load afternoon` a print is a 1-share limit entry with the load day'
   await until(() => sent.length > 0);
   assert.equal(sent.length, 1);
   assert.equal(sent[0].qty, 1);
-  assert.equal(sent[0].limitPrice, 20);
-  assert.equal(sent[0].takeProfitPrice, 20.01);
-  assert.equal(sent[0].stopPrice, 19.98);
+  // Ruling 3 of 2026-11-16: the print plus 1 cent, and the exits around that price.
+  assert.equal(sent[0].limitPrice, 20.01);
+  assert.equal(sent[0].takeProfitPrice, 20.02);
+  assert.equal(sent[0].stopPrice, 19.99);
 
   const w2 = await flatAtMidday();
   const sent2: any[] = [];
