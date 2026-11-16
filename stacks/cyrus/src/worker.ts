@@ -100,7 +100,7 @@ export const CARRIED_PHASE = "carried";
 // while Alpaca's request budget is below this, so the summary never runs the bucket low and never causes a rate-limit answer.
 export const SUMMARY_MIN_BUDGET = 100;
 // Michael's ruling 1 of 2026-11-16 (the speed release): the order sync every 6 s, and every 2 s only while the live updates are down
-// (connected before and not live now); started on time by the 1-second timed pass (`timedTick`). Before: every 10 s, started only by the
+// (a stream that exists and is not live now, including one that has not connected yet, so a stream that never connects means every 2 s from Armed to the close); started on time by the 1-second timed pass (`timedTick`). Before: every 10 s, started only by the
 // 5 second pass, so 10 to 15 s apart.
 export const SYNC_EVERY_MS = 6_000;
 export const SYNC_EVERY_STREAM_DOWN_MS = 2_000;
@@ -1153,7 +1153,7 @@ export class Worker {
       await this.refreshView(now, date);
       this.lastArmedRefresh = true;
     } else this.lastArmedRefresh = false;
-    // The regular order sync, every 10 seconds (the record of truth). Since the redesign of 2026-11-14 (part 2) protection work never brings it
+    // The regular order sync, every 6 s (2 s while the live updates are down; ruling 1 of 2026-11-16) (the record of truth). Since the redesign of 2026-11-14 (part 2) protection work never brings it
     // forward: the protection loop looks at the entries that are due (`look`).
     if (inSession && now.getTime() - this.lastSync >= this.syncEveryMs()) this.startSync(current, day.closeAt);
     if (inSession || (day.closeAt && now < addMinutes(day.closeAt, 10))) {
@@ -1376,7 +1376,7 @@ export class Worker {
   private async look(ids: ReadonlySet<string>, kind: WakeKind, extraRequests: number, untilMs = Infinity): Promise<{ outcome: "busy" | "done" | "failed" | "idle" } | { outcome: "wait"; retryAt: number }> {
     const s = this.sessionForSync;
     if (!s || this.d.now() >= s.closeAt) return { outcome: "idle" };
-    // Group 1, round 1 of part 2: the regular sync (the record of truth, every 10 s) goes first. When it is due, it starts now and the look
+    // Group 1, round 1 of part 2: the regular sync (the record of truth, every 6 s, 2 s while the live updates are down) goes first. When it is due, it starts now and the look
     // waits a quarter second (its wakes kept), so looks can never crowd it out.
     if (this.d.now().getTime() - this.lastSync >= this.syncEveryMs()) {
       this.startSync(s.day, s.closeAt);
@@ -1574,7 +1574,7 @@ export class Worker {
     await this.say("trading", `Today's live list (${list.length})${load ? ", a load day: cheap, heavily traded names" : ""}:\n${list.length ? formatLiveList(list, names) : "(empty, nothing passed the screen)"}\n${PAPER_ONLY}`);
   }
 
-  // Keeps the cached broker view fresh while the session runs: account and positions every 10 seconds while the live order updates
+  // Keeps the cached broker view fresh while the session runs: account and positions every 20 seconds (ruling 4 of 2026-11-16) while the live order updates
   // are connected (they keep the positions current in between), every 5 seconds while they are not (2 requests); settings and clock
   // every 30 seconds. Skipped while Alpaca's request budget is down to the safety reserve.
   private async refreshView(now: Date, date: string): Promise<void> {
