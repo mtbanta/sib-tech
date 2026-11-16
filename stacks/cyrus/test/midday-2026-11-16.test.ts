@@ -5,6 +5,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SimBroker } from "./sim-broker.ts";
 import { rig } from "./rig.ts";
+import { Liquidator, SellGate } from "../src/sells.ts";
+import { FakeBroker } from "./helpers.ts";
 
 async function session() {
   const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
@@ -124,4 +126,91 @@ test("item 1: outside the session a reconnect brings no sync", async () => {
   await s.r.orderStreamStatus("reconnecting");
   await s.r.orderStreamStatus("live");
   assert.equal(s.syncs(), before);
+});
+
+// ---------------- item 2: missing-exit sales of different symbols side by side, one at a time per symbol ----------------
+
+
+// The queue alone: `run` replaced by a step the test finishes by hand, so only the order in which sales start is under test.
+function queue() {
+  const broker = new FakeBroker();
+  const liq: any = new Liquidator({ broker, gate: new SellGate({ broker, say: async () => true }), now: () => new Date(), sleep: async () => undefined });
+  const started: string[] = [];
+  const finish = new Map<string, () => void>();
+  liq.run = (o: any) => {
+    started.push(o.reason);
+    return new Promise((res) => finish.set(o.reason, () => res({ flat: true, remaining: [], sold: [], errors: [] })));
+  };
+  const tick = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
+  const missing = (name: string, symbol: string) => liq.flatten({ reason: name, only: [symbol], ownEntryOnly: { maxQty: { [symbol]: 1 } }, sideBySide: true });
+  return { liq, started, finish, tick, missing };
+}
+
+test("item 2: missing-exit sales of different symbols start side by side; a second one on the same symbol waits for the first", async () => {
+  const q = queue();
+  const a = q.missing("AAL", "AAL");
+  const b = q.missing("RIOT", "RIOT");
+  const c = q.missing("SOFI", "SOFI");
+  const a2 = q.missing("AAL again", "AAL");
+  await q.tick();
+  assert.deepEqual(q.started, ["AAL", "RIOT", "SOFI"], "three symbols at once (at 9:55 SOFI waited 6.6 s behind the other two)");
+  q.finish.get("AAL")!();
+  await q.tick();
+  assert.deepEqual(q.started, ["AAL", "RIOT", "SOFI", "AAL again"], "the same symbol only after its earlier sale ended");
+  for (const k of ["RIOT", "SOFI", "AAL again"]) q.finish.get(k)!();
+  await Promise.all([a, b, c, a2]);
+});
+
+test("item 2: any other sale still runs alone: it waits for the side-by-side sales asked before it, and those asked after it wait for it", async () => {
+  const q = queue();
+  const a = q.missing("AAL", "AAL");
+  const w = q.liq.flatten({ reason: "close-out" }); // a sale of the whole account
+  const r = q.liq.flatten({ reason: "remainder", only: ["T"], ownEntryOnly: { maxQty: { T: 1 } } }); // a remainder sale: not side by side
+  const b = q.missing("RIOT", "RIOT");
+  await q.tick();
+  assert.deepEqual(q.started, ["AAL"], "the close-out waits for the sale asked before it");
+  q.finish.get("AAL")!();
+  await q.tick();
+  assert.deepEqual(q.started, ["AAL", "close-out"]);
+  q.finish.get("close-out")!();
+  await q.tick();
+  assert.deepEqual(q.started, ["AAL", "close-out", "remainder"], "the remainder sale runs alone, after the close-out");
+  q.finish.get("remainder")!();
+  await q.tick();
+  assert.deepEqual(q.started, ["AAL", "close-out", "remainder", "RIOT"], "a missing-exit sale asked after them waits for both");
+  q.finish.get("RIOT")!();
+  await Promise.all([a, w, r, b]);
+  assert.equal(q.liq.isLiquidating(), false);
+});
+
+test("item 2: a sale of the whole account asked while side-by-side sales run waits for all of them", async () => {
+  const q = queue();
+  const a = q.missing("AAL", "AAL");
+  const b = q.missing("RIOT", "RIOT");
+  const w = q.liq.flatten({ reason: "loss stop", priority: true });
+  await q.tick();
+  assert.deepEqual(q.started, ["AAL", "RIOT"]);
+  assert.equal(q.liq.priorityWaiting(), true, "the side-by-side sales see the loss stop waiting (they give way at their next step)");
+  q.finish.get("RIOT")!();
+  await q.tick();
+  assert.deepEqual(q.started, ["AAL", "RIOT"], "still waiting for AAL");
+  q.finish.get("AAL")!();
+  await q.tick();
+  assert.deepEqual(q.started, ["AAL", "RIOT", "loss stop"]);
+  q.finish.get("loss stop")!();
+  await Promise.all([a, b, w]);
+});
+
+test("item 2: a side-by-side sale that throws does not block the next sale of its symbol or the others", async () => {
+  const broker = new FakeBroker();
+  const liq: any = new Liquidator({ broker, gate: new SellGate({ broker, say: async () => true }), now: () => new Date(), sleep: async () => undefined });
+  const started: string[] = [];
+  liq.run = async (o: any) => { started.push(o.reason); if (o.reason === "bad") throw new Error("boom (test)"); return { flat: true, remaining: [], sold: [], errors: [] }; };
+  const bad = liq.flatten({ reason: "bad", only: ["AAL"], ownEntryOnly: { maxQty: { AAL: 1 } }, sideBySide: true }).catch(() => "threw");
+  const next = liq.flatten({ reason: "next", only: ["AAL"], ownEntryOnly: { maxQty: { AAL: 1 } }, sideBySide: true });
+  const w = liq.flatten({ reason: "close-out" });
+  assert.equal(await bad, "threw");
+  await next;
+  await w;
+  assert.deepEqual(started, ["bad", "next", "close-out"]);
 });
