@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { clientOrderIdFor } from "../src/gate.ts";
+import { Liquidator, SellGate } from "../src/sells.ts";
 import { SimBroker } from "./sim-broker.ts";
 import { D, rig, settle } from "./rig.ts";
 import { FakeBot } from "./helpers.ts";
@@ -102,5 +103,67 @@ for (const after of [20_000, 25_000]) {
     assert.ok(w.onSellsOrCancels <= 20, `rate-limit answers on sells and cancels: ${w.onSellsOrCancels} (v24: 17 to 20)`);
     assert.ok(w.lastSaleMs <= 12_000, `last bracketed sale ${w.lastSaleMs} ms after the ask`);
     assert.equal(w.oversell, 0);
+  });
+}
+
+// Michael's answer on the round 4 blocker ("end the wait at once"): three side-by-side sales on a simulated Alpaca whose sales are refused,
+// on a clock the test moves (50 ms steps), with no room after their start: two running ones wait before their second round, a third waits to
+// start. A sale of the whole account (`flatten`, or the loss stop's priority sale) asked meanwhile starts within 0.1 s: the waiting sales
+// wake at once and stand aside or give way. Before, they noticed only when their pause of up to 2 s ended (20ba5bd: `flatten` 0.01 to 2.7 s,
+// the loss stop 0.01 to 0.8 s; f9a4254 up to about 1.8 s).
+for (const kind of ["flatten", "loss stop"] as const) {
+  test(`round 4 (end the wait at once): a ${kind === "flatten" ? "flatten" : "loss stop's sale"} asked while side-by-side sales wait for room starts within 0.1 s`, async () => {
+    const sim: any = new SimBroker(Date.UTC(2026, 10, 2, 15, 0));
+    const holds: Array<{ until: number; res: () => void }> = [];
+    const sleep = (ms: number) => new Promise<void>((res) => holds.push({ until: sim.simMs + ms, res }));
+    let room = true;
+    const liq: any = new Liquidator({ broker: sim, gate: new SellGate({ broker: sim, say: async () => true, nowMs: () => sim.simMs }), now: () => new Date(sim.simMs), sleep, sideBySideRoom: () => room });
+    const syms = ["AAA", "BBB", "CCC"];
+    for (const s of syms) {
+      const id = clientOrderIdFor(D, s, 1);
+      await sim.submitEntry({ symbol: s, qty: 5, stopPrice: 9, takeProfitPrice: 11, referencePrice: 10, clientOrderId: id });
+      sim.fillEntry(id, 10);
+      for (const l of sim.orders.find((x: any) => x.clientOrderId === id)!.legs) await sim.cancelOrder(l.id);
+    }
+    sim.advance(1_000);
+    sim.refuseSellIf = () => true;
+    const drive = async (until: number) => {
+      while (sim.simMs < until) {
+        sim.advance(50);
+        for (const h of holds.filter((h) => h.until <= sim.simMs)) {
+          holds.splice(holds.indexOf(h), 1);
+          h.res();
+        }
+        for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+      }
+    };
+    const sale = (s: string) => liq.flatten({ reason: s, tradeDate: D, only: [s], ownEntryOnly: { maxQty: { [s]: 5 } }, sideBySide: true, maxRounds: 3 });
+    let wholeStart: number | null = null;
+    const realRun = liq.run.bind(liq);
+    liq.run = (o: any) => {
+      if (!o.ownEntryOnly && wholeStart === null) wholeStart = sim.simMs;
+      return realRun(o);
+    };
+    const t0 = sim.simMs;
+    const a = sale("AAA");
+    const b = sale("BBB");
+    await drive(t0 + 200);
+    assert.equal(liq.sideBySideNow(), 2);
+    room = false;
+    const c = sale("CCC"); // waits to start
+    await drive(t0 + 4_300); // A and B are in their waits before round 2, now pausing 2 s each
+    assert.equal(liq.sideBySideNow(), 2, "C still waiting to start");
+    const askAt = sim.simMs;
+    const whole = liq.flatten(kind === "flatten" ? { reason: "flatten command", tradeDate: D } : { reason: "daily loss stop", tradeDate: D, maxRounds: 1, priority: true });
+    await drive(askAt + 3_000);
+    assert.ok(wholeStart !== null, "the sale of the whole account started");
+    assert.ok(wholeStart! - askAt <= 100, `it started ${wholeStart! - askAt} ms after the ask`);
+    const [ra, rb, rc] = await Promise.all([a, b, c]);
+    assert.equal(ra.gaveWay, "whole account");
+    assert.equal(rb.gaveWay, "whole account");
+    assert.equal(rc.stoodAside, "whole account");
+    room = true;
+    await drive(sim.simMs + 30_000);
+    await whole;
   });
 }

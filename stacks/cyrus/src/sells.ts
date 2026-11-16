@@ -389,6 +389,10 @@ export class Liquidator {
   private running = 0;
   // Priority sales (the daily loss stop) asked for and not finished yet.
   private priorityPending = 0;
+  // Michael's answer of 2026-11-16 on the round 4 blocker ("end the wait at once"): side-by-side sales waiting for room (at their start, or
+  // before a round), woken the moment a sale of the whole account is asked (`flatten` wakes them), so they stand aside or give way at once
+  // instead of noticing it only when their pause of up to 2 s ends.
+  private readonly roomWaiters = new Set<() => void>();
   constructor(deps: LiquidatorDeps) {
     this.d = deps;
     this.sleep = deps.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -427,6 +431,8 @@ export class Liquidator {
     this.running++;
     const other = !o.ownEntryOnly;
     if (other) this.runningOthers++;
+    // A sale of the whole account (a close-out, `flatten`, the loss stop, a carried position): side-by-side sales waiting for room wake now.
+    if (other) for (const wake of [...this.roomWaiters]) wake();
     if (o.priority) this.priorityPending++;
     const sym = o.sideBySide && o.ownEntryOnly && o.only?.length === 1 ? o.only[0]! : null;
     let run: Promise<LiquidateResult>;
@@ -452,7 +458,7 @@ export class Liquidator {
 
   // Michael's ruling on item 2 of 2026-11-16: a side-by-side sale starts when no other is running (never worse than the one-at-a-time queue)
   // or while the request budget allows one more above the headroom of SIDE_BY_SIDE_HEADROOM (`sideBySideRoom`, Michael's answer on the round
-  // 4 blocker). Otherwise it waits, 0.25 s doubling to 2 s, with
+  // 4 blocker). Otherwise it waits, 0.25 s doubling to 2 s (woken at once when a sale of the whole account is asked, `roomWait`), with
   // no request: the wait ends when room comes, when every running side-by-side sale has ended (each is bounded by its rounds and waits), or
   // at once when a sale of the whole account (a close-out, `flatten`, the loss stop, a carried position) is asked for, in which case
   // `run` stands aside before sending anything: a close-out request stops new ones from starting. Sales already running carry on.
@@ -461,7 +467,7 @@ export class Liquidator {
     let waited = 0;
     const first = this.roundMost(o, 1);
     while (this.sideBySideRunning > 0 && this.runningOthers === 0 && !(this.d.sideBySideRoom?.(this.roundsInFlight() + first) ?? false)) {
-      await this.sleep(wait);
+      await this.roomWait(wait);
       // A turn for other work too (a test's pause can return at once), so the running sales this waits for can finish.
       await new Promise<void>((r) => setImmediate(r));
       waited += wait;
@@ -476,6 +482,19 @@ export class Liquidator {
       this.sideBySideRunning--;
       this.sideBySideRounds.delete(o);
     }
+  }
+
+  // A side-by-side sale's wait for room: `ms` (0.25 s doubling to 2 s, sending nothing), or less: it ends at once when a sale of the whole
+  // account is asked (Michael's answer on the round 4 blocker). No polling: the asking side wakes it.
+  private roomWait(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const wake = (): void => {
+        if (!this.roomWaiters.delete(wake)) return;
+        resolve();
+      };
+      this.roomWaiters.add(wake);
+      void this.sleep(ms).then(wake);
+    });
   }
 
   // The most a side-by-side sale's round `round` can send (`sideBySideRoundMost`, its last round with its last look).
@@ -622,7 +641,7 @@ export class Liquidator {
         let wait = 250;
         let waited = 0;
         while (this.sideBySideRunning > 1 && this.runningOthers === 0 && !(this.d.sideBySideRoom?.(this.roundsInFlight(o) + most) ?? false)) {
-          await this.sleep(wait);
+          await this.roomWait(wait);
           await new Promise<void>((r) => setImmediate(r));
           waited += wait;
           wait = Math.min(wait * 2, 2_000);
