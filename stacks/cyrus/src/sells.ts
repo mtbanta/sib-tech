@@ -229,6 +229,14 @@ export interface LiquidateOptions {
   // its exits itself. Nothing is cancelled here; the sale waits (up to `waitCancelMs`) for Alpaca's cancel to free the shares. If they
   // never come free (Alpaca kept the exits), nothing is sold, no blocked sale is logged, and `exitsKept` lists the symbol.
   waitForAlpacaCancel?: boolean;
+  // Item 1 of the speed release (Michael's ruling 5 of 2026-11-16): the cheap path of an ordinary stuck retry. Only for one entry's sale
+  // (`ownEntryOnly`, one symbol) of one round with nothing to cancel (no `cancelIds`, not `waitForAlpacaCancel`, not `endOnCancelFail`);
+  // otherwise ignored. The round reads the open orders and the positions once, through the sell gate's own read (`SellGate.look`: open
+  // orders first, then positions, kept by the gate as its view for its check while under a second old), and acts on that read instead of
+  // reading again before the cancels, while waiting, before selling and in the gate; a round that sent nothing takes that read as its last
+  // look. Every sell still goes through the gate's check (never more than is held counting sells already open) against a read no older than
+  // the gate allows, exactly as before.
+  cheapRetry?: boolean;
 }
 
 // What a sale did and when (release A, fix 5: written to the close-out's run-log event).
@@ -470,6 +478,11 @@ export class Liquidator {
     };
     let earlyWakes = 0;
     let blocked = 0; // logging only: symbols skipped in step 3 because their shares were not free
+    // Item 1 of the speed release: the cheap path (see `cheapRetry`), with the read it acts on (the gate's view) and the positions in it.
+    const cheap = o.cheapRetry === true && !!o.ownEntryOnly && only !== null && only.size === 1 && rounds === 1 && cancelIds.length === 0 && !o.waitForAlpacaCancel && !o.endOnCancelFail;
+    let cheapView: { positions: Position[]; open: Order[] } | null = null;
+    let cheapPositions: Position[] | null = null;
+    let sellsTried = 0; // item 1: sells handed to the gate in this liquidation, sent or not
     // Release 1 of 2026-11-09, part B: shares sold per symbol in this liquidation, and what is still to sell under `ownEntryOnly`.
     const soldBy = new Map<string, number>();
     const own = o.ownEntryOnly && only ? o.ownEntryOnly.maxQty : null;
@@ -555,7 +568,11 @@ export class Liquidator {
       }
       let positions: Position[];
       try {
-        positions = await heldNow();
+        if (cheap) {
+          cheapView = await this.d.gate.look();
+          positions = cheapView.positions.filter((p) => !only || only.has(p.symbol));
+          cheapPositions = positions;
+        } else positions = await heldNow();
         if (!result.heldBefore) result.heldBefore = Object.fromEntries(positions.map((p) => [p.symbol, p.qty]));
       } catch (err) {
         result.errors.push(`round ${round}: could not read positions: ${(err as Error).message.slice(0, 100)}`);
@@ -595,7 +612,7 @@ export class Liquidator {
       let cancelled = false;
       let onlyOwn = false;
       try {
-        const open = await this.openOrders();
+        const open = cheap && cheapView ? cheapView.open : await this.openOrders();
         // Release A, fix 2 (the close-out only): every share still held is covered by a sell of ours that is working. Waiting out
         // the remaining rounds on it does nothing useful; the close-out waits for the fills itself, gently.
         if (o.returnWhenOnlyOwnSells && round >= 2 && positions.every((p) => ownOpenSellQty(open, p.symbol) >= p.qty - EPS)) onlyOwn = true;
@@ -660,9 +677,16 @@ export class Liquidator {
         if (yieldNow()) return yielded();
         let held: Position[] = [];
         try {
-          openOrders = await this.openOrders();
-          openReadAt = this.d.now().getTime();
-          held = await heldNow();
+          if (cheap && cheapView && cheapPositions && polls === 0 && !cancelled) {
+            // Item 1: nothing was cancelled, so the round's one read is what Alpaca shows (the wait ends at once: nothing to wait for).
+            openOrders = cheapView.open;
+            openReadAt = this.d.now().getTime();
+            held = cheapPositions;
+          } else {
+            openOrders = await this.openOrders();
+            openReadAt = this.d.now().getTime();
+            held = await heldNow();
+          }
         } catch (err) {
           result.errors.push(`round ${round}: could not read open orders or positions: ${(err as Error).message.slice(0, 100)}`);
           readOk = false;
@@ -702,10 +726,12 @@ export class Liquidator {
       const capThisRound = new Map<string, number>(); // fix A: the recounted shares per symbol in this round
       if (readOk) {
         result.freshStopStillOpen = undefined; // what the last round's look saw (group 2, round 4 of the night release)
-        this.d.gate.invalidate();
+        // Item 1: the cheap path keeps the gate's view (this round's one read, nothing cancelled since) for the gate's own check.
+        if (!cheap) this.d.gate.invalidate();
         let freshPositions: Position[] = [];
         try {
-          freshPositions = await heldNow();
+          if (cheap && cheapPositions) freshPositions = cheapPositions;
+          else freshPositions = await heldNow();
           // Group 1 and group 2, round 7: only now has this round's look read the open orders AND the positions it acts on (reported only).
           result.lastLookOk = true;
         } catch (err) {
@@ -752,6 +778,7 @@ export class Liquidator {
             // treats an open cyrus-x- sell as a sale of ours still working and leaves it alone, but must cancel a fresh stop like any exit.
             const sid = `cyrus-p-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-s${round}`;
             const sentAtMs = this.d.now().getTime();
+            sellsTried++;
             const st = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: sid, reason: `${o.reason}, as a fresh stop`, stopPrice });
             if (st.status === "sent") {
               result.freshStop = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, orderId: st.order.id, sentAtMs, answerMs: this.d.now().getTime() - sentAtMs };
@@ -802,6 +829,7 @@ export class Liquidator {
             continue;
           }
           const id = `cyrus-x-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-${round}`;
+          sellsTried++;
           const r = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: id, reason: o.reason, ...(o.sideBySide ? { stillWanted: () => !yieldNow() } : {}) });
           // Michael's ruling 6: a side-by-side sale that gave way while its sell waited its turn in the gate sent nothing; it stops here.
           if (r.status !== "sent" && o.sideBySide && yieldNow()) return yielded();
@@ -831,7 +859,8 @@ export class Liquidator {
     }
 
     try {
-      const left = await heldNow();
+      // Item 1: a cheap round that tried no sell or stop and sent no cancel takes its one read as its last look.
+      const left = cheap && cheapPositions && sellsTried === 0 && steps.cancelsSentAt.length === 0 ? cheapPositions : await heldNow();
       result.flat = left.length === 0;
       result.remaining = left.map((p) => p.symbol);
       result.heldAfter = Object.fromEntries(left.map((p) => [p.symbol, p.qty]));

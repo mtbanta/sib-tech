@@ -478,6 +478,8 @@ export class Worker {
       onBareSale: (sale: { symbol: string; shares: number; takeProfit: number | null; atMs: number; clientOrderId?: string }) => this.stopGap.onSale(sale),
       onFreshStop: (x: { symbol: string; shares: number }) => this.stopGap.onFreshStop(x),
       budget: this.budget,
+      // Item 1 of the speed release: an ordinary stuck retry takes its cheaper path only while the live order updates are connected.
+      streamLive: () => this.orderStreamLive(),
       onRemainderSold: (symbol: string, shares: number) => void this.remainderSales.push({ symbol, shares }),
       onAccountRead: (account: { equity: number; cash: number }) => this.shadowEstimate(account),
       lateNoticeContext: (symbol: string) => this.lateNoticeContext(symbol),

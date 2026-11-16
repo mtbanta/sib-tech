@@ -4,14 +4,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Liquidator, SellGate } from "../src/sells.ts";
-import { STUCK_RETRY_MINUTE_CAP, SyncMemory, syncOrders } from "../src/risk.ts";
+import { CHEAP_STUCK_TRY_REQUESTS, STUCK_RETRY_MINUTE_CAP, STUCK_TRY_REQUESTS, SyncMemory, syncOrders } from "../src/risk.ts";
 import { MemoryStore } from "../src/store.ts";
 import { ensureDay } from "../src/morning.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
 import { RequestBudget, Reservation, withReservation } from "../src/request-budget.ts";
 import { SimBroker } from "./sim-broker.ts";
 import { D, rig, settle } from "./rig.ts";
-import { FakeBot } from "./helpers.ts";
+import { FakeBot, order } from "./helpers.ts";
 
 const CAP = STUCK_RETRY_MINUTE_CAP;
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -20,13 +20,13 @@ const iso = (ms: number) => new Date(ms).toISOString();
 // to explain it, as on 2026-11-09) or whose every sale Alpaca refuses (`refused`), for `minutes`, with steady low-priority demand when `p2`
 // (a P2 try of 3 requests asked every half second). Alpaca's live remaining reaches the governor, as main.ts wires it. Returns each position's
 // try times (the start of each of its sales) and the order of all tries.
-export async function stuckWorld(o: { n: number; minutes: number; p2: boolean; shape: "hidden" | "refused"; stream?: boolean; quietMs?: number; onStep?: (x: { sim: SimBroker; r: any; wk: any; tMs: number }) => void }) {
+export async function stuckWorld(o: { n: number; minutes: number; p2: boolean; shape: "hidden" | "refused"; stream?: boolean; log?: (event: string, data: any) => void; onStep?: (x: { sim: SimBroker; r: any; wk: any; tMs: number }) => void }) {
   const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
   const bot = new FakeBot();
   const holds: Array<{ until: number; res: () => void }> = [];
   let timed = false;
   const tsleep = (ms: number): Promise<void> => (timed ? new Promise<void>((res) => holds.push({ until: sim.simMs + ms, res })) : sim.sleep(ms));
-  const r: any = rig<SimBroker>({ broker: sim, sleep: tsleep, simClock: sim, bot, orderStream: o.stream === true });
+  const r: any = rig<SimBroker>({ broker: sim, sleep: tsleep, simClock: sim, bot, orderStream: o.stream === true, log: (_l: string, e: string, d?: any) => o.log?.(e, d ?? {}) });
   await r.at("2026-11-01T22:10:00Z");
   r.ownerSays("cap 2\napprove", "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
@@ -479,4 +479,178 @@ test("item 2: while the minute is still rising, a refusal on the minute is looke
   assert.ok(!r.ok && r.at <= w.clock.t + 1_000, `looked at again within a second (${r.at - w.clock.t} ms), not in a minute`);
   w.clock.t += 1_000;
   assert.ok(w.b.roomFor("P1", 10, false, 0, CAP, "A").ok, "and at 100 it fits (60 + 10 under 85)");
+});
+
+// ---------------- item 1: a cheaper stuck retry ----------------
+
+const retriesOf = (evs: any[]) => evs.filter((e) => e.event === "stuck_retry");
+
+// Measured in the simulator, one position, 2 minutes: while the live order updates are connected each ordinary stuck retry takes the cheap
+// path and sends 3 requests when Alpaca keeps holding the shares (its lookup and the sell gate's read of open orders and positions) and 5
+// when it tries a sale that Alpaca refuses (and the sale and its last look). With the live updates not connected (no order stream, or one
+// reconnecting) it takes today's path: 7 and 10. Never more than it reserved.
+for (const shape of ["hidden", "refused"] as const) {
+  for (const stream of ["connected", "none", "reconnecting"] as const) {
+    test(`item 1, measured: a stuck retry ${shape === "hidden" ? "whose shares Alpaca holds" : "whose sale Alpaca refuses"}, live order updates ${stream}: ${stream === "connected" ? "the cheap path" : "today's full path"}`, async () => {
+      const evs: any[] = [];
+      let dropped = false;
+      const w = await stuckWorld({
+        n: 1,
+        minutes: 2,
+        p2: false,
+        shape,
+        stream: stream !== "none",
+        log: (e, d) => void evs.push({ event: e, ...d }),
+        onStep: ({ r }) => {
+          if (stream === "reconnecting" && !dropped) {
+            dropped = true;
+            void r.orderStreamStatus("reconnecting");
+          }
+        },
+      });
+      const rs = retriesOf(evs);
+      assert.ok(rs.length >= 5, `retried: ${rs.length}`);
+      const want = stream === "connected" ? { path: "cheap", reserved: CHEAP_STUCK_TRY_REQUESTS, sent: shape === "hidden" ? 3 : 5 } : { path: "full", reserved: STUCK_TRY_REQUESTS, sent: shape === "hidden" ? 7 : 10 };
+      for (const x of rs) assert.deepEqual({ path: x.path, reserved: x.reserved, sent: x.sent }, want, JSON.stringify(x));
+      if (stream !== "connected") assert.ok(rs.every((x) => x.why === "the live order updates are not connected"));
+      assert.equal(w.wk.budget.totals.overdraft, 0, "never more than reserved");
+      assert.equal(w.oversell, 0);
+    });
+  }
+}
+
+// A sync world of its own (no worker): one entry, QXA, 5 shares held with its exits gone, stuck since a minute ago and due for a retry.
+async function retryWorld(opts: { streamLive: () => boolean }) {
+  const sim = new SimBroker(Date.UTC(2026, 10, 2, 15, 0));
+  const evs: any[] = [];
+  const log = (event: string, data?: any) => void evs.push({ event, ...data });
+  const say = async () => true;
+  const gate = new SellGate({ broker: sim, say, nowMs: () => sim.simMs, log });
+  const liquidator = new Liquidator({ broker: sim, gate, now: () => new Date(sim.simMs), sleep: sim.sleep, log });
+  const store = new MemoryStore();
+  const now = () => new Date(sim.simMs);
+  const memory = new SyncMemory();
+  memory.budget = new RequestBudget({ now: () => sim.simMs, remaining: () => 200 });
+  const risk: any = { broker: sim, store, now, say, liquidator, syncMemory: memory, log, onRemainderSold: () => undefined, onFreshStop: () => undefined, streamLive: opts.streamLive };
+  await ensureDay({ store, broker: sim, now } as any, D);
+  const dd = (await store.getDay(D))!;
+  const id = clientOrderIdFor(D, "QXA", 1);
+  await sim.submitEntry({ symbol: "QXA", qty: 5, stopPrice: 11.87, takeProfitPrice: 12.08, referencePrice: 12, clientOrderId: id });
+  sim.fillEntry(id, 12);
+  await store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "QXA", qty: 5, referencePrice: 12, stopPrice: 11.87, takeProfitPrice: 12.08, status: "filled", alpacaOrderId: null, filledQty: 5, filledAvgPrice: 12, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+  for (const l of sim.orders.find((o: any) => o.clientOrderId === id)!.legs) await sim.cancelOrder(l.id);
+  sim.advance(20_000);
+  memory.stuck.set(id, { symbol: "QXA", since: sim.simMs - 60_000, nextAt: sim.simMs - 1, delayMs: 0, alerted: true, escalated: false, lastTriedAt: sim.simMs - 3_000, why: "x" } as any);
+  return { sim, evs, gate, memory, risk, dd, id };
+}
+const turns = async (n = 20) => {
+  for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r));
+};
+
+test("item 1: the live order updates dropping between the retry's decision and its start: today's full path, with today's reservation", async () => {
+  let asked = 0;
+  const w = await retryWorld({ streamLive: () => asked++ === 0 }); // connected when decided, down when the try starts
+  w.sim.refuseSellIf = (x: any) => x.symbol === "QXA";
+  await syncOrders(w.risk, w.dd, { protect: true, streamLive: true });
+  const rs = retriesOf(w.evs);
+  assert.equal(rs.length, 1);
+  assert.deepEqual({ path: rs[0].path, reserved: rs[0].reserved, sent: rs[0].sent, why: rs[0].why }, { path: "full", reserved: STUCK_TRY_REQUESTS, sent: 10, why: "the live order updates dropped before the try started" });
+  assert.equal(w.memory.budget!.totals.overdraft, 0);
+});
+
+test("item 1: a cheap retry whose sale waits in the sell gate past its read's one second has the gate read again: 7 requests, its whole reservation, never more", async () => {
+  const w = await retryWorld({ streamLive: () => true });
+  // Another position whose sale of ours is in the gate first, its answer held by Alpaca until the test lets it go.
+  const oth = clientOrderIdFor(D, "OTH", 1);
+  await w.sim.submitEntry({ symbol: "OTH", qty: 5, stopPrice: 11.87, takeProfitPrice: 12.08, referencePrice: 12, clientOrderId: oth });
+  w.sim.fillEntry(oth, 12);
+  for (const l of w.sim.orders.find((o: any) => o.clientOrderId === oth)!.legs) await w.sim.cancelOrder(l.id);
+  w.sim.advance(1_000);
+  let release!: () => void;
+  const held = new Promise<void>((res) => (release = res));
+  const realSell = w.sim.submitSell.bind(w.sim);
+  w.sim.submitSell = async (x: any) => {
+    if (x.symbol === "OTH") await held;
+    return realSell(x);
+  };
+  const other = w.gate.sell({ symbol: "OTH", qty: 5, clientOrderId: "cyrus-x-oth", reason: "test" });
+  await turns();
+  w.sim.advance(1_200); // the gate's read for OTH is now over a second old
+  const sync = syncOrders(w.risk, w.dd, { protect: true, streamLive: true });
+  await turns();
+  w.sim.advance(1_500); // QXA's read is now over a second old too, and its sale still waits behind OTH's
+  release();
+  await other;
+  await sync;
+  const rs = retriesOf(w.evs);
+  assert.equal(rs.length, 1);
+  assert.deepEqual({ path: rs[0].path, reserved: rs[0].reserved, sent: rs[0].sent }, { path: "cheap", reserved: CHEAP_STUCK_TRY_REQUESTS, sent: CHEAP_STUCK_TRY_REQUESTS });
+  assert.equal(w.memory.budget!.totals.overdraft, 0);
+  assert.deepEqual(w.sim.sellLog.filter((x: any) => x.symbol === "QXA").map((x: any) => x.qty), [5], "sold");
+  assert.equal(w.sim.oversellAttempts, 0);
+});
+
+test("item 1: a cheap retry whose own lookup shows something of its entry's still open to cancel sends nothing more, and the next retry takes today's full path", async () => {
+  const w = await retryWorld({ streamLive: () => true });
+  // A remainder being protected (A4): the sync's list shows its take-profit cancelled (no exits), Alpaca's lookup still shows it open.
+  const st = w.memory.stuck.get(w.id)!;
+  st.protecting = true;
+  const entry = w.sim.orders.find((o: any) => o.clientOrderId === w.id)!;
+  const tp = entry.legs.find((l: any) => l.type === "limit")!;
+  const realFind = w.sim.findOrderByClientId.bind(w.sim);
+  (w.sim as any).findOrderByClientId = async (cid: string) => {
+    const o = await realFind(cid);
+    return o && cid === w.id ? { ...o, legs: o.legs.map((l: any) => (l.id === tp.id ? { ...l, status: "pending_cancel" } : l)) } : o;
+  };
+  w.sim.refuseSellIf = (x: any) => x.symbol === "QXA";
+  await syncOrders(w.risk, w.dd, { protect: true, streamLive: true });
+  let rs = retriesOf(w.evs);
+  assert.equal(rs.length, 1);
+  assert.deepEqual({ path: rs[0].path, sent: rs[0].sent }, { path: "cheap", sent: 1 }, "only its lookup");
+  assert.ok(w.evs.some((e) => e.event === "stuck_retry_full_next"));
+  assert.equal(w.memory.stuck.get(w.id)!.fullNext, true);
+  w.sim.advance(3_000);
+  await syncOrders(w.risk, w.dd, { protect: true, streamLive: true });
+  rs = retriesOf(w.evs);
+  assert.equal(rs.length, 2);
+  assert.deepEqual({ path: rs[1].path, reserved: rs[1].reserved, why: rs[1].why }, { path: "full", reserved: STUCK_TRY_REQUESTS, why: "the last retry found something of its entry's open to cancel" });
+  assert.equal(w.memory.stuck.get(w.id)?.fullNext, undefined, "cleared by the full retry");
+});
+
+// The sell gate's rule (never sell more than is held, counting sells already open) stays as safe as today: the cheap path never trusts the
+// worker's cached positions or the live updates. Here 3 of QXA's 5 shares are sold elsewhere at Alpaca with no live update of it (lost), and a
+// late duplicate update says QXA still holds 5 (so the worker's cached view says 5). The cheap retry sells only the 2 Alpaca shows.
+test("item 1: no oversell when a live update is late or lost: the cheap retry sells only what Alpaca shows held and free, whatever the worker's cached view says", async () => {
+  const evs: any[] = [];
+  let step = 0;
+  let cachedAtSale: number | null = null;
+  const w = await stuckWorld({
+    n: 1,
+    minutes: 2,
+    p2: false,
+    shape: "refused",
+    stream: true,
+    log: (e, d) => void evs.push({ event: e, ...d }),
+    onStep: ({ sim, r, wk, tMs }) => {
+      if (step === 0 && tMs >= 20_000) {
+        step = 1;
+        sim.refuseSellIf = (x: any) => x.symbol === "QXA" && x.clientOrderId.startsWith("cyrus-");
+        void sim.submitSell({ symbol: "QXA", qty: 3, clientOrderId: "elsewhere-1" } as any); // no live update of it ever arrives
+      } else if (step === 1 && tMs >= 24_000) {
+        step = 2;
+        void r.orderUpdate({ event: "fill", order: order({ clientOrderId: clientOrderIdFor(D, "QXA", 1), symbol: "QXA", side: "buy", status: "filled", qty: 5, filledQty: 5, filledAvgPrice: 12 }), positionQty: 5, atMs: sim.simMs - 300_000 });
+      } else if (step === 2 && tMs >= 25_000) {
+        step = 3;
+        cachedAtSale = wk.view.cachedPositions()?.find((p: any) => p.symbol === "QXA")?.qty ?? null;
+        sim.refuseSellIf = null; // Alpaca accepts sales again
+      }
+    },
+  });
+  assert.equal(step, 3);
+  assert.equal(cachedAtSale, 5, "the worker's cached view still said 5 shares");
+  const after = w.sim.sellLog.filter((x: any) => x.symbol === "QXA");
+  assert.deepEqual(after.map((x: any) => x.qty), [3, 2], "elsewhere 3, then the cheap retry 2");
+  assert.ok(retriesOf(evs).filter((x) => x.path === "cheap").length >= 3);
+  assert.equal(w.sim.oversellAttempts, 0, "no sell larger than Alpaca's free shares was sent");
+  assert.equal((await w.sim.listPositions()).length, 0, "flat");
 });
