@@ -1,6 +1,6 @@
 # Proposal: would Alpaca's close-position call shorten the 2:55 gap?
 
-**Status: research only. No code until Michael approves.** Nothing here was run against Alpaca. No order, cancel or close-position call was made, not even on paper. No key was read.
+**Status: research only. No code until Michael approves.** No order, cancel or close-position call was made, not even on paper. Sections 1 to 8 were written from documents and records only; section 9 adds read-only GET reads of Alpaca's paper order history (the key read only inside a script, never printed).
 
 Stack C (cyrus), paper trading only. Written Monday 2026-11-16, evening (Central). Times are Central unless stated.
 
@@ -153,5 +153,82 @@ A script running beside the worker at 2:55 is not safe, because it would race th
 - **Measured by the stack:** Monday's gap (section 1); the 2026-11-02 bulk failure, and the single closes succeeding after the stops were gone (section 2).
 - **Inferred:** the bulk call is cancel-then-sell, not one step; no call shortens Alpaca's hold; the most to gain is 1.5 to 2.5 s; Alpaca's quantity check would usually refuse a double sale.
 - **Unknown, and what would turn it into a measurement:** the cause of the 2:55 hold (the order-history read in section 7, item 2); whether the single close accepts `cancel_orders` (a paper test, section 7); Alpaca's error text on 2026-11-02 (lost).
+
+## 9. Measured: Alpaca's hold of the stack's sales, by time of day (read only, 2026-11-16 evening)
+
+**What was done.** Unlike the sections above, this section did read Alpaca: GET requests only, to the paper API, after the close on Monday 2026-11-16 (179 reads, paced under 90 a minute; no order, cancel or close call). The keys were read inside a script and never printed. Source: Alpaca's order history (`/v2/orders`, all statuses, sells only, 7:00 AM to 4:30 PM Central each day), every trading day from Monday 2026-11-02 to Monday 2026-11-16, counted by distinct order id. From it: every order whose client id starts `cyrus-x-` (the stack's sales, 620) or `cyrus-p-` (fresh stops, 108). Bracket exit legs and entries are left out. For each order: the hold (`submitted_at` minus `created_at`) and the fill time (`filled_at` minus `submitted_at`). Times are Central. "Measured" below means read from those timestamps; "inferred" means my reading of them.
+
+**Short answer (measured).** The hold is tied to the clock, not to the number of sales. Every sale created in the 2:55 close-out, on every day that had one (8 days, 38 sales), was held 11.5 to 16.3 seconds, including days with a single sale. No sale at any other time of day was held more than 6.2 seconds, and the mid-day close-out's bursts of 14 to 20 sales were held at most 0.7 seconds. All 728 orders are `filled` or `canceled` now; the status each showed during the hold is not in the record.
+
+### 9.1 By time of day (the stack's sales, all days together)
+
+| Time of day | Sales | Median hold | Highest hold | Median fill after submit |
+| :-- | --: | --: | --: | --: |
+| Before 9:30 AM | 160 | 0.01 s | 6.17 s | 1.46 s |
+| 9:30 AM to 2:00 PM (mid-day close-out excluded) | 333 | 0.01 s | 1.54 s | 1.28 s |
+| Mid-day close-out, 10:30 to 10:35 | 86 | 0.07 s | 0.70 s | 1.80 s |
+| 2:00 to 2:55 PM | 3 | 0.01 s | 0.02 s | 2.00 s |
+| **2:55 close-out** | **38** | **13.74 s** | **16.27 s** | **4.36 s** |
+
+Fresh stops (108, resting stop orders, a different order type) were never held long: highest 1.41 s, and those placed latest in the day (2:44, 2:50 and 2:52 PM) were held 0.003 to 0.51 s. None was placed at 2:55.
+
+### 9.2 The 2:55 close-out, per day (measured)
+
+| Day | Sales at 2:55 | Created | Submitted by Alpaca | Hold, median (highest) |
+| :-- | --: | :-- | :-- | :-- |
+| Wed 11-04 | 2 | 2:55:17.5 | 2:55:33.8 | 16.27 s (16.27) |
+| Thu 11-05 | 1 | 2:55:13.9 | 2:55:26.5 | 12.60 s |
+| Fri 11-06 | 2 | 2:55:09.6 | 2:55:25.5 to 25.6 | 15.94 s (15.95) |
+| Mon 11-09 | 1 | 2:55:13.2 | 2:55:27.5 | 14.28 s |
+| Wed 11-11 | 1 | 2:55:14.8 | 2:55:29.4 | 14.60 s |
+| Thu 11-12 | 5 | 2:55:16.2 to 16.5 | 2:55:29.4 to 29.7 | 13.17 s (13.19) |
+| Fri 11-13 | 13 | 2:55:08.2 to 09.2 | 2:55:22.6 to 24.5 | 14.87 s (15.28) |
+| Mon 11-16 | 13 | 2:55:08.2 to 09.3 | 2:55:19.8 to 21.2 | 11.76 s (11.89) |
+
+- **Days without a 2:55 sale:** Tue 11-03 (the day's last sale was at 8:53 AM; the build log records the daily loss stop that day) and Tue 11-10 (the daily loss stop sold everything at 1:57 PM, so the account was flat by 2:55; build C2 log, "Requests" and "How fast it sold everything" for that day).
+- **Mon 11-02** had no `cyrus-x-` sales (that day used Alpaca's bulk close, section 2). Its 5 plain market sales at 2:55:20 to 2:55:22, not counted above because they carry Alpaca's own ids, were held the same way: 11.6 to 12.3 s.
+- **Not a fixed clock time for the release (measured).** Sales created at 2:55:08 were submitted at 2:55:20 to 2:55:24; sales created at 2:55:17 were submitted at 2:55:34. The hold runs about 12 to 16 s from each sale's creation, whenever in the minute it was created.
+- **Slower fills too (measured):** at 2:55, fills took a median 4.4 s after submit (up to 14.0 s), against 1.3 to 1.8 s at other times.
+
+### 9.3 By how many sales were sent together (measured)
+
+Burst size here is the number of the stack's sales created within 5 seconds either side of each sale.
+
+| Burst size | Not at 2:55: sales, median hold, highest | At 2:55: sales, median hold, highest |
+| :-- | :-- | :-- |
+| 1 | 395, 0.01 s, 6.17 s | 3, 14.28 s, 14.60 s |
+| 2 to 3 | 35, 0.01 s, 0.11 s | 4, 16.11 s, 16.27 s |
+| 4 to 9 | 5, 0.01 s, 0.02 s | 5, 13.17 s, 13.19 s |
+| 10 or more | 147, 0.02 s, 0.70 s | 26, 13.18 s, 15.28 s (two days: about 14.9 and 11.8) |
+
+The largest bursts away from 2:55, each the same whole-account close-out code as at 2:55 (inferred from the code: the mid-day close-out and the loss stop call the same close-out and its "cancel everything", `src/sells.ts`):
+
+| Burst | Sales | Hold, median (highest) | Exit cancels landed |
+| :-- | --: | :-- | :-- |
+| Mid-day close-out, 11-10 | 18 | 0.04 s (0.16) | before the first sale |
+| Mid-day close-out, 11-11 | 20 | 0.39 s (0.54) | before the first sale |
+| Mid-day close-out, 11-12 | 14 | 0.02 s (0.13) | before the first sale |
+| Mid-day close-out, 11-13 | 18 | 0.54 s (0.70) | before the first sale |
+| Mid-day close-out, 11-16 | 14 | 0.04 s (0.17) | before the first sale |
+| 11-13, 11:54 AM | 19 | 0.01 s (0.03) | before the first sale |
+| Loss stop, 11-10, 1:57 PM | 17 | 0.01 s (0.13) | 1:56:59.3 to 59.4, about 1 s before the first sale |
+| Afternoon close-out, 11-16, 1:20 PM | 17 | 0.005 s (0.02) | before the first sale |
+
+So a burst of 17 to 20 sales is not held at 10:30, 11:54, 1:20 or 1:57, while a single sale is held 12.6 to 14.6 s at 2:55. Within a burst, the last sale's hold is a little longer than the first's (about 0.3 to 0.8 s at mid-day, 0.3 to 0.8 s at 2:55), consistent with sales passing through one at a time; that is minor next to the 2:55 hold.
+
+### 9.4 Were the exits' cancels still pending during the hold? (measured from the exit orders' own records)
+
+No. On every 2:55 day, every exit order cancelled between 2:54 and 2:58 (bracket legs and fresh stops, read from their `canceled_at`) shows its cancel before the first sale was created: for example 11-16, cancels 2:55:01.64 to 06.73, first sale 2:55:08.21; 11-12, cancels 2:55:05.5 to 15.4, first sale 2:55:16.2. The same holds at the mid-day close-outs and at the other bursts above. So the hold is not Alpaca waiting for those cancels to finish. (A record keeps only the final cancel time, not a history of statuses, so this rests on `canceled_at`.)
+
+### 9.5 Smaller finding: some morning sales held 1.3 to 6.2 s (measured)
+
+Ten single sales were held 1.3 to 6.2 s, nine between 8:45 and 9:15 AM and one at 10:00 AM (highest 6.17 s, APLD at 9:00 AM on 11-11; 4.15 s, DBX at 8:45 AM on 11-10), all alone, not in bursts. Not part of the 2:55 question; noted so it is not mistaken for the same effect.
+
+### 9.6 What this does and does not settle
+
+- **Measured:** the 11.5 to 16.3 s hold happened at every 2:55 close-out on record (8 of 8 days, plus 11-02's bulk sales), for 1 to 13 sales alike; the same close-out code at 10:30, and bursts of up to 20 sales at other times, were not held; the exits' cancels had finished before each held sale was created.
+- **Not measured: when the held period begins.** The latest market sale before 2:55 on any day was at 2:10 PM (held 0.02 s); between then and 2:55 there are only fresh stops (a different order type, not held as late as 2:52:17). So this neither supports nor rules out fix A of the Monday review (starting the close-out a few minutes earlier): a 2:50 sale might be held the same way. What would measure it: the time of the earliest held sale, which only a sale sent between about 2:30 and 2:55 can show. The daily reviews could watch for any sale the stack happens to send in that span (no code change), or a close-out moved earlier for one paper day would show it directly (a money-touching change for Michael to rule on).
+- **Not measured: why Alpaca holds these sales.** One guess, not checked: 2:55 PM Central is 3:55 PM Eastern, inside the last minutes before the market's closing auctions, and Alpaca's paper system may queue market orders in that span. Alpaca's documentation was not checked for this here. An answer from Alpaca support, or the documentation, would turn the guess into a fact.
+- **Not measured: the status during the hold.** Every one of these orders now shows `filled` or `canceled`; whether it showed `accepted`, `held` or something else during the hold is not in the order history. Recording Alpaca's live order updates during a 2:55 close-out might show it, if Alpaca sends one during the wait (not known).
 
 Paper trading only; research input for a human decision, never an instruction to act.
