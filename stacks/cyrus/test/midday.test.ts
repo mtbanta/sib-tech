@@ -656,10 +656,19 @@ test("a retry takes at most 10 positions, in turn; and a retry over some positio
   assert.ok(sim.orders.some((o) => o.symbol === "BBB" && o.legs.some((l) => l.status === "new" || l.status === "held")), "BBB's exits were not touched");
 });
 
-test("Michael's ruling on a mid-day close-out that cannot get flat: 40 positions with every sale refused; after the unlimited first try, mid-day requests stay within 60 a minute, no rate-limit answers after the first try's minute, one alert and one 5 minute alert, and the positions are sold once Alpaca accepts", { timeout: 120_000 }, async () => {
+// The speed release, item 2 (Michael's ruling 5 of 2026-11-16): the shared budget's minute grows with Alpaca's spare, so the mid-day retries'
+// "within 60 a minute" holds while Alpaca is busy (`busy`: the governor counts 150 requests a minute the budget did not send, so the minute
+// stays 60), and when quiet they stay within the budget's minute in force (at most Alpaca's spare); no rate-limit answers either way.
+async function middayCannotGetFlat(busy: boolean) {
   const w = await armedDay();
   const { sim, r } = w;
   sim.onRate = (remaining) => r.governor.observe({ path: "/v2/orders", status: 200, limit: 200, remaining, reset: null });
+  const wk: any = r.worker;
+  if (busy) {
+    const realStats = r.governor.stats.bind(r.governor);
+    r.governor.stats = () => ({ ...realStats(), requestsLastMinute: wk.budget.inUse().minute + 150 });
+  }
+  let highestMinute = 60;
   sim.advanceTo(z("16:00:00").getTime());
   for (let i = 0; i < 40; i++) await hold(sim, r.store, `S${i}`, 1, 10);
   sim.refuseSellsTimes = 1_000_000;
@@ -682,13 +691,17 @@ test("Michael's ruling on a mid-day close-out that cannot get flat: 40 positions
     if (rejectedAtMinute === null && t >= after) rejectedAtMinute = sim.rejected429;
     await w.r.at(new Date(t).toISOString());
     await until(() => !midday(), 2000);
+    highestMinute = Math.max(highestMinute, wk.budget.budgetMinute());
     t = Math.max(t + 5000, Math.ceil(sim.simMs / 5000) * 5000);
   }
   const retryReqs = reqDuring.filter((x) => x > firstEnd);
   let worst = 0;
   for (let i = 0; i < retryReqs.length; i++) worst = Math.max(worst, retryReqs.filter((x) => x >= retryReqs[i]! && x < retryReqs[i]! + 60_000).length);
   assert.ok(tries() >= 3, `retries happened (${tries()} tries)`);
-  assert.ok(worst <= 60, `mid-day requests in any 60 seconds after the first try: ${worst}`);
+  if (busy) {
+    assert.equal(highestMinute, 60, "busy: the budget's minute stayed 60");
+    assert.ok(worst <= 60, `mid-day requests in any 60 seconds after the first try: ${worst}`);
+  } else assert.ok(wk.budget.peak.minute <= highestMinute, `quiet: budgeted requests in any 60 seconds (${wk.budget.peak.minute}) within the budget's highest minute (${highestMinute})`);
   assert.equal(sim.rejected429, rejectedAtMinute, "no rate-limit answers after the first try's minute");
   assert.equal(r.said("alerts").filter((x) => x.includes("mid-day close-out is NOT FLAT yet")).length, 1, "one alert");
   assert.equal(r.said("alerts").filter((x) => x.includes("still NOT FLAT after 5 minutes")).length, 1, "one 5 minute alert");
@@ -709,6 +722,14 @@ test("Michael's ruling on a mid-day close-out that cannot get flat: 40 positions
   assert.equal((await sim.listPositions()).length, 0);
   assert.equal(sim.oversellAttempts, 0);
   assert.equal(r.said("alerts").filter((x) => x.includes("still NOT FLAT after 5 minutes")).length, 1, "still one 5 minute alert");
+}
+
+test("Michael's ruling on a mid-day close-out that cannot get flat: 40 positions with every sale refused; after the unlimited first try, mid-day requests stay within 60 a minute, no rate-limit answers after the first try's minute, one alert and one 5 minute alert, and the positions are sold once Alpaca accepts", { timeout: 120_000 }, async () => {
+  await middayCannotGetFlat(true);
+});
+
+test("speed release, item 2: the same mid-day close-out while Alpaca is quiet: its retries stay within the shared budget's minute in force (grown with Alpaca's spare), no rate-limit answers after the first try's minute", { timeout: 120_000 }, async () => {
+  await middayCannotGetFlat(false);
 });
 
 test("the loss stop on: the morning line and the 1:30 note say trading stays paused for the rest of the day unless `resume` and then `go`", async () => {

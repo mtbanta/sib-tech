@@ -345,11 +345,13 @@ test("item 3: forgetting a retry (its stuck record resolved) takes it out of the
 
 // In the worker, 10 minutes, 5 positions whose shares Alpaca keeps holding, with steady low-priority demand. Before item 3 (b995c17's code,
 // measured with this same shape): the longest wait between one position's tries was 167.5 s against an average of about 95 s, and the turns
-// were uneven (5 to 8 tries each). With turns: the longest is close to the average and the positions are tried in turn.
-test("item 3, in the worker: 5 stuck positions under steady low-priority demand are tried in turn, and the longest wait stays close to the average", async () => {
+// were uneven (5 to 8 tries each). With turns the positions are tried in turn, so no position waits much longer than another: each one's
+// longest wait is within 15 s of every other's. (With item 2 the longest waits are set by the budgeted minute filling, the same for all.)
+test("item 3, in the worker: 5 stuck positions under steady low-priority demand are tried in turn, and no position waits much longer than another", async () => {
   const w = await stuckWorld({ n: 5, minutes: 10, p2: true, shape: "hidden" });
   assert.equal(w.rateLimited, 0);
-  assert.ok(w.longest <= 1.4 * w.mean, `longest ${Math.round(w.longest / 1000)} s, average ${Math.round(w.mean / 1000)} s`);
+  const longestEach = w.gaps.map((g) => Math.max(...g));
+  assert.ok(Math.max(...longestEach) - Math.min(...longestEach) <= 15_000, `each position's longest wait: ${longestEach.map((x) => Math.round(x / 1000)).join(", ")} s`);
   const counts = w.syms.map((s) => w.tries.get(s)?.length ?? 0);
   assert.ok(Math.max(...counts) - Math.min(...counts) <= 1, `tries per position ${counts.join(", ")}`);
   // In turn: after every position's first try, no position is tried twice while another waits without a try between.
@@ -358,4 +360,123 @@ test("item 3, in the worker: 5 stuck positions under steady low-priority demand 
     const window = later.slice(i, i + w.syms.length);
     assert.equal(new Set(window).size, w.syms.length, `in turn: ${window.join(", ")}`);
   }
+});
+
+// ---------------- item 2: a retry budget that grows with spare room ----------------
+
+// A budget whose governor reports `seen.n` answers in the last 60 s, with Alpaca's remaining at `rem.n`.
+function growWorld(seenN: number, remN = 200) {
+  const clock = { t: 1_000_000 };
+  const seen = { n: seenN };
+  const rem = { n: remN };
+  const b: any = new RequestBudget({ now: () => clock.t, remaining: () => rem.n, requestsLastMinute: () => seen.n });
+  return { clock, seen, rem, b };
+}
+// Lets the minute climb to its target (one step a second).
+function climb(w: ReturnType<typeof growWorld>, seconds: number): void {
+  for (let i = 0; i < seconds; i++) {
+    w.b.budgetMinute();
+    w.clock.t += 1_000;
+  }
+  w.b.budgetMinute();
+}
+// Sends `n` budgeted requests of class `cls` now (one try), outside any cap (forced), to fill the window.
+function sendNow(b: any, cls: "P1" | "P2", n: number, minuteCap?: number): void {
+  const r = b.tryReserve(cls, n, { label: "fill", force: true, fiveSec: false, ...(minuteCap ? { minuteCap } : {}) }) as Reservation;
+  for (let i = 0; i < n; i++) r.charge("/v2/test");
+  r.end();
+}
+
+test("item 2: when busy (Alpaca's spare under 60) the minute is 60, with the 15 in 5 seconds, the stuck retries' 45 and P2's 40, as before", () => {
+  const w = growWorld(170); // 170 requests the budget did not send: spare 30
+  climb(w, 10);
+  assert.equal(w.b.budgetMinute(), 60);
+  assert.ok(w.b.roomFor("P1", 15).ok && !w.b.roomFor("P1", 16).ok, "15 in 5 seconds");
+  sendNow(w.b, "P1", 35);
+  assert.ok(w.b.roomFor("P1", 10, false, 0, CAP, "A").ok, "a stuck retry fits at 35 + 10 = 45");
+  assert.ok(!w.b.roomFor("P1", 11, false, 0, CAP, "A").ok, "not at 46");
+  assert.ok(w.b.roomFor("P2", 5, false).ok && !w.b.roomFor("P2", 6, false).ok, "P2 up to 40");
+  assert.ok(w.b.roomFor("P1", 25, false).ok && !w.b.roomFor("P1", 26, false).ok, "urgent work up to 60");
+});
+
+test("item 2: when quiet the minute grows to Alpaca's spare (200 less what the budget did not send), with the 5 seconds a quarter of it, the stuck ceiling 15 below it and P2's share 20 below it", () => {
+  const w = growWorld(50); // spare 150
+  climb(w, 10);
+  assert.equal(w.b.budgetMinute(), 150);
+  assert.ok(w.b.roomFor("P1", 37).ok && !w.b.roomFor("P1", 38).ok, "the 5 seconds: 37 (a quarter of 150)");
+  sendNow(w.b, "P1", 125);
+  w.seen.n = 50 + 125; // the governor sees the budget's own 125 too: still 50 not budgeted
+  w.clock.t += 6_000; // out of the 5 seconds, still in the minute
+  assert.equal(w.b.budgetMinute(), 150, "its own requests do not count against the spare");
+  assert.ok(w.b.roomFor("P1", 10, false, 0, CAP, "A").ok, "a stuck retry fits at 125 + 10 = 135 (150 less 15)");
+  assert.ok(!w.b.roomFor("P1", 11, false, 0, CAP, "A").ok, "not at 136: 15 always kept for urgent work");
+  assert.ok(w.b.roomFor("P2", 5, false).ok && !w.b.roomFor("P2", 6, false).ok, "P2 up to 130 (150 less 20)");
+  assert.ok(w.b.roomFor("P1", 25, false).ok && !w.b.roomFor("P1", 26, false).ok, "urgent work up to 150");
+});
+
+test("item 2: the minute is computed at most once a second and rises by at most 20 at a time; it falls at once", () => {
+  const w = growWorld(50);
+  assert.equal(w.b.budgetMinute(), 80, "first step from 60");
+  w.clock.t += 999;
+  assert.equal(w.b.budgetMinute(), 80, "not again within the second");
+  w.clock.t += 1;
+  assert.equal(w.b.budgetMinute(), 100);
+  w.clock.t += 1_000;
+  assert.equal(w.b.budgetMinute(), 120);
+  w.clock.t += 1_000;
+  assert.equal(w.b.budgetMinute(), 140);
+  w.clock.t += 1_000;
+  assert.equal(w.b.budgetMinute(), 150, "up to its target");
+  w.seen.n = 160; // entries start: spare 40
+  w.clock.t += 1_000;
+  assert.equal(w.b.budgetMinute(), 60, "falls at once to 60");
+  w.seen.n = 90; // spare 110
+  w.clock.t += 1_000;
+  assert.equal(w.b.budgetMinute(), 80, "and rises again 20 at a time");
+});
+
+test("item 2: with no answer seen by the governor in the last minute the spare cannot be measured and the minute stays 60; without a governor count it is always 60", () => {
+  const w = growWorld(0);
+  climb(w, 10);
+  assert.equal(w.b.budgetMinute(), 60);
+  const plain: any = new RequestBudget({ now: () => 0 });
+  assert.equal(plain.budgetMinute(), 60);
+});
+
+test("item 2: the floors on Alpaca's remaining are unchanged when the minute grows (20 for urgent work and stuck retries, 80 for P2)", () => {
+  const w = growWorld(20); // spare 180
+  climb(w, 10);
+  assert.equal(w.b.budgetMinute(), 180);
+  w.rem.n = 29;
+  assert.ok(w.b.roomFor("P1", 9, false).ok && !w.b.roomFor("P1", 10, false).ok, "P1 leaves 20");
+  const s = w.b.roomFor("P1", 10, false, 0, CAP, "A");
+  assert.ok(!s.ok && s.why === "floor", "a stuck retry too");
+  w.rem.n = 89;
+  assert.ok(w.b.roomFor("P2", 9, false).ok && !w.b.roomFor("P2", 10, false).ok, "P2 leaves 80");
+});
+
+test("item 2: when the minute falls, urgent work keeps its 15 above what stuck retries were let in for; stuck retries and P2 wait for the new minute", () => {
+  const w = growWorld(50);
+  climb(w, 10);
+  assert.equal(w.b.budgetMinute(), 150);
+  sendNow(w.b, "P1", 135, CAP); // stuck retries used their whole 135
+  w.seen.n = 135 + 170; // entries started: 170 not budgeted, spare 30
+  w.clock.t += 6_000;
+  assert.equal(w.b.budgetMinute(), 60, "the minute fell to 60 at once");
+  assert.ok(w.b.roomFor("P1", 13, false).ok, "a timed-out stop's try of 13 still gets in (135 + 13 under the 150 in force this minute)");
+  assert.ok(w.b.roomFor("P1", 15, false).ok && !w.b.roomFor("P1", 16, false).ok, "urgent work has exactly its 15");
+  assert.ok(!w.b.roomFor("P1", 1, false, 0, CAP, "A").ok, "stuck retries wait (45 now)");
+  assert.ok(!w.b.roomFor("P2", 1, false).ok, "P2 waits (40 now)");
+  w.clock.t += 60_000; // the 135 have left the window; the 150 is no longer in force within it
+  assert.ok(w.b.roomFor("P1", 60, false).ok && !w.b.roomFor("P1", 61, false).ok, "urgent work back to the minute in force, 60");
+});
+
+test("item 2: while the minute is still rising, a refusal on the minute is looked at again at its next step, not when the oldest requests leave", () => {
+  const w = growWorld(50);
+  w.b.budgetMinute(); // 80, rising toward 150
+  sendNow(w.b, "P1", 60, CAP);
+  const r = w.b.roomFor("P1", 10, false, 0, CAP, "A"); // 60 + 10 passes 80 less 15
+  assert.ok(!r.ok && r.at <= w.clock.t + 1_000, `looked at again within a second (${r.at - w.clock.t} ms), not in a minute`);
+  w.clock.t += 1_000;
+  assert.ok(w.b.roomFor("P1", 10, false, 0, CAP, "A").ok, "and at 100 it fits (60 + 10 under 85)");
 });

@@ -46,6 +46,14 @@ export const ANONYMOUS_RETRY = "(a capped retry with no key)";
 // already has room looks again no sooner than this (the one ahead takes the room at its own look).
 export const TURN_DROP_MS = 10_000;
 export const TURN_RECHECK_MS = 250;
+// Item 2 of the speed release (a retry budget that grows with spare room): the budgeted minute is the larger of BUDGET_PER_MINUTE and
+// Alpaca's spare, its 200 a minute less every request sent in the last 60 s that the budget did not count (the governor's count of answers
+// in the last 60 s, less the budget's own sent count over the same window). Computed at most once a BUDGET_RECOMPUTE_MS; it rises by at most
+// BUDGET_RISE_PER_S at a time and may fall at once. The 5 seconds are a quarter of it; P2's share is it less P1_KEEP; an ordinary stuck
+// retry's ceiling keeps its distance below it (45 of 60: it less 15, always kept for urgent work). The floors on Alpaca's remaining (P1_FLOOR
+// and P2_FLOOR) and the entries' reserve are unchanged. When busy it is BUDGET_PER_MINUTE, as before.
+export const BUDGET_RECOMPUTE_MS = 1_000;
+export const BUDGET_RISE_PER_S = 20;
 const REFILL_PER_MS = ALPACA_REQUESTS_PER_MINUTE / 60_000;
 
 // `turn` (item 3 of the speed release): a capped retry with room that waits because another stuck retry has waited longer.
@@ -171,11 +179,53 @@ export class RequestBudget {
   // When each request beyond its try's reservation was sent (the last 10 minutes; statistics and tests).
   readonly overdraftAt: number[] = [];
 
-  constructor(opts: { now?: () => number; remaining?: () => number; log?: (event: string, data?: Record<string, unknown>) => void } = {}) {
+  // Item 2 of the speed release: the governor's count of Alpaca answers in the last 60 s (its `stats().requestsLastMinute`). Without it (a
+  // test's own budget) the minute stays BUDGET_PER_MINUTE.
+  private readonly requestsLastMinute: (() => number) | undefined;
+  // The budgeted minute in force, when it was last computed, the figure it moves toward, and each value with the time it took effect (the
+  // last 60 s and the one in force at their start), for urgent work's ceiling.
+  private minuteNow = BUDGET_PER_MINUTE;
+  private minuteAt = -Infinity;
+  private minuteTarget = BUDGET_PER_MINUTE;
+  private readonly minuteHistory: Array<{ t: number; m: number }> = [];
+
+  constructor(opts: { now?: () => number; remaining?: () => number; requestsLastMinute?: () => number; log?: (event: string, data?: Record<string, unknown>) => void } = {}) {
     this.nowMs = opts.now ?? Date.now;
     // Alpaca's remaining requests as the governor estimates them (the last figure Alpaca gave, plus the refill since).
     this.remaining = opts.remaining ?? (() => ALPACA_REQUESTS_PER_MINUTE);
+    this.requestsLastMinute = opts.requestsLastMinute;
     this.log = opts.log;
+  }
+
+  // Item 2 of the speed release: the budgeted minute now (see BUDGET_RECOMPUTE_MS). While the governor has seen no answer in the last 60 s,
+  // Alpaca's spare cannot be measured, so the minute stays BUDGET_PER_MINUTE. Requests in flight are counted by the budget when sent and by
+  // the governor when answered, so the requests the budget did not count are never taken below 0.
+  budgetMinute(now: number = this.nowMs()): number {
+    if (!this.requestsLastMinute) return BUDGET_PER_MINUTE;
+    if (now - this.minuteAt < BUDGET_RECOMPUTE_MS) return this.minuteNow;
+    this.prune(now);
+    const seen = this.requestsLastMinute();
+    const notBudgeted = Math.max(0, seen - this.sent.length);
+    const target = seen > 0 ? Math.max(BUDGET_PER_MINUTE, ALPACA_REQUESTS_PER_MINUTE - notBudgeted) : BUDGET_PER_MINUTE;
+    const next = target <= this.minuteNow ? target : Math.min(target, this.minuteNow + BUDGET_RISE_PER_S);
+    this.minuteTarget = target;
+    this.minuteAt = now;
+    if (next !== this.minuteNow || this.minuteHistory.length === 0) this.minuteHistory.push({ t: now, m: next });
+    while (this.minuteHistory.length > 1 && this.minuteHistory[1]!.t <= now - 60_000) this.minuteHistory.shift();
+    this.minuteNow = next;
+    return next;
+  }
+
+  // Item 2 of the speed release: urgent work's ceiling, the largest minute in force at any moment of the last 60 s. Stuck retries and P2 were
+  // let in under the minute in force when they started, so when the minute falls, the requests they sent still leave urgent work its 15 (it
+  // falls for urgent work only as those requests leave the window).
+  private urgentMinute(now: number): number {
+    let m = this.minuteNow;
+    for (let i = 0; i < this.minuteHistory.length; i++) {
+      const nextAt = this.minuteHistory[i + 1]?.t ?? Infinity;
+      if (nextAt > now - 60_000) m = Math.max(m, this.minuteHistory[i]!.m);
+    }
+    return m;
   }
 
   private prune(now: number): void {
@@ -276,29 +326,38 @@ export class RequestBudget {
   // waiting list could next get room.
   private roomRefusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead: number, minuteCap: number | undefined, retryKey: string | undefined, effects: boolean): Refusal | null {
     const u = this.usage(now);
+    // Item 2 of the speed release: the minute and what scales with it, at this moment (all as before while it is BUDGET_PER_MINUTE).
+    const minute = this.budgetMinute(now);
+    const grow = minute - BUDGET_PER_MINUTE;
+    const five = Math.floor(minute / 4);
+    const p2Share = minute - P1_KEEP;
+    const ownCap = minuteCap === undefined ? undefined : minuteCap + grow;
     // P2 leaves room, in the minute and in the 5 seconds, for a waiting capped retry (Michael's answer after group 1's rulings round 2); since
     // item 4 of the speed release, for every waiting retry whose hold is in force, held to the most restrictive of them.
     const holding = now < this.holdEnd;
     const held = holding ? this.heldCeilings(now) : { room: Infinity, five: Infinity };
-    const p2Cap = holding ? Math.min(BUDGET_PER_MINUTE - P1_KEEP, held.room) : BUDGET_PER_MINUTE - P1_KEEP;
-    const cap = Math.min(cls === "P1" ? BUDGET_PER_MINUTE : p2Cap, minuteCap ?? Infinity);
-    const fiveCap = cls === "P2" && holding ? Math.min(BUDGET_PER_5S, held.five) : BUDGET_PER_5S;
+    const p2Cap = holding ? Math.min(p2Share, held.room + grow) : p2Share;
+    const cap = Math.min(cls === "P1" ? (ownCap === undefined ? this.urgentMinute(now) : minute) : p2Cap, ownCap ?? Infinity);
+    const fiveCap = cls === "P2" && holding ? Math.min(five, held.five + (five - BUDGET_PER_5S)) : five;
     const at: number[] = [];
     let why: Refusal["why"] | null = null;
     const minuteShort = u.minute + u.unsentMinute + n > cap;
     const fiveShort = fiveSec && u.five + u.unsentFive + n > fiveCap;
+    // Item 2 of the speed release: while the minute is still rising toward Alpaca's spare, room in the minute and the 5 seconds may come with
+    // its next step, so such a refusal is looked at again then at the latest (a local check, no request).
+    const rising = this.minuteTarget > minute ? Math.max(now + 1, this.minuteAt + BUDGET_RECOMPUTE_MS) : Infinity;
     if (minuteShort) {
-      why = u.minute + u.unsentMinute + n <= BUDGET_PER_MINUTE ? "class" : "minute";
-      at.push(this.agedOutAt(u.minute + u.unsentMinute + n - cap, 60_000, now, u.unsentMinute));
+      why = u.minute + u.unsentMinute + n <= minute ? "class" : "minute";
+      at.push(Math.min(rising, this.agedOutAt(u.minute + u.unsentMinute + n - cap, 60_000, now, u.unsentMinute)));
     }
     if (fiveShort) {
       why ??= "five";
-      at.push(this.agedOutAt(u.five + u.unsentFive + n - fiveCap, 5_000, now, u.unsentFive));
+      at.push(Math.min(rising, this.agedOutAt(u.five + u.unsentFive + n - fiveCap, 5_000, now, u.unsentFive)));
     }
     // A capped retry (an ordinary stuck retry, under its ceiling of 45) kept out by the minute or the 5 seconds: if the urgent work alone (P1,
     // sent and reserved) leaves it room in both, P2's use is what keeps it out, so P2 holds back for it until it looks again. If P1 alone already
     // fills either, holding P2 back would not help, and P2 keeps its share.
-    const holdForRetry = cls === "P1" && minuteCap !== undefined && (minuteShort || fiveShort) && (!minuteShort || (cap === minuteCap && this.p1Use(now, 60_000) + n <= minuteCap)) && (!fiveShort || this.p1Use(now, 5_000, true) + n <= BUDGET_PER_5S);
+    const holdForRetry = cls === "P1" && ownCap !== undefined && (minuteShort || fiveShort) && (!minuteShort || (cap === ownCap && this.p1Use(now, 60_000) + n <= ownCap)) && (!fiveShort || this.p1Use(now, 5_000, true) + n <= five);
     const floor = cls === "P1" ? P1_FLOOR : P2_FLOOR;
     const left = this.remaining() - u.unsentMinute - n - routineAhead;
     if (left < floor) {
@@ -309,7 +368,7 @@ export class RequestBudget {
     const when = Math.max(now + 1, ...at);
     if (!effects) return { ok: false, at: when, why };
     // Statistics only: a P2 refusal the hold alone caused (P2's usual share, the 15 in 5 seconds and the floor would all have let it in).
-    this.lastRefusalHeldOnly = cls === "P2" && holding && u.minute + u.unsentMinute + n <= Math.min(BUDGET_PER_MINUTE - P1_KEEP, minuteCap ?? Infinity) && (!fiveSec || u.five + u.unsentFive + n <= BUDGET_PER_5S) && left >= floor;
+    this.lastRefusalHeldOnly = cls === "P2" && holding && u.minute + u.unsentMinute + n <= Math.min(p2Share, ownCap ?? Infinity) && (!fiveSec || u.five + u.unsentFive + n <= five) && left >= floor;
     // The hold lasts until the retry looks again (when room may return, plus a moment), and at least RETRY_WAIT_HOLD_MS; each look renews it.
     // Item 4 of the speed release: per retry (its key), each with its own end; a later look never shortens a key's end.
     if (holdForRetry && minuteCap !== undefined) {

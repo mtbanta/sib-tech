@@ -34,7 +34,8 @@ const store = new CachingStore(new PgStore(pool));
 const governor = new Governor();
 // The redesign of 2026-11-14, part 1: the shared request budget. The client counts every request it sends into it by tag (`onSend`), and
 // charges each one to the reservation of the scope it is made in (request-scope.ts).
-const budget = new RequestBudget({ remaining: () => governor.budget(), log: (event, fields) => logAndStore?.("info", event, fields) });
+// Item 2 of the speed release: the minute grows with Alpaca's spare, read from the governor's count of answers in the last 60 s.
+const budget = new RequestBudget({ remaining: () => governor.budget(), requestsLastMinute: () => governor.stats().requestsLastMinute, log: (event, fields) => logAndStore?.("info", event, fields) });
 const broker = new AlpacaTrading(settings, { onRate: (info) => governor.observe(info), onSend: (path) => budget.onSend(path) });
 const data = new AlpacaData(settings);
 const bot = new DiscordBot(settings, redact);

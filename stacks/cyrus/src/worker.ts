@@ -341,7 +341,7 @@ export class Worker {
 
   constructor(deps: WorkerDeps) {
     this.d = deps;
-    this.budget = deps.budget ?? new RequestBudget({ now: () => deps.now().getTime(), remaining: () => deps.governor.budget(), log: (e, data) => deps.log?.("info", e, data) });
+    this.budget = deps.budget ?? new RequestBudget({ now: () => deps.now().getTime(), remaining: () => deps.governor.budget(), requestsLastMinute: () => deps.governor.stats().requestsLastMinute, log: (e, data) => deps.log?.("info", e, data) });
     this.syncMemory.budget = this.budget;
     this.lossMemory.budget = this.budget;
     deps.governor.setSafetyHold?.(this.budget);
