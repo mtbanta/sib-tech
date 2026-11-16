@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { clientOrderIdFor } from "../src/gate.ts";
-import { Liquidator, SellGate } from "../src/sells.ts";
+import { Liquidator, SIDE_BY_SIDE_LONE_WAIT_MAX_MS, SellGate } from "../src/sells.ts";
 import { SimBroker } from "./sim-broker.ts";
 import { D, rig, settle } from "./rig.ts";
 import { FakeBot } from "./helpers.ts";
@@ -94,13 +94,15 @@ async function lostThenFlatten(askAfterMs: number) {
   return { onSellsOrCancels, lastSaleMs: Math.max(...sales.map((x: any) => x.at)) - askAt, sold: new Set(sales.map((x: any) => x.symbol)).size, oversell: sim.oversellAttempts };
 }
 
-// v24 (20ba5bd) in this shape: 17 to 20 rate-limit answers on sells and cancels, last bracketed sale 8.2 to 9.1 s after the ask. f9a4254 (the
-// floor of 20): 59 to 72 answers, 17.2 to 23.1 s.
-for (const after of [20_000, 25_000]) {
-  test(`round 4 (headroom 120): lost-exit sales side by side, then flatten asked ${after / 1000} s later: no more rate-limit answers on sells and cancels than v24, last bracketed sale within 12 s`, async () => {
+// v24 (20ba5bd) in this shape, rate-limit answers on sells and cancels by when the ask came: 5 s 0, 10 s 17, 20 s 20, 25 s 17; last bracketed
+// sale 8.2 to 10.1 s after the ask. f9a4254 (the floor of 20): 59 to 72 answers, 17.2 to 23.1 s. With the headroom of 120 alone (4c8e688),
+// asks at 5 and 10 s still got 54 and 36; with the lone sale also waiting above 20 (Michael's "Lone sale waits above 20"), 0 at every ask.
+const v24Answers: Record<number, number> = { 5_000: 0, 10_000: 17, 20_000: 20, 25_000: 17 };
+for (const after of [5_000, 10_000, 20_000, 25_000]) {
+  test(`round 4 (headroom 120, lone sale above 20): lost-exit sales side by side, then flatten asked ${after / 1000} s later: no more rate-limit answers on sells and cancels than v24 (${v24Answers[after]}), last bracketed sale within 12 s`, async () => {
     const w = await lostThenFlatten(after);
     assert.equal(w.sold, 25, "every bracketed position sold");
-    assert.ok(w.onSellsOrCancels <= 20, `rate-limit answers on sells and cancels: ${w.onSellsOrCancels} (v24: 17 to 20)`);
+    assert.ok(w.onSellsOrCancels <= v24Answers[after]!, `rate-limit answers on sells and cancels: ${w.onSellsOrCancels} (v24: ${v24Answers[after]})`);
     assert.ok(w.lastSaleMs <= 12_000, `last bracketed sale ${w.lastSaleMs} ms after the ask`);
     assert.equal(w.oversell, 0);
   });
@@ -167,3 +169,156 @@ for (const kind of ["flatten", "loss stop"] as const) {
     await whole;
   });
 }
+
+// Michael's answer of 2026-11-16 ("Lone sale waits above 20"), and its bound: a lone side-by-side sale waits (sending nothing) while the
+// room check above the urgent floor of 20 says no, at its start and before each round; whatever the estimate says, it goes ahead after
+// SIDE_BY_SIDE_LONE_WAIT_MAX_MS (30 s), as the one-at-a-time queue would. A sale of the whole account asked meanwhile ends the wait at once.
+test("lone sale above 20: it waits while there is no room, and goes ahead after 30 s whatever the estimate says; a whole-account ask ends its wait at once", async () => {
+  assert.equal(SIDE_BY_SIDE_LONE_WAIT_MAX_MS, 30_000);
+  const sim: any = new SimBroker(Date.UTC(2026, 10, 2, 15, 0));
+  const holds: Array<{ until: number; res: () => void }> = [];
+  const sleep = (ms: number) => new Promise<void>((res) => holds.push({ until: sim.simMs + ms, res }));
+  let alone = false; // the room check above 20 for a lone sale: no room at all (an estimate stuck low)
+  const events: Array<{ e: string; d: any; t: number }> = [];
+  const liq: any = new Liquidator({ broker: sim, gate: new SellGate({ broker: sim, say: async () => true, nowMs: () => sim.simMs }), now: () => new Date(sim.simMs), sleep, log: (e, d) => void events.push({ e, d, t: sim.simMs }), sideBySideRoom: () => false, sideBySideRoomAlone: () => alone });
+  for (const s of ["AAA", "BBB"]) {
+    const id = clientOrderIdFor(D, s, 1);
+    await sim.submitEntry({ symbol: s, qty: 5, stopPrice: 9, takeProfitPrice: 11, referencePrice: 10, clientOrderId: id });
+    sim.fillEntry(id, 10);
+    for (const l of sim.orders.find((x: any) => x.clientOrderId === id)!.legs) await sim.cancelOrder(l.id);
+  }
+  sim.advance(1_000);
+  const sells: Array<{ s: string; t: number }> = [];
+  sim.submitSell = async (x: any) => {
+    sells.push({ s: x.symbol, t: sim.simMs });
+    throw new Error("sell refused (test)");
+  };
+  const drive = async (until: number) => {
+    while (sim.simMs < until) {
+      sim.advance(50);
+      for (const h of holds.filter((h) => h.until <= sim.simMs)) {
+        holds.splice(holds.indexOf(h), 1);
+        h.res();
+      }
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    }
+  };
+  const sale = (s: string) => liq.flatten({ reason: s, tradeDate: D, only: [s], ownEntryOnly: { maxQty: { [s]: 5 } }, sideBySide: true, maxRounds: 2 });
+  const t0 = sim.simMs;
+  const a = sale("AAA");
+  await drive(t0 + 25_000);
+  assert.equal(sells.length, 0, "no room above 20: the lone sale has sent nothing after 25 s");
+  await drive(t0 + 40_000);
+  assert.equal(sells.length, 1, "it went ahead once its wait reached 30 s");
+  assert.ok(sells[0]!.t >= t0 + 30_000 && sells[0]!.t <= t0 + 33_000, `first sell at ${sells[0]!.t - t0} ms`);
+  assert.ok(events.some((x) => x.e === "side_by_side_lone_wait_over" && x.d.at === "start"));
+  await drive(t0 + 80_000);
+  await a;
+  assert.equal(sells.length, 2, "its second round waited too, and went ahead after 30 s");
+  assert.ok(events.some((x) => x.e === "side_by_side_lone_wait_over" && x.d.at === "round 2"));
+  // With room above 20 it goes ahead at once.
+  alone = true;
+  const t1 = sim.simMs;
+  const b = sale("BBB");
+  await drive(t1 + 500);
+  assert.equal(sells.filter((x) => x.s === "BBB").length, 1, "room above 20: at once");
+  await drive(t1 + 5_000);
+  await b;
+  // No room again: a whole-account ask ends the lone wait at once (it stands aside, sending nothing).
+  alone = false;
+  const c = sale("AAA");
+  await drive(sim.simMs + 3_000);
+  const n = sells.length;
+  const whole = liq.flatten({ reason: "flatten command", tradeDate: D });
+  await drive(sim.simMs + 200);
+  const rc = await c;
+  assert.equal(rc.stoodAside, "whole account");
+  assert.equal(sells.length, n, "nothing sent by the waiting sale");
+  await drive(sim.simMs + 20_000);
+  await whole;
+});
+
+// The bound counts only time waited alone. A sale that queued more than 30 s behind another (for the headroom of 120) and then finds itself
+// alone with no room above 20 still waits, sending nothing, for up to 30 s more of waiting alone (before this, it went ahead at once).
+async function queuedThenAlone(at: "start" | "round") {
+  const sim: any = new SimBroker(Date.UTC(2026, 10, 2, 15, 0));
+  const holds: Array<{ until: number; res: () => void }> = [];
+  const sleep = (ms: number) => new Promise<void>((res) => holds.push({ until: sim.simMs + ms, res }));
+  let room120 = true;
+  let alone = true;
+  const events: Array<{ e: string; d: any; t: number }> = [];
+  const liq: any = new Liquidator({ broker: sim, gate: new SellGate({ broker: sim, say: async () => true, nowMs: () => sim.simMs }), now: () => new Date(sim.simMs), sleep, log: (e, d) => void events.push({ e, d, t: sim.simMs }), sideBySideRoom: () => room120, sideBySideRoomAlone: () => alone });
+  for (const s of ["AAA", "BBB"]) {
+    const id = clientOrderIdFor(D, s, 1);
+    await sim.submitEntry({ symbol: s, qty: 5, stopPrice: 9, takeProfitPrice: 11, referencePrice: 10, clientOrderId: id });
+    sim.fillEntry(id, 10);
+    for (const l of sim.orders.find((x: any) => x.clientOrderId === id)!.legs) await sim.cancelOrder(l.id);
+  }
+  sim.advance(1_000);
+  let release: () => void = () => {};
+  const held = new Promise<void>((res) => (release = res));
+  const sells: Array<{ s: string; t: number }> = [];
+  sim.submitSell = async (x: any) => {
+    sells.push({ s: x.symbol, t: sim.simMs });
+    if (x.symbol === "AAA") await held; // AAA's sale is in flight until the test lets it end
+    throw new Error("sell refused (test)");
+  };
+  const drive = async (until: number) => {
+    while (sim.simMs < until) {
+      sim.advance(50);
+      for (const h of holds.filter((h) => h.until <= sim.simMs)) {
+        holds.splice(holds.indexOf(h), 1);
+        h.res();
+      }
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    }
+  };
+  const sale = (s: string, maxRounds: number) => liq.flatten({ reason: s, tradeDate: D, only: [s], ownEntryOnly: { maxQty: { [s]: 5 } }, sideBySide: true, maxRounds });
+  const t0 = sim.simMs;
+  // "start": AAA runs (one round, its sell in flight) and BBB queues behind it at its start. "round": BBB starts alone, its first sell is
+  // refused at once and it pauses 1 s; AAA starts beside it (its sell in flight; the sell gate sends one sale at a time, so AAA goes second);
+  // BBB's second round then queues behind AAA.
+  let a: Promise<any>;
+  let b: Promise<any>;
+  if (at === "start") {
+    a = sale("AAA", 1);
+    room120 = false;
+    await drive(t0 + 200);
+    b = sale("BBB", 1);
+  } else {
+    b = sale("BBB", 2);
+    await drive(t0 + 200);
+    a = sale("AAA", 1);
+  }
+  await drive(t0 + 400);
+  room120 = false;
+  alone = false;
+  await drive(t0 + 40_000);
+  const bBefore = sells.filter((x) => x.s === "BBB").length;
+  release(); // AAA's sale ends; BBB is now alone with no room above 20, after more than 30 s of queueing
+  const t1 = sim.simMs;
+  await drive(t1 + 25_000);
+  const bAt25 = sells.filter((x) => x.s === "BBB").length;
+  await drive(t1 + 40_000);
+  await Promise.all([a, b]);
+  const bLate = sells.filter((x) => x.s === "BBB");
+  return { bBefore, bAt25, bAfter: bLate.length, lastB: bLate.length ? bLate[bLate.length - 1]!.t - t1 : null, over: events.filter((x) => x.e === "side_by_side_lone_wait_over").map((x) => x.d) };
+}
+
+test("lone sale above 20: a sale that queued 40 s behind another at its start, then alone with no room, still waits up to 30 s alone before going ahead", async () => {
+  const w = await queuedThenAlone("start");
+  assert.equal(w.bBefore, 0, "queued behind AAA (headroom 120): nothing sent");
+  assert.equal(w.bAt25, 0, "alone with no room above 20: still nothing 25 s after AAA ended");
+  assert.equal(w.bAfter, 1, "went ahead once it had waited 30 s alone");
+  assert.ok(w.lastB! >= 30_000 && w.lastB! <= 34_000, `sent ${w.lastB} ms after AAA ended`);
+  assert.ok(w.over.some((d: any) => d.at === "start" && d.waitedAloneMs >= 30_000 && d.waitedMs >= 60_000), JSON.stringify(w.over));
+});
+
+test("lone sale above 20: a round that queued 40 s behind another sale, then alone with no room, still waits up to 30 s alone before going ahead", async () => {
+  const w = await queuedThenAlone("round");
+  assert.equal(w.bBefore, 1, "BBB's first round only; its second queued behind AAA (headroom 120)");
+  assert.equal(w.bAt25, 1, "alone with no room above 20: its second round still not sent 25 s after AAA ended");
+  assert.equal(w.bAfter, 2, "its second round went ahead once it had waited 30 s alone");
+  assert.ok(w.lastB! >= 30_000 && w.lastB! <= 34_000, `sent ${w.lastB} ms after AAA ended`);
+  assert.ok(w.over.some((d: any) => d.at === "round 2" && d.waitedAloneMs >= 30_000 && d.waitedMs >= 60_000), JSON.stringify(w.over));
+});

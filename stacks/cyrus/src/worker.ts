@@ -40,7 +40,7 @@ import { listDaySliced, summaryWindows } from "./summary-listing.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
 import { PAPER_ONLY } from "./discord.ts";
 import { CLOSEOUT_RETRY_MOST, MIDDAY_NOT_FLAT_ALERT_AFTER_MS, MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MIDDAY_RETRY_MS, blockedNext, lossPast, middayFlat, middayTimes, readHold, readPause, resumedByText, retrySymbols, startupAction, updatePause } from "./midday.ts";
-import { Reservation, RequestBudget, withReservation } from "./request-budget.ts";
+import { P1_FLOOR, Reservation, RequestBudget, withReservation } from "./request-budget.ts";
 import { inRequestScope, outsideScope } from "./request-scope.ts";
 import { ProtectionLoop, type WakeKind } from "./protection.ts";
 import type { PingKind } from "./heartbeat.ts";
@@ -376,6 +376,9 @@ export class Worker {
       // needs 120 left, not 20"; it was the urgent floor of 20). Since the fix of the rate-limit storm (2026-11-16) it is asked before each
       // round of a side-by-side sale, and `most` counts each round in flight at what its steps can send (sells.ts `sideBySideRoundMost`).
       sideBySideRoom: (most) => deps.governor.budget() - this.budget.inUse().reservedUnsent - most >= SIDE_BY_SIDE_HEADROOM,
+      // Michael's answer of 2026-11-16 ("Lone sale waits above 20"): the only side-by-side sale running, or a first one starting when none
+      // runs, needs room for its round above the urgent floor of 20 (the same measure); it goes ahead anyway after SIDE_BY_SIDE_LONE_WAIT_MAX_MS.
+      sideBySideRoomAlone: (most) => deps.governor.budget() - this.budget.inUse().reservedUnsent - most >= P1_FLOOR,
     });
     // The load window's 5 second cancels are part of entering (tagged as entries for the shared request budget's statistics).
     this.entryExpiry = new EntryExpiry({ cancelOrder: (id) => inRequestScope({ tag: "entry" }, () => deps.broker.cancelOrder(id)), wasFilled: (id) => this.orderHandler?.wasFilled(id) ?? false, log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}) });

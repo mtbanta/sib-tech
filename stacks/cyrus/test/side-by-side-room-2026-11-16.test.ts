@@ -89,6 +89,16 @@ test("rate-limit storm: 10 positions whose sales Alpaca refuses at once: no rate
   assert.equal(w.oversell, 0);
 });
 
+// Michael's answer of 2026-11-16 ("Lone sale waits above 20"): with the headroom of 120 a second sale rarely starts, and before this the sale
+// running alone (and each first one starting when none ran) went ahead with no floor: first tries ran back to back and drained the bucket
+// (4c8e688: 144 rate-limit answers in 2 minutes, 17 to 22 on sells and cancels; v24 152 to 161). Now the lone sale waits for room above 20.
+test("rate-limit storm: 30 positions whose sales Alpaca refuses at once: no rate-limit answer at all in a minute, none on sells or cancels, remaining never below 20", async () => {
+  const w = await refusedWorld(30, 60);
+  assert.equal(w.rateLimited, 0, `rate-limit answers: ${w.rateLimited} (lowest remaining ${w.lowest})`);
+  assert.ok(w.lowest >= 20, `lowest remaining ${w.lowest}`);
+  assert.equal(w.oversell, 0);
+});
+
 test("the room check's count: a first try of 3 rounds whose sale Alpaca refuses sends exactly its rounds' most from its start (its lookup before it)", async () => {
   const w = await refusedWorld(1, 10);
   const most = sideBySideRoundMost({}) * 3 + 1; // three rounds, the last with its last look
@@ -107,8 +117,9 @@ test("the room check's count from the liquidator's steps: one page, cancels, wai
 
 // The round gate on its own: two side-by-side sales on a simulated Alpaca whose sales are refused, on a clock the test moves. The room check
 // says yes at their start, then no for 5 s, then yes again. While both run and there is no room, neither starts its next round (nothing is
-// sent); when room returns they go on. A sale running alone always goes ahead, even with no room at all (never worse than the queue).
-test("a running side-by-side sale asks for room before each round: with no room it waits while another runs; alone it always goes ahead", async () => {
+// sent); when room returns they go on. With no lone-sale check given (`sideBySideRoomAlone`), a sale running alone goes ahead even with no
+// room at all; the worker gives one (room above the urgent floor of 20, Michael's "Lone sale waits above 20"), tested in round4-2026-11-16.
+test("a running side-by-side sale asks for room before each round: with no room it waits while another runs; alone, with no lone-sale check given, it goes ahead", async () => {
   const sim = new SimBroker(Date.UTC(2026, 10, 2, 15, 0));
   const holds: Array<{ until: number; res: () => void }> = [];
   const sleep = (ms: number) => new Promise<void>((res) => holds.push({ until: sim.simMs + ms, res }));
@@ -157,7 +168,7 @@ test("a running side-by-side sale asks for room before each round: with no room 
   assert.equal(tries.filter((x) => x.s === "BBB").length, 3, "BBB too");
   assert.ok(tries.slice(2).every((x) => x.t >= t0 + 5_000), "second rounds only after room returned");
   assert.ok(events.filter((x) => x.e === "side_by_side_round_waited").length >= 2, "both waited before a round");
-  // Alone, with no room at all: every round goes ahead.
+  // Alone, with no room at all and no lone-sale check given: every round goes ahead.
   room = false;
   const n0 = tries.length;
   const t1 = sim.simMs;
