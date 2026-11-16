@@ -6707,3 +6707,9 @@ Scripts and outputs: the scratchpad folder `eod1116` (not kept in the repo). `PR
 Paper trading only; research input for a human decision, never an instruction to act.
 
 **Michael's answer to question 6 (2026-11-16, afternoon), saved verbatim:** "Question 6: yes, plus 1 cent applies in the afternoon load window too, as built." So ruling 3's entry price (the price seen plus 1 cent) applies in every load window, the afternoon load window on a normal day included; no change.
+
+### Michael's answers on the end-of-day questions (2026-11-16, evening), saved verbatim
+
+> Answers: 1) Accept and measure daily; also research, read only, whether Alpaca's close-position call (cancelling the exits and selling in one step on Alpaca's side) would shorten the 2:55 gap, as a proposal for later. 2) Keep the limit as the price seen. 3) Revisit after tonight's release. Tuesday will be a load morning to test the plus-1-cent entries; make sure the mid-day brief measures fill rate, requests per entry and lost exits against today.
+
+So: the 2:55 Alpaca waits are measured in each daily review; a read-only proposal on Alpaca's close-position call is to be written (no code, no call made); the largest position stays checked at the price seen; watching costs after tonight's release; the mid-day brief gains Tuesday's comparison with Monday 2026-11-16 (fill rate, requests per entry, lost exits).
