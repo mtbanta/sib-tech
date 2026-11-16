@@ -107,6 +107,10 @@ export const SYNC_EVERY_STREAM_DOWN_MS = 2_000;
 // The timed pass: every second it starts the timed checks that are due (the order sync, the account and positions view). The full pass
 // (commands, the day record, the heartbeat) stays every 5 s (Michael's answer of 2026-11-16: "Timed checks only").
 export const TIMED_PASS_MS = 1_000;
+// Group 2, round 1 of the speed release: after the timed pass's view read fails, it skips the view for 5 s, doubling to 30 s, until a read
+// succeeds (by it or anyone else). The full pass's own view read is unchanged.
+export const VIEW_BACKOFF_FIRST_MS = 5_000;
+export const VIEW_BACKOFF_MOST_MS = 30_000;
 // Michael's mid-day build of 2026-11-16, item 4: the most entries the morning line looks up at Alpaca (those still stored as working).
 export const MORNING_LINE_LOOKUPS = 20;
 // Group 2, round 1: the most time, in all, the morning line's lookups may take (real time).
@@ -187,6 +191,11 @@ export class Worker {
   private timedTicking = false;
   // The timed pass refreshes the view only on a day the full pass has armed and refreshed it at least once (it keeps the same rule).
   private lastArmedRefresh = false;
+  // Group 2, round 1 of the speed release: the timed pass's view read after a failure waits VIEW_BACKOFF_FIRST_MS, doubling to
+  // VIEW_BACKOFF_MOST_MS (0: no failure since the last success), from `viewFailedAt` until `viewRetryAt`.
+  private viewBackoffMs = 0;
+  private viewFailedAt = 0;
+  private viewRetryAt = 0;
   private ticking = false;
   private failedTicks = 0;
   private lastOkPing = 0;
@@ -576,10 +585,24 @@ export class Worker {
       const now = this.d.now();
       if (!s || now >= s.closeAt) return;
       if (now.getTime() - this.lastSync >= this.syncEveryMs()) this.startSync(s.day, s.closeAt);
-      if (this.lastArmedRefresh && this.view.fastAgeMs() >= (this.orderStreamLive() ? VIEW_EVERY_MS : VIEW_EVERY_NO_STREAM_MS) - 500 && this.d.governor.canSpend()) {
-        const readFrom = now.getTime();
-        await this.view.refreshFast();
-        this.shadowRebase(readFrom, this.d.now().getTime());
+      const nowMs = now.getTime();
+      // A read by anyone else (the full pass, the gate) that succeeded since the failure ends the backoff.
+      if (this.viewBackoffMs > 0 && this.view.fastAgeMs() < nowMs - this.viewFailedAt) this.viewBackoffMs = this.viewRetryAt = 0;
+      if (this.lastArmedRefresh && nowMs >= this.viewRetryAt && this.view.fastAgeMs() >= (this.orderStreamLive() ? VIEW_EVERY_MS : VIEW_EVERY_NO_STREAM_MS) - 500 && this.d.governor.canSpend()) {
+        try {
+          await this.view.refreshFast();
+          this.viewBackoffMs = this.viewRetryAt = 0;
+        } catch (err) {
+          // Bounded: after a failure the timed pass skips the view for 5 s, doubling to 30 s, until a read succeeds (at most about 4 reads
+          // and 4 log rows a minute while it keeps failing; the 5 second full pass keeps its own view read, as on 20ba5bd). One log line per
+          // backoff step, since a step's read is its only try.
+          this.viewBackoffMs = this.viewBackoffMs === 0 ? VIEW_BACKOFF_FIRST_MS : Math.min(VIEW_BACKOFF_MOST_MS, this.viewBackoffMs * 2);
+          this.viewFailedAt = nowMs;
+          this.viewRetryAt = nowMs + this.viewBackoffMs;
+          this.d.log?.("warn", "timed_pass_failed", { error: (err as Error).message.slice(0, 120), part: "view", retryInMs: this.viewBackoffMs });
+          return;
+        }
+        this.shadowRebase(nowMs, this.d.now().getTime());
       }
     } catch (err) {
       this.d.log?.("warn", "timed_pass_failed", { error: (err as Error).message.slice(0, 120) });

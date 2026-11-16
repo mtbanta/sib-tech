@@ -196,3 +196,107 @@ test("item 3: with choice 5 switched on, the row says urgent work has no own cei
   const w = world(50, { urgentGrownMinute: true });
   assert.equal(w.b.takeMinute().minuteInForce.urgent, null);
 });
+
+// ---------------- item 2: the timed pass's failed view read backs off ----------------
+
+import { SimBroker } from "./sim-broker.ts";
+import { rig } from "./rig.ts";
+import { VIEW_BACKOFF_FIRST_MS, VIEW_BACKOFF_MOST_MS } from "../src/worker.ts";
+
+// An armed session at 14:30:05 UTC on the simulator, with the live order updates connected; every view read is recorded with its source
+// (the timed pass, the full pass, or the gate inside an entry decision) and whether it failed.
+async function viewSession() {
+  const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
+  const logs: Array<{ level: string; event: string; data?: Record<string, unknown> }> = [];
+  const r: any = rig({ broker: sim, sleep: sim.sleep, simClock: sim, orderStream: true, log: (level, event, data) => logs.push({ level, event, data }) });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("cap 2\napprove", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:25:00");
+  await r.at("14:30:05");
+  const w: any = r.worker;
+  const fail = { on: false };
+  const reads: Array<{ t: number; from: string; failed: boolean }> = [];
+  const where = { now: "other" };
+  const rf = w.view.refreshFast.bind(w.view);
+  w.view.refreshFast = async () => {
+    reads.push({ t: sim.simMs, from: where.now, failed: fail.on });
+    if (fail.on) throw new Error("simulated view read failure");
+    return rf();
+  };
+  const timed = w.timedTick.bind(w);
+  w.timedTick = async () => {
+    where.now = "timed pass";
+    try { return await timed(); } finally { where.now = "other"; }
+  };
+  const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((x) => setImmediate(x)); };
+  // One second at a time from `fromMs`: the timed pass every second, and the full pass every 5 s when `full`.
+  const run = async (fromMs: number, seconds: number, full = false) => {
+    for (let i = 1; i <= seconds; i++) {
+      const iso = new Date(fromMs + i * 1_000).toISOString();
+      if (full && i % 5 === 0) {
+        where.now = "full pass";
+        await r.at(iso);
+        where.now = "other";
+      } else r.setNow(iso);
+      await w.timedTick();
+      await settle();
+    }
+  };
+  const rows = () => logs.filter((l) => l.level === "warn" && l.event === "timed_pass_failed");
+  return { r, sim, w, fail, reads, where, run, rows, logs };
+}
+
+test("item 2: the backoff constants are 5 s doubling to 30 s", () => {
+  assert.equal(VIEW_BACKOFF_FIRST_MS, 5_000);
+  assert.equal(VIEW_BACKOFF_MOST_MS, 30_000);
+});
+
+test("item 2: with the view read failing for 60 s, the timed pass reads at 5, 10, 20, 30 s steps (4 reads, 4 rows, not about one a second); a success resets the backoff", async () => {
+  const s = await viewSession();
+  s.w.view.invalidate(); // the view is due at once
+  s.fail.on = true;
+  const t0 = s.sim.simMs;
+  s.reads.length = 0;
+  await s.run(t0, 60);
+  const timed = s.reads.filter((x) => x.from === "timed pass");
+  console.log(`item 2, timed pass alone, 60 s failing: ${timed.length} reads, ${s.rows().length} rows, at +${timed.map((x) => (x.t - t0) / 1000).join(", +")} s`);
+  assert.deepEqual(timed.map((x) => x.t - t0), [1_000, 6_000, 16_000, 36_000], "after 5, 10 and 20 s (the next, 30 s later, falls after the 60 s)");
+  assert.equal(s.rows().length, 4, "one row per backoff step");
+  assert.deepEqual(s.rows().map((x) => x.data?.retryInMs), [5_000, 10_000, 20_000, 30_000]);
+  // Success: the read at +66 s succeeds and resets the backoff; a later failure starts again at 5 s.
+  s.fail.on = false;
+  await s.run(t0 + 60_000, 10);
+  const ok = s.reads.filter((x) => x.from === "timed pass" && !x.failed);
+  assert.equal(ok.length, 1);
+  assert.equal(ok[0]!.t - t0, 66_000);
+  assert.equal(s.w.viewBackoffMs, 0, "reset on success");
+  s.w.view.invalidate();
+  s.fail.on = true;
+  const t1 = s.sim.simMs;
+  const before = s.rows().length;
+  await s.run(t1, 7);
+  assert.equal(s.rows().length - before, 2, "two failures 5 s apart");
+  assert.deepEqual(s.rows().slice(before).map((x) => x.data?.retryInMs), [5_000, 10_000], "the backoff starts again at 5 s");
+});
+
+test("item 2: with the full pass running too, its own view read every 5 s is unchanged (as on 20ba5bd) and a success by it resets the timed pass's backoff", async () => {
+  const s = await viewSession();
+  s.w.view.invalidate();
+  s.fail.on = true;
+  const t0 = s.sim.simMs;
+  s.reads.length = 0;
+  await s.run(t0, 60, true);
+  const timed = s.reads.filter((x) => x.from === "timed pass").length;
+  const full = s.reads.filter((x) => x.from === "full pass").length;
+  console.log(`item 2, timed and full pass, 60 s failing: ${s.reads.length} reads (timed pass ${timed}, full pass ${full}, other ${s.reads.length - timed - full}), ${s.rows().length} timed_pass_failed rows`);
+  assert.ok(timed <= 4, `timed pass reads: ${timed}`);
+  assert.ok(full >= 12, `the full pass still reads on each of its 12 passes while the view is stale (unchanged code): ${full}`);
+  assert.ok(s.rows().length <= 4, `rows: ${s.rows().length}`);
+  // The full pass's next read succeeds: the timed pass's backoff ends with it.
+  s.fail.on = false;
+  await s.run(t0 + 60_000, 5, true);
+  assert.ok(s.reads.some((x) => x.from === "full pass" && !x.failed));
+  await s.run(t0 + 65_000, 1);
+  assert.equal(s.w.viewBackoffMs, 0, "a success by the full pass ends the backoff");
+});
