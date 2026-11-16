@@ -1006,6 +1006,7 @@ test("item 2 of 2026-11-16: two lost exits on different symbols are sold side by
   const w = world();
   const dd = await day(w);
   w.sim.cancelMs = 1_500; // Alpaca's own cancel of the exits lands 1.5 s later
+  (w.liquidator as any).d.sideBySideRoom = () => true; // Michael's ruling: the request budget has room for both (the worker's rule is tested apart)
   const a = await loadEntry(w, "AAL", 12.1, 154);
   const b = await loadEntry(w, "SOFI", 26.4, 194);
   const fillAt = w.sim.simMs;
