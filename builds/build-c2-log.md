@@ -6192,3 +6192,32 @@ Full suite 830 of 830. Type check clean.
 **Group 2, rulings round 7: PASS** (no blocking findings; checks 2, 7, 10 clean; src identical to fa357df). Round 6 closed: `noPrevMax` fails the new test, and with its stored-end assertion removed it still fails on the visible outcome ("P2 still held"), so the test catches a reachable difference; all of rounds 4 to 6's hold mutants still fail. Full suite 836 (818 pass, the 18 hook tests outside the repo), type check clean. Notes: the two carried notes (a hold outlasting a retry that got in, at most about 60 s, named to Michael; the hold's room values follow the last look, harmless while every ordinary retry asks for 10); one more explicit assertion would make the round 6 test explain itself; a self-referencing `node_modules/node_modules` symlink in the live folder (dated 2026-11-02, ignored by git).
 
 **Standing:** part 2 with Michael's rulings (branch `redesign-2026-11-14-p2`, code of `fa357df`, head `94487c1` plus this log) has passed group 1 (rulings round 4) and group 2 (rulings round 7); part 1 (`c414720`) passed both groups in its round 5. The full suite at the head: 836 of 836. Deploy per Michael's rule: not before v22 has traded Monday morning; at the Monday mid-day pause with his written yes in `commands` (through `tools/midday-deploy.mjs`), otherwise Monday night. Part 1 stays ready to ship alone (decision 8). Paper trading only; research input for a human decision, never an instruction to act.
+
+## Michael's approval of 2026-11-15 (Sunday, about 9 PM), saved verbatim
+
+> Approved: the counter for when the low-priority hold is in force (logging only), group 2 review. Deploy it with the redesign at Monday's mid-day pause, not before.
+> For the speed proposal after Monday: add fair turn-taking among stuck positions (with 5 stuck, one waited up to 257 s, worse than v22's 171 s) and clearing the hold as soon as the stuck retry gets in.
+> Never print any token or key.
+
+Builder's reading: the counter is the one named to Michael after group 2's rulings round 3 ("the hold leaves no record of its own (a counter or log field would be a small change for his go-ahead)"). It is logging only and reviewed by group 2 (Michael's choice). Built on the part 2 branch `redesign-2026-11-14-p2`. Part 1 (`c414720`) is untouched and can still ship alone. Rounds for this change are numbered "hold counter, round n", up to 8 (Michael's allowance for this build; at least 3 under the standing rule). Michael's message is not the written yes for a market-hours deploy: Monday's mid-day deploy still needs his yes in `commands`. The two proposal items are written into `builds/c2-proposal-stuck-retry-cost.md`, items 3 and 4. Nothing for them is built.
+
+### The hold counter: built 2026-11-15, night
+
+**What changed (`src/request-budget.ts`: lines added, and one existing line extended, the empty minute gaining `retryHold`; no existing expression in a decision changed):**
+- `governor_stats.requestBudget.retryHold`, per minute:
+  - `started`: refused looks or tries of an ordinary stuck retry that set P2's hold while it was not in force;
+  - `renewed`: those that renewed it while it was in force;
+  - `inForceMs`: the milliseconds of the minute the hold was in force, up to its end (not up to the read), split at each minute's read;
+  - `p2Refused`: P2 tries (`tryReserve` only, as `refused` counts them) refused that P2's usual share (40, or its own ceiling), the 15 in 5 seconds and the floor would all have let in, so the hold alone caused them. Each is also counted once in `refused.class` or `refused.five`.
+- `started` and `renewed` are counted where the hold is set, inside `refusal`, so a `roomFor` look counts as well as a try (the hold is set mostly by looks).
+- Two private fields are used for the statistics only (`holdCountedTo`, `lastRefusalHeldOnly`); no decision reads them. The `Refusal` object and the `budget_refused` log line are unchanged. No schema change: `governor_stats` is stored as JSON.
+
+**Checks:**
+- **Old against new** (scratchpad script, not a repo test): `fa357df`'s `request-budget.ts` and the new one, driven by the same seeded random sequences of `tryReserve` (both classes, the 45 ceiling, 5-second and forced tries, wait keys), `roomFor`, charges, ends, clock steps, a moving remaining figure, and `takeMinute`. Every return, `inUse()`, `givingWay()`, the hold's three fields, `totals`, `peak` and the minute's statistics (without `retryHold`) compared after every step: 3 seeds, 6,000 runs, 2,400,000 steps, about 672,000 refusals, the hold in force in about 1,307,000 steps: **0 differences**.
+- **Tests:** `test/hold-counter-2026-11-15.test.ts`, 12 tests: all zero with no hold; a refused retry that sets no hold (urgent work alone fills the 5 seconds) counts nothing; a hold set by a look, and by a try, counted, with time stopping at the hold's end; a renewal is not a start and overlapping renewals do not count time twice; a set after a lapse is a new start and the gap is not counted; time split across a minute's read; held P2 refusals counted for tries only, not for looks, not when refused anyway (the 5 seconds, the floor, P2's share of 40, its own ceiling), not after the hold ends; P1 refusals never counted.
+- **Broken copies:** 14 changes to the counter run against the new tests. 12 fail them: start and renewal swapped; every set counted as a start; time counted to the read; no count at the set, or at the read; the count's start not moved; each of the floor, 5-second, minute and own-ceiling parts of the held-only test dropped; looks counted; tries not counted. 2 survive and are equivalent, because they cannot change any number: dropping `holding` (without the hold, P2's limits are its usual ones, so any refusal fails the usual test) and dropping `cls === "P2"` (a P1 refusal can never pass P2's usual test).
+- Full suite 848 of 848 (836 plus 12); type check clean.
+
+**Documents:** both review briefs (the hold's sentence corrected: one held refusal still looks like an ordinary one in Fly's `budget_refused` lines, but `retryHold` counts them; `retryHold` added beside `givingWayRefusals`, with what to report); the design's section 10.2.
+
+Paper trading only; research input for a human decision, never an instruction to act.

@@ -117,9 +117,15 @@ export interface BudgetMinute {
   // reserve against the minute only, design 3.2). Above 15 only if a try overdrew, or a request came after its try ended.
   mostCappedIn5s: number;
   givingWayRefusals: number;
+  // Michael's approval of 2026-11-15 (logging only): P2's hold for a waiting ordinary stuck retry ("rechecks leave room"), this minute.
+  // `started`: refused looks or tries of such a retry that set the hold while it was not in force; `renewed`: those that renewed it while
+  // in force (both counted where the hold is set, so `roomFor` looks count as well as `tryReserve` tries). `inForceMs`: the milliseconds of
+  // the minute the hold was in force, up to its end (not up to the read). `p2Refused`: P2 tries (`tryReserve` only, as `refused` counts them)
+  // refused that would have been granted without the hold; each is also counted once in `refused.class` or `refused.five`.
+  retryHold: { started: number; renewed: number; inForceMs: number; p2Refused: number };
 }
 
-const emptyMinute = (): BudgetMinute => ({ sent: { entry: 0, first: 0, P1: 0, P2: 0, routine: 0, clock: 0 }, granted: 0, refused: { minute: 0, five: 0, class: 0, floor: 0 }, forced: 0, overdrafts: 0, sentAfterEnd: 0, mostBudgetedInMinute: 0, mostBudgetedIn5s: 0, mostCappedIn5s: 0, givingWayRefusals: 0 });
+const emptyMinute = (): BudgetMinute => ({ sent: { entry: 0, first: 0, P1: 0, P2: 0, routine: 0, clock: 0 }, granted: 0, refused: { minute: 0, five: 0, class: 0, floor: 0 }, forced: 0, overdrafts: 0, sentAfterEnd: 0, mostBudgetedInMinute: 0, mostBudgetedIn5s: 0, mostCappedIn5s: 0, givingWayRefusals: 0, retryHold: { started: 0, renewed: 0, inForceMs: 0, p2Refused: 0 } });
 
 export class RequestBudget {
   readonly nowMs: () => number;
@@ -133,6 +139,10 @@ export class RequestBudget {
   private retryWaitUntil = 0;
   private retryWaitRoom = Infinity;
   private retryWaitFive = Infinity;
+  // Statistics only (Michael's approval of 2026-11-15): the time up to which the hold's time in force has been counted, and whether the
+  // last refusal `refusal` returned was a P2 refusal that only the hold caused. Neither is read by any decision.
+  private holdCountedTo = 0;
+  private lastRefusalHeldOnly = false;
   private readonly open = new Set<Reservation>();
   private readonly floorWaits = new Map<string, number>();
   private minute = emptyMinute();
@@ -180,6 +190,7 @@ export class RequestBudget {
       const refusal = this.refusal(cls, size, fiveSec, now, 0, opts.minuteCap);
       if (refusal) {
         this.minute.refused[refusal.why]++;
+        if (this.lastRefusalHeldOnly) this.minute.retryHold.p2Refused++; // statistics only
         if (cls === "P2" && refusal.why === "floor" && opts.waitKey) this.floorWaits.set(opts.waitKey, now + GIVE_WAY_MAX_MS);
         // Group 2, round 4 of the redesign: refused for another reason (the minute, the 5 seconds, P2's share), entries giving way would not
         // help, so a floor wait it had is dropped (decision 5: entries give way only while a P2 try waits on the 80).
@@ -233,13 +244,25 @@ export class RequestBudget {
     }
     if (why === null) return null;
     const when = Math.max(now + 1, ...at);
+    // Statistics only: a P2 refusal the hold alone caused (P2's usual share, the 15 in 5 seconds and the floor would all have let it in).
+    this.lastRefusalHeldOnly = cls === "P2" && holding && u.minute + u.unsentMinute + n <= Math.min(BUDGET_PER_MINUTE - P1_KEEP, minuteCap ?? Infinity) && (!fiveSec || u.five + u.unsentFive + n <= BUDGET_PER_5S) && left >= floor;
     // The hold lasts until the retry looks again (when room may return, plus a moment), and at least RETRY_WAIT_HOLD_MS; each look renews it.
     if (holdForRetry && minuteCap !== undefined) {
+      this.countHold(now); // statistics only
+      if (holding) this.minute.retryHold.renewed++;
+      else this.minute.retryHold.started++;
       this.retryWaitUntil = Math.max(this.retryWaitUntil, now + RETRY_WAIT_HOLD_MS, when + 500);
       this.retryWaitRoom = minuteCap - n;
       this.retryWaitFive = BUDGET_PER_5S - n;
     }
     return { ok: false, at: when, why };
+  }
+
+  // Statistics only: adds the time the hold was in force since it was last counted, up to `now` or the hold's end, whichever is first.
+  private countHold(now: number): void {
+    const end = Math.min(now, this.retryWaitUntil);
+    if (end > this.holdCountedTo) this.minute.retryHold.inForceMs += end - this.holdCountedTo;
+    if (now > this.holdCountedTo) this.holdCountedTo = now;
   }
 
 
@@ -335,6 +358,7 @@ export class RequestBudget {
 
   // The statistics since the last call (the worker's per-minute `governor_stats`).
   takeMinute(): BudgetMinute & { inUseNow: ReturnType<RequestBudget["inUse"]> } {
+    this.countHold(this.nowMs()); // statistics only
     const out = { ...this.minute, inUseNow: this.inUse() };
     this.minute = emptyMinute();
     return out;

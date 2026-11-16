@@ -66,6 +66,32 @@ These are estimates. They assume each refused try takes about 1.5 s in the sale 
 
 Both together give the shortest waits, but each should be built and reviewed on its own.
 
+## Two more items (Michael, 2026-11-15)
+
+Michael's words: "For the speed proposal after Monday: add fair turn-taking among stuck positions (with 5 stuck, one waited up to 257 s, worse than v22's 171 s) and clearing the hold as soon as the stuck retry gets in." No code yet for either.
+
+### 3. Fair turn-taking among stuck positions
+
+**Today.** The sync's walk takes stuck positions longest-waiting first (Michael's decision of 2026-11-09). Since part 2 of the redesign each position's retry is also woken on its own by the protection loop, as soon as the budget has room. Inferred from the code and the test sweeps, not measured live: when room comes back, whichever position's look runs first takes it, so under steady low-priority work one position can lose several times in a row.
+
+**The figures behind it.** 257 s is the longest single wait in one run of group 1's rulings round 3 sweep (5 stuck, with low-priority load). Group 1's round 4 sweep on the same code gave 101 to 125 s. The earlier release v22 gave 125 to 171 s in its own test of 5 stuck positions, a different test shape. So the redesign is sometimes worse than v22 for the unluckiest position and sometimes better. Over an hour the turns balance out.
+
+**The change.** When room comes back, give it to the stuck position that has waited longest since its last try, and make the others wait their turn even if their own look runs first. Measure it by the longest wait for any one position, not the average.
+
+**What it risks.** It changes only the order of retries, not how many run or how much of the budget they use. A position that cannot be sold (for example, Alpaca still holds its shares) must not keep the turn and block the others, so after its try it goes to the back of the queue.
+
+**The expected effect, an estimate.** The longest wait comes close to the average in the table above: about 75 s for 5 stuck today, about 20 s with option 1. The test sweeps would confirm it, using the longest wait per position at 2, 5 and 10 stuck, with and without low-priority load.
+
+### 4. Clearing the hold as soon as the stuck retry gets in
+
+**Today.** While an ordinary stuck retry waits for room that low-priority work (P2: the list-lag rechecks and a confirmed fresh stop's periodic lookup) is taking, P2 is held to 35 of the minute and 5 in any 5 seconds. The hold lasts until the retry's next look plus 0.5 s, and at least 2.5 s. Each refused look renews it. It can outlast a retry that got in, by up to about 60 s (a note group 1 and group 2 carried through rulings rounds 6 and 7). During that time P2 is held back for nothing.
+
+**The change.** End the hold when the retry it was set for is granted or its position resolves. With several stuck positions, the hold has to know which retries it is holding for: it would end only when none of them is still waiting, so one retry getting in does not take the hold from another that still needs it.
+
+**What it risks.** Small, and only for P2. If the hold ends too early, a waiting retry can lose its room to P2 again, which is the case the hold exists for. The tests would need the case "retry A gets in while retry B still waits".
+
+**Measured from Monday.** The hold counter Michael approved on 2026-11-15 (`governor_stats.requestBudget.retryHold`: `started`, `renewed`, `inForceMs`, `p2Refused`, per minute) shows how long the hold is in force and how many P2 tries it refuses. Its time in force set against the stuck positions' own times shows how much of the hold this change would remove.
+
 ## What Monday must measure
 
 - **Requests per stuck retry, live.** The simulator says up to 10 for a refused sale and about 4 for a hidden hold. Source: `budget_overdraft` and `governor_stats.requestBudget`, per try.
@@ -74,3 +100,5 @@ Both together give the shortest waits, but each should be built and reviewed on 
 - **How often positions get stuck, how many at once, and for how long.** Source: the stuck alerts and resolution lines.
 - **How reliable the live updates are.** Gaps and late events. Option 1 depends on them.
 - **Fly CPU.** The `self_monitor` rows, to confirm the room checks stay as small as estimated.
+- **The longest wait for any one stuck position**, not only the average, for item 3. Source: the stuck alerts, the resolution lines and the `budget_refused` lines.
+- **The hold's time in force and its P2 refusals**, for item 4. Source: `governor_stats.requestBudget.retryHold` (from the redesign deploy).
