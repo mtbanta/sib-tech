@@ -300,3 +300,101 @@ test("item 2: with the full pass running too, its own view read every 5 s is unc
   await s.run(t0 + 65_000, 1);
   assert.equal(s.w.viewBackoffMs, 0, "a success by the full pass ends the backoff");
 });
+
+// ---------------- item 7: ruling 4 (the view every 20 s) against the gate's own 15 s refresh (a measurement) ----------------
+
+// Runs 60 s of a load window (live updates connected) from 14:46 UTC (8:46 AM Central), with prints every 0.1 s across 30 names when
+// `withEntries` (none otherwise), the full pass every 5 s and the timed pass every second; returns every view read with its source.
+async function viewReads(withEntries: boolean) {
+  const symbols = Array.from({ length: 30 }, (_, i) => `S${String(i).padStart(2, "0")}`);
+  const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
+  const r: any = rig({ broker: sim, sleep: sim.sleep, simClock: sim, orderStream: true, liveList: symbols });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("load on\nposition 400\nloss 5000\ntrades 150\ncap 1", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:15:00");
+  sim.clockOpen = true;
+  await r.at("14:25:00");
+  await r.at("14:45:00");
+  const w: any = r.worker;
+  const where = { now: "other" };
+  const reads: Array<{ t: number; from: string }> = [];
+  const rf = w.view.refreshFast.bind(w.view);
+  w.view.refreshFast = async () => (reads.push({ t: sim.simMs, from: where.now }), rf());
+  const snap = w.view.snapshot.bind(w.view);
+  w.view.snapshot = async (limits: unknown) => {
+    const was = where.now;
+    where.now = "gate";
+    try { return await snap(limits); } finally { where.now = was; }
+  };
+  const fresh = w.view.freshPositions.bind(w.view);
+  w.view.freshPositions = async (maxAgeMs: number) => {
+    const was = where.now;
+    where.now = "carried-position scan";
+    try { return await fresh(maxAgeMs); } finally { where.now = was; }
+  };
+  // The stored per-minute counts (governor_stats.viewReads), summed over the run.
+  const stored = { gate: 0, freshPositions: 0, worker: 0, failed: 0 };
+  const take = w.view.takeReadCounts.bind(w.view);
+  take();
+  w.view.takeReadCounts = () => {
+    const c = take();
+    for (const k of Object.keys(stored) as Array<keyof typeof stored>) stored[k] += c[k];
+    return c;
+  };
+  let entries = 0;
+  const realSubmit = sim.submitEntry.bind(sim);
+  sim.submitEntry = async (e: any) => (entries++, realSubmit(e));
+  const price = symbols.map((_, i) => 10 + i * 0.5);
+  const t0 = Date.UTC(2026, 10, 2, 14, 46);
+  const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((x) => setImmediate(x)); };
+  for (let ms = 0; ms <= 60_000; ms += 100) {
+    const t = t0 + ms;
+    const iso = new Date(t).toISOString();
+    if (ms % 5_000 === 0) {
+      where.now = "full pass";
+      await r.at(iso);
+      where.now = "other";
+    }
+    if (ms % 1_000 === 0) {
+      r.setNow(iso);
+      where.now = "timed pass";
+      await w.timedTick();
+      where.now = "other";
+      await settle();
+    }
+    if (!withEntries) continue;
+    const i = (ms / 100) % symbols.length;
+    price[i] = Math.round((price[i]! + (ms % 300 === 0 ? 0.01 : -0.01)) * 100) / 100;
+    sim.prices.set(symbols[i]!, price[i]!);
+    await r.trade(symbols[i]!, price[i]!, iso);
+  }
+  w.view.takeReadCounts();
+  const from = (f: string) => reads.filter((x) => x.from === f).length;
+  const gaps = reads.slice(1).map((x, i) => Math.round((x.t - reads[i]!.t) / 100) / 10);
+  const line = `${entries} entries sent; ${reads.length} view reads (gate ${from("gate")}, timed pass ${from("timed pass")}, carried-position scan ${from("carried-position scan")}, full pass's own ${from("full pass")}, other ${from("other")}); at +${reads.map((x) => (x.t - t0) / 1000).join(", +")} s; gaps ${gaps.join(", ")} s`;
+  return { entries, reads, from, gaps, line, stored, live: w.orderStreamLive() as boolean };
+}
+
+test("item 7 (measured): entries flowing for 60 s on a load window with the live updates connected: the view is read about every 15 s, by the gate inside entry decisions and by the 30 s carried-position scan, not every 20 s", { timeout: 120_000 }, async () => {
+  const m = await viewReads(true);
+  console.log(`item 7, with entries: ${m.line}`);
+  assert.ok(m.live, "the live updates connected");
+  assert.ok(m.entries >= 30, `entries flowed: ${m.entries}`);
+  // What it shows (not a rule the code must keep): the gate's 15 s limit (VIEW.fastMs in gate.ts) reads the view inside an entry decision
+  // before the timed pass's 20 s (19.5 s) comes due, and the carried-position scan (every 30 s, a view no older than 10 s) reads it too.
+  assert.ok(m.from("gate") >= 1, "the gate reads the view inside entry decisions");
+  assert.equal(m.from("timed pass"), 0, "the timed pass's 20 s never comes due");
+  assert.ok(m.reads.length >= 4 && m.reads.length <= 5, `about every 15 s: ${m.reads.length} reads in 60 s`);
+  assert.ok(m.gaps.every((g) => g >= 14 && g < 20), `gaps about 15 s: ${m.gaps.join(", ")}`);
+  // The stored counts say the same, by who asked (logging only).
+  assert.deepEqual(m.stored, { gate: m.from("gate"), freshPositions: m.from("carried-position scan"), worker: m.from("timed pass") + m.from("full pass") + m.from("other"), failed: 0 });
+});
+
+test("item 7 (measured): the same 60 s without entries: the view is read every 20 s (here by the full pass and the carried-position scan, which run first at the same moment as the timed pass)", { timeout: 120_000 }, async () => {
+  const m = await viewReads(false);
+  console.log(`item 7, without entries: ${m.line}`);
+  assert.equal(m.entries, 0);
+  assert.equal(m.from("gate"), 0);
+  assert.ok(m.gaps.length >= 2 && m.gaps.every((g) => g >= 19.5 && g <= 20), `every 20 s: ${m.gaps.join(", ")}`);
+});
