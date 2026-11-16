@@ -250,6 +250,19 @@ async function viewSession() {
     where.now = "timed pass";
     try { return await timed(); } finally { where.now = "other"; }
   };
+  // The carried-position scan's read (every 30 s, a view no older than 10 s) runs inside the full pass; told apart here.
+  const fresh = w.view.freshPositions.bind(w.view);
+  w.view.freshPositions = async (maxAgeMs: number) => {
+    const was = where.now;
+    where.now = "carried-position scan";
+    try { return await fresh(maxAgeMs); } finally { where.now = was; }
+  };
+  const syncs: number[] = [];
+  const origSync = w.startSync.bind(w);
+  w.startSync = (...a: unknown[]) => {
+    if (w.backgroundReady("risk")) syncs.push(sim.simMs);
+    return origSync(...a);
+  };
   const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((x) => setImmediate(x)); };
   // One second at a time from `fromMs`: the timed pass every second, and the full pass every 5 s when `full`.
   const run = async (fromMs: number, seconds: number, full = false) => {
@@ -265,7 +278,7 @@ async function viewSession() {
     }
   };
   const rows = () => logs.filter((l) => l.level === "warn" && l.event === "timed_pass_failed");
-  return { r, sim, w, fail, reads, where, run, rows, logs };
+  return { r, sim, w, fail, reads, where, run, rows, logs, syncs };
 }
 
 test("item 2: the backoff constants are 5 s doubling to 30 s", () => {
@@ -285,6 +298,10 @@ test("item 2: with the view read failing for 60 s, the timed pass reads at 5, 10
   assert.deepEqual(timed.map((x) => x.t - t0), [1_000, 6_000, 16_000, 36_000], "after 5, 10 and 20 s (the next, 30 s later, falls after the 60 s)");
   assert.equal(s.rows().length, 4, "one row per backoff step");
   assert.deepEqual(s.rows().map((x) => x.data?.retryInMs), [5_000, 10_000, 20_000, 30_000]);
+  // The order sync keeps its 6 s through the backoff (only the view is skipped).
+  const during = s.syncs.filter((t) => t > t0 && t <= t0 + 60_000);
+  const syncGaps = during.slice(1).map((t, i) => t - during[i]!);
+  assert.ok(syncGaps.length >= 8 && syncGaps.every((g) => g === 6_000), `syncs every 6 s during the backoff: ${syncGaps.join(", ")}`);
   // Success: the read at +66 s succeeds and resets the backoff; a later failure starts again at 5 s.
   s.fail.on = false;
   await s.run(t0 + 60_000, 10);
@@ -310,14 +327,15 @@ test("item 2: with the full pass running too, its own view read every 5 s is unc
   await s.run(t0, 60, true);
   const timed = s.reads.filter((x) => x.from === "timed pass").length;
   const full = s.reads.filter((x) => x.from === "full pass").length;
-  console.log(`item 2, timed and full pass, 60 s failing: ${s.reads.length} reads (timed pass ${timed}, full pass ${full}, other ${s.reads.length - timed - full}), ${s.rows().length} timed_pass_failed rows`);
+  const scan = s.reads.filter((x) => x.from === "carried-position scan").length;
+  console.log(`item 2, timed and full pass, 60 s failing: ${s.reads.length} reads (timed pass ${timed}, full pass's own view read ${full}, carried-position scan ${scan}, other ${s.reads.length - timed - full - scan}), ${s.rows().length} timed_pass_failed rows`);
   assert.ok(timed <= 4, `timed pass reads: ${timed}`);
-  assert.ok(full >= 12, `the full pass still reads on each of its 12 passes while the view is stale (unchanged code): ${full}`);
+  assert.equal(full, 12, "the full pass reads its own view on each of its 12 passes while the view is stale, as on 20ba5bd");
   assert.ok(s.rows().length <= 4, `rows: ${s.rows().length}`);
   // The full pass's next read succeeds: the timed pass's backoff ends with it.
   s.fail.on = false;
   await s.run(t0 + 60_000, 5, true);
-  assert.ok(s.reads.some((x) => x.from === "full pass" && !x.failed));
+  assert.ok(s.reads.some((x) => x.from !== "timed pass" && !x.failed), "a read by the full pass succeeded");
   await s.run(t0 + 65_000, 1);
   assert.equal(s.w.viewBackoffMs, 0, "a success by the full pass ends the backoff");
 });
