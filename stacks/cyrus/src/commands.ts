@@ -6,7 +6,7 @@ import type { DiscordBot, DiscordMessage } from "./discord-bot.ts";
 import { isOwnerCommand } from "./discord-bot.ts";
 import type { Settings } from "./config.ts";
 import { decideLimits, decideLoad, limitLines, parseCommand, type NextSessionFinder } from "./morning.ts";
-import { AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_AFTERNOON_PHASE, LOAD_MAX_POSITION_USD, LOAD_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, beforeLoadWindow, inAfternoonLoad, isLoadDay, loadLine, loadWindow, loadWindowRules } from "./load-mode.ts";
+import { AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_AFTERNOON_ENDED_EARLY_PHASE, LOAD_AFTERNOON_PHASE, LOAD_AFTERNOON_PREVIOUS_PHASE, LOAD_MAX_POSITION_USD, LOAD_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, afternoonMayStartAgain, beforeLoadWindow, inAfternoonLoad, isLoadDay, loadLine, loadWindow, loadWindowRules } from "./load-mode.ts";
 import type { Liquidator, Say } from "./sells.ts";
 import { inRequestScope } from "./request-scope.ts";
 import { CONTROL_COMMAND_CURSOR, CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
@@ -53,7 +53,8 @@ export function loadAfternoonRefusal(o: { day: DayRecord | null; now: Date; paus
   const times = o.day ? middayTimes(o.day) : null;
   if (!o.day || !times) return "there is no mid-day cycle today";
   if (o.day.status !== "approved" || !o.day.phases.armed) return "today is not approved and armed";
-  if (afternoonLoadStart(o.day)) return "the afternoon load window was already started today";
+  // Michael's request of 2026-11-17: once a day, unless his own stop or flatten ended the window early (then it may start again).
+  if (afternoonLoadStart(o.day) && !afternoonMayStartAgain(o.day)) return "the afternoon load window was already started today, and only your `stop` or `flatten` during it lets it start again";
   if (o.now >= times.resumeUntil) return `it is ${centralClock(times.resumeUntil)} or later (\`load afternoon\` is accepted only before then)`;
   if (plainStop(o.stop)) {
     if (!middayFlat(o.day)) return "the mid-day close-out has not finished flat yet";
@@ -329,6 +330,7 @@ export class CommandProcessor {
         // during the save is already cancelled (it says nothing) and this reply keeps its cancel line.
         const screenCancelled = this.d.cancelAfternoonScreen?.(etDate(now)) ?? false;
         const saved = await this.trySetStop(true, "owner command (stop)", now);
+        if (saved) await this.markAfternoonEndedEarly(now, "stop");
         let n = 0;
         let cancelFailed = false;
         try {
@@ -357,6 +359,7 @@ export class CommandProcessor {
       case "flatten": {
         const screenCancelled = this.d.cancelAfternoonScreen?.(etDate(now)) ?? false; // before the stop's save, as for `stop`
         const saved = await this.trySetStop(true, "owner command (flatten)", now);
+        if (saved) await this.markAfternoonEndedEarly(now, "flatten");
         // The sale can take a while (it waits for cancels). It runs in the background so the next command, the heartbeat
         // and the rest of the pass are not held up; the reply follows when it is done.
         const task = (async () => {
@@ -695,20 +698,38 @@ export class CommandProcessor {
     return { day, pause, stop, notFlat, positions, openOrders, ...(equity !== undefined ? { equity } : {}) };
   }
 
+  // Michael's request of 2026-11-17: his `stop` or `flatten` while the afternoon load window is on is written down (a day phase), so
+  // `load afternoon` may start it again today (still only while flat, before 1:30 PM). A failed read or write only means it cannot start
+  // again (the safe side); the stop itself is already saved.
+  private async markAfternoonEndedEarly(now: Date, by: "stop" | "flatten"): Promise<void> {
+    try {
+      const date = etDate(now);
+      const day = await this.d.store.getDay(date);
+      if (!inAfternoonLoad(day, now)) return;
+      await setPhase(this.d.store, date, LOAD_AFTERNOON_ENDED_EARLY_PHASE, now.toISOString());
+      this.d.log?.("load_afternoon_ended_early", { date, by });
+    } catch {
+      /* the window then cannot start again today; nothing else depends on it */
+    }
+  }
+
   // Writes the window's start and ends the pause, then says so.
   private async startAfternoonWindow(date: string, r: { switched: boolean; list: string[] }, facts: Awaited<ReturnType<CommandProcessor["afternoonFacts"]>>, at: Date): Promise<void> {
     // Michael's ruling of 2026-11-12 (afternoon): accepted with his own stop on (flat, checked by loadAfternoonRefusal), it clears the
     // stop with the same write `resume` makes. The window's phase is written first, so a failed clear leaves entries stopped (safe).
     const clearsStop = plainStop(facts.stop);
-    await setPhase(this.d.store, date, LOAD_AFTERNOON_PHASE, at.toISOString());
+    // Michael's request of 2026-11-17: a window starting again (the earlier one ended early by his stop or flatten) keeps the earlier start
+    // in its own phase and clears the earlier window's flat mark in the same write, so its own close-out runs when it ends.
+    const previous = afternoonLoadStart(facts.day);
+    await setPhase(this.d.store, date, LOAD_AFTERNOON_PHASE, at.toISOString(), previous ? { [LOAD_AFTERNOON_PREVIOUS_PHASE]: previous.toISOString(), [AFTERNOON_FLAT_PHASE]: "" } : {});
     await updatePause(this.d.store, date, { on: false, resumedAt: at.toISOString(), resumedBy: "load afternoon" });
     if (clearsStop) await this.setStop(false, "owner command (load afternoon)", at);
-    this.d.log?.("load_afternoon", { date, switched: r.switched, symbols: r.list.length, clearedStop: clearsStop });
+    this.d.log?.("load_afternoon", { date, switched: r.switched, symbols: r.list.length, clearedStop: clearsStop, ...(previous ? { again: true, previousStart: previous.toISOString() } : {}) });
     const day = facts.day!;
     const end = afternoonLoadWindow({ ...day, phases: { ...day.phases, [LOAD_AFTERNOON_PHASE]: at.toISOString() } })?.end ?? middayTimes(day)!.lastEntryAt;
     const closeoutAt = day.closeAt ? centralClock(addMinutes(day.closeAt, -this.d.settings.closeoutMinutesBeforeClose)) : "the usual time";
     await this.say(
-      `Afternoon load window on until ${centralClock(end)}: ${loadWindowRules()}; at most ${LOAD_MAX_POSITION_USD} dollars a position and up to ${MAX_TRADES_PER_MINUTE_LOAD_DAY} orders a minute (your ruling, this window only). ${r.switched ? `The live list is now ${r.list.length} cheap names (posted in trading). ` : ""}${clearsStop ? (facts.pause?.on ? "Stop cleared, and the mid-day pause is over: trading resumed. " : "Stop cleared: trading resumed. ") : "Resumed: the mid-day pause is over. "}At ${centralClock(end)} entries pause and a close-out sells to flat; trading does not resume on its own after it. The loss stop counts from the open; the regular close-out runs at ${closeoutAt}.`,
+      `${previous ? "Afternoon load window on again (the earlier one ended early by your stop or flatten) " : "Afternoon load window on "}until ${centralClock(end)}: ${loadWindowRules()}; at most ${LOAD_MAX_POSITION_USD} dollars a position and up to ${MAX_TRADES_PER_MINUTE_LOAD_DAY} orders a minute (your ruling, this window only). ${r.switched ? `The live list is now ${r.list.length} cheap names (posted in trading). ` : ""}${clearsStop ? (facts.pause?.on ? "Stop cleared, and the mid-day pause is over: trading resumed. " : "Stop cleared: trading resumed. ") : "Resumed: the mid-day pause is over. "}At ${centralClock(end)} entries pause and a close-out sells to flat; trading does not resume on its own after it. The loss stop counts from the open; the regular close-out runs at ${closeoutAt}.`,
     );
   }
 

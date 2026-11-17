@@ -111,6 +111,21 @@ export function inAfternoonLoad(day: AfternoonDay | null | undefined, t: Date): 
   return !!w && t >= w.start && t < w.end;
 }
 
+// MICHAEL'S REQUEST OF 2026-11-17 (about 11:00 AM): "allow load afternoon to start again the same day if the earlier window ended early by
+// my stop or flatten (still only while flat, before 1:30 PM)". Day phase: when Michael's own `stop` or `flatten` came while the afternoon
+// load window was on (its time). The previous window's start is kept in LOAD_AFTERNOON_PREVIOUS_PHASE when it starts again.
+export const LOAD_AFTERNOON_ENDED_EARLY_PHASE = "loadAfternoonEndedEarly";
+export const LOAD_AFTERNOON_PREVIOUS_PHASE = "loadAfternoonPrevious";
+// The window started today may start again: Michael's stop or flatten came while it was on (at or after its start, before its end).
+// Every other condition of `load afternoon` (flat, before 1:30 PM, not after the daily loss stop) still applies (loadAfternoonRefusal).
+export function afternoonMayStartAgain(day: AfternoonDay | null | undefined): boolean {
+  const w = afternoonLoadWindow(day);
+  const v = day?.phases?.[LOAD_AFTERNOON_ENDED_EARLY_PHASE];
+  if (!w || typeof v !== "string") return false;
+  const t = new Date(v);
+  return !Number.isNaN(t.getTime()) && t >= w.start && t < w.end;
+}
+
 // Load-day entries (1 share, a limit buy) may be sent today: a load day, or a day whose afternoon load window was started.
 export const hasLoadEntries = (day: Pick<DayRecord, "phases"> | null | undefined): boolean => isLoadDay(day) || afternoonLoadStart(day) !== null;
 

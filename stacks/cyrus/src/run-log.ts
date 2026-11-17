@@ -56,6 +56,7 @@ export const STORED_INFO_EVENTS = new Set([
   "fresh_stop_lookup_failed",
   // The same release: the afternoon load window's start and its 30 minute close-out, and symbols the screen dropped as not tradable.
   "load_afternoon",
+  "load_afternoon_ended_early", // Michael's request of 2026-11-17: his stop or flatten during the window (it may start again)
   "afternoon_closeout",
   "screen_not_tradable",
   // Item 2 of 2026-11-13 (group 2, round 1 of the weekend build): the timed-out stop's status checks and end, a try that waited for room in

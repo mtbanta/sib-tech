@@ -323,7 +323,8 @@ export class Worker {
   private middayFiveMinAlertDate: string | null = null;
   // True from 10:30 until the mid-day close-out has finished flat (set on every pass): the mid-day close-out alone sells then.
   private middayOwnsSelling = false;
-  // The close-out after the afternoon load window (Michael, 2026-11-12).
+  // The close-out after the afternoon load window (Michael, 2026-11-12). Since Michael's request of 2026-11-17 the "date" fields hold the
+  // window's key (the date and the window's start), as the window may start again the same day.
   private lastAfternoonAttempt = 0;
   private afternoonAttemptDate: string | null = null;
   private afternoonAttempts = 0;
@@ -1214,9 +1215,12 @@ export class Worker {
     // first), entries pause again and the mid-day close-out code sells everything, retried 20 seconds apart (longer while nothing sells, at
     // most a minute; item 3 of 2026-11-13) within the same 60 requests
     // a minute and above the reserve, until flat. Never from the regular close-out time on (that close-out takes over). Its own phase.
-    if (afternoonCloseoutDue && !this.closingOut && !this.inflight.has("carried") && !this.inflight.has("midday") && now.getTime() - this.lastAfternoonAttempt >= (this.afternoonAttemptDate === date ? this.afternoonProgress.gapMs(MIDDAY_RETRY_MS, 60_000, this.afternoonLastRemaining.length) : 0)) {
-      if (this.afternoonAttemptDate !== date) {
-        this.afternoonAttemptDate = date;
+    // Michael's request of 2026-11-17 (the window may start again the same day): the close-out's tries and its alert are counted per window
+    // (the date and the window's start), so a second window's close-out starts with a first try and can alert again.
+    const afternoonKey = `${date}|${afternoonLoadStart(current)?.toISOString() ?? ""}`;
+    if (afternoonCloseoutDue && !this.closingOut && !this.inflight.has("carried") && !this.inflight.has("midday") && now.getTime() - this.lastAfternoonAttempt >= (this.afternoonAttemptDate === afternoonKey ? this.afternoonProgress.gapMs(MIDDAY_RETRY_MS, 60_000, this.afternoonLastRemaining.length) : 0)) {
+      if (this.afternoonAttemptDate !== afternoonKey) {
+        this.afternoonAttemptDate = afternoonKey;
         this.afternoonAttempts = 0;
         this.afternoonLastCost = null;
         this.afternoonLastRemaining = [];
@@ -1995,8 +1999,8 @@ export class Worker {
       return;
     }
     this.afternoonLastRemaining = result.remaining;
-    if (this.afternoonAlertDate !== date) {
-      this.afternoonAlertDate = date;
+    if (this.afternoonAlertDate !== this.afternoonAttemptDate) {
+      this.afternoonAlertDate = this.afternoonAttemptDate; // once a window (its date and start; Michael's request of 2026-11-17)
       await this.say("alerts", `**Michael: the close-out after the afternoon load window is NOT FLAT yet: ${result.remaining.length > 0 ? result.remaining.join(", ") : "the positions could not be listed"}.** New entries stay paused. I keep trying (20 seconds apart, longer while nothing sells, at most a minute) within 60 Alpaca requests a minute; the regular close-out takes over at its time.`, { mentionOwner: true });
     }
   }

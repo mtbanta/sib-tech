@@ -104,7 +104,7 @@ test("every refusal of `load afternoon`: no cycle, not armed, already on, 1:30 P
   assert.equal(loadAfternoonRefusal({ ...ok, day: null }), "there is no mid-day cycle today");
   assert.equal(loadAfternoonRefusal({ ...ok, day: { ...flatDay, status: "pending" } as DayRecord }), "today is not approved and armed");
   assert.equal(loadAfternoonRefusal({ ...ok, day: { ...flatDay, phases: { ...flatDay.phases, armed: undefined } } as unknown as DayRecord }), "today is not approved and armed");
-  assert.equal(loadAfternoonRefusal({ ...ok, day: dayWith({ [MIDDAY_PHASE]: "x", middayFlat: "yes", [LOAD_AFTERNOON_PHASE]: z("16:35:00").toISOString() }) }), "the afternoon load window was already started today");
+  assert.equal(loadAfternoonRefusal({ ...ok, day: dayWith({ [MIDDAY_PHASE]: "x", middayFlat: "yes", [LOAD_AFTERNOON_PHASE]: z("16:35:00").toISOString() }) }), "the afternoon load window was already started today, and only your `stop` or `flatten` during it lets it start again");
   assert.equal(loadAfternoonRefusal({ ...ok, pause: null }), "trading is not paused for the mid-day cycle");
   assert.equal(loadAfternoonRefusal({ ...ok, pause: { ...paused, on: false, resumedAt: z("16:35:00").toISOString(), resumedBy: "go" } }), "trading has already resumed today");
   assert.equal(loadAfternoonRefusal({ ...ok, day: dayWith({}) }), "the mid-day close-out has not finished flat yet");
@@ -152,7 +152,7 @@ test("on a normal morning, `load afternoon` while flat and paused runs the cheap
   assert.ok(r.said("trading").some((t) => t.startsWith("Live list switched to 2 cheap, heavily traded names for the afternoon load window.")));
   r.ownerSays("load afternoon", "16:41:00");
   await r.at("16:41:05");
-  assert.ok(r.said("commands").some((t) => t === "Not started: the afternoon load window was already started today."));
+  assert.ok(r.said("commands").some((t) => t === "Not started: the afternoon load window was already started today, and only your `stop` or `flatten` during it lets it start again."));
   assert.equal(r.screenOpts.filter((o) => o?.load).length, 1, "no second screen");
 });
 
