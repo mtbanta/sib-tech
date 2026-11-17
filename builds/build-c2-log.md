@@ -7030,3 +7030,9 @@ Traced on v26 (`95fc178`; v27's code is v26 plus the close-out alert, which this
 **Group 2 on the brief text written after the v28 deploy (`4257738`), round 1: CHANGES REQUIRED, fixed.** (1) "v28 ran the whole session" was claimed before the session ran, while item 3 targets the mid-day pause: now "Armed and the whole load window", with the latest `worker_started` row for the afternoon, in all three places, and the close-out bullet says a later row may follow; (2) the mid-day brief's Tuesday conditionals resolved for Tuesday (v28 ran the window: expect a higher fill rate and a lower entry-tag ratio, the 1.15 estimate applies as an estimate to test, the comparison is Monday on v23 against the night build plus the plus-1-cent entries). Notes: a redundant "both before the open" dropped; the CLAUDE.md citation gives the full heading; "If the release was deployed later"; PROJECT_STATE's current paragraph repeats the mid-day wait.
 
 **Group 2, round 2 on the brief fixes after the v28 deploy (`328b188`): PASS.** Its note on the item 3 section: the one L1 result file that differed from v26 byte for byte differs only in fields other than the measures; on every measure the bar uses (each seed's sale times, unsold count, rate-limit answers and time to flat), all 10 of L1's files equal v26's.
+
+## Michael's answer on the stuck retries' ceiling (2026-11-17, about 7:35 AM), saved verbatim
+
+> Yes, raise it to 60 if the bar passes; build it now.
+
+So `STUCK_RETRY_MINUTE_CAP` goes from 45 to 60 (the whole budgeted minute), built now, measured on its own against the bar (no worse than v24 apart from the 7 accepted cases, and no worse than v26 anywhere), both groups, for the mid-day pause with his written yes for the deploy.
