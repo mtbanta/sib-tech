@@ -37,6 +37,14 @@ export const GIVE_WAY_MAX_MS = 2_000;
 // for that retry (its share is in effect 45 less the retry's size, 35, instead of 40), until the retry looks again (when room may return)
 // and at least this long; each refused look of the retry renews it.
 export const RETRY_WAIT_HOLD_MS = 2_500;
+// Item 3 of the night build (Michael's request of 2026-11-16, about 8:50 PM, decision 4 changed: "First tries: paced, not exempt; they wait
+// only for Alpaca's requests to refill, at most about 3 s"). A first try waits before it starts, sending nothing, while Alpaca's remaining
+// requests less the room budgeted tries hold unsent less what the try can send are below the urgent floor of 20 (P1_FLOOR, the floor every
+// P1 try already keeps): 0.25 s doubling to 1 s, at most FIRST_TRY_WAIT_MAX_MS in all, then it goes ahead whatever the room. A one-entry
+// first try's wait ends at once when a sale of the whole account is asked (`wakeFirstWaiters`). It is still counted, never refused.
+export const FIRST_TRY_WAIT_MAX_MS = 3_000;
+// What a one-entry first try can send: a missing-exit or remainder sale's 3 rounds (measured on 2026-11-16: 25), and the fast sale.
+export const FIRST_TRY_MOST = 25;
 const REFILL_PER_MS = ALPACA_REQUESTS_PER_MINUTE / 60_000;
 
 export type Refusal = { ok: false; at: number; why: "minute" | "five" | "class" | "floor" };
@@ -123,9 +131,12 @@ export interface BudgetMinute {
   // the minute the hold was in force, up to its end (not up to the read). `p2Refused`: P2 tries (`tryReserve` only, as `refused` counts them)
   // refused that would have been granted without the hold; each is also counted once in `refused.class` or `refused.five`.
   retryHold: { started: number; renewed: number; inForceMs: number; p2Refused: number };
+  // Item 3 of the night build (logging only): first tries that waited for room this minute, and their total wait in ms.
+  firstPaced: number;
+  firstPacedMs: number;
 }
 
-const emptyMinute = (): BudgetMinute => ({ sent: { entry: 0, first: 0, P1: 0, P2: 0, routine: 0, clock: 0 }, granted: 0, refused: { minute: 0, five: 0, class: 0, floor: 0 }, forced: 0, overdrafts: 0, sentAfterEnd: 0, mostBudgetedInMinute: 0, mostBudgetedIn5s: 0, mostCappedIn5s: 0, givingWayRefusals: 0, retryHold: { started: 0, renewed: 0, inForceMs: 0, p2Refused: 0 } });
+const emptyMinute = (): BudgetMinute => ({ sent: { entry: 0, first: 0, P1: 0, P2: 0, routine: 0, clock: 0 }, granted: 0, refused: { minute: 0, five: 0, class: 0, floor: 0 }, forced: 0, overdrafts: 0, sentAfterEnd: 0, mostBudgetedInMinute: 0, mostBudgetedIn5s: 0, mostCappedIn5s: 0, givingWayRefusals: 0, retryHold: { started: 0, renewed: 0, inForceMs: 0, p2Refused: 0 }, firstPaced: 0, firstPacedMs: 0 });
 
 export class RequestBudget {
   readonly nowMs: () => number;
@@ -288,6 +299,44 @@ export class RequestBudget {
   first(label: string): Reservation {
     return new Reservation(this, null, Infinity, label, false);
   }
+
+  // Item 3 of the night build: room for a first try of `n` requests above the urgent floor (no request; the governor's estimate).
+  firstRoom(n: number): boolean {
+    return this.remaining() - this.usage(this.nowMs()).unsentMinute - n >= P1_FLOOR;
+  }
+
+  // Item 3 of the night build: waits (sending nothing) until `firstRoom(n)`, at most FIRST_TRY_WAIT_MAX_MS, 0.25 s doubling to 1 s; a
+  // `wakeable` wait also ends when a sale of the whole account is asked. Returns how long it waited (ms). Logged when it waited.
+  async paceFirst(n: number, label: string, sleep: (ms: number) => Promise<void>, wakeable: boolean): Promise<number> {
+    const start = this.nowMs();
+    let wait = 250;
+    let woke = false;
+    while (!this.firstRoom(n) && this.nowMs() - start < FIRST_TRY_WAIT_MAX_MS && !woke) {
+      const step = Math.min(wait, FIRST_TRY_WAIT_MAX_MS - (this.nowMs() - start));
+      if (wakeable) {
+        let wake: () => void = () => {};
+        const woken = new Promise<boolean>((res) => (wake = () => res(true)));
+        this.firstWaiters.add(wake);
+        woke = await Promise.race([sleep(step).then(() => false), woken]);
+        this.firstWaiters.delete(wake);
+      } else await sleep(step);
+      wait = Math.min(wait * 2, 1_000);
+    }
+    const waited = this.nowMs() - start;
+    if (waited > 0) {
+      this.minute.firstPaced++;
+      this.minute.firstPacedMs += waited;
+      this.log?.("first_try_paced", { label, n, waitedMs: waited, room: this.firstRoom(n), woke });
+    }
+    return waited;
+  }
+
+  // Item 3 of the night build: a sale of the whole account was asked; one-entry first tries waiting for room go ahead now (they then stand
+  // aside at their turn in the sale queue, as before).
+  wakeFirstWaiters(): void {
+    for (const w of [...this.firstWaiters]) w();
+  }
+  private readonly firstWaiters = new Set<() => void>();
 
   recordSend(r: Reservation, path: string): void {
     if (separateBucket(path)) return;

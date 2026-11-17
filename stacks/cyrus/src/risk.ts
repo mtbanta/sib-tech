@@ -2,7 +2,7 @@
 // entry still has a live exit resting at Alpaca, and stop the day if the daily loss limit is reached.
 import { AlpacaError, type Order } from "./alpaca-trading.ts";
 import { activeOrdersOldestFirst } from "./order-index.ts";
-import { Reservation, RequestBudget, withReservation } from "./request-budget.ts";
+import { FIRST_TRY_MOST, Reservation, RequestBudget, withReservation } from "./request-budget.ts";
 import { inRequestScope } from "./request-scope.ts";
 import type { ProtectionHooks, RoomNeed } from "./protection.ts";
 import type { Broker } from "./broker.ts";
@@ -23,6 +23,8 @@ export interface RiskDeps {
   // decision 7 of 2026-11-06; the fixed SAFETY_RESERVE when the governor does not say), and the first sale's requests (as Alpaca
   // counted them) are charged to the loss stop's budget.
   governor?: { budget(): number; reserve?(): number; stats?(): { requestsLastMinute: number } };
+  // Item 3 of the night build: the clock first tries wait on for room (at most FIRST_TRY_WAIT_MAX_MS). Without it they go ahead at once.
+  sleep?: (ms: number) => Promise<void>;
   // Optional: the worker passes its own, so the order sync remembers between runs (release A, fixes 1 and 4).
   syncMemory?: SyncMemory;
   // The speed release (Michael's decision 3): told about each sale of shares left without a stop, so the worker can measure it
@@ -1074,7 +1076,11 @@ function waitForRoom(d: RiskDeps, mem: SyncMemory, st: StuckEntry | undefined, c
 // Runs one try: inside its P1 reservation (a retry), taken now, or counted as a first try. The reservation ends with the try. A retry that
 // finds no room now (another try took it since the walk looked) sends nothing and waits for room.
 async function inTry(d: RiskDeps, mem: SyncMemory, s: OrderRecord, spec: TrySpec | null, label: string, fn: () => Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }>): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number; room?: RoomNeed }> {
-  if (!spec) return withReservation(budgetOf(d, mem).first(label), fn, "first");
+  if (!spec) {
+    // Item 3 of the night build (decision 4 changed): a first try waits for room above the urgent floor, at most 3 s, then goes ahead.
+    if (d.sleep) await budgetOf(d, mem).paceFirst(FIRST_TRY_MOST, label, d.sleep, true);
+    return withReservation(budgetOf(d, mem).first(label), fn, "first");
+  }
   const r = budgetOf(d, mem).tryReserve("P1", spec.n, { label: spec.timedOut ? "timed-out stop try" : "stuck retry", limitRetries: spec.timedOut, ...(spec.timedOut ? {} : { minuteCap: STUCK_RETRY_MINUTE_CAP }) });
   const st = mem.stuck.get(s.clientOrderId);
   if (!(r instanceof Reservation)) return { attempted: true, stuck: true, recheckAt: waitForRoom(d, mem, st, s.clientOrderId, spec.timedOut, spec.n, r.why, d.now().getTime()), room: p1Room(spec.n, retryCap(spec.timedOut)) };
@@ -1999,6 +2005,8 @@ async function sweepEntriesNow(d: RiskDeps): Promise<number> {
 // sells nothing if Alpaca kept the exits. Never throws.
 export async function fastLostExitSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, fillAtMs: number): Promise<void> {
   // A first try (the redesign of 2026-11-14, part 1): counted, never refused.
+  // Item 3 of the night build (decision 4 changed): the fast sale's first try waits for room too, at most 3 s.
+  if (d.sleep) await budgetOf(d, mem).paceFirst(FIRST_TRY_MOST, "fast sale", d.sleep, true);
   return withReservation(budgetOf(d, mem).first("fast sale"), () => fastLostExitSaleInner(d, day, mem, s, fillAtMs), "first");
 }
 async function fastLostExitSaleInner(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, fillAtMs: number): Promise<void> {

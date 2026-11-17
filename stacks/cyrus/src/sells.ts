@@ -307,6 +307,8 @@ export interface LiquidatorDeps {
   // close-out or the afternoon close-out owns selling: no selling action"): the worker's own stand-aside rule (false from the close-out
   // time, and while a close-out, mid-day or carried step owns selling), asked when a one-entry cleanup sale's turn comes.
   ownSalesMayRun?: () => boolean;
+  // Item 3 of the night build: told the moment a sale of the whole account is asked (the worker wakes one-entry first tries waiting for room).
+  onWholeAccountAsk?: () => void;
 }
 
 // At most MAX_EARLY_WAKES early wake-ups in one liquidation, so a burst of updates cannot turn the waits into a run of extra looks (5
@@ -369,6 +371,7 @@ export class Liquidator {
     this.running++;
     const other = !o.ownEntryOnly;
     if (other) this.runningOthers++;
+    if (other) this.d.onWholeAccountAsk?.();
     if (o.priority) this.priorityPending++;
     const run = this.chain.then(() => this.run(o));
     this.chain = run.catch(() => undefined);
