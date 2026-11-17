@@ -251,6 +251,8 @@ test("night build, item 1: lookups that keep failing stay bounded (at most 3 fai
   assert.ok(looks <= CANCEL_LOOKUP_FAILS_MAX, `failed lookups ${looks}`);
   assert.ok(sends >= 2, "the failed lookup fell back to sending the cancel again");
   assert.equal(CANCEL_LOOKUP_FAILS_MAX, 3);
+  // The give-up is not silent: one stored row (cancel_not_confirmed) when the last allowed lookup fails with no re-send left.
+  assert.equal(w.events.filter((x) => x.e === "cancel_not_confirmed" && x.d.id === bad).length, 1);
 });
 
 test("night build, item 1: a round where 20ba5bd would have cancelled again keeps its timing (the blind half second, then the same looks) without the cancel: with 8 s cancels the sale goes out within 0.1 s of the exits ending, as on 20ba5bd", async () => {

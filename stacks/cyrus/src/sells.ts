@@ -619,7 +619,10 @@ export class Liquidator {
             c.lookupFails = (c.lookupFails ?? 0) + 1;
             this.d.log?.("cancel_lookup_failed", { reason: o.reason, id, fails: c.lookupFails, error: (err as Error).message.slice(0, 100) });
             if (c.resends >= CANCEL_RESENDS_MAX) {
-              c.at = this.d.now().getTime(); // nothing left to send: looked up again after the next wait, while failures allow
+              // Nothing left to send: looked up again after the next wait while failures allow; at the last allowed failure it is given up
+              // for the memory, and stored as not confirmed (logging only).
+              if (c.lookupFails >= CANCEL_LOOKUP_FAILS_MAX) this.d.log?.("cancel_not_confirmed", { reason: o.reason, id, resends: c.resends, lookupsFailed: c.lookupFails });
+              c.at = this.d.now().getTime();
               c.waitMs = Math.min(c.waitMs * 2, 8_000);
               continue;
             }

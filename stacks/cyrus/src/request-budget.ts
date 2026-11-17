@@ -58,7 +58,8 @@ export const FIRST_TRY_PACING = { on: false };
 //    (the same test `holdForRetry` uses for P2). Refused for anything else, it holds nothing, since holding the stuck retries would not help;
 //  - in one waiting spell the hold lasts at most CLOSEOUT_HOLD_TOTAL_MS in all. After that there is no hold until the close-out retry is
 //    granted, or has not been refused for CLOSEOUT_SPELL_GAP_MS (it stopped asking), so an unprotected position's sale never waits more than
-//    10 s for it (Michael's priority of 2026-11-16 night: protection of positions without a stop first).
+//    10 s for it (the priority relayed to the builder for judgment calls on the night of 2026-11-16, protection of positions without a
+//    stop first; not yet saved verbatim in the C2 log, for Michael to confirm, as is this narrowing of item 5 (b)).
 export const CLOSEOUT_FIRST_HOLD_MS = 5_500;
 export const CLOSEOUT_HOLD_TOTAL_MS = 10_000;
 export const CLOSEOUT_SPELL_GAP_MS = 15_000;
@@ -87,7 +88,8 @@ export interface ReserveOptions {
   // cancels, Michael's item 2 of 2026-11-13). Any other try is never stopped halfway (design 3.2): its extra requests are counted.
   limitRetries?: boolean;
   // Item 5 (b) of the night build: a close-out's retry (the regular close-out at the set time, 2:55 by default, or the mid-day, afternoon or carried-position close-out). While one waits for
-  // room, ordinary stuck retries are refused so it gets the room first (`closeOutWaitUntil`).
+  // room and the ordinary stuck retries' own use is what keeps it out, they are refused so it gets the room first (`closeOutWaitUntil`),
+  // at most 10 s in all in one waiting spell (CLOSEOUT_HOLD_TOTAL_MS).
   closeOut?: boolean;
 }
 
