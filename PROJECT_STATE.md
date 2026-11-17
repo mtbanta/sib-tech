@@ -6,7 +6,9 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**BUILD C2: FLY RUNS RELEASE V27 (`96528f6`), DEPLOYED 5:45 AM CT ON 2026-11-17: V26 (THE CANCEL FIX) PLUS THE CLOSE-OUT'S EARLY NOT FLAT ALERT. PROTECT-FIRST FIX (A) LEFT OUT (WORSE ON THE BAR); FIX (B) NOT BUILT, A QUESTION FOR MICHAEL.** As of 2026-11-17, about 5:50 AM.
+**BUILD C2: FLY RUNS RELEASE V28 (`f9b92f2`), DEPLOYED 7:28 AM CT ON 2026-11-17: V27 PLUS THE PLUS-1-CENT LOAD ENTRIES ALONE (GROUP 1 AND GROUP 2 PASS, ROUND 2). TUESDAY'S LOAD MORNING TESTS THEM. NEXT: ITEM 3, A STUCK SALE GETS ROOM AHEAD OF NEW ENTRIES AND ROUTINE WORK (MICHAEL'S TOP PRIORITY), MEASURED ON ITS OWN, FOR THE MID-DAY PAUSE WITH HIS WRITTEN YES.** Rollback: v27's image `deployment-01M7MN6FH9YH7JQRYC5FEH9FCM`. Michael's answers of 2026-11-17 morning: the bar is v24 apart from the 7 accepted cases and no worse than v26 anywhere; fix (a)'s scope confirmed. Paper only. Research input for a human decision.
+
+Earlier entry, superseded by the paragraph above: **BUILD C2: FLY RUNS RELEASE V27 (`96528f6`), DEPLOYED 5:45 AM CT ON 2026-11-17: V26 (THE CANCEL FIX) PLUS THE CLOSE-OUT'S EARLY NOT FLAT ALERT. PROTECT-FIRST FIX (A) LEFT OUT (WORSE ON THE BAR); FIX (B) NOT BUILT, A QUESTION FOR MICHAEL.** As of 2026-11-17, about 5:50 AM.
 
 - Fix (a) (`morning-a`): against v24 36 of 60 cases pass, against v26 30; with protect-first on, v26 49 of 60 and v26 plus (a) 36. Left out under the split.
 - Fix (b): traced first; the slow case is an ordinary stuck retry refused request room in a busy window (`roomWaits`), not a backoff by count, so the approved change would not help; question for Michael with the traces.
