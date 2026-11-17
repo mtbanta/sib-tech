@@ -1167,9 +1167,11 @@ test("part 2 (group 2, round 5): a retry refused at its action's start (room gon
   w.mem.stuck.set(w.id, { symbol: "AAA", since: w.sim.simMs - 60_000, nextAt: w.sim.simMs - 1, delayMs: 5_000, alerted: true, escalated: false, lastTriedAt: w.sim.simMs - 5_000, why: "x" } as any);
   await w.sync();
   assert.equal(w.acts.length, 1, "decided with room");
+  assert.equal((w.mem.budget as any).givingWay(), false, "with room nothing is held");
   w.box.remaining = 25; // gone before the action starts
   const sells0 = w.sim.sellLog.length;
   const r = await w.acts[0]!.run();
+  assert.equal((w.mem.budget as any).givingWay(), true, "Michael's ruling of 2026-11-17: refused for Alpaca's room at the action's start, entries give way (group 1, round 1)");
   assert.deepEqual(r?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 45, stuckSale: true });
   assert.ok(r?.recheckAt > w.sim.simMs);
   assert.equal(w.sim.sellLog.length, sells0, "nothing sold");

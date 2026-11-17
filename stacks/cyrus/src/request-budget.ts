@@ -16,8 +16,10 @@
 //    nothing is charged for a request that never ran, nothing runs uncharged, and the Alpaca client's own retries are counted too.
 //  - First tries of safety work are counted (per tag, for the statistics) but never refused (decision 4); they are not part of the
 //    budgeted minute. Entries keep the governor's reserve and their ceilings (unchanged). Routine work is counted, not limited.
-//  - Entries give way only while a P2 try has room in the minute but waits on its floor of 80 (decision 5 with change A): the governor
-//    refuses an entry then (`givingWay`). A P1 try's floor of 20 is below the entries' 80, so entries never hold one back.
+//  - Entries give way while a P2 try has room in the minute but waits on its floor of 80 (decision 5 with change A), and, since Michael's
+//    ruling of 2026-11-17, while a stuck sale waits for Alpaca's room (STUCK_SALE_GIVE_WAY, below): the governor refuses an entry then
+//    (`givingWay`). A P1 try's floor of 20 is below the entries' reserve of 80, so entries rarely hold one back; the stuck-sale give-way
+//    covers the rest (room reserved unsent can bring a sale short of its floor while the estimate is above 80).
 // Nothing here sends, cancels or sizes an order; it only says whether a budgeted try may start, and counts.
 import { SAFETY_RESERVE, ALPACA_REQUESTS_PER_MINUTE } from "./governor.ts";
 import { currentTag, requestScope, separateBucket, type ScopeReservation, type Scope, type Tag } from "./request-scope.ts";
