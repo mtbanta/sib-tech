@@ -43,6 +43,10 @@ export const RETRY_WAIT_HOLD_MS = 2_500;
 // P1 try already keeps): 0.25 s doubling to 1 s, at most FIRST_TRY_WAIT_MAX_MS in all, then it goes ahead whatever the room. A one-entry
 // first try's wait ends at once when a sale of the whole account is asked (`wakeFirstWaiters`). It is still counted, never refused.
 export const FIRST_TRY_WAIT_MAX_MS = 3_000;
+// Item 5 (b) of the night build (Michael: "close-out retries go ahead of stuck retries"): when a close-out's retry is refused for room, ordinary
+// stuck retries (the tries capped at STUCK_RETRY_MINUTE_CAP) are refused as "class" until that retry is granted, and at most this long after
+// its refusal (it asks again on the next 5 second pass), or until the moment it said room would return, plus a moment. Nothing else waits.
+export const CLOSEOUT_FIRST_HOLD_MS = 5_500;
 // What a one-entry first try can send: a missing-exit or remainder sale's 3 rounds (measured on 2026-11-16: 25), and the fast sale.
 export const FIRST_TRY_MOST = 25;
 const REFILL_PER_MS = ALPACA_REQUESTS_PER_MINUTE / 60_000;
@@ -65,6 +69,9 @@ export interface ReserveOptions {
   // The Alpaca client's own retries inside this try stop when its reservation has no room left (only a timed-out stop's tries, checks and
   // cancels, Michael's item 2 of 2026-11-13). Any other try is never stopped halfway (design 3.2): its extra requests are counted.
   limitRetries?: boolean;
+  // Item 5 (b) of the night build: a close-out's retry (the 2:55, mid-day, afternoon or carried-position close-out). While one waits for
+  // room, ordinary stuck retries are refused so it gets the room first (`closeOutWaitUntil`).
+  closeOut?: boolean;
 }
 
 export class Reservation implements ScopeReservation {
@@ -134,9 +141,17 @@ export interface BudgetMinute {
   // Item 3 of the night build (logging only): first tries that waited for room this minute, and their total wait in ms.
   firstPaced: number;
   firstPacedMs: number;
+  // Item 5 (a) of the night build (logging only): the most in any 5 seconds sent by urgent (P1) tries that reserve against the 5 seconds,
+  // so the 15 in 5 seconds can be judged for urgent work in every minute, close-out minutes included (close-out retries, which reserve
+  // against the minute only, are left out; `mostCappedIn5s` counts P1 and P2 together).
+  mostUrgentCappedIn5s: number;
+  // Item 5 (b) (logging only): close-out retries refused for room that set or renewed the stuck retries' hold, and the stuck retries' tries or
+  // looks refused because of it.
+  closeOutHolds: number;
+  closeOutHeldRetries: number;
 }
 
-const emptyMinute = (): BudgetMinute => ({ sent: { entry: 0, first: 0, P1: 0, P2: 0, routine: 0, clock: 0 }, granted: 0, refused: { minute: 0, five: 0, class: 0, floor: 0 }, forced: 0, overdrafts: 0, sentAfterEnd: 0, mostBudgetedInMinute: 0, mostBudgetedIn5s: 0, mostCappedIn5s: 0, givingWayRefusals: 0, retryHold: { started: 0, renewed: 0, inForceMs: 0, p2Refused: 0 }, firstPaced: 0, firstPacedMs: 0 });
+const emptyMinute = (): BudgetMinute => ({ sent: { entry: 0, first: 0, P1: 0, P2: 0, routine: 0, clock: 0 }, granted: 0, refused: { minute: 0, five: 0, class: 0, floor: 0 }, forced: 0, overdrafts: 0, sentAfterEnd: 0, mostBudgetedInMinute: 0, mostBudgetedIn5s: 0, mostCappedIn5s: 0, givingWayRefusals: 0, retryHold: { started: 0, renewed: 0, inForceMs: 0, p2Refused: 0 }, firstPaced: 0, firstPacedMs: 0, mostUrgentCappedIn5s: 0, closeOutHolds: 0, closeOutHeldRetries: 0 });
 
 export class RequestBudget {
   readonly nowMs: () => number;
@@ -199,6 +214,11 @@ export class RequestBudget {
     const fiveSec = opts.fiveSec !== false;
     if (!opts.force) {
       const refusal = this.refusal(cls, size, fiveSec, now, 0, opts.minuteCap);
+      // Item 5 (b): a close-out's retry kept out holds the ordinary stuck retries back until it gets in (bounded, see CLOSEOUT_FIRST_HOLD_MS).
+      if (refusal && opts.closeOut) {
+        this.closeOutWaitUntil = Math.max(this.closeOutWaitUntil, Math.min(now + CLOSEOUT_FIRST_HOLD_MS, refusal.at + 500));
+        this.minute.closeOutHolds++;
+      }
       if (refusal) {
         this.minute.refused[refusal.why]++;
         if (this.lastRefusalHeldOnly) this.minute.retryHold.p2Refused++; // statistics only
@@ -210,6 +230,7 @@ export class RequestBudget {
         return refusal;
       }
     } else this.minute.forced++;
+    if (opts.closeOut) this.closeOutWaitUntil = 0; // item 5 (b): it got in; the stuck retries may draw again
     if (opts.waitKey) this.floorWaits.delete(opts.waitKey);
     const r = new Reservation(this, cls, size, opts.label, fiveSec, opts.limitRetries === true);
     this.open.add(r);
@@ -224,7 +245,15 @@ export class RequestBudget {
     return this.refusal(cls, Math.max(0, Math.ceil(n)), fiveSec, this.nowMs(), routineAhead, minuteCap) ?? { ok: true };
   }
 
+  // Item 5 (b) of the night build: until when ordinary stuck retries give way to a close-out's retry that is waiting for room.
+  private closeOutWaitUntil = 0;
+
   private refusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead = 0, minuteCap?: number): Refusal | null {
+    // Item 5 (b): an ordinary stuck retry (capped) gives way while a close-out's retry waits for room; it looks again when that wait ends.
+    if (cls === "P1" && minuteCap !== undefined && now < this.closeOutWaitUntil) {
+      this.minute.closeOutHeldRetries++;
+      return { ok: false, at: this.closeOutWaitUntil, why: "class" };
+    }
     const u = this.usage(now);
     // P2 leaves room, in the minute and in the 5 seconds, for a waiting capped retry (Michael's answer after group 1's rulings round 2).
     const holding = now < this.retryWaitUntil;
@@ -345,8 +374,14 @@ export class RequestBudget {
       this.sent.push({ t: now, cls: r.cls, capped: r.fiveSec });
       const u = this.usage(now);
       let capped5 = 0;
-      for (let i = this.sent.length - 1; i >= 0 && now - this.sent[i]!.t < 5_000; i--) if (this.sent[i]!.capped) capped5++;
+      let urgentCapped5 = 0; // item 5 (a), logging only
+      for (let i = this.sent.length - 1; i >= 0 && now - this.sent[i]!.t < 5_000; i--) {
+        if (!this.sent[i]!.capped) continue;
+        capped5++;
+        if (this.sent[i]!.cls === "P1") urgentCapped5++;
+      }
       this.minute.mostCappedIn5s = Math.max(this.minute.mostCappedIn5s, capped5);
+      this.minute.mostUrgentCappedIn5s = Math.max(this.minute.mostUrgentCappedIn5s, urgentCapped5);
       this.minute.mostBudgetedInMinute = Math.max(this.minute.mostBudgetedInMinute, u.minute);
       this.minute.mostBudgetedIn5s = Math.max(this.minute.mostBudgetedIn5s, u.five);
       this.totals[r.cls]++;

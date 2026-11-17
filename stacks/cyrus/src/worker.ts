@@ -1144,7 +1144,7 @@ export class Worker {
       // of the shared request budget, reserving the last try's measured cost (at most CLOSEOUT_RETRY_MOST) against the minute only, down to
       // 20 of Alpaca's remaining. Refused, it is not an attempt; the next pass asks again.
       const retry = this.carriedAttempts > 0;
-      const res = retry ? this.budget.tryReserve("P1", Math.min(CLOSEOUT_RETRY_MOST, this.carriedLastCost ?? CLOSEOUT_RETRY_MOST), { fiveSec: false, label: "carried-position retry" }) : this.budget.first("carried-position sale");
+      const res = retry ? this.budget.tryReserve("P1", Math.min(CLOSEOUT_RETRY_MOST, this.carriedLastCost ?? CLOSEOUT_RETRY_MOST), { fiveSec: false, closeOut: true, label: "carried-position retry" }) : this.budget.first("carried-position sale");
       if (res instanceof Reservation) {
         this.lastCarriedAttempt = now.getTime();
         this.carriedAttempts++;
@@ -1177,7 +1177,7 @@ export class Worker {
       // A retry's cost is estimated from the last try's measured cost, at most CLOSEOUT_RETRY_MOST; it reserves that against the shared
       // budget's minute (P1, down to 20 of Alpaca's remaining). The first try is a first try: never refused, counted.
       const estimate = Math.min(CLOSEOUT_RETRY_MOST, this.middayLastCost ?? CLOSEOUT_RETRY_MOST);
-      const res = !this.backgroundReady("midday") ? null : retry ? this.budget.tryReserve("P1", estimate, { fiveSec: false, label: "mid-day close-out retry" }) : this.budget.first("mid-day close-out");
+      const res = !this.backgroundReady("midday") ? null : retry ? this.budget.tryReserve("P1", estimate, { fiveSec: false, closeOut: true, label: "mid-day close-out retry" }) : this.budget.first("mid-day close-out");
       if (res instanceof Reservation) {
         this.lastMiddayAttempt = now.getTime();
         // A retry sells at most MIDDAY_RETRY_SYMBOLS positions, in turn (the first retry takes the first ten left, and so on).
@@ -1205,7 +1205,7 @@ export class Worker {
       }
       const retry = this.afternoonAttempts > 0;
       const estimate = Math.min(CLOSEOUT_RETRY_MOST, this.afternoonLastCost ?? CLOSEOUT_RETRY_MOST);
-      const res = !this.backgroundReady("midday") ? null : retry ? this.budget.tryReserve("P1", estimate, { fiveSec: false, label: "afternoon close-out retry" }) : this.budget.first("afternoon close-out");
+      const res = !this.backgroundReady("midday") ? null : retry ? this.budget.tryReserve("P1", estimate, { fiveSec: false, closeOut: true, label: "afternoon close-out retry" }) : this.budget.first("afternoon close-out");
       if (res instanceof Reservation) {
         this.lastAfternoonAttempt = now.getTime();
         const only = retry ? retrySymbols(this.afternoonLastRemaining, this.afternoonAttempts - 1) : null;
@@ -1256,7 +1256,7 @@ export class Worker {
       // from CLOSEOUT_NEVER_REFUSED_MS before the close (2:58 PM Central) it is counted but never refused. Refused, it is not an attempt:
       // the next pass asks again. The first try is a first try (never refused, counted).
       const force = now.getTime() >= day.closeAt.getTime() - CLOSEOUT_NEVER_REFUSED_MS;
-      const res = path === "retry" ? this.budget.tryReserve("P1", Math.min(CLOSEOUT_RETRY_MOST, this.closeoutLastCost ?? CLOSEOUT_RETRY_MOST), { fiveSec: false, force, label: "close-out retry" }) : this.budget.first("close-out");
+      const res = path === "retry" ? this.budget.tryReserve("P1", Math.min(CLOSEOUT_RETRY_MOST, this.closeoutLastCost ?? CLOSEOUT_RETRY_MOST), { fiveSec: false, force, closeOut: true, label: "close-out retry" }) : this.budget.first("close-out");
       if (res instanceof Reservation) {
         this.lastCloseoutAttempt = now.getTime();
         this.closeoutAttempts++;
