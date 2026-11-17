@@ -323,9 +323,25 @@ test("hold counter: P2 tries refused while protect-first has P2 give way are not
 });
 
 test("hold counter: an ordinary stuck retry held back while a close-out retry waits is not counted as a held P2 refusal", () => {
-  const b = at36();
-  // 36 sent in the minute and 60 more pass the minute's 60: the close-out retry waits, and the close-out hold starts.
-  const co = b.tryReserve("P1", 60, { label: "close-out retry", fiveSec: false, closeOut: true });
+  // Since group 1's night round 1 the close-out hold is set only when the stuck retries' own use keeps the close-out retry out, so here
+  // P2 sent 26 and an earlier stuck retry 10 (30 and 24 s ago): the capped stuck retry of 10 (36 + 10 passes its 45) starts P2's hold.
+  let t = 70_000;
+  const b: any = new RequestBudget({ now: () => t });
+  const p2 = b.tryReserve("P2", 26, { label: "list lag recheck", fiveSec: false }) as Reservation;
+  for (let i = 0; i < 26; i++) p2.charge("/v2/test");
+  p2.end();
+  t = 76_000; // outside P2's 5 seconds
+  const earlier = b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: CAP }) as Reservation;
+  assert.ok(earlier instanceof Reservation);
+  for (let i = 0; i < 10; i++) earlier.charge("/v2/test");
+  earlier.end();
+  b.takeMinute();
+  t = 100_000;
+  const retry = b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: CAP });
+  assert.ok(!(retry instanceof Reservation), "the capped stuck retry of 10 is refused");
+  assert.ok(b.retryWaitUntil > t, "P2's hold started");
+  // 36 sent and 30 more pass the minute's 60; without the stuck retries' 10 it would fit: the close-out hold starts.
+  const co = b.tryReserve("P1", 30, { label: "close-out retry", fiveSec: false, closeOut: true });
   assert.ok(!(co instanceof Reservation) && co.why === "minute", "the close-out retry is refused for room");
   const held = b.tryReserve("P2", 1, { label: "list lag recheck" });
   assert.ok(!(held instanceof Reservation) && held.why === "class", "refused by the retry's hold alone");

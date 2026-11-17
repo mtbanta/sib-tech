@@ -52,7 +52,16 @@ export const FIRST_TRY_PACING = { on: false };
 // Item 5 (b) of the night build (Michael: "close-out retries go ahead of stuck retries"): when a close-out's retry is refused for room, ordinary
 // stuck retries (the tries capped at STUCK_RETRY_MINUTE_CAP) are refused as "class" until that retry is granted, and at most this long after
 // its refusal (it asks again on the next 5 second pass), or until the moment it said room would return, plus a moment. Nothing else waits.
+// Group 1, night build round 1 (finding 2: each refused close-out retry renewed the hold, so stuck retries could be refused without limit):
+//  - the hold is set only when the stuck retries' own use is what keeps the close-out retry out: the minute is what refuses it, and without
+//    the ordinary stuck retries' requests (sent in the last minute, and reserved unsent) it would fit, with Alpaca's remaining above its floor
+//    (the same test `holdForRetry` uses for P2). Refused for anything else, it holds nothing, since holding the stuck retries would not help;
+//  - in one waiting spell the hold lasts at most CLOSEOUT_HOLD_TOTAL_MS in all. After that there is no hold until the close-out retry is
+//    granted, or has not been refused for CLOSEOUT_SPELL_GAP_MS (it stopped asking), so an unprotected position's sale never waits more than
+//    10 s for it (Michael's priority of 2026-11-16 night: protection of positions without a stop first).
 export const CLOSEOUT_FIRST_HOLD_MS = 5_500;
+export const CLOSEOUT_HOLD_TOTAL_MS = 10_000;
+export const CLOSEOUT_SPELL_GAP_MS = 15_000;
 // What a one-entry first try can send: a missing-exit or remainder sale's 3 rounds (measured on 2026-11-16: 25), and the fast sale.
 // The close-outs' first tries are not paced (night-a2 tuning): measured on 2026-11-16 (simulator, the worker's own regular (then at 2:55) and mid-day close-outs
 // with Alpaca's remaining at 60), a wait of 1.8 to 3 s before the close-out delayed its sales by as much against v24.
@@ -84,6 +93,8 @@ export interface ReserveOptions {
 
 export class Reservation implements ScopeReservation {
   used = 0;
+  // An ordinary stuck retry's reservation (reserved with `minuteCap`): item 5 (b) counts its use (group 1, night build round 1).
+  stuckRetry = false;
   ended = false;
   overdraft = 0;
   readonly startedAt: number;
@@ -167,7 +178,8 @@ export class RequestBudget {
   private readonly log: ((event: string, data?: Record<string, unknown>) => void) | undefined;
   // Every budgeted request sent in the last 60 seconds, oldest first (its time and class).
   // `capped`: sent by a try that reserved against the 5 seconds too (every budgeted try but a close-out retry).
-  private sent: Array<{ t: number; cls: BudgetClass; capped: boolean }> = [];
+  // `stuck`: sent by an ordinary stuck retry (item 5 (b), group 1, night build round 1).
+  private sent: Array<{ t: number; cls: BudgetClass; capped: boolean; stuck: boolean }> = [];
   // Michael's answer after group 1's rulings round 2: until when a capped retry is waiting that P2 holding back would let in, and the
   // ceiling P2 must then leave the minute at (the retry's ceiling less its size).
   private retryWaitUntil = 0;
@@ -225,11 +237,9 @@ export class RequestBudget {
     const fiveSec = opts.fiveSec !== false;
     if (!opts.force) {
       const refusal = this.refusal(cls, size, fiveSec, now, 0, opts.minuteCap);
-      // Item 5 (b): a close-out's retry kept out holds the ordinary stuck retries back until it gets in (bounded, see CLOSEOUT_FIRST_HOLD_MS).
-      if (refusal && opts.closeOut) {
-        this.closeOutWaitUntil = Math.max(this.closeOutWaitUntil, Math.min(now + CLOSEOUT_FIRST_HOLD_MS, refusal.at + 500));
-        this.minute.closeOutHolds++;
-      }
+      // Item 5 (b): a close-out's retry kept out by the stuck retries' own use holds them back until it gets in, at most 10 s in all in one
+      // waiting spell (see CLOSEOUT_FIRST_HOLD_MS and CLOSEOUT_HOLD_TOTAL_MS).
+      if (refusal && opts.closeOut) this.closeOutRefused(refusal, size, now);
       if (refusal) {
         this.minute.refused[refusal.why]++;
         if (this.lastRefusalHeldOnly) this.minute.retryHold.p2Refused++; // statistics only
@@ -241,9 +251,14 @@ export class RequestBudget {
         return refusal;
       }
     } else this.minute.forced++;
-    if (opts.closeOut) this.closeOutWaitUntil = 0; // item 5 (b): it got in; the stuck retries may draw again
+    if (opts.closeOut) {
+      // item 5 (b): it got in; the stuck retries may draw again, and its next wait is a new spell
+      this.closeOutWaitUntil = 0;
+      this.closeOutSpellStart = null;
+    }
     if (opts.waitKey) this.floorWaits.delete(opts.waitKey);
     const r = new Reservation(this, cls, size, opts.label, fiveSec, opts.limitRetries === true);
+    if (opts.minuteCap !== undefined) r.stuckRetry = true;
     this.open.add(r);
     this.minute.granted++;
     return r;
@@ -258,6 +273,43 @@ export class RequestBudget {
 
   // Item 5 (b) of the night build: until when ordinary stuck retries give way to a close-out's retry that is waiting for room.
   private closeOutWaitUntil = 0;
+  // Group 1, night build round 1: when the current waiting spell's first hold was set (null: no spell), when a close-out retry was last
+  // refused, and whether the spell's cap was logged.
+  private closeOutSpellStart: number | null = null;
+  private closeOutLastRefusal = -Infinity;
+  private closeOutCapLogged = false;
+
+  // A close-out's retry was refused. The stuck retries are held back only if their own use is what keeps it out, and only up to the spell's
+  // cap (CLOSEOUT_HOLD_TOTAL_MS); a spell ends when the retry is granted or has not been refused for CLOSEOUT_SPELL_GAP_MS.
+  private closeOutRefused(refusal: Refusal, n: number, now: number): void {
+    if (now - this.closeOutLastRefusal >= CLOSEOUT_SPELL_GAP_MS) this.closeOutSpellStart = null; // it had stopped asking
+    this.closeOutLastRefusal = now;
+    if (!this.stuckUseKeepsOut(n, now)) return;
+    if (this.closeOutSpellStart === null) {
+      this.closeOutSpellStart = now;
+      this.closeOutCapLogged = false;
+    }
+    const capEnd = this.closeOutSpellStart + CLOSEOUT_HOLD_TOTAL_MS;
+    if (now >= capEnd) {
+      if (!this.closeOutCapLogged) this.log?.("closeout_hold_capped", { heldMs: CLOSEOUT_HOLD_TOTAL_MS }); // Fly's log, once a spell
+      this.closeOutCapLogged = true;
+      return;
+    }
+    this.closeOutWaitUntil = Math.min(capEnd, Math.max(this.closeOutWaitUntil, Math.min(now + CLOSEOUT_FIRST_HOLD_MS, refusal.at + 500)));
+    this.minute.closeOutHolds++;
+  }
+
+  // Whether a close-out retry of `n` (it reserves against the minute only) is kept out by the ordinary stuck retries' use: the minute refuses
+  // it, it would fit without their requests (sent in the last minute, and reserved unsent), and Alpaca's remaining stays above its floor.
+  private stuckUseKeepsOut(n: number, now: number): boolean {
+    const u = this.usage(now);
+    const total = u.minute + u.unsentMinute + n;
+    if (total <= BUDGET_PER_MINUTE) return false;
+    let stuck = 0;
+    for (const x of this.sent) if (x.stuck && now - x.t < 60_000) stuck++;
+    for (const r of this.open) if (r.stuckRetry) stuck += r.unsent();
+    return total - stuck <= BUDGET_PER_MINUTE && this.remaining() - u.unsentMinute - n >= P1_FLOOR;
+  }
 
   private refusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead = 0, minuteCap?: number): Refusal | null {
     // Item 5 (b): an ordinary stuck retry (capped) gives way while a close-out's retry waits for room; it looks again when that wait ends.
@@ -391,7 +443,7 @@ export class RequestBudget {
     if (separateBucket(path)) return;
     const now = this.nowMs();
     if (r.cls !== null) {
-      this.sent.push({ t: now, cls: r.cls, capped: r.fiveSec });
+      this.sent.push({ t: now, cls: r.cls, capped: r.fiveSec, stuck: r.stuckRetry });
       const u = this.usage(now);
       let capped5 = 0;
       let urgentCapped5 = 0; // item 5 (a), logging only
