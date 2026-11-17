@@ -43,7 +43,11 @@ test("the rule: the window may start again only after Michael's stop or flatten 
   const facts = (phases: Record<string, string>, now: string) => loadAfternoonRefusal({ day: { ...day(phases), status: "approved", phases: { ...day(phases).phases, armed: "x", [MIDDAY_PHASE]: "x", middayFlat: "yes" } } as any, now: z(now), pause: { on: false } as any, stop: { on: true, at: z("16:50:00").toISOString(), reason: "owner command (flatten)" }, notFlat: null, positions: 0, openOrders: 0, equity: 20000 });
   assert.match(facts({}, "16:55:00") ?? "", /already started today, and only your `stop` or `flatten` during it lets it start again/);
   assert.equal(facts({ [LOAD_AFTERNOON_ENDED_EARLY_PHASE]: z("16:50:00").toISOString() }, "16:55:00"), null);
-  assert.match(facts({ [LOAD_AFTERNOON_ENDED_EARLY_PHASE]: z("16:50:00").toISOString() }, "19:30:00") ?? "", /accepted only before then/, "not from 1:30 PM CT");
+  assert.match(facts({ [LOAD_AFTERNOON_ENDED_EARLY_PHASE]: z("16:50:00").toISOString(), [AFTERNOON_FLAT_PHASE]: z("17:10:20").toISOString() }, "19:30:00") ?? "", /accepted only before then/, "not from 1:30 PM CT");
+  // Group 1, round 1: never while the earlier window's close-out has not finished flat (the window ended at 17:10, no flat mark yet).
+  assert.equal(facts({ [LOAD_AFTERNOON_ENDED_EARLY_PHASE]: z("16:50:00").toISOString() }, "17:10:03"), "the close-out after the afternoon load window has not finished flat yet");
+  assert.equal(facts({ [LOAD_AFTERNOON_ENDED_EARLY_PHASE]: z("16:50:00").toISOString(), [AFTERNOON_FLAT_PHASE]: z("17:10:20").toISOString() }, "17:15:00"), null, "once it is flat");
+  assert.equal(afternoonMayStartAgain(day({ [LOAD_AFTERNOON_ENDED_EARLY_PHASE]: "" })), false, "a cleared mark (a resume during the window) never counts");
 });
 
 test("a load day: flatten during the window, then `load afternoon` again: a fresh 30 minutes, its own close-out to flat with a first try; a third start without another stop is refused", async () => {
@@ -151,4 +155,51 @@ test("a stop during the window, its close-out at the window's end, then `load af
   await until(async () => Boolean((await r.store.getDay(D))!.phases[AFTERNOON_FLAT_PHASE]) && !r.worker["inflight"].has("midday"));
   assert.equal(events.filter((e) => e.e === "afternoon_closeout" && e.d.step === "first").length, 2, "the second window's close-out started with its own first try (counted per window)");
   assert.equal((await readPause(r.store, D))!.on, true);
+});
+
+test("group 1, round 1: a stop then a resume while the window is on clears the mark: the full-length window cannot start again", async () => {
+  const { r, events } = await flatAtMidday({ load: true });
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  r.ownerSays("stop", "16:50:00");
+  await r.at("16:50:05");
+  await r.at("16:50:30");
+  assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_ENDED_EARLY_PHASE], z("16:50:05").toISOString());
+  r.ownerSays("resume", "16:52:00");
+  await r.at("16:52:05");
+  await r.at("16:52:30");
+  assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_ENDED_EARLY_PHASE], "", "cleared by the resume inside the window");
+  assert.ok(events.some((e) => e.e === "load_afternoon_ended_early" && e.d.cleared === true && e.d.by === "resume"));
+  await r.at("17:10:06");
+  await until(async () => Boolean((await r.store.getDay(D))!.phases[AFTERNOON_FLAT_PHASE]) && !r.worker["inflight"].has("midday"));
+  r.ownerSays("load afternoon", "17:15:00");
+  await r.at("17:15:05");
+  await r.at("17:15:30");
+  assert.ok(r.said("commands").some((t) => t.startsWith("Not started: the afternoon load window was already started today")), r.said("commands").slice(-3).join(" | "));
+});
+
+test("the daily loss stop never writes the early-end mark (only Michael's stop and flatten commands do)", async () => {
+  const { r } = await flatAtMidday({ load: true });
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  await r.store.setControl(CONTROL_STOP, { on: true, at: z("16:50:00").toISOString(), reason: "daily loss stop: loss 510 dollars" });
+  await r.at("16:50:05");
+  await r.at("16:50:30");
+  assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_ENDED_EARLY_PHASE], undefined);
+});
+
+test("group 1, round 1, the second guard: a close-out that was closing an earlier window never marks a newer window flat", async () => {
+  const { r, events } = await flatAtMidday({ load: true });
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  const older = (await r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE]!;
+  // A newer window's start written meanwhile (as if a second start had raced the older close-out).
+  const { setPhase } = await import("../src/store.ts");
+  await setPhase(r.store, D, LOAD_AFTERNOON_PHASE, z("16:45:00").toISOString());
+  await (r.worker as any).afternoonCloseoutPhase(D, false, null, null, older);
+  assert.equal((await r.store.getDay(D))!.phases[AFTERNOON_FLAT_PHASE], undefined, "not marked flat for the newer window");
+  assert.ok(events.some((e) => e.e === "afternoon_closeout_stale" && e.d.windowStart === older));
+  // With the matching start it marks flat as before.
+  await (r.worker as any).afternoonCloseoutPhase(D, false, null, null, z("16:45:00").toISOString());
+  assert.ok((await r.store.getDay(D))!.phases[AFTERNOON_FLAT_PHASE]);
 });

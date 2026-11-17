@@ -55,6 +55,9 @@ export function loadAfternoonRefusal(o: { day: DayRecord | null; now: Date; paus
   if (o.day.status !== "approved" || !o.day.phases.armed) return "today is not approved and armed";
   // Michael's request of 2026-11-17: once a day, unless his own stop or flatten ended the window early (then it may start again).
   if (afternoonLoadStart(o.day) && !afternoonMayStartAgain(o.day)) return "the afternoon load window was already started today, and only your `stop` or `flatten` during it lets it start again";
+  // Group 1, round 1: never while the earlier window's close-out has not finished flat (as for `go`), so that close-out cannot mark the
+  // second window flat or sell its entries.
+  if (afternoonCloseoutPending(o.day, o.now)) return "the close-out after the afternoon load window has not finished flat yet";
   if (o.now >= times.resumeUntil) return `it is ${centralClock(times.resumeUntil)} or later (\`load afternoon\` is accepted only before then)`;
   if (plainStop(o.stop)) {
     if (!middayFlat(o.day)) return "the mid-day close-out has not finished flat yet";
@@ -330,7 +333,6 @@ export class CommandProcessor {
         // during the save is already cancelled (it says nothing) and this reply keeps its cancel line.
         const screenCancelled = this.d.cancelAfternoonScreen?.(etDate(now)) ?? false;
         const saved = await this.trySetStop(true, "owner command (stop)", now);
-        if (saved) await this.markAfternoonEndedEarly(now, "stop");
         let n = 0;
         let cancelFailed = false;
         try {
@@ -338,6 +340,7 @@ export class CommandProcessor {
         } catch {
           cancelFailed = true;
         }
+        if (saved) await this.markAfternoonEndedEarly(now, "stop"); // after the cancels (group 1, round 1: no delay before them)
         if (!saved) {
           await this.say("**STOP DID NOT COMPLETE.** The stack could not save the stop flag. It also cannot place new entries while its database is unreachable, but check Alpaca's dashboard and cancel or close anything open by hand.");
         } else if (cancelFailed) {
@@ -350,6 +353,9 @@ export class CommandProcessor {
       }
       case "resume": {
         await this.setStop(false, "owner command (resume)", now);
+        // Group 1, round 1 (Michael's request of 2026-11-17 reads "ended early"): a `resume` while the afternoon window is still on means it
+        // did not end early, so the mark no longer counts (cleared; the window may not start again unless another stop or flatten comes).
+        await this.clearAfternoonEndedEarly(now);
         // Wording only (the 10:31 AM note of 2026-11-03): if today's loss is still past the limit, the daily loss stop puts the stop
         // back on at its next check, so the reply says so. The resume itself is done above and is not changed by this look.
         const past = await this.lossStillPast(now);
@@ -359,7 +365,8 @@ export class CommandProcessor {
       case "flatten": {
         const screenCancelled = this.d.cancelAfternoonScreen?.(etDate(now)) ?? false; // before the stop's save, as for `stop`
         const saved = await this.trySetStop(true, "owner command (flatten)", now);
-        if (saved) await this.markAfternoonEndedEarly(now, "flatten");
+        // Not awaited, so the sale starts at once (group 1, round 1); if it lands after a quick `load afternoon`, that start is refused (the safe side).
+        if (saved) void this.markAfternoonEndedEarly(now, "flatten");
         // The sale can take a while (it waits for cancels). It runs in the background so the next command, the heartbeat
         // and the rest of the pass are not held up; the reply follows when it is done.
         const task = (async () => {
@@ -710,6 +717,19 @@ export class CommandProcessor {
       this.d.log?.("load_afternoon_ended_early", { date, by });
     } catch {
       /* the window then cannot start again today; nothing else depends on it */
+    }
+  }
+
+  // Group 1, round 1: a `resume` while the window is on clears the early-end mark (an empty value never counts).
+  private async clearAfternoonEndedEarly(now: Date): Promise<void> {
+    try {
+      const date = etDate(now);
+      const day = await this.d.store.getDay(date);
+      if (!inAfternoonLoad(day, now) || !day?.phases[LOAD_AFTERNOON_ENDED_EARLY_PHASE]) return;
+      await setPhase(this.d.store, date, LOAD_AFTERNOON_ENDED_EARLY_PHASE, "");
+      this.d.log?.("load_afternoon_ended_early", { date, cleared: true, by: "resume" });
+    } catch {
+      /* a failed clear leaves the mark; the window could then start again only after it ends (logged in the review) */
     }
   }
 

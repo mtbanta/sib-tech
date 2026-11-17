@@ -1235,7 +1235,8 @@ export class Worker {
         this.afternoonProgress.started(retry ? this.afternoonLastRemaining.length : Infinity);
         this.afternoonAttempts++;
         // The same background name as the mid-day close-out, so every guard that stands aside for it stands aside for this too.
-        if (!this.background("midday", () => withReservation(res, () => this.afternoonCloseoutPhase(date, retry, only, res), retry ? undefined : "first"))) res.end();
+        const windowStart = afternoonLoadStart(current)?.toISOString() ?? null;
+        if (!this.background("midday", () => withReservation(res, () => this.afternoonCloseoutPhase(date, retry, only, res, windowStart), retry ? undefined : "first"))) res.end();
       }
     }
     // The second alert: still not flat 5 minutes after a try first ended not flat (once a day).
@@ -1971,7 +1972,7 @@ export class Worker {
   // then on), then the mid-day close-out code (path "midday": no `closeout` phase, no not-flat flag, the borrowing cap untouched, the
   // price stream kept). A retry is one round without the wait for its own sells, as for the mid-day close-out. When flat it writes its
   // own phase and says so; entries stay paused (no automatic return to normal trading).
-  private async afternoonCloseoutPhase(date: string, retry: boolean, only: string[] | null, res: Reservation | null = null): Promise<void> {
+  private async afternoonCloseoutPhase(date: string, retry: boolean, only: string[] | null, res: Reservation | null = null, windowStart: string | null = null): Promise<void> {
     const pause = await readPause(this.d.store, date);
     if (!pause?.on) {
       // The pause's start time stays the mid-day one (the summary and `status` name it); only the flag and the reason change.
@@ -1986,6 +1987,14 @@ export class Worker {
     }
     this.d.log?.("info", "afternoon_closeout", { date, step: retry ? "retry" : "first", flat: result.flat, remaining: result.remaining.length });
     if (result.flat) {
+      // Group 1, round 1 (Michael's request of 2026-11-17): the flat mark is written only for the window this close-out was closing; if a
+      // new window started meanwhile (it cannot while this is pending, but a second guard), it is not marked flat by an older close-out.
+      const dayNow0 = await this.d.store.getDay(date).catch(() => null);
+      const startNow = afternoonLoadStart(dayNow0)?.toISOString() ?? null;
+      if (windowStart !== null && startNow !== windowStart) {
+        this.d.log?.("warn", "afternoon_closeout_stale", { date, windowStart, startNow });
+        return;
+      }
       await setPhase(this.d.store, date, AFTERNOON_FLAT_PHASE, this.d.now().toISOString());
       await this.say("trading", "Afternoon load window over: the close-out after it is done and the account is flat. Entries stay paused.");
       const dayNow = await this.d.store.getDay(date).catch(() => null);
