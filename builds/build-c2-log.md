@@ -7168,3 +7168,7 @@ Added to the daily brief (note for Tuesday 2026-11-17).
 **Round 3 (on `feac43c`): PASS.** Non-blocking, for a later brief: the daily summary (`Governor.resetDayStats`, about 3:05 PM) also resets `rateLimitAnswers`, so a period spanning it needs the same split as a worker start; today's periods all end by the 2:45 close-out.
 
 **The deploy-approval acknowledgement (`fix-deploy-ack` at `80fe162`), group 2 round 1: PASS.** It matches item 4 of the speed release and nothing else came across; only the whole line matches and no existing command's parsing changes; the bot only replies; the owner and channel gate applies; both tests fail on v29's code and pass with the change; full suite 967 pass, `tsc` clean. Non-blocking: help text not changed (reasonable: it is not a command); a multi-line message still runs its other lines, as before. To deploy tonight after the close, outside market hours, as Michael's named bug fix.
+
+## Michael's request for tonight's list (2026-11-17, about 11:00 AM), saved verbatim
+
+> For tonight's list: allow load afternoon to start again the same day if the earlier window ended early by my stop or flatten (still only while flat, before 1:30 PM). Group 1 review.
