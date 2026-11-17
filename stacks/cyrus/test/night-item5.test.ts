@@ -1,9 +1,9 @@
 // Item 5 of the night build (Michael's request of 2026-11-16, about 8:50 PM): "Fix the 15-in-5-seconds logging gap; close-out retries go ahead
 // of stuck retries; measure flatten's request use after the cancel fix." (a) and (b) here; (c) is measured, see the C2 log.
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { CLOSEOUT_FIRST_HOLD_MS, CLOSEOUT_HOLD_TOTAL_MS, CLOSEOUT_SPELL_GAP_MS, Reservation, RequestBudget } from "../src/request-budget.ts";
+import { CLOSEOUT_HOLD, CLOSEOUT_FIRST_HOLD_MS, CLOSEOUT_HOLD_TOTAL_MS, CLOSEOUT_SPELL_GAP_MS, Reservation, RequestBudget } from "../src/request-budget.ts";
 import { STUCK_RETRY_MINUTE_CAP } from "../src/risk.ts";
 
 function rig(remaining: () => number) {
@@ -25,6 +25,44 @@ test("night build, item 5 (a): mostUrgentCappedIn5s counts only urgent sends fro
   assert.equal(m.mostUrgentCappedIn5s, 4, "the urgent capped try's 4, not P2's 3 nor the close-out retry's 9");
   assert.equal(m.mostCappedIn5s, 7, "P1 and P2 capped together, as before");
 });
+
+// Item 5 (b) ships switched off (CLOSEOUT_HOLD; night build, after group 1 round 1, under Michael's pre-approved split). The tests of the
+// narrowed design below run with it switched on; the off tests set it off themselves and put it back.
+before(() => {
+  CLOSEOUT_HOLD.on = true;
+});
+after(() => {
+  CLOSEOUT_HOLD.on = false;
+});
+function holdOff<T>(fn: () => T): T {
+  CLOSEOUT_HOLD.on = false;
+  try {
+    return fn();
+  } finally {
+    CLOSEOUT_HOLD.on = true;
+  }
+}
+
+test("item 5 (b) switched off as shipped", () => {
+  assert.equal(holdOff(() => CLOSEOUT_HOLD.on), false);
+});
+
+test("item 5 (b) off: where the hold would engage (the stuck retries' use keeps a close-out retry out), the stuck retry is granted at once, as on v24", () =>
+  holdOff(() => {
+    const r = rig(() => 200);
+    stuckSent(r, 20);
+    const co = r.b.tryReserve("P1", 45, { label: "close-out retry", fiveSec: false, closeOut: true });
+    assert.ok(!(co instanceof Reservation) && co.why === "minute", "the close-out retry is refused, as on v24");
+    for (let i = 0; i < 3; i++) {
+      r.advance(5_000);
+      assert.ok(!(r.b.tryReserve("P1", 45, { label: "close-out retry", fiveSec: false, closeOut: true }) instanceof Reservation));
+    }
+    const s = stuckTry(r);
+    assert.ok(s instanceof Reservation, "the stuck retry is granted at once");
+    const m = r.b.takeMinute();
+    assert.equal(m.closeOutHolds, 0);
+    assert.equal(m.closeOutHeldRetries, 0);
+  }));
 
 // Group 1, night build round 1 (finding 2): the hold is set only when the ordinary stuck retries' own use is what keeps the close-out retry
 // out, and lasts at most 10 s in all in one waiting spell. `stuckSent(k)`: ordinary stuck retries sent k requests 30 to about 20 s ago, in

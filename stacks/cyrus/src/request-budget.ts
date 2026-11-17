@@ -58,8 +58,14 @@ export const FIRST_TRY_PACING = { on: false };
 //    (the same test `holdForRetry` uses for P2). Refused for anything else, it holds nothing, since holding the stuck retries would not help;
 //  - in one waiting spell the hold lasts at most CLOSEOUT_HOLD_TOTAL_MS in all. After that there is no hold until the close-out retry is
 //    granted, or has not been refused for CLOSEOUT_SPELL_GAP_MS (it stopped asking), so an unprotected position's sale never waits more than
-//    10 s for it (the priority relayed to the builder for judgment calls on the night of 2026-11-16, protection of positions without a
-//    stop first; not yet saved verbatim in the C2 log, for Michael to confirm, as is this narrowing of item 5 (b)).
+//    10 s for it (Michael's overnight instructions of 2026-11-16, item 1, saved verbatim in the C2 log: "fastest protection of positions
+//    without a stop first"). Even so it is switched off (CLOSEOUT_HOLD, above).
+// THE SWITCH for item 5 (b) (night build, after group 1 round 1): OFF. When it engages it holds an unprotected position's stuck retry for up
+// to 10 s where v24 grants it at once, worse than v24 on Michael's time measure and against his first priority (his overnight instructions
+// of 2026-11-16, saved verbatim in the C2 log: "fastest protection of positions without a stop first"), so under his pre-approved split
+// it ships switched off: no close-out retry sets a hold, so stuck retries are never held for one (as on v24). Item 5 (a), the logging
+// counter, stays on. An object so the tests can switch it on; nothing in the worker changes it.
+export const CLOSEOUT_HOLD = { on: false };
 export const CLOSEOUT_FIRST_HOLD_MS = 5_500;
 export const CLOSEOUT_HOLD_TOTAL_MS = 10_000;
 export const CLOSEOUT_SPELL_GAP_MS = 15_000;
@@ -241,7 +247,7 @@ export class RequestBudget {
       const refusal = this.refusal(cls, size, fiveSec, now, 0, opts.minuteCap);
       // Item 5 (b): a close-out's retry kept out by the stuck retries' own use holds them back until it gets in, at most 10 s in all in one
       // waiting spell (see CLOSEOUT_FIRST_HOLD_MS and CLOSEOUT_HOLD_TOTAL_MS).
-      if (refusal && opts.closeOut) this.closeOutRefused(refusal, size, now);
+      if (refusal && opts.closeOut && CLOSEOUT_HOLD.on) this.closeOutRefused(refusal, size, now);
       if (refusal) {
         this.minute.refused[refusal.why]++;
         if (this.lastRefusalHeldOnly) this.minute.retryHold.p2Refused++; // statistics only

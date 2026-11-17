@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { STUCK_RETRY_MINUTE_CAP } from "../src/risk.ts";
-import { RequestBudget, Reservation } from "../src/request-budget.ts";
+import { CLOSEOUT_HOLD, RequestBudget, Reservation } from "../src/request-budget.ts";
 
 const CAP = STUCK_RETRY_MINUTE_CAP;
 
@@ -322,7 +322,12 @@ test("hold counter: P2 tries refused while protect-first has P2 give way are not
   assert.equal(m.refused.class, 5, "the stuck retry, the held try and the 3 give-way tries");
 });
 
-test("hold counter: an ordinary stuck retry held back while a close-out retry waits is not counted as a held P2 refusal", () => {
+test("hold counter: an ordinary stuck retry held back while a close-out retry waits is not counted as a held P2 refusal", (ctx) => {
+  // Item 5 (b) ships switched off (CLOSEOUT_HOLD); this test switches it on.
+  CLOSEOUT_HOLD.on = true;
+  ctx.after(() => {
+    CLOSEOUT_HOLD.on = false;
+  });
   // Since group 1's night round 1 the close-out hold is set only when the stuck retries' own use keeps the close-out retry out, so here
   // P2 sent 26 and an earlier stuck retry 10 (30 and 24 s ago): the capped stuck retry of 10 (36 + 10 passes its 45) starts P2's hold.
   let t = 70_000;
