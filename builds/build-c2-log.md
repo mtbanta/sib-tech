@@ -7156,3 +7156,7 @@ Michael's yes, in Discord `commands` at 10:42 AM CT, verbatim: "Yes, deploy dd10
 > For the end-of-day review, cover the afternoon load window on dd104f7: stuck retries (count, requests per retry, time to sell), how the 60/75 budget was used, lost exits and time to sale, the close-out after the window, and rate-limit answers by kind, compared with this morning on v28.
 
 Added to the daily brief (note for Tuesday 2026-11-17).
+
+## Michael's request (2026-11-17, about 10:50 AM), saved verbatim
+
+> Bug fix for tonight: the bot still answers "I did not understand" to my deploy approval line. Add the deploy-approval acknowledgement from the speed branch (recognise "Yes, deploy <commit> now." in commands from me, reply that it is noted for the builder, take no action itself). Group 2 review.
