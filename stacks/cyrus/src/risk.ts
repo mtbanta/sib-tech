@@ -169,6 +169,16 @@ export const STUCK_ESCALATE_MS = 5 * 60_000;
 // on 2026-11-09, the 2 more are margin); what it really sends is counted as it is sent. A retry that does not fit waits for room. A
 // position's first sale is never refused (it is counted, as a first try).
 export const STUCK_TRY_REQUESTS = 10;
+// MICHAEL'S DECISION 1 OF 2026-11-17 (about 9:10 AM): "Cheap retry: build version C for real (admits on today's 10, sends 3, gives back 7)."
+// While Alpaca's live order updates are connected, an ordinary stuck retry of a missing-exit sale whose entry shows no exit still open in the
+// sync's own list, and which has nothing to cancel, skips the entry lookup and reads open orders and positions once, through the sell gate
+// (2 requests); its round decides from that one read and the gate's sell reuses it while it is under a second old (1 request): 3 requests,
+// where the full path sends about 10. It is still admitted on STUCK_TRY_REQUESTS (10) and gives the unused room back when the try ends.
+// The sell gate's own check is unchanged (open orders first, then positions, less the sells it sent since), so it can never sell more than
+// is held less the sells already open. Anything else (live updates down, a first try, a timed-out stop's try, the 15 second limit's sale,
+// a remainder being given a fresh stop, the fast sale, anything to cancel) takes the full path. An object so the tests can switch it off;
+// nothing in the worker changes it.
+export const CHEAP_RETRY = { on: true };
 export interface StuckEntry {
   // Group 2 review of 2026-11-12: true when the stuck case is a remainder the stack is trying to give a fresh stop (A4), so the alerts say
   // "protect or sell", not only "sell". Since Michael's answer of 2026-11-14 (night) on ruling 1 it is also read by the order sync: such a
@@ -1075,7 +1085,7 @@ function retryDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string, nowMs: nu
   // (TIMED_OUT_TRY_REQUESTS for an entry with a timed-out stop, else STUCK_TRY_REQUESTS); what it sends is counted as it is sent. Part 2
   // (the advisor's point, and group 1's leak note): here the room is only looked at; the reservation is taken when the try starts (`inTry`,
   // inside the loop's action, after its busy check and the stand-aside rules are asked again).
-  const n = timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS;
+  const n = timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS; // the cheap retry (CHEAP_RETRY) is admitted on the same 10
   const room = budgetOf(d, mem).roomFor("P1", n, true, 0, retryCap(timedOut));
   if (room.ok) return { go: { n, timedOut } };
   return { wait: waitForRoom(d, mem, st, clientOrderId, timedOut, n, room, nowMs), room: saleRoom(n, retryCap(timedOut)) };
@@ -1450,7 +1460,10 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   const ordinaryRetry = !timedOutTry && mem.stuck.has(s.clientOrderId);
   // A5: the fast sale has just looked the entry up itself, so it is not looked up a second time here. Item 2 of 2026-11-13: nor a try for an
   // entry with a timed-out stop (whose bracket exits ended long ago): the copy from this sync's own list or lookup is used.
-  if (!extra.fast && !timedOutTry) try {
+  // Michael's decision 1 of 2026-11-17 (CHEAP_RETRY): the cheap path skips the entry lookup; the gate's one read of open orders shows any
+  // exit of the entry still open (then nothing is sold: the gate counts it as a sell already holding the shares).
+  const cheap = CHEAP_RETRY.on && ordinaryRetry && kind === "missing" && !extra.fast && mem.streamLive && (extra.alsoCancel?.length ?? 0) === 0 && !flattenLegs(listedCopy).some((l) => l.side === "sell" && OPEN_STATUSES.has(l.status));
+  if (!extra.fast && !timedOutTry && !cheap) try {
     const fresh = await d.broker.findOrderByClientId(s.clientOrderId);
     if (fresh) o = fresh;
     else d.log?.("cleanup_lookup_empty", { symbol: s.symbol, clientOrderId: s.clientOrderId, kind });
@@ -1493,6 +1506,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     maxRounds: extra.fast || timedOutTry || ordinaryRetry ? 1 : 3,
     cancelIds,
     yieldToPriority: true,
+    ...(cheap ? { cheap: true } : {}), // CHEAP_RETRY: one read through the sell gate for the whole round
     ownEntryOnly: { maxQty: { [s.symbol]: ownShares } },
     endWhenHiddenHold: !extra.fast,
     onSellSent: sent,

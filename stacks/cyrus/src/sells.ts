@@ -189,6 +189,10 @@ export interface LiquidateOptions {
   // Release A, fix 1: order ids to cancel first in an `only` sale (a filled bracket's exit legs, which Alpaca's open list may
   // not show). An answer that the order is already filled or cancelled is not a failure.
   cancelIds?: string[];
+  // Michael's decision 1 of 2026-11-17 (the cheap stuck retry, CHEAP_RETRY in risk.ts): one read of open orders then positions through the
+  // sell gate, reused for every look in the round; the gate's sell reuses it while it is under a second old (VIEW_MAX_AGE_MS). Honoured only
+  // for a one-symbol sale with nothing to cancel.
+  cheap?: boolean;
   // Ruling B (group 1, round 2 of the night release), set only for a fresh stop that hit the 15 second limit: if a cancel this round is
   // not accepted, the attempt ends at once (no waiting and polling for a cancel that was not made); the order sync tries again on the
   // stuck backoff within the shared request budget.
@@ -434,7 +438,11 @@ export class Liquidator {
     const steps: LiquidateSteps = { cancelsSentAt: [], cancelsAnsweredAt: [], sells: [] };
     const stamp = () => this.d.now().toISOString();
     const cancelIds = [...new Set(o.cancelIds ?? [])];
-    const heldNow = async (): Promise<Position[]> => (await this.d.broker.listPositions()).filter((p) => !only || only.has(p.symbol));
+    const cheapOk = o.cheap === true && cancelIds.length === 0 && !!only && only.size === 1;
+    let cheapView: { positions: Position[]; open: Order[] } | null = null;
+    const cview = async () => (cheapView ??= await this.d.gate.look());
+    const heldNow = async (): Promise<Position[]> => (cheapOk ? (await cview()).positions : await this.d.broker.listPositions()).filter((p) => !only || only.has(p.symbol));
+    const openOrdersR = async (): Promise<Order[]> => (cheapOk ? (await cview()).open : await this.openOrders());
     // Item 6: a remainder sale stops at its next step while the daily loss stop's sale waits or runs; that sale sells these shares too.
     const yieldNow = (): boolean => o.yieldToPriority === true && !o.priority && this.priorityPending > 0;
     const yielded = (): LiquidateResult => {
@@ -547,7 +555,7 @@ export class Liquidator {
         // Nothing to sell. A whole-account request still clears any order left open (an entry that never filled).
         if (!only && round === 1) {
           try {
-            if ((await this.openOrders()).length > 0) await this.d.broker.cancelAllOrders();
+            if ((await openOrdersR()).length > 0) await this.d.broker.cancelAllOrders();
           } catch (err) {
             result.errors.push(`could not cancel the remaining open orders: ${(err as Error).message.slice(0, 100)}`);
           }
@@ -575,7 +583,7 @@ export class Liquidator {
       // cancel, so no sale goes out later than on 20ba5bd.
       let v24Cancelled = false;
       try {
-        const open = await this.openOrders();
+        const open = await openOrdersR();
         // Release A, fix 2 (the close-out only): every share still held is covered by a sell of ours that is working. Waiting out
         // the remaining rounds on it does nothing useful; the close-out waits for the fills itself, gently.
         if (o.returnWhenOnlyOwnSells && round >= 2 && positions.every((p) => ownOpenSellQty(open, p.symbol) >= p.qty - EPS)) onlyOwn = true;
@@ -738,7 +746,7 @@ export class Liquidator {
         if (yieldNow()) return yielded();
         let held: Position[] = [];
         try {
-          openOrders = await this.openOrders();
+          openOrders = await openOrdersR();
           openReadAt = this.d.now().getTime();
           held = await heldNow();
         } catch (err) {
@@ -780,7 +788,7 @@ export class Liquidator {
       const capThisRound = new Map<string, number>(); // fix A: the recounted shares per symbol in this round
       if (readOk) {
         result.freshStopStillOpen = undefined; // what the last round's look saw (group 2, round 4 of the night release)
-        this.d.gate.invalidate();
+        if (!cheapOk) this.d.gate.invalidate(); // the cheap retry keeps the gate's one read (nothing was cancelled this round)
         let freshPositions: Position[] = [];
         try {
           freshPositions = await heldNow();
