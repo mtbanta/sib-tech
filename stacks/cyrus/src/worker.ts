@@ -1499,7 +1499,8 @@ export class Worker {
       // The redesign of 2026-11-14, part 1: the shared request budget this minute: requests sent by tag (entries, first tries, P1, P2,
       // routine, and the clock's separate bucket), tries granted and refused (and why), forced (the regular close-out's retry from 2:58), overdrafts, the
       // most budgeted requests in any minute and any 5 seconds (at most 60 and 15 unless forced or overdrawn), and entries refused while a
-      // P2 try waited on its floor.
+      // P2 try waited on its floor or (Michael's ruling of 2026-11-17) a stuck sale waited for Alpaca's room (`stuckSaleHolds`,
+      // `stuckSaleEntriesRefused`).
       requestBudget: this.budget.takeMinute(),
       // The redesign of 2026-11-14, part 2: the protection loop this minute (looks run, list-lag looks, failed, put off while a sync ran,
       // waited for room, actions started, wakes asked for; wakes pending and actions running now).

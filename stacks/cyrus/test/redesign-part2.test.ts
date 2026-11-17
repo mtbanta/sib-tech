@@ -1195,6 +1195,7 @@ test("part 2 (group 2, round 5): the 15 second limit's first try refused for roo
   w.box.remaining = 30; // room for the limit's look (2), not for its try (13)
   const r = await w.acts[0]!.run();
   assert.deepEqual(r?.room, { cls: "P1", n: w.TIMED_OUT_TRY_REQUESTS, reads: 2, stuckSale: true }); // a sale: entries give way while it waits (2026-11-17)
+  assert.equal((w.mem.budget as any).givingWay(), true, "Michael's ruling of 2026-11-17: the 15 second limit's sale waiting for Alpaca's room makes entries give way");
 });
 
 // Michael's ruling 1 of 2026-11-14 (night): a stuck sale (here every sale is refused by Alpaca) is tried again within a few seconds while the

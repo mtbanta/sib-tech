@@ -26,7 +26,7 @@ export interface RoomNeed {
   reads: number;
   // A lower ceiling on the budgeted minute for this try (an ordinary stuck retry: 45, Michael's answer of 2026-11-14, night).
   minuteCap?: number;
-  // Michael's ruling of 2026-11-17: the try is a stuck sale's (an ordinary stuck retry or a timed-out stop's try); while its local room check
+  // Michael's ruling of 2026-11-17: the try is a stuck sale's (an ordinary stuck retry, a timed-out stop's try, or the 15 second limit's sale); while its local room check
   // is refused for Alpaca's room, new entries give way (the worker's `roomAt` tells the budget).
   stuckSale?: boolean;
 }
