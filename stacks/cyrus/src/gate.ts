@@ -52,7 +52,7 @@ export interface GateDeps {
   entryBlock?: () => string | null;
   // Protect-first (Michael's night build request of 2026-11-16, item 2; protect-first.ts): while a held position lacks a confirmed stop,
   // the reason no entry may go now (its first 30 s: none; after: one every 2 s), or null. `recheck`, just before sending: only the pause
-  // refuses. `entryAdmitted`: an entry passed the governor (it takes the reduced rate's slot).
+  // refuses. `entryAdmitted`: an entry passed the governor (it takes the reduced rate's slot). (Switched off: see the constant, PROTECT_FIRST.)
   protectFirst?: { entryRefusal(recheck?: boolean): string | null; entryAdmitted(): void };
   // The speed release (decision 4): told about each 1-share limit entry Alpaca accepted, so the worker can cancel it if it has not
   // filled within the load day's wait (entry-expiry.ts). Never waits.
