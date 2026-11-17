@@ -309,6 +309,9 @@ export interface LiquidatorDeps {
   ownSalesMayRun?: () => boolean;
   // Item 3 of the night build: told the moment a sale of the whole account is asked (the worker wakes one-entry first tries waiting for room).
   onWholeAccountAsk?: () => void;
+  // Item 1 of the night build (round 1 follow-up): whether there is room for one lookup of a cancel's result above the urgent floor (the
+  // shared request budget's `urgentRoom(1)`). Unset: always (the lookup is made, as in the tests that build a liquidator alone).
+  lookupRoom?: () => boolean;
 }
 
 // At most MAX_EARLY_WAKES early wake-ups in one liquidation, so a burst of updates cannot turn the waits into a run of extra looks (5
@@ -636,7 +639,16 @@ export class Liquidator {
           const t = this.d.now().getTime();
           if (t - c.at < c.waitMs || c.lookups >= CANCEL_LOOKUPS_MAX || (c.lookupFails ?? 0) >= CANCEL_LOOKUP_FAILS_MAX) continue;
           let still = false;
-          try {
+          // Night build round 1 follow-up (a judgment call under Michael's overnight instructions, item 1: "fastest protection of positions
+          // without a stop first, then fewest rate-limit answers on sale, cancel or close-out steps"): when Alpaca's remaining, as the
+          // governor estimates it, less the room reserved unsent, is below the urgent floor of 20 plus the lookup's 1, the lookup is skipped and
+          // the cancel sent again directly, as v24 does (a lookup there cost a sale check a rate-limit answer: sold 18 s later than v24 in the
+          // simulator). The re-send allowance and every other bound are unchanged.
+          if (this.d.lookupRoom && !this.d.lookupRoom()) {
+            if (c.resends >= CANCEL_RESENDS_MAX) continue; // nothing left to send: looked up once there is room (bounded as above)
+            this.d.log?.("cancel_lookup_skipped", { reason: o.reason, id, resends: c.resends }); // Fly's log, at most once a re-send
+            still = true;
+          } else try {
             const x = await this.d.broker.getOrderById(id);
             c.lookups++; // only a lookup that answered counts toward CANCEL_LOOKUPS_MAX
             still = !!x && OPEN_STATUSES.has(x.status) && x.status !== "pending_cancel";

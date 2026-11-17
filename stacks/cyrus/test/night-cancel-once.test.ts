@@ -8,6 +8,7 @@ import { clientOrderIdFor } from "../src/gate.ts";
 import { SimBroker } from "./sim-broker.ts";
 import { D } from "./rig.ts";
 import { STORED_INFO_EVENTS, shouldStoreEvent } from "../src/run-log.ts";
+import { RequestBudget } from "../src/request-budget.ts";
 
 // `bracketed` positions with both exits resting, `bare` positions whose exits are already gone (their sale goes out in round 1 and, with
 // slow fills, stays open), Alpaca taking `cancelMs` per cancel; a liquidator on a clock the test moves. Counts requests by kind.
@@ -326,6 +327,133 @@ test("night build, item 1: lookups that keep failing stay bounded (at most 3 fai
   assert.equal(CANCEL_LOOKUP_FAILS_MAX, 3);
   // The give-up is not silent: one stored row (cancel_not_confirmed) when the last allowed lookup fails with no re-send left.
   assert.equal(w.events.filter((x) => x.e === "cancel_not_confirmed" && x.d.id === bad).length, 1);
+});
+
+// Night build round 1 follow-up (a judgment call under Michael's overnight instructions, item 1): with too little room above the urgent
+// floor (remaining less unsent below 21), a cancel's result is not looked up; the cancel is sent again directly, as v24 does. The builder's
+// probe `lookup-429.mts` as a test: one exit's first cancel is lost; Alpaca's remaining is set to `tok` at the start of the second close-out
+// retry (where the head would look the result up and v24 sends the cancel again), refill `refill` a minute; the lookup room is the shared
+// request budget's `urgentRoom(1)` over the simulated bucket. v24 (20ba5bd) sold QAA at 42.05 s (tok 0, refill 30) and 28.3 s (tok 2,
+// refill 60); with the lookup made there, the night build sold it at 60.05 s and 29.3 s.
+async function lookup429(tok: number, refill: number, withRoomCheck = true) {
+  const sim: any = new SimBroker(Date.UTC(2026, 10, 2, 15, 0));
+  const holds: Array<{ until: number; res: () => void }> = [];
+  const sleep = (ms: number) => new Promise<void>((res) => holds.push({ until: sim.simMs + ms, res }));
+  const budget = new RequestBudget({ now: () => sim.simMs, remaining: () => Math.floor(sim.tokens) });
+  const events: Array<{ e: string; d: any }> = [];
+  const liq: any = new Liquidator({ broker: sim, gate: new SellGate({ broker: sim, say: async () => true, nowMs: () => sim.simMs }), now: () => new Date(sim.simMs), sleep, log: (e: string, d: any) => void events.push({ e, d }), ...(withRoomCheck ? { lookupRoom: () => budget.urgentRoom(1) } : {}) });
+  const legs: string[] = [];
+  for (const s of ["QAA", "QAB"]) {
+    const id = clientOrderIdFor(D, s, 1);
+    await sim.submitEntry({ symbol: s, qty: 5, stopPrice: 9, takeProfitPrice: 11, referencePrice: 10, clientOrderId: id });
+    sim.fillEntry(id, 10);
+    legs.push(...sim.orders.find((x: any) => x.clientOrderId === id)!.legs.map((l: any) => l.id));
+  }
+  sim.advance(1000);
+  sim.cancelMs = 200;
+  sim.refillPerMinute = refill;
+  const bad = legs[0];
+  let lost = 1;
+  let lookups = 0;
+  const realCancel = sim.cancelOrder.bind(sim);
+  sim.cancelOrder = async (id: string) => {
+    if (id === bad && lost > 0) {
+      lost--;
+      sim.spend("safety"); // Alpaca took the request and lost the cancel
+      return;
+    }
+    return realCancel(id);
+  };
+  const realGet = sim.getOrderById.bind(sim);
+  sim.getOrderById = async (id: string) => {
+    lookups++;
+    return realGet(id);
+  };
+  const soldAt: Record<string, number> = {};
+  const realSell = sim.submitSell.bind(sim);
+  sim.submitSell = (x: any) => {
+    soldAt[x.symbol] ??= sim.simMs;
+    return realSell(x);
+  };
+  const t0 = sim.simMs;
+  const drive = async (until: number) => {
+    while (sim.simMs < until) {
+      sim.advance(50);
+      for (const h of holds.filter((h) => h.until <= sim.simMs)) {
+        holds.splice(holds.indexOf(h), 1);
+        h.res();
+      }
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+    }
+  };
+  for (let k = 0; k < 4; k++) {
+    if (k === 1) sim.tokens = tok;
+    const p = liq.flatten({ reason: "close-out", tradeDate: D, only: ["QAA", "QAB"], maxRounds: 1 });
+    await drive(sim.simMs + 20_000);
+    await p;
+  }
+  return { soldQAA: soldAt.QAA === undefined ? null : soldAt.QAA - t0, lookups, events, oversell: sim.oversellAttempts };
+}
+
+for (const [tok, refill, v24, before] of [[0, 30, 42_050, 60_050], [2, 60, 28_300, 29_300]] as const) {
+  test(`night build, item 1: with Alpaca's remaining low (set to ${tok}, refill ${refill} a minute) the cancel is sent again without the lookup; QAA sold no later than on v24 (${v24} ms)`, async () => {
+    const r = await lookup429(tok, refill);
+    assert.ok(r.soldQAA !== null && r.soldQAA <= v24, `QAA sold at ${r.soldQAA} ms (v24 ${v24})`);
+    assert.equal(r.lookups, 0, "no lookup while the room is low");
+    assert.ok(r.events.some((x) => x.e === "cancel_lookup_skipped"));
+    assert.equal(r.oversell, 0);
+    // The control: without the room check (a liquidator built alone), the lookup is made and the sale comes later.
+    const off = await lookup429(tok, refill, false);
+    assert.equal(off.soldQAA, before, "the lookup made: as measured before this change");
+  });
+}
+
+test("night build, item 1: the worker gives the liquidator the lookup room check (one request above the urgent floor of 20)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const w = readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
+  assert.match(w, /lookupRoom: \(\) => this\.budget\.urgentRoom\(1\),/);
+  const b = new RequestBudget({ now: () => 0, remaining: () => 21 });
+  assert.equal(b.urgentRoom(1), true, "21 less 1 is 20");
+  const c = new RequestBudget({ now: () => 0, remaining: () => 20 });
+  assert.equal(c.urgentRoom(1), false, "20 less 1 is 19");
+});
+
+test("night build, item 1: with no room for the lookup, re-sends stay within the allowance (2), and nothing more is sent once it is used", async () => {
+  const sim: any = new SimBroker(Date.UTC(2026, 10, 2, 15, 0));
+  const holds: Array<{ until: number; res: () => void }> = [];
+  const sleep = (ms: number) => new Promise<void>((res) => holds.push({ until: sim.simMs + ms, res }));
+  const liq: any = new Liquidator({ broker: sim, gate: new SellGate({ broker: sim, say: async () => true, nowMs: () => sim.simMs }), now: () => new Date(sim.simMs), sleep, lookupRoom: () => false });
+  const id = clientOrderIdFor(D, "QAA", 1);
+  await sim.submitEntry({ symbol: "QAA", qty: 5, stopPrice: 9, takeProfitPrice: 11, referencePrice: 10, clientOrderId: id });
+  sim.fillEntry(id, 10);
+  const bad = sim.orders.find((x: any) => x.clientOrderId === id)!.legs[0].id;
+  sim.advance(1000);
+  let sends = 0;
+  let lookups = 0;
+  const realCancel = sim.cancelOrder.bind(sim);
+  sim.cancelOrder = async (x: string) => (x === bad ? void sends++ : realCancel(x)); // always lost
+  sim.getOrderById = async () => void lookups++;
+  const t0 = sim.simMs;
+  for (let k = 0; k < 10 && sim.simMs - t0 < 50_000; k++) {
+    let done = false;
+    const p = liq.flatten({ reason: "close-out", tradeDate: D, only: ["QAA"], maxRounds: 4 }).finally(() => (done = true));
+    const cap = sim.simMs + 60_000;
+    while (!done && sim.simMs < cap) {
+      const until = sim.simMs + 500;
+      while (sim.simMs < until) {
+        sim.advance(50);
+        for (const h of holds.filter((h) => h.until <= sim.simMs)) {
+          holds.splice(holds.indexOf(h), 1);
+          h.res();
+        }
+        for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+      }
+    }
+    assert.ok(done, "each liquidation ends");
+    await p;
+  }
+  assert.equal(lookups, 0);
+  assert.equal(sends, 1 + CANCEL_RESENDS_MAX, "the first cancel and 2 re-sends, within about 50 s");
 });
 
 test("night build, item 1: a round where 20ba5bd would have cancelled again keeps its timing (the blind half second, then the same looks) without the cancel: with 8 s cancels the sale goes out within 0.1 s of the exits ending, as on 20ba5bd", async () => {

@@ -410,6 +410,12 @@ export class RequestBudget {
 
   // Item 3 of the night build: room for a first try of `n` requests above the urgent floor (no request; the governor's estimate).
   firstRoom(n: number): boolean {
+    return this.urgentRoom(n);
+  }
+
+  // Room for `n` requests above the urgent floor of 20: Alpaca's remaining as the governor estimates it, less the room reserved unsent, less
+  // `n` (no request). Item 1's cancel-result lookup asks it for 1 (night build round 1 follow-up).
+  urgentRoom(n: number): boolean {
     return this.remaining() - this.usage(this.nowMs()).unsentMinute - n >= P1_FLOOR;
   }
 
