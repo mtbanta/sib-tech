@@ -107,10 +107,14 @@ export const STORED_INFO_EVENTS = new Set([
   "protection_action_failed",
   // Night build of 2026-11-16 (group 2, round 1; logging only). Protect-first's episodes (item 2): they fire only while it is switched on
   // (`PROTECT_FIRST.on`; switched off: see the constant), about one started and one ended row an episode, and one when it reaches its 30 s
-  // limit. (Item 1, the cancel fix, is not in this release: left out under Michael's split, with its `cancel_*` events.)
+  // limit. Item 1: `cancel_not_confirmed`, in three forms: an answered lookup still shows the order working with the 2 re-sends used; the
+  // third failed lookup with the re-sends used (`lookupsFailed`); the fourth thrown cancel (`thrown`). Up to about 3 rows an order per 60 s
+  // cancel memory (group 2, night round 2: measured 3). The re-sends (`cancel_resent`, logged once Alpaca took the re-send), failed lookups
+  // (`cancel_lookup_failed`) and skipped lookups (`cancel_lookup_skipped`) stay in Fly's log only.
   "protect_first_started",
   "protect_first_limit_reached",
   "protect_first_ended",
+  "cancel_not_confirmed",
 ]);
 
 export function shouldStoreEvent(level: "info" | "warn" | "error", event: string): boolean {

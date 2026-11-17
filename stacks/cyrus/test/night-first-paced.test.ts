@@ -167,9 +167,7 @@ test("night build, item 3: which first tries are paced (missing-exit, remainder,
   // The close-outs' first tries are not paced (night-a2 tuning): measured on 2026-11-16 (simulator, the worker's own 2:55 and mid-day
   // close-outs, Alpaca's remaining forced to 60 at the loss), waiting 1.8 to 3 s before the close-out delayed its sales by as much against v24.
   assert.ok(!worker.includes("paceFirst"), "no close-out first try waits");
-  // The whole-account wake-up (`onWholeAccountAsk`) lived in item 1's sells.ts; with item 1 left out (night-noitem1) sells.ts is v24's text,
-  // so the worker no longer wires it. Item 3 is switched off, so no first try ever waits to be woken.
-  assert.ok(!worker.includes("onWholeAccountAsk"), "not wired: sells.ts is v24's");
+  assert.match(worker, /onWholeAccountAsk: \(\) => this\.budget\.wakeFirstWaiters\(\),/);
   // Not paced: the loss stop's first sale (the most urgent), the start-up protection check (reads only), the carried-position sale.
   assert.doesNotMatch(risk, /paceFirst\([^)]*"loss stop first sale"/);
   assert.doesNotMatch(risk, /paceFirst\([^)]*"start-up protection check"/);

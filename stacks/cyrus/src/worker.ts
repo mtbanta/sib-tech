@@ -351,7 +351,12 @@ export class Worker {
     this.liquidator = new Liquidator({ broker: deps.broker, gate: this.sellGate, now: deps.now, sleep: deps.sleep, log: (e, data) => deps.log?.("info", e, data), waitEvent: (symbols, ms) => this.waitEvent(symbols, ms), ownSalesMayRun: () => {
       const s = this.sessionForSync;
       return !s || this.protectNow(s.closeAt);
-    } });
+    },
+      // Item 3 of the night build: one-entry first tries waiting for room go ahead the moment a sale of the whole account is asked.
+      onWholeAccountAsk: () => this.budget.wakeFirstWaiters(),
+      // Item 1 of the night build (round 1 follow-up): a cancel's result is looked up only with room above the urgent floor.
+      lookupRoom: () => this.budget.urgentRoom(1),
+    });
     // The load window's 5 second cancels are part of entering (tagged as entries for the shared request budget's statistics).
     this.entryExpiry = new EntryExpiry({ cancelOrder: (id) => inRequestScope({ tag: "entry" }, () => deps.broker.cancelOrder(id)), wasFilled: (id) => this.orderHandler?.wasFilled(id) ?? false, log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}) });
     this.commands = new CommandProcessor({

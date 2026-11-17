@@ -6,7 +6,14 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**BUILD C2: FLY RUNS RELEASE V25 (`9bd7ef5`), DEPLOYED 11:47 PM CT ON 2026-11-16: V24 PLUS THE CLOSE-OUT TIME AS A SETTING (2:45 PM CT FOR THE TEST) AND LOGGING. TUESDAY 2026-11-17 IS A LOAD MORNING (PLUS 1 CENT ENTRIES NOT LIVE). THE CANCEL FIX WAITS FOR MICHAEL AT THE MID-DAY PAUSE.** As of 2026-11-17, about 12:05 AM.
+**BUILD C2: FLY RUNS RELEASE V26 (`95fc178`), DEPLOYED 5:07 AM CT ON 2026-11-17: V25 PLUS THE CANCEL FIX. TUESDAY 2026-11-17 IS A LOAD MORNING (PLUS 1 CENT ENTRIES NOT LIVE). NEXT: PROTECT-FIRST FIX (A), THEN (B), AND THE CLOSE-OUT NOT FLAT ALERT AFTER 3 MINUTES.** As of 2026-11-17, about 5:10 AM.
+
+- Michael's morning decisions (verbatim in `builds/build-c2-log.md`): he accepted the cancel fix's trade-off and asked for it before the open; then build protect-first fix (a) (a running lost-exit sale gives way to a close-out at its next round), measured on its own, then (b) (the stuck-sale backoff counts from the first refusal), and the 2:45 close-out's NOT FLAT alert after 3 minutes while it keeps waiting. First-try pacing dropped; close-out first tries stay unpaced; Alpaca's 2:55 hold decided after today's figures.
+- Bar unchanged (median and worst run no worse than v24), both groups; deploy before 7:30 AM only if both pass, otherwise to the mid-day pause for his written yes; pre-approved split.
+- Mid-day wait set (from 10:31 AM, run `builds/midday-review-brief.md` once flat, post "done").
+- Rollback: v25's image `deployment-01M7M0Q0QS8F9T4RXMN5WA30K8`. Paper only. Research input for a human decision.
+
+Earlier entry, superseded by the paragraph above: **BUILD C2: FLY RUNS RELEASE V25 (`9bd7ef5`), DEPLOYED 11:47 PM CT ON 2026-11-16: V24 PLUS THE CLOSE-OUT TIME AS A SETTING (2:45 PM CT FOR THE TEST) AND LOGGING. TUESDAY 2026-11-17 IS A LOAD MORNING (PLUS 1 CENT ENTRIES NOT LIVE). THE CANCEL FIX WAITS FOR MICHAEL AT THE MID-DAY PAUSE.** As of 2026-11-17, about 12:05 AM.
 
 - Michael's bar for the night build: no worse than v24 on rate-limit answers on sale, cancel or close-out steps and on time from lost exits to each sale, read as median and worst run over jittered runs. Passed and shipped: item 4 (close-out setting), item 5 (a) (logging). Built, switched off (failed the bar): item 3 (first-try pacing; reworked on `night-item3`, still fails), item 5 (b) (close-out-first hold), item 2 (protect-first; its regressions trace to v24's queue and backoff). Left out: item 1, the cancel fix (worse in 7 of 75 cases by small margins, large gains elsewhere), on `night-2026-11-16` at `95fc178`.
 - Morning batch for Michael (log, from "Michael's night build request"): item 1 yes or no for the mid-day pause; protect-first's two possible fixes (a running one-entry sale gives way at its next round; the stuck backoff timed from the first refusal); item 3's narrowing for the close-outs and its rework's results; the up to 13 minute wait at 2:45; the 2:55 hold tied to the clock; the speed release's open threads.
