@@ -62,6 +62,9 @@ test("night build, item 1: cancel_not_confirmed is stored in the run log; cancel
   assert.equal(shouldStoreEvent("info", "cancel_not_confirmed"), true);
   assert.equal(shouldStoreEvent("info", "cancel_resent"), false);
   assert.equal(shouldStoreEvent("info", "cancel_lookup_failed"), false);
+  // Group 2, night round 2: the skipped lookup and the close-out hold's cap stay in Fly's log only too.
+  assert.equal(shouldStoreEvent("info", "cancel_lookup_skipped"), false);
+  assert.equal(shouldStoreEvent("info", "closeout_hold_capped"), false);
 });
 
 test("night build, item 1: a flatten whose own sells are open in round 2, with 8 s cancels, sends no cancel again for orders pending cancel (v24 re-sent one each, every round)", async () => {
@@ -292,6 +295,59 @@ for (const fails of [1, 3, 10]) {
     assert.equal(w.sim.oversellAttempts, 0);
   });
 }
+
+// Group 2, night build round 2 (their probe as a test): failed and answered lookups mixed. One stop leg's cancels are always lost, its first
+// 2 lookups throw and the rest answer; close-out retries of both symbols with `only`. Within one cancel memory (60 s from the first cancel)
+// the order gets at most 3 cancels (the first and 2 re-sends), at most 6 lookups (3 answered, 3 failed) and at most about 3 stored
+// `cancel_not_confirmed` rows (measured by group 2: 3 cancels, 5 lookups, 2 failed and 3 answered, and 3 rows).
+test("night build, item 1: failed and answered lookups mixed: within one cancel memory at most 3 cancels, 6 lookups (3 answered, 3 failed) and about 3 cancel_not_confirmed rows an order", async () => {
+  const w = await world(2, 0, 200);
+  const bad = w.legIds[1]!;
+  const cancelsAt: number[] = [];
+  const answeredAt: number[] = [];
+  const failedAt: number[] = [];
+  const realCancel = w.sim.cancelOrder;
+  w.sim.cancelOrder = async (id: string) => {
+    if (id === bad) {
+      cancelsAt.push(w.sim.simMs);
+      return; // lost: it stays working
+    }
+    return realCancel(id);
+  };
+  const realGet = w.sim.getOrderById;
+  w.sim.getOrderById = async (id: string) => {
+    if (id === bad) {
+      if (failedAt.length < 2 && answeredAt.length === 0) {
+        failedAt.push(w.sim.simMs);
+        throw new Error("Alpaca 503 on lookup");
+      }
+      answeredAt.push(w.sim.simMs);
+    }
+    return realGet(id);
+  };
+  const rowsAt: number[] = [];
+  const t0 = w.sim.simMs;
+  for (let k = 0; k < 20 && w.sim.simMs - t0 < 60_000; k++) {
+    let done = false;
+    const p = w.liq.flatten({ reason: "close-out", tradeDate: D, only: ["QAA", "QAB"], maxRounds: 4 }).finally(() => (done = true));
+    const cap = w.sim.simMs + 60_000;
+    while (!done && w.sim.simMs < cap) await w.drive(w.sim.simMs + 500);
+    assert.ok(done, "each liquidation ends");
+    await p;
+    await w.drive(w.sim.simMs + 1_000);
+  }
+  for (const x of w.events) if (x.e === "cancel_not_confirmed" && x.d.id === bad) rowsAt.push(1);
+  const first = cancelsAt[0]!;
+  const within = (ts: number[]) => ts.filter((t) => t - first < CANCEL_MEMORY_MS).length;
+  assert.ok(within(cancelsAt) <= 1 + CANCEL_RESENDS_MAX, `cancels ${within(cancelsAt)}`);
+  assert.ok(within(answeredAt) <= CANCEL_LOOKUPS_MAX, `answered lookups ${within(answeredAt)}`);
+  assert.ok(within(failedAt) <= CANCEL_LOOKUP_FAILS_MAX, `failed lookups ${within(failedAt)}`);
+  assert.ok(within(answeredAt) + within(failedAt) <= CANCEL_LOOKUPS_MAX + CANCEL_LOOKUP_FAILS_MAX, "at most 6 lookups");
+  assert.ok(rowsAt.length >= 1 && rowsAt.length <= 3, `cancel_not_confirmed rows ${rowsAt.length}`);
+  assert.equal(failedAt.length, 2, "the probe's 2 failed lookups");
+  assert.equal(w.sim.oversellAttempts, 0);
+  // Measured when written: cancels at 0.05, 7.6, 15.15 s; failed lookups at 7.6 and 15.15 s; answered at 31.55, 39.1, 46.65 s; 3 rows.
+});
 
 test("night build, item 1: lookups that keep failing stay bounded (at most 3 failed lookups and 2 re-sends an order within the memory)", async () => {
   const w = await world(2, 0, 200);

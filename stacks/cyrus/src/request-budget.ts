@@ -165,7 +165,8 @@ export interface BudgetMinute {
   // the minute the hold was in force, up to its end (not up to the read). `p2Refused`: P2 tries (`tryReserve` only, as `refused` counts them)
   // refused that would have been granted without the hold; each is also counted once in `refused.class` or `refused.five`.
   retryHold: { started: number; renewed: number; inForceMs: number; p2Refused: number };
-  // Item 3 of the night build (logging only): first tries that waited for room this minute, and their total wait in ms.
+  // Item 3 of the night build (logging only): first tries that waited for room this minute, and their total wait in ms. (Switched off: see
+  // the constant, FIRST_TRY_PACING; both stay 0.)
   firstPaced: number;
   firstPacedMs: number;
   // Item 5 (a) of the night build (logging only): the most in any 5 seconds sent by urgent (P1) tries that reserve against the 5 seconds,
@@ -173,7 +174,7 @@ export interface BudgetMinute {
   // against the minute only, are left out; `mostCappedIn5s` counts P1 and P2 together).
   mostUrgentCappedIn5s: number;
   // Item 5 (b) (logging only): close-out retries refused for room that set or renewed the stuck retries' hold, and the stuck retries' tries or
-  // looks refused because of it.
+  // looks refused because of it. (Switched off: see the constant, CLOSEOUT_HOLD; both stay 0.)
   closeOutHolds: number;
   closeOutHeldRetries: number;
 }
@@ -205,6 +206,7 @@ export class RequestBudget {
   readonly totals = { P1: 0, P2: 0, overdraft: 0 };
   // Protect-first (Michael's night build request of 2026-11-16, item 2): true while low-priority work gives way because a held position
   // lacks a confirmed stop (protect-first.ts, its first 30 s). Every P2 try is refused then; P1 is never affected. Unset: never.
+  // (Switched off: see the constant, PROTECT_FIRST.)
   p2GivesWay: (() => boolean) | null = null;
   readonly peak = { minute: 0, five: 0 };
   // When each request beyond its try's reservation was sent (the last 10 minutes; statistics and tests).

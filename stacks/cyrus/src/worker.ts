@@ -298,6 +298,7 @@ export class Worker {
   private readonly lostExitsPending = new Map<string, { symbol: string; at: number; tries: number }>();
   // Protect-first (Michael's night build request of 2026-11-16, item 2; protect-first.ts): while a held position lacks a confirmed stop,
   // new entries stop and P2 gives way for up to 30 s, then entries run at a reduced rate until every position is protected or sold.
+  // (Switched off: see the constant, PROTECT_FIRST.)
   readonly protectFirst: ProtectFirst;
   // Michael's item 1 of 2026-11-13 (afternoon): a remainder whose stop cancel the live update reported complete gets up to 3 more syncs,
   // 0.5, 1 and 2 seconds apart, until it has its fresh stop (or is sold or closed); the 10 second sync is the backstop after that.
