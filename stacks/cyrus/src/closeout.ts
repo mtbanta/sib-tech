@@ -156,6 +156,7 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
         }
         // Fix B (Michael's approval of 2026-11-10): open orders are read on timed looks only. Before, a look brought forward by an
         // update made `look` 0, and 0 % 5 is 0, so the check ran on it (on 2026-11-10 the wait ended after 544 ms).
+        let coverChecked = false; // question 5: this look read the open orders and found every share held covered by a sell of ours
         if (!early && look % OWN_SELLS_ORDERS_EVERY === 0) {
           const open = (await d.broker.listOrdersPaged("open", "2000-01-01T00:00:00Z", 5)).orders;
           const covered = (ps: Array<{ symbol: string; qty: number }>) => ps.every((p) => ownOpenSellQty(open, p.symbol) >= p.qty - 1e-6);
@@ -174,16 +175,19 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
               break;
             }
           }
+          coverChecked = true;
         }
-        // Question 5 (after this look's checks, so only while every share held is still covered): still waiting 3 minutes after the regular
-        // close-out started, with at least one more look before the deadline: post the NOT FLAT alert now (once, not awaited), keep waiting.
+        // Question 5 (group 1, round 1: only on a look whose open-orders check ran and found every share held covered, so the alert's "covered"
+        // is what this look saw; that check runs every 5th timed look, so the alert can come up to about 8 s after the 3 minutes): still waiting
+        // 3 minutes after the regular close-out started, with at least one more look before the deadline: post the NOT FLAT alert now (once,
+        // not awaited), keep waiting.
         const nowMs = d.now().getTime();
-        if (alert && path === "close-out" && earlyAlertAt === null && nowMs - startedAt >= CLOSEOUT_EARLY_ALERT_MS && nowMs + OWN_SELLS_POLL_MS < deadline) {
-          earlyAlertAt = nowMs;
+        if (alert && path === "close-out" && coverChecked && earlyAlertAt === null && nowMs - startedAt >= CLOSEOUT_EARLY_ALERT_MS && nowMs + OWN_SELLS_POLL_MS < deadline) {
           const n = sells.filter((x) => remaining.includes(x.symbol)).length || remaining.length;
           const sentAt = sells.length > 0 ? centralClock(new Date(sells[0]!.at)) : "earlier";
           const mins = Math.floor((nowMs - startedAt) / 60_000);
           const text = `**Michael: NOT FLAT ${mins} minutes into the close-out: ${remaining.join(", ")}.** ${n} sell${n === 1 ? "" : "s"} sent at ${sentAt}; Alpaca has not filled ${n === 1 ? "it" : "them"} yet. Every share still held is covered by a sell of ours, so I keep waiting until ${centralClock(new Date(deadline))} and will post again. Please check Alpaca.`.slice(0, 1800);
+          earlyAlertAt = nowMs; // set once the text is built, so an Update line always has an alert before it
           void d.say("alerts", text, { mentionOwner: true }).catch(() => undefined);
           void d.say("commands", text).catch(() => undefined);
           void d.store.addEvent("warn", "closeout_waiting_alert", { remaining, afterMs: nowMs - startedAt, deadline: new Date(deadline).toISOString() }).catch(() => undefined);
@@ -201,7 +205,12 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
     // our own sells, or Alpaca saying a cancel was already under way, is not a problem.
     if (alert && errors.length > 0) await d.say("alerts", `Michael: the close-out had trouble but recovered and the account is flat. First problem: ${errors[0]!.slice(0, 200)}`);
     // Question 5: the early alert said it would post again.
-    if (alert && earlyAlertAt !== null) await d.say("alerts", `Update: the close-out is now flat; Alpaca filled the last sells by ${centralClock(d.now())}.`);
+    // Not awaited (group 1, round 1): a slow Discord post never holds up putting the borrowing cap back.
+    if (alert && earlyAlertAt !== null) {
+      const update = `Update: the close-out is now flat; the account is flat as of ${centralClock(d.now())}.`;
+      void d.say("alerts", update).catch(() => undefined);
+      void d.say("commands", update).catch(() => undefined);
+    }
     return path === "midday" ? { flat: true, remaining: [] } : finishFlat(d);
   }
   if (alert) {

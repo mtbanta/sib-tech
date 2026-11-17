@@ -39,12 +39,12 @@ async function hold(w: ReturnType<typeof world>, symbol: string, qty: number, pr
   w.sim.fillEntry(id, price);
 }
 
-async function run(startMs: number, fillDelayMs: number, path?: CloseoutPath, o: { slowSay?: boolean } = {}) {
+async function run(startMs: number, fillDelayMs: number, path?: CloseoutPath, o: { slowSay?: boolean; alert?: boolean } = {}) {
   const w = world(startMs - 6 * 3600_000, o);
   await hold(w, "ADT", 7, 9.9);
   w.sim.advanceTo(startMs);
   w.sim.sellFillDelayMs = fillDelayMs;
-  const res = await closeOut({ broker: w.sim, liquidator: w.liquidator, store: w.store, now: w.now, say: w.say, sleep: w.sim.sleep }, D, { closeAt: CLOSE, ...(path ? { path } : {}) });
+  const res = await closeOut({ broker: w.sim, liquidator: w.liquidator, store: w.store, now: w.now, say: w.say, sleep: w.sim.sleep }, D, { closeAt: CLOSE, ...(path ? { path } : {}), ...(o.alert === false ? { alert: false } : {}) });
   const notFlat = w.said.filter((m) => m.ch === "alerts" && m.text.includes("NOT FLAT"));
   return { ...w, res, notFlat };
 }
@@ -57,11 +57,10 @@ test("question 5: at 2:45, sells still unfilled 3 minutes in: one early NOT FLAT
   const early = w.notFlat[0]!;
   assert.match(early.text, /NOT FLAT 3 minutes into the close-out: ADT\.\*\* 1 sell sent at .*; Alpaca has not filled it yet\. Every share still held is covered by a sell of ours, so I keep waiting until 2:58 PM.* and will post again\./);
   assert.equal(early.mention, true);
-  assert.ok(early.at >= AT_245 + 180_000 && early.at < AT_245 + 185_000, `posted about 3 minutes in (${(early.at - AT_245) / 1000} s)`);
+  assert.ok(early.at >= AT_245 + 180_000 && early.at < AT_245 + 190_000, `posted about 3 minutes in, on a look whose open-orders check ran (${(early.at - AT_245) / 1000} s)`);
   assert.ok(w.said.some((m) => m.ch === "commands" && m.text.includes("minutes into the close-out")));
-  const update = w.said.filter((m) => m.text.startsWith("Update: the close-out is now flat"));
-  assert.equal(update.length, 1);
-  assert.equal(update[0]!.ch, "alerts");
+  const update = w.said.filter((m) => m.text.startsWith("Update: the close-out is now flat; the account is flat as of"));
+  assert.deepEqual(update.map((m) => m.ch).sort(), ["alerts", "commands"]);
   assert.equal(w.said.filter((m) => m.text.includes("Close-out done")).length, 1);
   // Messages only: one closeout_result at the end (flat), one stored warning for the early alert.
   assert.deepEqual(w.events.filter((e) => e.event === "closeout_result").map((e) => e.data.flat), [true]);
@@ -105,7 +104,44 @@ test("question 5: only the regular close-out: its retry path keeps the old behav
   assert.ok(!w.events.some((e) => e.event === "closeout_waiting_alert"));
 });
 
-test("question 5: the early alert is not waited for: a Discord post that never finishes does not hold up the looks", async () => {
+test("question 5: with alerts off (Michael was already told of a NOT FLAT that day), no early alert, no stored row, no update line", async () => {
+  const w = await run(AT_245, 5 * 60_000, "close-out", { alert: false });
+  assert.deepEqual(w.res, { flat: true, remaining: [] });
+  assert.equal(w.said.filter((m) => m.text.includes("NOT FLAT")).length, 0, w.said.map((m) => m.text).join("\n"));
+  assert.ok(!w.said.some((m) => m.text.startsWith("Update:")));
+  assert.ok(!w.events.some((e) => e.event === "closeout_waiting_alert"));
+});
+
+test("question 5: only on a look whose open-orders check found every share covered: a sell of ours cancelled between two open-orders checks gets no early 'covered' alert, only the final NOT FLAT", async () => {
+  const w = world(AT_245 - 6 * 3600_000);
+  await hold(w, "ADT", 7, 9.9);
+  w.sim.advanceTo(AT_245);
+  w.sim.sellFillDelayMs = 30 * 60_000;
+  // With 6 s cancels the close-out's own selling ends later, and the wait reads the open orders at 177.55, 187.55 s after the start (every
+  // 5th look; plain looks every 2 s between). At 178.5 s, just after the 177.55 s check, the close-out's own sell disappears at Alpaca
+  // (cancelled) while ADT is still held: the looks from 181.55 s are past the 3 minutes but have not re-read the orders, so an alert there
+  // would claim cover it no longer has; the 187.55 s check finds the sell gone and ends the wait with the final NOT FLAT.
+  w.sim.cancelMs = 6_000;
+  const origSleep = w.sim.sleep;
+  let gone = false;
+  const sleep = async (ms: number) => {
+    await origSleep(ms);
+    if (!gone && w.sim.simMs >= AT_245 + 178_500) {
+      gone = true;
+      const sell = w.sim.orders.find((x: any) => x.symbol === "ADT" && x.side === "sell" && (x.status === "new" || x.status === "accepted"));
+      if (sell) (w.sim as any).setStatus(sell.id, "canceled");
+    }
+  };
+  const res = await closeOut({ broker: w.sim, liquidator: w.liquidator, store: w.store, now: w.now, say: w.say, sleep }, D, { closeAt: CLOSE });
+  assert.equal(res.flat, false);
+  assert.ok(gone, "the sell was cancelled during the wait");
+  const notFlat = w.said.filter((m) => m.ch === "alerts" && m.text.includes("NOT FLAT"));
+  assert.equal(notFlat.length, 1, notFlat.map((m) => m.text).join("\n"));
+  assert.match(notFlat[0]!.text, /NOT FLAT after the close-out/);
+  assert.ok(!w.events.some((e) => e.event === "closeout_waiting_alert"));
+});
+
+test("question 5: the early alert is not waited for: a Discord post that never finishes does not hold up the looks", { timeout: 10_000 }, async () => {
   const w = await run(AT_245, 5 * 60_000, undefined, { slowSay: true });
   assert.deepEqual(w.res, { flat: true, remaining: [] }, "the wait went on and saw the fill");
   assert.equal(w.notFlat.length, 1);
