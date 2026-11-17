@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { AlpacaError } from "../src/alpaca-trading.ts";
 import { ensureDay } from "../src/morning.ts";
 import { enforceDailyLoss, LossStopMemory, LOSS_STOP_RETRY_PER_CHECK } from "../src/risk.ts";
-import { BUDGET_PER_MINUTE, P1_FLOOR } from "../src/request-budget.ts";
+import { BUDGET_PER_MINUTE, P1_FLOOR, RULED_MINUTE_CAP, RequestBudget, Reservation } from "../src/request-budget.ts";
 import { Liquidator, SellGate } from "../src/sells.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
 import { SAFETY_RESERVE } from "../src/governor.ts";
@@ -47,7 +47,7 @@ async function afterLossStop(symbols: string[], opts: { governor?: { budget(): n
   const check = async () => enforceDailyLoss(deps, (await store.getDay(D))!);
   const step = (seconds: number) => void (clock.t = new Date(clock.t.getTime() + seconds * 1000));
   const sells = (sym?: string) => broker.calls.filter((c) => c.fn === "submitSell" && (!sym || (c.args[0] as { symbol: string }).symbol === sym)).length;
-  return { store, broker, clock, said, check, step, sells };
+  return { store, broker, clock, said, check, step, sells, mem: deps.lossMemory };
 }
 
 test("after a failed loss stop sale, only the sales that failed are retried: no second whole-account liquidation", async () => {
@@ -331,4 +331,25 @@ test("the daily summary and the fee code say the paper account is charged regula
   assert.ok(line.includes("paper account too"), line);
   const src = readFileSync(new URL("../src/fees.ts", import.meta.url), "utf8");
   assert.ok(!/charges none/.test(src), "the fee code's comment no longer says paper charges none");
+});
+
+// Michael's decision 2 of 2026-11-17 made the shared minute 75; his ruling of 2026-11-09 ("within 60 Alpaca requests a minute (like the
+// loss stop's retry)") keeps the loss stop's re-sell within 60 of it (RULED_MINUTE_CAP; group 1, rounds 1 and 2). With 50 of the minute
+// already used by other urgent work, a re-sell check (it reserves 15) would pass 60, so it sends nothing; with 45 used it goes (60).
+test("decision 2 of 2026-11-17: the loss stop's re-sell keeps within 60 of the shared 75: with 50 already in the minute it sends nothing, with 45 it goes", async () => {
+  assert.equal(RULED_MINUTE_CAP, 60);
+  assert.equal(BUDGET_PER_MINUTE, 75);
+  for (const [used, goes] of [[50, false], [45, true]] as const) {
+    const p = await afterLossStop(["AAA"]);
+    p.mem.budget = new RequestBudget({ now: () => p.clock.t.getTime(), remaining: () => 200 });
+    const other = p.mem.budget.tryReserve("P1", used, { label: "other urgent work", fiveSec: false }) as Reservation;
+    assert.ok(other instanceof Reservation);
+    for (let k = 0; k < used; k++) other.charge("/v2/test");
+    other.end();
+    p.step(6); // out of the 5 seconds, still in the minute
+    await p.check();
+    const sent = p.broker.count("listPositions") + p.sells();
+    if (goes) assert.ok(sent > 0, `with ${used} used: ${used} + ${LOSS_STOP_RETRY_PER_CHECK} = ${used + LOSS_STOP_RETRY_PER_CHECK}, within 60, so it goes`);
+    else assert.equal(sent, 0, `with ${used} used: ${used} + ${LOSS_STOP_RETRY_PER_CHECK} would pass 60 (though within 75), so nothing is sent`);
+  }
 });
