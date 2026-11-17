@@ -7059,3 +7059,18 @@ While a stuck sale (an ordinary stuck retry, a timed-out stop's try, or the 15 s
 ### The budget at 75 with stuck retries at 60 (tree `i3-L3`): fails the bar
 
 Against v26: 52 of 54 pass, the same 2 probe G cases worse as with the ceiling of 60 alone (5 bracketed, 25 lost exits, flatten 40 s after; rate-limit answers on sale steps median 3 to 5 and worst 4 to 7 with 11 s cancels, median 3 to 4 and worst 3 to 5 with 8 s). Against v24: 51 of 60, 9 worse (v26's 7 plus those 2). Scenario 1 refused: every position sold in all 16 seeds. So it does not meet Michael's pre-approval ("if it passes") and is not shipped.
+
+## Michael's decisions (2026-11-17, about 8:25 AM), saved verbatim
+
+> Decisions:
+> 1. Yes: entries-give-way at the mid-day pause. I will write my yes in commands.
+> 2. Yes: raise stuck sales to 60 a minute, accepting 1 to 3 extra rate-limit answers in those 2 cases, but only in the version where urgent work keeps its 15 (shared budget 75) and the three behaviour tests (timed-out stop, unclear stop) pass. Build it on top of entries-give-way, measure together, both groups; mid-day if ready, otherwise tonight.
+> 3. Yes, the wider reading.
+> 4. Agreed, no time cap.
+> Also, in parallel, for bigger gains (proposal and measurements, no money-path code until I approve):
+> a. Cut a stuck retry from about 10 requests to about 3, using live updates instead of re-reads.
+> b. Research first hand, and test on the paper account with one position at a time if the docs are unclear: does the close-position call (DELETE /v2/positions/{symbol}) cancel that symbol's open exits and sell in one step? Can a bracket's take-profit be replaced to a marketable price above the stop, to sell without a cancel? Report request cost and time to fill.
+> c. Report "Alpaca refuses for 30 s" cases separately from pass or fail.
+> Never print any token or key.
+
+So: (1) `fdb9fc3` deploys at the mid-day pause by the mid-day route once his yes is in `commands` (never inferred); (2) stuck retries 60 with the shared budget 75 (urgent work keeps its 15), built on `morning-giveway`, measured together; his acceptance covers the 2 probe G cases at 1 to 3 extra rate-limit answers, nothing else; (3) the 15 second limit's sale counts as a stuck sale; (4) no time cap on the hold; (a) and (b) proposals and measurements only, no money-path code; (c) the bar's summaries report the cases where Alpaca refuses sales for 30 s apart from pass or fail.
