@@ -50,6 +50,10 @@ export interface GateDeps {
   clockMs?: () => number;
   // Why entries are blocked although nothing else forbids them (the worker: Michael's commands are not being read), or null.
   entryBlock?: () => string | null;
+  // Protect-first (Michael's night build request of 2026-11-16, item 2; protect-first.ts): while a held position lacks a confirmed stop,
+  // the reason no entry may go now (its first 30 s: none; after: one every 2 s), or null. `recheck`, just before sending: only the pause
+  // refuses. `entryAdmitted`: an entry passed the governor (it takes the reduced rate's slot).
+  protectFirst?: { entryRefusal(recheck?: boolean): string | null; entryAdmitted(): void };
   // The speed release (decision 4): told about each 1-share limit entry Alpaca accepted, so the worker can cancel it if it has not
   // filled within the load day's wait (entry-expiry.ts). Never waits.
   onLimitEntrySent?: (e: { clientOrderId: string; alpacaOrderId: string; symbol: string; qty: number }) => void;
@@ -84,7 +88,7 @@ export function clientOrderIdFor(date: string, symbol: string, n: number): strin
 
 // Refusals that are normal flow control at volume (a full minute, a held name). They are counted and written down
 // as one line per reason per minute, not one row each.
-const FLOW_REASONS = [/^load day: entries start/, /^my commands /, /^trades-per-minute/, /^holding back for safety/, /^already holding/, /^an entry for this symbol is still working/, /^the signal waited/, /^Alpaca refused this symbol a moment ago/, /^too close to the close for a new entry/];
+const FLOW_REASONS = [/^load day: entries start/, /^my commands /, /^trades-per-minute/, /^holding back for safety/, /^already holding/, /^an entry for this symbol is still working/, /^the signal waited/, /^Alpaca refused this symbol a moment ago/, /^too close to the close for a new entry/, /^protecting positions first/];
 
 const isActive = isActiveOrder;
 
@@ -220,6 +224,9 @@ export class OrderGate {
     if (afternoonCloseoutPending(day, now)) return this.refuse(date, symbol, AFTERNOON_WINDOW_ENDED);
     const blocked = this.d.entryBlock?.();
     if (blocked) return this.refuse(date, symbol, blocked);
+    // Protect-first: before any request.
+    const protecting = this.d.protectFirst?.entryRefusal() ?? null;
+    if (protecting) return this.refuse(date, symbol, protecting);
     // Load day (load-mode.ts): no entries before the load window, and at most 75 dollars an entry until the mid-day pause; from the
     // pause on, a normal day (Michael's decision of 2026-11-10).
     if (beforeLoadWindow(day, now)) return this.refuse(date, symbol, `load day: entries start at ${centralTime(loadWindow(day)!.start)} Central`);
@@ -328,6 +335,7 @@ export class OrderGate {
     // The governor: a slot under the per-minute cap (never above the ceiling in force) and headroom under Alpaca's limit.
     const slot = this.d.governor.admitTrade(tradesPerMinute, ceiling);
     if (!slot.ok) return this.refuse(date, symbol, slot.reason);
+    this.d.protectFirst?.entryAdmitted();
 
     const n = mine.length + 1;
     const clientOrderId = clientOrderIdFor(date, symbol, n);
@@ -360,6 +368,11 @@ export class OrderGate {
       if (blockedNow) {
         await this.d.store.updateOrder(clientOrderId, { status: "canceled", note: "commands unreadable before sending" });
         return this.refuse(date, symbol, blockedNow);
+      }
+      const protectingNow = this.d.protectFirst?.entryRefusal(true) ?? null;
+      if (protectingNow) {
+        await this.d.store.updateOrder(clientOrderId, { status: "canceled", note: "protecting positions first before sending" });
+        return this.refuse(date, symbol, protectingNow);
       }
     } catch {
       await this.d.store.updateOrder(clientOrderId, { status: "canceled", note: "database unavailable before sending" }).catch(() => undefined);

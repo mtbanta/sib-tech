@@ -21,6 +21,8 @@ export class BrokerView {
   private config: AccountConfig | null = null;
   private clock: Clock | null = null;
   private fastAt = 0;
+  // Protect-first (night build of 2026-11-16, item 2): when the last account and positions read started.
+  private fastStartedAt = -Infinity;
   private configAt = 0;
   private clockAt = 0;
   // The speed release, item 8: the share count Alpaca's live order updates gave last for each symbol, and when. A read of the
@@ -39,6 +41,7 @@ export class BrokerView {
     const [account, positions] = await Promise.all([this.broker.getAccount(), this.broker.listPositions()]);
     this.account = account;
     this.positions = positions;
+    this.fastStartedAt = started;
     for (const [symbol, u] of [...this.fromUpdates]) {
       if (started - u.at > 60_000) this.fromUpdates.delete(symbol);
       else if (u.at >= started) this.apply(symbol, u.qty, u.price);
@@ -83,6 +86,15 @@ export class BrokerView {
   // (item 8); a read that started after it shows what Alpaca shows.
   dropPosition(symbol: string): void {
     this.setPositionFromUpdate(symbol, 0, null);
+  }
+
+  // Protect-first (night build of 2026-11-16, item 2): whether `symbol` is held according to news newer than `sinceMs`: a live update at
+  // or after it, else a positions read that started at or after it. Null when there is no such news (an older view never answers).
+  heldSince(symbol: string, sinceMs: number): boolean | null {
+    const u = this.fromUpdates.get(symbol);
+    if (u && u.at >= sinceMs) return u.qty > 1e-9;
+    if (this.positions && this.fastStartedAt >= sinceMs) return this.positions.some((p) => p.symbol === symbol && p.qty > 1e-9);
+    return null;
   }
 
   // The positions as last seen (with the live updates applied), or null before the first read. For the shadow loss-stop estimate.

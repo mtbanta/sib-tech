@@ -27,6 +27,8 @@ export const BUDGET_PER_MINUTE = 60;
 export const BUDGET_PER_5S = 15;
 export const P1_KEEP = 20;
 export const P1_FLOOR = 20;
+// Protect-first: when a P2 try refused because P2 gives way may look again (a local check; the try's own window and schedule bound it).
+export const PROTECT_FIRST_RECHECK_MS = 250;
 export const P2_FLOOR = SAFETY_RESERVE;
 // A P2 try refused on its floor counts as waiting (entries give way) until it is granted, or this long after its last refusal unless its
 // caller extends the wait to its next try (`extendWait`: the list-lag recheck, bounded by its 30 s window; the unclear fresh-stop lookup is P1
@@ -149,6 +151,9 @@ export class RequestBudget {
   // Since the start (statistics and tests): budgeted requests sent per class, and the most budgeted requests seen in any minute and any 5
   // seconds (forced and overdrawn requests included).
   readonly totals = { P1: 0, P2: 0, overdraft: 0 };
+  // Protect-first (Michael's night build request of 2026-11-16, item 2): true while low-priority work gives way because a held position
+  // lacks a confirmed stop (protect-first.ts, its first 30 s). Every P2 try is refused then; P1 is never affected. Unset: never.
+  p2GivesWay: (() => boolean) | null = null;
   readonly peak = { minute: 0, five: 0 };
   // When each request beyond its try's reservation was sent (the last 10 minutes; statistics and tests).
   readonly overdraftAt: number[] = [];
@@ -214,6 +219,8 @@ export class RequestBudget {
   }
 
   private refusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead = 0, minuteCap?: number): Refusal | null {
+    // Protect-first: P2 gives way (looked at again a quarter second later, a local check with no request).
+    if (cls === "P2" && this.p2GivesWay?.()) return { ok: false, at: now + PROTECT_FIRST_RECHECK_MS, why: "class" };
     const u = this.usage(now);
     // P2 leaves room, in the minute and in the 5 seconds, for a waiting capped retry (Michael's answer after group 1's rulings round 2).
     const holding = now < this.retryWaitUntil;

@@ -207,6 +207,9 @@ export class SyncMemory {
   readonly mustLook = new Set<string>();
   // Release 1 of 2026-11-09: entries (client ids) whose cleanup sale could not sell their shares, with the retry and alert state.
   readonly stuck = new Map<string, StuckEntry>();
+  // Protect-first (Michael's night build request of 2026-11-16, item 2; protect-first.ts): told when the walk finds an entry without a
+  // confirmed stop, when it finds one protected, and what its own positions read showed. Unset (a test's own memory): nothing is told.
+  protectFirst?: { mark(entryClientOrderId: string, symbol: string, why: string): void; protectedNow(entryClientOrderId: string): void; positionsRead(heldQty: ReadonlyMap<string, number>, readStartedMs: number): void };
   // The redesign of 2026-11-14, part 1: the shared request budget when the deps bring none (a test's own memory; the worker passes its own).
   budget?: RequestBudget;
   // Whether the live order updates were connected at the start of the current sync (set by syncOrders; read by the backoff's cap).
@@ -689,6 +692,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   // when its entry holds the whole symbol). With another position on the symbol it protects only its own shares, so it must not keep the
   // check away from the other position.
   const heldQty = new Map(positions.map((p) => [p.symbol, p.qty]));
+  mem.protectFirst?.positionsRead(heldQty, syncStartMs);
   // Ruling B (group 1, round 2 of the night release): a fresh stop that hit the 15 second limit never counts here (it is not protection and
   // not a sale of ours): the walk reaches its entry, whose missing-exit sale cancels it, waits for Alpaca's cancel and sells.
   const sellingSymbols = new Set(listed.orders.filter((x) => x.side === "sell" && OPEN_STATUSES.has(x.status) && !mem.timedOutStops.has(x.clientOrderId) && (!x.clientOrderId.startsWith("cyrus-p-") || (!(FRESH_STOP_LIMIT.on && x.status === "pending_cancel") && x.qty - x.filledQty >= (heldQty.get(x.symbol) ?? 0) - 1e-9))).map((x) => x.symbol));
@@ -870,7 +874,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
       await ctx.loop.act(id, "15 second limit", async () => {
         if (!stillProtect()) return;
         const t = await freshStopTimeout(d, day, mem, s, o, fresh, nowMs);
-        if (t.attempted) ctx.unprotected.push(s.symbol);
+        if (t.attempted) (ctx.unprotected.push(s.symbol), mem.protectFirst?.mark(s.clientOrderId, s.symbol, "the order sync found it unprotected"));
         return t.recheckAt !== undefined ? { recheckAt: t.recheckAt, ...(t.room ? { room: t.room } : {}) } : undefined;
       });
       return;
@@ -898,7 +902,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
     if (hasTimedOut(mem, s.clientOrderId)) {
       const w = await timedOutWait(d, mem, s, listed.orders, d.now().getTime());
       if (w !== null) {
-        ctx.unprotected.push(s.symbol);
+        (ctx.unprotected.push(s.symbol), mem.protectFirst?.mark(s.clientOrderId, s.symbol, "the order sync found it unprotected"));
         wake(w.at, w.room);
         return;
       }
@@ -907,7 +911,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
     if ("wait" in due) {
       // Part A, step 1: tried moments ago and stuck; it is tried again at `due` (or when the shared request budget has room), and the
       // sync carries on with the others.
-      ctx.unprotected.push(s.symbol);
+      (ctx.unprotected.push(s.symbol), mem.protectFirst?.mark(s.clientOrderId, s.symbol, "the order sync found it unprotected"));
       wake(due.wait, due.room);
       return;
     }
@@ -917,6 +921,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
     // it (group 1, rulings round 1): a fresh stop that existed and then ended is sold at market as before; never for a timed-out stop (ruling B).
     const stRem = mem.stuck.get(id);
     const remainderStop = stRem?.protecting === true && stRem.freshStopRecorded !== true && !hasTimedOut(mem, id) ? (stopLeg(o)?.stopPrice ?? s.stopPrice) : null;
+    mem.protectFirst?.mark(s.clientOrderId, s.symbol, "no live exit");
     d.log?.("unprotected_position", { symbol: s.symbol, clientOrderId: s.clientOrderId, listAgeMs: listAgeMs(), ...(remainderStop !== null ? { asRemainder: true } : {}) });
     const endedAt = flattenLegs(o).filter((l) => l.side === "sell" && !OPEN_STATUSES.has(l.status)).map((l) => l.canceledAt ?? l.updatedAt ?? "").filter((x) => Number.isFinite(Date.parse(x))).sort().at(-1) ?? null;
     lateNotice(s, "missing", endedAt);
@@ -929,7 +934,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
       const c = remainderStop !== null && timedOutIds.length === 0
         ? await inTry(d, mem, s, due.go, "remainder", () => timedCleanup(d, day, mem, s, o, "bare", undefined, { stopPrice: remainderStop, stopCancelledAt: stopLeg(o)?.canceledAt ?? null }))
         : await inTry(d, mem, s, due.go, "missing-exit sale", () => timedCleanup(d, day, mem, s, o, "missing", undefined, timedOutIds.length > 0 ? { alsoCancel: timedOutIds, alsoCancelStops: timedOutShown.map((x) => x.clientOrderId) } : {}));
-      if (c.attempted) ctx.unprotected.push(s.symbol);
+      if (c.attempted) (ctx.unprotected.push(s.symbol), mem.protectFirst?.mark(s.clientOrderId, s.symbol, "the order sync found it unprotected"));
       return c.recheckAt !== undefined ? { recheckAt: c.recheckAt, ...(c.room ? { room: c.room } : {}) } : undefined;
     });
     return;
@@ -947,6 +952,8 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
   }
   if (!bare) {
     mem.bareSeen.delete(s.clientOrderId);
+    // Protect-first: its exits are live and no remainder is bare, so it is protected.
+    if (!mem.stuck.has(s.clientOrderId)) mem.protectFirst?.protectedNow(s.clientOrderId);
     return;
   }
   // Group 2, round 4 of the weekend build: while the list still shows the stop open, the sale is not started (the sell gate counts that
@@ -995,10 +1002,11 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
   if ("wait" in stuckDue) {
     // Part A, step 1: tried moments ago and stuck; it is tried again then (or when the shared request budget has room), and the sync
     // carries on with the others.
-    ctx.unprotected.push(s.symbol);
+    (ctx.unprotected.push(s.symbol), mem.protectFirst?.mark(s.clientOrderId, s.symbol, "the order sync found it unprotected"));
     wake(stuckDue.wait, stuckDue.room);
     return;
   }
+  mem.protectFirst?.mark(s.clientOrderId, s.symbol, "a remainder without its stop");
   d.log?.("bare_remainder", { symbol: s.symbol, clientOrderId: s.clientOrderId, shares: bare.shares, stopCancelledAt: cancelTime, listAgeMs: listAgeMs() });
   lateNotice(s, "bare", cancelTime, { firstSeenAgoMs: d.now().getTime() - firstSeen });
   const tp = flattenLegs(o).find((l) => l.side === "sell" && l.type === "limit");
@@ -1015,7 +1023,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
   await ctx.loop.act(id, "remainder", async () => {
     if (!stillProtect()) return;
     const c = await inTry(d, mem, s, stuckDue.go, "remainder", () => timedCleanup(d, day, mem, s, o, "bare", onSellSent, { stopPrice: bare.stop.stopPrice ?? s.stopPrice, stopCancelledAt: cancelTime }));
-    if (c.attempted) ctx.unprotected.push(s.symbol);
+    if (c.attempted) (ctx.unprotected.push(s.symbol), mem.protectFirst?.mark(s.clientOrderId, s.symbol, "the order sync found it unprotected"));
     if (!c.stuck) mem.bareSeen.delete(s.clientOrderId);
     return c.recheckAt !== undefined ? { recheckAt: c.recheckAt, ...(c.room ? { room: c.room } : {}) } : undefined;
   });
