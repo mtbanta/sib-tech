@@ -140,7 +140,7 @@ export const STUCK_VISIBLE_RETRY_FIRST_MS = 10_000;
 // (75 a minute since Michael's decision 2 of 2026-11-17, 60 before; 15 in 5 seconds; shared); its wait grows while the budget has no room (0.5, 1, 2, then 4 s, `roomWaitUntil`).
 export const STUCK_RETRY_MIN_GAP_MS = 2_000;
 // Michael's answer of 2026-11-14 (night) on rulings 1 and 2: ordinary stuck retries stop at 45 of the budget's 60 a minute, leaving 15 for
-// urgent work (unclear fresh-stop lookups, the 15 second limit's try of 13, timed-out stop checks and tries, close-out retries), so one
+// urgent work (unclear fresh-stop lookups, the 15 second limit's try of 13, timed-out stop checks and tries, and then close-out retries), so one
 // stuck position whose sales Alpaca refuses can never fill the minute.
 // Michael's decision 2 of 2026-11-17 (about 8:25 AM): "raise stuck sales to 60 a minute ... only in the version where urgent work keeps its 15
 // (shared budget 75) and the three behaviour tests (timed-out stop, unclear stop) pass". So 60 of the shared 75 (BUDGET_PER_MINUTE); the
@@ -1596,7 +1596,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     // Group 1, round 3 of the night release (Michael's decision 1 of 2026-11-13, and his rule that every retry loop has a limit and a
     // backoff): only the FIRST accepted cancel of a stop gets a look in a second, a P1 try of the shared request budget (Alpaca's cancel then
     // shows, and the sale waits for it if still pending). If the stop still holds the shares after a cancel Alpaca accepted, or Alpaca refused the cancel, the entry goes on
-    // the stuck backoff (5, 10, 20, then every 30 seconds), each retry a P1 try of the shared request budget (60 requests a minute, 15 in 5
+    // the stuck backoff (5, 10, 20, then every 30 seconds), each retry a P1 try of the shared request budget (75 requests a minute since 2026-11-17, 60 before; 15 in 5
     // seconds). A live update that the stop ended still runs the sale at once (worker.ts, onFreshStopUpdate).
     if (stopEndedDuringTry()) return dueNow(now);
     const acceptedBefore = mem.timedOutCancelAccepted.has(heldBy.clientOrderId);
@@ -1904,7 +1904,9 @@ async function retryLossStopSale(d: RiskDeps, day: DayRecord): Promise<void> {
   if (day.closeAt && nowMs >= day.closeAt.getTime() - retryQuietBeforeCloseMs(d.closeoutMinutesBeforeClose)) return;
   // The redesign of 2026-11-14, part 1: the check's whole room is reserved in the shared request budget first (P1, at most
   // LOSS_STOP_RETRY_PER_CHECK requests, down to 20 of Alpaca's remaining). Without room the check waits for the next one (5 seconds).
-  const res = budgetOf(d, mem).tryReserve("P1", LOSS_STOP_RETRY_PER_CHECK, { label: "loss stop re-sell" });
+  // Michael's ruling of 2026-11-09 ("within 60 Alpaca requests a minute (like the loss stop's retry)"): it keeps its 60 of the shared 75
+  // (RULED_MINUTE_CAP, decision 2 of 2026-11-17; group 2, round 1).
+  const res = budgetOf(d, mem).tryReserve("P1", LOSS_STOP_RETRY_PER_CHECK, { label: "loss stop re-sell", ruledCap: true });
   if (!(res instanceof Reservation)) return;
   await withReservation(res, () => retryLossStopCheck(d, day, mem));
 }

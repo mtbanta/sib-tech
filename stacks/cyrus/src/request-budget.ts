@@ -27,17 +27,22 @@ import { currentTag, requestScope, separateBucket, type ScopeReservation, type S
 export type BudgetClass = "P1" | "P2";
 // Michael's decision 2 of 2026-11-17 (about 8:25 AM): "raise stuck sales to 60 a minute ... only in the version where urgent work keeps its 15
 // (shared budget 75)". So the shared minute is 75 (60 until then): ordinary stuck retries stop at 60 of it (STUCK_RETRY_MINUTE_CAP in risk.ts),
-// urgent P1 work (unclear fresh-stop lookups, the 15 second limit's try, timed-out stop checks and tries, close-out and loss-stop retries)
-// keeps the last 15, and P2 keeps its share of 40 (P1_KEEP is 35, was 20, so 75 - 35 = 40 as before). The 15 in any 5 seconds is unchanged.
+// urgent P1 work (unclear fresh-stop lookups, the 15 second limit's sale, timed-out stop checks and tries) keeps the last 15, and P2 keeps
+// its share of 40. Close-out retries and the loss stop's re-sells keep their own 60 (RULED_MINUTE_CAP, below), so they never draw on the 15;
+// a close-out still gets up to 60 because stuck retries stand aside while a regular, mid-day or afternoon close-out owns selling (not between a carried position's tries) (P1_KEEP is 35, was 20, so 75 - 35 = 40 as before). The 15 in any 5 seconds is unchanged.
 export const BUDGET_PER_MINUTE = 75;
 export const BUDGET_PER_5S = 15;
 export const P1_KEEP = 35;
-// A close-out's retry (the regular, mid-day, afternoon or carried-position close-out) keeps Michael's ruling of 2026-11-09 ("Keep trying every
-// 20 seconds, but only within 60 Alpaca requests a minute"): it starts only while the shared minute's use plus its own stays at or below 60,
-// though the minute is now 75 (decision 2 of 2026-11-17). Without this, a close-out retry may start in the 15 above 60 and its unreserved
-// extra requests (a try is never stopped halfway) reached 104 in 60 s in the mid-day test. Stuck retries stand aside while a close-out owns
-// selling, so the two do not compete for the 60.
-export const CLOSEOUT_MINUTE_CAP = 60;
+// A close-out's retry (the regular, mid-day, afternoon or carried-position close-out) and the daily loss stop's re-sell keep Michael's ruling
+// of 2026-11-09 ("Keep trying every 20 seconds, but only within 60 Alpaca requests a minute (like the loss stop's retry)"): each starts only
+// while the shared minute's use plus its own stays at or below 60, though the minute is now 75 (decision 2 of 2026-11-17). Without this, a
+// close-out retry may start in the 15 above 60 and its unreserved extra requests (a try is never stopped halfway) reached 104 in 60 s in the
+// mid-day test, and the loss stop's re-sells reached 52 in a minute in the round 8 test where they had reached 39 (group 2, round 1).
+// Stuck retries stand aside while a regular, mid-day or afternoon close-out owns selling, so those do not compete for the 60 (between a
+// carried position's tries they can). Refused between 60 and 75 it counts as
+// `refused.class` (within the minute, above its own share), not `minute`.
+export const RULED_MINUTE_CAP = 60;
+export const CLOSEOUT_MINUTE_CAP = RULED_MINUTE_CAP;
 export const P1_FLOOR = 20;
 // Protect-first: when a P2 try refused because P2 gives way may look again (a local check; the try's own window and schedule bound it).
 export const PROTECT_FIRST_RECHECK_MS = 250;
@@ -46,8 +51,8 @@ export const P2_FLOOR = SAFETY_RESERVE;
 // caller extends the wait to its next try (`extendWait`: the list-lag recheck, bounded by its 30 s window; the unclear fresh-stop lookup is P1
 // since Michael's ruling 2 of 2026-11-14, night).
 export const GIVE_WAY_MAX_MS = 2_000;
-// Michael's answer of 2026-11-14 (night, after group 1's rulings round 2): while an ordinary stuck retry waits for room under its ceiling of
-// 45, and P2's use is what keeps it out, P2 (list-lag rechecks, a confirmed fresh stop's periodic lookup) may draw only while it leaves room
+// Michael's answer of 2026-11-14 (night, after group 1's rulings round 2): while an ordinary stuck retry waits for room under its ceiling
+// (STUCK_RETRY_MINUTE_CAP: 60 since 2026-11-17, 45 before), and P2's use is what keeps it out, P2 (list-lag rechecks, a confirmed fresh stop's periodic lookup) may draw only while it leaves room
 // for that retry (its share is in effect the retry's ceiling less its size: 60 - 10 = 50 since 2026-11-17, so in the minute P2 keeps its 40 and the hold acts in the 5 seconds; 45 - 10 = 35 before), until the retry looks again (when room may return)
 // and at least this long; each refused look of the retry renews it.
 export const RETRY_WAIT_HOLD_MS = 2_500;
@@ -115,11 +120,13 @@ export interface ReserveOptions {
   waitKey?: string;
   // Michael's answer of 2026-11-14 (night) on rulings 1 and 2: a lower ceiling on the budgeted minute for this try (an ordinary stuck retry:
   // STUCK_RETRY_MINUTE_CAP, 60 of 75 since 2026-11-17, 45 of 60 before), so the rest of the minute stays for urgent work (unclear fresh-stop lookups, the 15 second limit's try, timed-out
-  // stop checks, close-out retries). Refused above it as "class" (its share of the minute).
+  // stop checks; close-out retries and the loss stop's re-sells until 2026-11-17, which now keep their own 60). Refused above it as "class".
   minuteCap?: number;
   // The Alpaca client's own retries inside this try stop when its reservation has no room left (only a timed-out stop's tries, checks and
   // cancels, Michael's item 2 of 2026-11-13). Any other try is never stopped halfway (design 3.2): its extra requests are counted.
   limitRetries?: boolean;
+  // The daily loss stop's re-sell (and, through `closeOut`, every close-out retry): starts only within RULED_MINUTE_CAP (60) of the minute.
+  ruledCap?: boolean;
   // Item 5 (b) of the night build: a close-out's retry (the regular close-out at the set time, 2:55 by default, or the mid-day, afternoon or carried-position close-out). While one waits for
   // room and the ordinary stuck retries' own use is what keeps it out, they are refused so it gets the room first (`closeOutWaitUntil`),
   // at most 10 s in all in one waiting spell (CLOSEOUT_HOLD_TOTAL_MS).
@@ -279,7 +286,7 @@ export class RequestBudget {
     const size = Math.max(0, Math.ceil(n));
     const fiveSec = opts.fiveSec !== false;
     if (!opts.force) {
-      const refusal = this.refusal(cls, size, fiveSec, now, 0, opts.minuteCap, opts.closeOut ? CLOSEOUT_MINUTE_CAP : undefined);
+      const refusal = this.refusal(cls, size, fiveSec, now, 0, opts.minuteCap, opts.closeOut || opts.ruledCap ? RULED_MINUTE_CAP : undefined);
       // Item 5 (b): a close-out's retry kept out by the stuck retries' own use holds them back until it gets in, at most 10 s in all in one
       // waiting spell (see CLOSEOUT_FIRST_HOLD_MS and CLOSEOUT_HOLD_TOTAL_MS).
       if (refusal && opts.closeOut && CLOSEOUT_HOLD.on) this.closeOutRefused(refusal, size, now);

@@ -111,11 +111,17 @@ test("Michael's answer (60 of 75 for stuck retries, decision 2 of 2026-11-17; wa
   await drive(t0 + 40_000); // S has reserved 60 of the minute (a seventh retry would pass its 60; Michael's decision 2 of 2026-11-17, was 40 of 45)
   const tU = sim.simMs;
   assert.ok(wk.budget.inUse().minute + 10 > STUCK_RETRY_MINUTE_CAP, `S's retries are at their most: ${wk.budget.inUse().minute} in the minute`);
+  // Group 2, round 1 of decision 2 (2026-11-17): the fresh stop is hidden from the routine order list, so it can only be confirmed by its
+  // budgeted lookup, which must win room while S's retries hold their 60 (before, the routine list confirmed it and no lookup ran).
+  const realList = sim.listOrders.bind(sim);
+  sim.listOrders = async (...a: any[]) => (await (realList as any)(...a)).filter((o: any) => !(o.symbol === "QXU" && String(o.clientOrderId).startsWith("cyrus-p-")));
   sim.partialTakeProfit(U, 2, 12.08);
   wk.loop.wake(U, sim.simMs, "protect");
   await drive(tU + 60_000);
   const uEv = (name: string) => ev.filter((x) => x.t >= tU && x.e === name && JSON.stringify(x.d ?? {}).includes("QXU"));
   assert.equal(uEv("fresh_stop_confirmed").length, 1, "confirmed by its lookup");
+  assert.notEqual((uEv("fresh_stop_confirmed")[0]!.d as any).by, "order list", `confirmed by the budgeted lookup, not the routine list: ${JSON.stringify(uEv("fresh_stop_confirmed")[0]!.d)}`);
+  assert.ok(wk.budget.peak.minute > STUCK_RETRY_MINUTE_CAP, `the lookup used the urgent room above the stuck retries' 60: peak ${wk.budget.peak.minute}`);
   assert.equal(uEv("fresh_stop_timeout").length, 0, "the 15 second limit never fired");
   assert.equal(sim.heldQty("QXU"), 3, "the remainder kept (its stop rests)");
   assert.ok(!r.bot.posts.some((p: any) => p.text.includes("QXU") && /not confirmed within 15 seconds/.test(p.text)), "no 15 second alert");

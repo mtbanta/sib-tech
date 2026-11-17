@@ -176,7 +176,9 @@ test("hold counter: a P2 refusal on its floor under the hold is not counted as h
   assert.equal(b.takeMinute().retryHold.p2Refused, 0, "the floor would have refused it anyway");
 });
 
-test("hold counter: a P2 refusal on its share of 40 under the hold is not counted, one at 35 to 39 is", () => {
+// An edge case set by hand: a hold room of 35 came from the ceiling of 45 less a retry of 10; since Michael's decision 2 of 2026-11-17 the
+// ceiling is 60, so a retry of 10 gives 50 (above P2's 40) and this room no longer arises from a stuck retry of 10; the counting is still tested.
+test("hold counter: a P2 refusal on its share of 40 under the hold is not counted, one at 35 to 39 is (a hold room of 35 set by hand)", () => {
   const t = 100_000;
   const b: any = new RequestBudget({ now: () => t - 30_000 });
   // 36 budgeted requests sent 30 s ago (outside the 5 seconds; P2's share counts the whole minute)
