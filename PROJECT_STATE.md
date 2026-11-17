@@ -6,7 +6,15 @@ This file is the running status of sib-tech. Read it at the start of every sessi
 
 ## Current Stage
 
-**BUILD C2: FLY RUNS RELEASE V26 (`95fc178`), DEPLOYED 5:07 AM CT ON 2026-11-17: V25 PLUS THE CANCEL FIX. TUESDAY 2026-11-17 IS A LOAD MORNING (PLUS 1 CENT ENTRIES NOT LIVE). NEXT: PROTECT-FIRST FIX (A), THEN (B), AND THE CLOSE-OUT NOT FLAT ALERT AFTER 3 MINUTES.** As of 2026-11-17, about 5:10 AM.
+**BUILD C2: FLY RUNS RELEASE V27 (`96528f6`), DEPLOYED 5:45 AM CT ON 2026-11-17: V26 (THE CANCEL FIX) PLUS THE CLOSE-OUT'S EARLY NOT FLAT ALERT. PROTECT-FIRST FIX (A) LEFT OUT (WORSE ON THE BAR); FIX (B) NOT BUILT, A QUESTION FOR MICHAEL.** As of 2026-11-17, about 5:50 AM.
+
+- Fix (a) (`morning-a`): against v24 36 of 60 cases pass, against v26 30; with protect-first on, v26 49 of 60 and v26 plus (a) 36. Left out under the split.
+- Fix (b): traced first; the slow case is an ordinary stuck retry refused request room in a busy window (`roomWaits`), not a backoff by count, so the approved change would not help; question for Michael with the traces.
+- Questions for Michael (log): confirm the bar's baseline reading (v24 apart from the accepted 7, and v26) and the scope of (a); what to do about stuck retries starved of room.
+- Mid-day wait set (from 10:31 AM, run `builds/midday-review-brief.md` once flat, post "done").
+- Rollback: v26's image `deployment-01M7MK0AY6T3ZDQ2QG4V8YZJQX`. Paper only. Research input for a human decision.
+
+Earlier entry, superseded by the paragraph above: **BUILD C2: FLY RUNS RELEASE V26 (`95fc178`), DEPLOYED 5:07 AM CT ON 2026-11-17: V25 PLUS THE CANCEL FIX. TUESDAY 2026-11-17 IS A LOAD MORNING (PLUS 1 CENT ENTRIES NOT LIVE). NEXT: PROTECT-FIRST FIX (A), THEN (B), AND THE CLOSE-OUT NOT FLAT ALERT AFTER 3 MINUTES.** As of 2026-11-17, about 5:10 AM.
 
 - Michael's morning decisions (verbatim in `builds/build-c2-log.md`): he accepted the cancel fix's trade-off and asked for it before the open; then build protect-first fix (a) (a running lost-exit sale gives way to a close-out at its next round), measured on its own, then (b) (the stuck-sale backoff counts from the first refusal), and the 2:45 close-out's NOT FLAT alert after 3 minutes while it keeps waiting. First-try pacing dropped; close-out first tries stay unpaced; Alpaca's 2:55 hold decided after today's figures.
 - Bar unchanged (median and worst run no worse than v24), both groups; deploy before 7:30 AM only if both pass, otherwise to the mid-day pause for his written yes; pre-approved split.
