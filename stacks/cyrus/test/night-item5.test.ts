@@ -52,7 +52,9 @@ test("item 5 (b) off: where the hold would engage (the stuck retries' use keeps 
     const r = rig(() => 200);
     stuckSent(r, 20);
     const co = r.b.tryReserve("P1", 45, { label: "close-out retry", fiveSec: false, closeOut: true });
-    assert.ok(!(co instanceof Reservation) && co.why === "minute", "the close-out retry is refused, as on v24");
+    // Michael's decision 2 of 2026-11-17: 20 + 45 = 65 is inside the shared minute of 75 but above the close-out retry's own 60
+    // (CLOSEOUT_MINUTE_CAP), so it is refused as "class" (v24, with a minute of 60, said "minute").
+    assert.ok(!(co instanceof Reservation) && co.why === "class", "the close-out retry is refused, as on v24 (by its own 60 since decision 2)");
     for (let i = 0; i < 3; i++) {
       r.advance(5_000);
       assert.ok(!(r.b.tryReserve("P1", 45, { label: "close-out retry", fiveSec: false, closeOut: true }) instanceof Reservation));
@@ -88,9 +90,10 @@ test("night build, item 5 (b): a close-out retry kept out by the stuck retries' 
   assert.deepEqual([CLOSEOUT_FIRST_HOLD_MS, CLOSEOUT_HOLD_TOTAL_MS, CLOSEOUT_SPELL_GAP_MS], [5_500, 10_000, 15_000]);
   const r = rig(() => 200);
   stuckSent(r, 20);
-  // 20 + 45 passes the minute's 60; without the stuck retries' 20 it would fit.
+  // 20 + 45 passes the close-out retry's 60 (the minute's 60 before Michael's decision 2 of 2026-11-17; since then its own CLOSEOUT_MINUTE_CAP
+  // inside the shared 75, so refused as "class"); without the stuck retries' 20 it would fit.
   const co = r.b.tryReserve("P1", 45, { label: "close-out retry", fiveSec: false, closeOut: true });
-  assert.ok(!(co instanceof Reservation) && co.why === "minute", "the close-out retry waits for room");
+  assert.ok(!(co instanceof Reservation) && co.why === "class", "the close-out retry waits for room");
   const stuck = stuckTry(r);
   assert.ok(!(stuck instanceof Reservation) && stuck.why === "class", "the stuck retry gives way");
   assert.equal(r.b.roomFor("P1", 10, true, 0, STUCK_RETRY_MINUTE_CAP).ok, false, "its local room check too");

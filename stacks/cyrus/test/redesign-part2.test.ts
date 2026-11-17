@@ -1154,11 +1154,12 @@ test("part 2 (group 2, round 5): a stuck retry's backoff wait and its wait for r
   const w = await roomWorld();
   w.mem.stuck.set(w.id, { symbol: "AAA", since: w.sim.simMs - 60_000, nextAt: w.sim.simMs + 5_000, delayMs: 5_000, alerted: true, escalated: false, lastTriedAt: w.sim.simMs - 5_000, why: "x" } as any);
   await w.sync();
-  assert.deepEqual(w.wakes.at(-1)?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 45, stuckSale: true }, "its backoff wait");
+  // minuteCap 60: the stuck retries' ceiling since Michael's decision 2 of 2026-11-17 (was 45).
+  assert.deepEqual(w.wakes.at(-1)?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 60, stuckSale: true }, "its backoff wait");
   w.mem.stuck.get(w.id)!.nextAt = w.sim.simMs - 1;
   w.box.remaining = 25; // no room for the retry's 10
   await w.sync();
-  assert.deepEqual(w.wakes.at(-1)?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 45, stuckSale: true }, "its wait for room");
+  assert.deepEqual(w.wakes.at(-1)?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 60, stuckSale: true }, "its wait for room");
   assert.equal(w.acts.length, 0, "no action without room");
 });
 
@@ -1172,7 +1173,7 @@ test("part 2 (group 2, round 5): a retry refused at its action's start (room gon
   const sells0 = w.sim.sellLog.length;
   const r = await w.acts[0]!.run();
   assert.equal((w.mem.budget as any).givingWay(), true, "Michael's ruling of 2026-11-17: refused for Alpaca's room at the action's start, entries give way (group 1, round 1)");
-  assert.deepEqual(r?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 45, stuckSale: true });
+  assert.deepEqual(r?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 60, stuckSale: true }); // 60: Michael's decision 2 of 2026-11-17 (was 45)
   assert.ok(r?.recheckAt > w.sim.simMs);
   assert.equal(w.sim.sellLog.length, sells0, "nothing sold");
 });
@@ -1202,7 +1203,8 @@ test("part 2 (group 2, round 5): the 15 second limit's first try refused for roo
 
 // Michael's ruling 1 of 2026-11-14 (night): a stuck sale (here every sale is refused by Alpaca) is tried again within a few seconds while the
 // shared budget has room (2 s after its last try, as soon as there is room), each retry is one round and never sends more than the 10
-// requests it reserved (no overdraft), and the budget's limits (60 a minute, 15 in any 5 seconds) hold.
+// requests it reserved (no overdraft), and the budget's limits (the stuck retries' 60 of the shared 75 a minute since Michael's decision 2 of
+// 2026-11-17, 45 of 60 before; 15 in any 5 seconds) hold.
 test("Michael's ruling 1 of 2026-11-14: in the worker, a stuck sale retries within a few seconds while the budget has room, one round each, with no overdraft", async () => {
   const { sim, r } = await armedDay();
   const wk: any = r.worker;
@@ -1221,13 +1223,14 @@ test("Michael's ruling 1 of 2026-11-14: in the worker, a stuck sale retries with
   // The first try keeps its 3 rounds (a first try is counted, never refused); each retry after it is one round, so one sell each.
   const retries = tries.slice(3);
   const gaps = retries.slice(1).map((t, i) => t - retries[i]!);
-  // At least 2 s apart; about 5 s while there is room, set by the budget's 15 in any 5 seconds (each retry reserves 10); after 4 retries
-  // this one position has reserved 40 and a fifth would pass the 45 that ordinary stuck retries may use (Michael's answer of 2026-11-14,
-  // night), so the next waits for the minute; the other 15 stay for urgent work.
-  assert.ok(retries.length >= 4, `retried while there was room: ${retries.length} retries in about 60 s`);
-  assert.ok(gaps.slice(0, 3).every((g) => g >= 2_000 && g <= 6_000), `within a few seconds, never sooner than 2 s: ${gaps.join(", ")}`);
+  // At least 2 s apart; about 5 s while there is room, set by the budget's 15 in any 5 seconds (each retry reserves 10); after 6 retries
+  // this one position has reserved 60 and a seventh would pass the 60 that ordinary stuck retries may use (Michael's decision 2 of
+  // 2026-11-17; 4 retries and 45 before, Michael's answer of 2026-11-14, night), so the next waits for the minute; the other 15 of the 75
+  // stay for urgent work.
+  assert.ok(retries.length >= 6, `retried while there was room: ${retries.length} retries in about 60 s`);
+  assert.ok(gaps.slice(0, 5).every((g) => g >= 2_000 && g <= 6_000), `within a few seconds, never sooner than 2 s: ${gaps.join(", ")}`);
   const b = wk.budget;
   assert.equal(b.totals.overdraft, 0, "no retry sent more than it reserved");
-  assert.ok(b.peak.minute <= 45 && b.peak.five <= 15, `within the stuck retries' 45 a minute and the 15 in 5 seconds (minute ${b.peak.minute}, 5 s ${b.peak.five})`);
+  assert.ok(b.peak.minute <= 60 && b.peak.five <= 15, `within the stuck retries' 60 a minute and the 15 in 5 seconds (minute ${b.peak.minute}, 5 s ${b.peak.five})`);
   r.worker.stop?.();
 });

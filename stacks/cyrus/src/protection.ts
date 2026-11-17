@@ -10,7 +10,7 @@
 //    10 second sync. Live updates wake the entry they are about.
 //  - A wake that comes while the entry's action runs is kept, and looked at when the action ends.
 //  - Rule 6 (every retry loop has a limit and a backoff): each wake comes from a schedule that has both (an ordinary stuck retry 2 s after
-//    its last try, then as soon as the shared budget has room, within the budget's cap and at most 45 a minute, Michael's ruling 1 of
+//    its last try, then as soon as the shared budget has room, within the budget's cap and at most 60 of its 75 a minute (45 of 60 before 2026-11-17), Michael's ruling 1 of
 //    2026-11-14 and his answer after it; a timed-out stop's tries on their backoff within the shared budget; the timed-out stop's checks; the unclear stop's lookups within its 15 s; the list-lag steps 0.5, 1, 2 s within
 //    30 s; the follow-ups' 3 tries within 10 s). A look that fails keeps its wakes and waits 1 s, doubling to 10 s; a look that cannot start
 //    because a sync runs is put off a quarter second (no request is made meanwhile).
@@ -24,7 +24,7 @@ export interface RoomNeed {
   cls: "P1" | "P2";
   n: number;
   reads: number;
-  // A lower ceiling on the budgeted minute for this try (an ordinary stuck retry: 45, Michael's answer of 2026-11-14, night).
+  // A lower ceiling on the budgeted minute for this try (an ordinary stuck retry: STUCK_RETRY_MINUTE_CAP, 60 of the shared 75 since Michael's decision 2 of 2026-11-17; 45 of 60 before).
   minuteCap?: number;
   // Michael's ruling of 2026-11-17: the try is a stuck sale's (an ordinary stuck retry, a timed-out stop's try, or the 15 second limit's sale); while its local room check
   // is refused for Alpaca's room, new entries give way (the worker's `roomAt` tells the budget).

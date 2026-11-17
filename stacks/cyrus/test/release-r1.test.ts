@@ -248,10 +248,11 @@ test("part B: once that entry's own share has filled, the cleanup sale stops loo
   assert.ok(w.sim.simMs - t0 <= 1_500, `${w.sim.simMs - t0} ms (3,000 without the stop)`);
 });
 
-// The redesign of 2026-11-14, part 1: the stuck retries are P1 tries of the shared request budget (60 a minute, 15 in any 5 seconds), each
-// reserving STUCK_TRY_REQUESTS and counted at what it really sends.
-test("the redesign of 2026-11-14: the shared budget is 60 a minute and 15 in any 5 seconds; a stuck retry reserves 10; the next room is computed from what was sent", () => {
-  assert.deepEqual([BUDGET_PER_MINUTE, BUDGET_PER_5S, STUCK_TRY_REQUESTS], [60, 15, 10]);
+// The redesign of 2026-11-14, part 1: the stuck retries are P1 tries of the shared request budget (75 a minute since Michael's decision 2 of
+// 2026-11-17, 60 before; 15 in any 5 seconds), each reserving STUCK_TRY_REQUESTS and counted at what it really sends. (The tries here carry
+// no `minuteCap`, so they meet the whole shared minute, not the ordinary stuck retries' ceiling of 60.)
+test("the redesign of 2026-11-14: the shared budget is 75 a minute and 15 in any 5 seconds; a stuck retry reserves 10; the next room is computed from what was sent", () => {
+  assert.deepEqual([BUDGET_PER_MINUTE, BUDGET_PER_5S, STUCK_TRY_REQUESTS], [75, 15, 10]);
   let t = 0;
   const b = new RequestBudget({ now: () => t });
   const tryAt = (ms: number, send = 10): Reservation | { ok: false; at: number; why: string } => {
@@ -266,9 +267,9 @@ test("the redesign of 2026-11-14: the shared budget is 60 a minute and 15 in any
   assert.ok(tryAt(0) instanceof Reservation);
   const second = tryAt(1_000);
   assert.ok(!(second instanceof Reservation) && second.at === 5_000 && second.why === "five", "a second retry inside 5 seconds waits for the 5 second room");
-  for (const ms of [5_000, 10_000, 15_000, 20_000, 25_000]) assert.ok(tryAt(ms) instanceof Reservation, `${ms}`);
-  const seventh = tryAt(30_000);
-  assert.ok(!(seventh instanceof Reservation) && seventh.at === 60_000 && seventh.why === "minute", "six retries in the minute (60 requests): the seventh waits for the first to age out");
+  for (const ms of [5_000, 10_000, 15_000, 20_000, 25_000, 30_000]) assert.ok(tryAt(ms) instanceof Reservation, `${ms}`);
+  const eighth = tryAt(35_000);
+  assert.ok(!(eighth instanceof Reservation) && eighth.at === 60_000 && eighth.why === "minute", "seven retries in the minute (70 requests): the eighth (80) waits for the first to age out");
   assert.ok(tryAt(60_000) instanceof Reservation);
   // What a try really sends is what counts: a retry that sent 3 leaves room for more in the same 5 seconds.
   t = 0;

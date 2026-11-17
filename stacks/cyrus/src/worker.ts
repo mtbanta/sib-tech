@@ -1116,7 +1116,7 @@ export class Worker {
     const inSession = now >= day.openAt && now < day.closeAt && current.status === "approved";
     // The mid-day cycle: from 10:30 until the mid-day close-out has finished flat, it alone sells (as the regular close-out, at the set time, does from its
     // time on), so the order sync's missing-exit check stands aside and its sales cannot spend Alpaca's requests outside the mid-day
-    // close-out's 60 a minute (group 1 review, round 1: 40 positions with refused sales made 80 such sales in 10 minutes).
+    // close-out's 60 a minute (CLOSEOUT_MINUTE_CAP; the shared minute is 75 since Michael's decision 2 of 2026-11-17) (group 1 review, round 1: 40 positions with refused sales made 80 such sales in 10 minutes).
     const middayToday = this.d.middayCycle === false ? null : middayTimes(current);
     // The close-out after the afternoon load window (Michael, 2026-11-12) owns selling the same way until it has finished flat.
     const afternoonCloseoutDue = Boolean(inSession && current.phases.armed && afternoonCloseoutPending(current, now) && now < this.closeoutAt(day.closeAt));

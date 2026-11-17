@@ -5,7 +5,7 @@
 //
 //  - Budgeted work (class P1: sales of shares without a confirmed stop, the timed-out stop's tries, checks and cancels, the close-out
 //    retries, the loss stop's re-sells, an unclear fresh stop's lookup since Michael's ruling 2 of 2026-11-14; class P2: the list-lag rechecks
-//    and a confirmed fresh stop's periodic lookup; ordinary stuck retries stop at 45, `minuteCap`) shares at most BUDGET_PER_MINUTE
+//    and a confirmed fresh stop's periodic lookup; ordinary stuck retries stop at STUCK_RETRY_MINUTE_CAP, 60 of the 75 since 2026-11-17 (45 of 60 before), `minuteCap`) shares at most BUDGET_PER_MINUTE
 //    requests in any 60 seconds and BUDGET_PER_5S in any 5 seconds. P2 may draw only while it leaves P1_KEEP of the minute for P1.
 //  - A budgeted try asks for its whole room before it starts (`tryReserve`, its most requests). It starts only when the minute (and,
 //    unless it is a close-out retry, the 5 seconds) has room, its class leaves P1 its share, and Alpaca's remaining requests stay at or
@@ -25,9 +25,19 @@ import { SAFETY_RESERVE, ALPACA_REQUESTS_PER_MINUTE } from "./governor.ts";
 import { currentTag, requestScope, separateBucket, type ScopeReservation, type Scope, type Tag } from "./request-scope.ts";
 
 export type BudgetClass = "P1" | "P2";
-export const BUDGET_PER_MINUTE = 60;
+// Michael's decision 2 of 2026-11-17 (about 8:25 AM): "raise stuck sales to 60 a minute ... only in the version where urgent work keeps its 15
+// (shared budget 75)". So the shared minute is 75 (60 until then): ordinary stuck retries stop at 60 of it (STUCK_RETRY_MINUTE_CAP in risk.ts),
+// urgent P1 work (unclear fresh-stop lookups, the 15 second limit's try, timed-out stop checks and tries, close-out and loss-stop retries)
+// keeps the last 15, and P2 keeps its share of 40 (P1_KEEP is 35, was 20, so 75 - 35 = 40 as before). The 15 in any 5 seconds is unchanged.
+export const BUDGET_PER_MINUTE = 75;
 export const BUDGET_PER_5S = 15;
-export const P1_KEEP = 20;
+export const P1_KEEP = 35;
+// A close-out's retry (the regular, mid-day, afternoon or carried-position close-out) keeps Michael's ruling of 2026-11-09 ("Keep trying every
+// 20 seconds, but only within 60 Alpaca requests a minute"): it starts only while the shared minute's use plus its own stays at or below 60,
+// though the minute is now 75 (decision 2 of 2026-11-17). Without this, a close-out retry may start in the 15 above 60 and its unreserved
+// extra requests (a try is never stopped halfway) reached 104 in 60 s in the mid-day test. Stuck retries stand aside while a close-out owns
+// selling, so the two do not compete for the 60.
+export const CLOSEOUT_MINUTE_CAP = 60;
 export const P1_FLOOR = 20;
 // Protect-first: when a P2 try refused because P2 gives way may look again (a local check; the try's own window and schedule bound it).
 export const PROTECT_FIRST_RECHECK_MS = 250;
@@ -38,7 +48,7 @@ export const P2_FLOOR = SAFETY_RESERVE;
 export const GIVE_WAY_MAX_MS = 2_000;
 // Michael's answer of 2026-11-14 (night, after group 1's rulings round 2): while an ordinary stuck retry waits for room under its ceiling of
 // 45, and P2's use is what keeps it out, P2 (list-lag rechecks, a confirmed fresh stop's periodic lookup) may draw only while it leaves room
-// for that retry (its share is in effect 45 less the retry's size, 35, instead of 40), until the retry looks again (when room may return)
+// for that retry (its share is in effect the retry's ceiling less its size: 60 - 10 = 50 since 2026-11-17, so in the minute P2 keeps its 40 and the hold acts in the 5 seconds; 45 - 10 = 35 before), until the retry looks again (when room may return)
 // and at least this long; each refused look of the retry renews it.
 export const RETRY_WAIT_HOLD_MS = 2_500;
 // Item 3 of the night build (Michael's request of 2026-11-16, about 8:50 PM, decision 4 changed: "First tries: paced, not exempt; they wait
@@ -104,7 +114,7 @@ export interface ReserveOptions {
   // A P2 try that will be tried again when room returns (the list-lag recheck): while it waits on its floor, entries give way.
   waitKey?: string;
   // Michael's answer of 2026-11-14 (night) on rulings 1 and 2: a lower ceiling on the budgeted minute for this try (an ordinary stuck retry:
-  // STUCK_RETRY_MINUTE_CAP, 45), so the rest of the 60 stays for urgent work (unclear fresh-stop lookups, the 15 second limit's try, timed-out
+  // STUCK_RETRY_MINUTE_CAP, 60 of 75 since 2026-11-17, 45 of 60 before), so the rest of the minute stays for urgent work (unclear fresh-stop lookups, the 15 second limit's try, timed-out
   // stop checks, close-out retries). Refused above it as "class" (its share of the minute).
   minuteCap?: number;
   // The Alpaca client's own retries inside this try stop when its reservation has no room left (only a timed-out stop's tries, checks and
@@ -269,7 +279,7 @@ export class RequestBudget {
     const size = Math.max(0, Math.ceil(n));
     const fiveSec = opts.fiveSec !== false;
     if (!opts.force) {
-      const refusal = this.refusal(cls, size, fiveSec, now, 0, opts.minuteCap);
+      const refusal = this.refusal(cls, size, fiveSec, now, 0, opts.minuteCap, opts.closeOut ? CLOSEOUT_MINUTE_CAP : undefined);
       // Item 5 (b): a close-out's retry kept out by the stuck retries' own use holds them back until it gets in, at most 10 s in all in one
       // waiting spell (see CLOSEOUT_FIRST_HOLD_MS and CLOSEOUT_HOLD_TOTAL_MS).
       if (refusal && opts.closeOut && CLOSEOUT_HOLD.on) this.closeOutRefused(refusal, size, now);
@@ -337,14 +347,17 @@ export class RequestBudget {
   private stuckUseKeepsOut(n: number, now: number): boolean {
     const u = this.usage(now);
     const total = u.minute + u.unsentMinute + n;
-    if (total <= BUDGET_PER_MINUTE) return false;
+    // A close-out retry's own ceiling (CLOSEOUT_MINUTE_CAP, 60 of the shared 75 since decision 2 of 2026-11-17) is what refuses it on the minute.
+    if (total <= CLOSEOUT_MINUTE_CAP) return false;
     let stuck = 0;
     for (const x of this.sent) if (x.stuck && now - x.t < 60_000) stuck++;
     for (const r of this.open) if (r.stuckRetry) stuck += r.unsent();
-    return total - stuck <= BUDGET_PER_MINUTE && this.remaining() - u.unsentMinute - n >= P1_FLOOR;
+    return total - stuck <= CLOSEOUT_MINUTE_CAP && this.remaining() - u.unsentMinute - n >= P1_FLOOR;
   }
 
-  private refusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead = 0, minuteCap?: number): Refusal | null {
+  // `ceiling`: a lower ceiling on the shared minute that is not a stuck retry's (a close-out retry's CLOSEOUT_MINUTE_CAP); it never sets the
+  // stuck retries' holds.
+  private refusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead = 0, minuteCap?: number, ceiling?: number): Refusal | null {
     // Item 5 (b): an ordinary stuck retry (capped) gives way while a close-out's retry waits for room; it looks again when that wait ends.
     // Neither early refusal below is one the retry's hold alone caused, so each clears that flag (statistics only; group 2, night build of
     // 2026-11-16, round 1: a stale flag counted these refusals into `retryHold.p2Refused`).
@@ -362,7 +375,7 @@ export class RequestBudget {
     // P2 leaves room, in the minute and in the 5 seconds, for a waiting capped retry (Michael's answer after group 1's rulings round 2).
     const holding = now < this.retryWaitUntil;
     const p2Cap = holding ? Math.min(BUDGET_PER_MINUTE - P1_KEEP, this.retryWaitRoom) : BUDGET_PER_MINUTE - P1_KEEP;
-    const cap = Math.min(cls === "P1" ? BUDGET_PER_MINUTE : p2Cap, minuteCap ?? Infinity);
+    const cap = Math.min(cls === "P1" ? BUDGET_PER_MINUTE : p2Cap, minuteCap ?? Infinity, ceiling ?? Infinity);
     const fiveCap = cls === "P2" && holding ? Math.min(BUDGET_PER_5S, this.retryWaitFive) : BUDGET_PER_5S;
     const at: number[] = [];
     let why: Refusal["why"] | null = null;
@@ -376,7 +389,7 @@ export class RequestBudget {
       why ??= "five";
       at.push(this.agedOutAt(u.five + u.unsentFive + n - fiveCap, 5_000, now, u.unsentFive));
     }
-    // A capped retry (an ordinary stuck retry, under its ceiling of 45) kept out by the minute or the 5 seconds: if the urgent work alone (P1,
+    // A capped retry (an ordinary stuck retry, under its ceiling, STUCK_RETRY_MINUTE_CAP) kept out by the minute or the 5 seconds: if the urgent work alone (P1,
     // sent and reserved) leaves it room in both, P2's use is what keeps it out, so P2 holds back for it until it looks again. If P1 alone already
     // fills either, holding P2 back would not help, and P2 keeps its share.
     const holdForRetry = cls === "P1" && minuteCap !== undefined && (minuteShort || fiveShort) && (!minuteShort || (cap === minuteCap && this.p1Use(now, 60_000) + n <= minuteCap)) && (!fiveShort || this.p1Use(now, 5_000, true) + n <= BUDGET_PER_5S);

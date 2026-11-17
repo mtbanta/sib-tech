@@ -2,10 +2,10 @@
 // where the worker uses them (Michael's approval of 2026-11-14 with his changes A and B; builds/c2-redesign-2026-11-14.md, sections 3 and 10).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BUDGET_PER_5S, BUDGET_PER_MINUTE, GIVE_WAY_MAX_MS, P1_FLOOR, P1_KEEP, P2_FLOOR, Reservation, RequestBudget, withReservation } from "../src/request-budget.ts";
+import { BUDGET_PER_5S, BUDGET_PER_MINUTE, CLOSEOUT_HOLD, CLOSEOUT_MINUTE_CAP, GIVE_WAY_MAX_MS, P1_FLOOR, P1_KEEP, P2_FLOOR, Reservation, RequestBudget, withReservation } from "../src/request-budget.ts";
 import { currentTag, inRequestScope, outsideScope, requestScope, retryAllowedInScope } from "../src/request-scope.ts";
 import { Liquidator, SellGate } from "../src/sells.ts";
-import { SyncMemory, syncOrders } from "../src/risk.ts";
+import { STUCK_RETRY_MINUTE_CAP, SyncMemory, syncOrders } from "../src/risk.ts";
 import { MemoryStore } from "../src/store.ts";
 import { ensureDay } from "../src/morning.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
@@ -21,8 +21,11 @@ const sendN = (r: Reservation, n: number) => {
 
 // ---------------- the budget's rules ----------------
 
-test("part 1: the sizes Michael approved (decisions 1, 2 and change A)", () => {
-  assert.deepEqual([BUDGET_PER_MINUTE, BUDGET_PER_5S, P1_KEEP, P1_FLOOR, P2_FLOOR], [60, 15, 20, 20, SAFETY_RESERVE]);
+// Michael's decision 2 of 2026-11-17: the shared minute is 75 (was 60) and P1_KEEP 35 (was 20), so P2's share stays 40; the 5 seconds, the
+// floors and the reserve are unchanged.
+test("part 1: the sizes Michael approved (decisions 1, 2 and change A; decision 2 of 2026-11-17: the minute 75, P1 keeps 35)", () => {
+  assert.deepEqual([BUDGET_PER_MINUTE, BUDGET_PER_5S, P1_KEEP, P1_FLOOR, P2_FLOOR], [75, 15, 35, 20, SAFETY_RESERVE]);
+  assert.equal(BUDGET_PER_MINUTE - P1_KEEP, 40, "P2's share of the minute is 40, as before");
   assert.equal(P2_FLOOR, 80);
 });
 
@@ -41,14 +44,15 @@ test("part 1: the minute and the 5 seconds count what was sent plus what running
   assert.ok(!granted(b.tryReserve("P1", 5, { label: "d" })), "c, still running, holds 11 of the 5 seconds: 11 + 5 > 15");
   assert.ok(granted(b.tryReserve("P1", 4, { label: "d" })), "11 + 4 = 15: fits");
   (b as any).open.clear(); // the tries end without sending (their room released)
-  for (let i = 0; i < 3; i++) {
+  // Michael's decision 2 of 2026-11-17: the minute is 75 (was 60), so four tries of 15 (was three) bring it to 11 short of full.
+  for (let i = 0; i < 4; i++) {
     const r = b.tryReserve("P1", 15, { label: "e" }) as Reservation;
     assert.ok(granted(r), `minute room ${i}`);
     sendN(r, 15);
     r.end();
     t += 5_000;
   }
-  // 4 + 45 sent: 11 left in the minute
+  // 4 + 60 sent: 11 left in the minute of 75
   const full = b.tryReserve("P1", 12, { label: "f" });
   assert.ok(!granted(full) && full.why === "minute");
   assert.ok(granted(b.tryReserve("P1", 11, { label: "g" })));
@@ -68,6 +72,52 @@ test("part 1: P2 may draw only while it leaves 20 of the minute for P1 (decision
   assert.ok(!granted(p2) && p2.why === "class", "40 used: P2 stops (20 kept for P1)");
   const p1 = b.tryReserve("P1", 15, { label: "stuck" });
   assert.ok(granted(p1), "P1 still has its 20");
+});
+
+// Michael's decision 2 of 2026-11-17 (the shared minute 75) with his ruling of 2026-11-09 for close-outs ("Keep trying every 20 seconds, but
+// only within 60 Alpaca requests a minute"): a close-out's retry starts only while the shared minute's use plus its own stays at or below
+// CLOSEOUT_MINUTE_CAP (60). Other urgent P1 work (no ceiling) may use the room above 60, and a refused close-out retry sets no hold for the
+// stuck retries (neither P2's hold for a waiting stuck retry nor, with item 5 (b) off as shipped, the stuck retries' hold).
+test("decision 2 of 2026-11-17: a close-out retry starts only within 60 of the shared 75; other urgent work is granted in the room above 60; a refused close-out retry sets no stuck-retry hold", () => {
+  assert.equal(CLOSEOUT_MINUTE_CAP, 60);
+  assert.equal(BUDGET_PER_MINUTE, 75);
+  assert.equal(CLOSEOUT_HOLD.on, false, "item 5 (b) off, as shipped");
+  let t = 0;
+  const b: any = new RequestBudget({ now: () => t, remaining: () => 200 });
+  // P2 sent 30 and urgent P1 work 21 (outside the 5 seconds by the time of the tries): 51 in the minute.
+  const p2 = b.tryReserve("P2", 30, { label: "list lag recheck", fiveSec: false }) as Reservation;
+  assert.ok(granted(p2));
+  sendN(p2, 30);
+  p2.end();
+  t = 1_000;
+  const urgent = b.tryReserve("P1", 21, { label: "unclear fresh stop lookup", fiveSec: false }) as Reservation;
+  assert.ok(granted(urgent));
+  sendN(urgent, 21);
+  urgent.end();
+  t = 10_000;
+  assert.equal(b.inUse().minute, 51);
+  // The edge: 51 + 9 = 60 is granted; 51 + 10 = 61 is refused, though the shared minute (75) has room.
+  const at60 = b.tryReserve("P1", 9, { label: "close-out retry", fiveSec: false, closeOut: true });
+  assert.ok(granted(at60), "51 + 9 = 60: at the close-out's ceiling, granted");
+  at60.end(); // ends without sending: its room released
+  const over = b.tryReserve("P1", 10, { label: "close-out retry", fiveSec: false, closeOut: true });
+  assert.ok(!granted(over) && over.why === "class", "51 + 10 = 61 passes the close-out's 60 (inside the 75): refused as its share");
+  assert.ok(over.at >= 60_000, "its room returns only when the earliest requests leave the minute");
+  // No hold for the stuck retries from that refusal: P2's hold for a waiting stuck retry is not set, and a stuck retry is not held back.
+  assert.ok(b.retryWaitUntil <= t, "P2's hold for a waiting stuck retry is not set by a close-out retry's refusal");
+  assert.ok(b.roomFor("P2", 1, false).ok === false && b.roomFor("P2", 1, false).why === "class", "P2 stays at its own share (51 is above its 40)");
+  const m0 = b.takeMinute();
+  assert.equal(m0.closeOutHolds, 0, "no close-out hold");
+  assert.equal(m0.retryHold.started, 0, "no retry hold started");
+  // Another urgent P1 try of the same size without a ceiling is granted in the room above 60.
+  const other = b.tryReserve("P1", 10, { label: "timed-out stop try", fiveSec: false });
+  assert.ok(granted(other), "51 + 10 = 61 of the shared 75: urgent work without a ceiling is granted");
+  other.end();
+  // The same state does set a hold for a capped stuck retry of 10 (P2's use keeps it over its 60 while P1 alone leaves it room), so the
+  // check above is not empty: only the stuck retries' own ceiling sets it, never the close-out's.
+  const capped = b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP, fiveSec: false });
+  assert.ok(!granted(capped) && capped.why === "class", "a capped stuck retry of 10 passes its 60 too");
+  assert.ok(b.retryWaitUntil > t, "and its refusal does set P2's hold");
 });
 
 test("part 1 (change A): P1 tries start only while 20 stay after them; P2 tries while 80 stay; each refusal says when room returns", () => {

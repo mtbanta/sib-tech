@@ -137,12 +137,15 @@ export const STUCK_VISIBLE_RETRY_FIRST_MS = 10_000;
 // Michael's ruling 1 of 2026-11-14 (night), replacing the two waits above for an ordinary stuck retry (one without a timed-out fresh stop):
 // each retry is one round (so it fits the 10 requests it reserves), and the next one is due this long after it, then runs as soon as the
 // shared request budget has room (a room wake: checked locally, no request, until there is room). Rule 6: its limit is the budget's cap
-// (60 a minute, 15 in 5 seconds, shared); its wait grows while the budget has no room (0.5, 1, 2, then 4 s, `roomWaitUntil`).
+// (75 a minute since Michael's decision 2 of 2026-11-17, 60 before; 15 in 5 seconds; shared); its wait grows while the budget has no room (0.5, 1, 2, then 4 s, `roomWaitUntil`).
 export const STUCK_RETRY_MIN_GAP_MS = 2_000;
 // Michael's answer of 2026-11-14 (night) on rulings 1 and 2: ordinary stuck retries stop at 45 of the budget's 60 a minute, leaving 15 for
 // urgent work (unclear fresh-stop lookups, the 15 second limit's try of 13, timed-out stop checks and tries, close-out retries), so one
 // stuck position whose sales Alpaca refuses can never fill the minute.
-export const STUCK_RETRY_MINUTE_CAP = 45;
+// Michael's decision 2 of 2026-11-17 (about 8:25 AM): "raise stuck sales to 60 a minute ... only in the version where urgent work keeps its 15
+// (shared budget 75) and the three behaviour tests (timed-out stop, unclear stop) pass". So 60 of the shared 75 (BUDGET_PER_MINUTE); the
+// last 15 stay for urgent work as before, and one refused stuck position still cannot fill the minute.
+export const STUCK_RETRY_MINUTE_CAP = 60;
 // Michael's decision of 2026-11-13 (item 2, first point): with the live updates down, an entry with a timed-out fresh stop is tried at
 // least every 10 seconds (5, then 10), within the shared request budget.
 export const STUCK_RETRY_MAX_NO_STREAM_MS = 10_000;
@@ -161,7 +164,7 @@ export const TIMED_OUT_TRY_REQUESTS = 13;
 export const TIMED_OUT_CHECK_REQUESTS = 2;
 export const STUCK_ESCALATE_MS = 5 * 60_000;
 // The redesign of 2026-11-14, part 1 (Michael's approval): the short retries of stuck entries are class P1 of the shared request budget
-// (request-budget.ts: 60 a minute and 15 in any 5 seconds for every retry and check together, down to 20 of Alpaca's remaining). Each
+// (request-budget.ts: 75 a minute (60 before 2026-11-17) and 15 in any 5 seconds for every retry and check together, down to 20 of Alpaca's remaining). Each
 // retry reserves STUCK_TRY_REQUESTS before it starts (one lookup plus one short round of the sale; at most 8 were measured in the simulator
 // on 2026-11-09, the 2 more are margin); what it really sends is counted as it is sent. A retry that does not fit waits for room. A
 // position's first sale is never refused (it is counted, as a first try).
@@ -1766,7 +1769,7 @@ export class LossStopMemory {
 }
 
 // THE LOSS STOP'S RE-SELLS AND THE SHARED REQUEST BUDGET (the redesign of 2026-11-14, part 1, Michael's approval with his change A): each
-// retry check is class P1 of the shared budget (request-budget.ts: 60 a minute and 15 in any 5 seconds for every retry and check together),
+// retry check is class P1 of the shared budget (request-budget.ts: 75 a minute (60 before 2026-11-17) and 15 in any 5 seconds for every retry and check together),
 // reserving LOSS_STOP_RETRY_PER_CHECK before it starts, and starts only while Alpaca's remaining requests stay at or above 20 after it. The
 // equity check every 5 seconds is routine work (counted, not limited). The first sale when the stop fires is a first try: never held back
 // (it is the stop's whole job), ONE round of the liquidator (cancel the exits, wait, sell each symbol), a bounded burst, counted.
