@@ -257,12 +257,18 @@ export class RequestBudget {
 
   private refusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead = 0, minuteCap?: number): Refusal | null {
     // Item 5 (b): an ordinary stuck retry (capped) gives way while a close-out's retry waits for room; it looks again when that wait ends.
+    // Neither early refusal below is one the retry's hold alone caused, so each clears that flag (statistics only; group 2, night build of
+    // 2026-11-16, round 1: a stale flag counted these refusals into `retryHold.p2Refused`).
     if (cls === "P1" && minuteCap !== undefined && now < this.closeOutWaitUntil) {
+      this.lastRefusalHeldOnly = false;
       this.minute.closeOutHeldRetries++;
       return { ok: false, at: this.closeOutWaitUntil, why: "class" };
     }
     // Protect-first: P2 gives way (looked at again a quarter second later, a local check with no request).
-    if (cls === "P2" && this.p2GivesWay?.()) return { ok: false, at: now + PROTECT_FIRST_RECHECK_MS, why: "class" };
+    if (cls === "P2" && this.p2GivesWay?.()) {
+      this.lastRefusalHeldOnly = false;
+      return { ok: false, at: now + PROTECT_FIRST_RECHECK_MS, why: "class" };
+    }
     const u = this.usage(now);
     // P2 leaves room, in the minute and in the 5 seconds, for a waiting capped retry (Michael's answer after group 1's rulings round 2).
     const holding = now < this.retryWaitUntil;
