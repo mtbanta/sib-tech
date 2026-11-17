@@ -322,11 +322,14 @@ export interface LiquidatorDeps {
 // some symbols), an order already pending cancel at Alpaca is never cancelled again, and an order this liquidator cancelled in the last
 // CANCEL_MEMORY_MS is not cancelled again while its result is awaited: the open list each round (which live updates bring up to date), and,
 // if it still shows the order working CANCEL_RESULT_WAIT_MS after the cancel, one lookup by its id. Only if that lookup shows it still working
-// (the cancel refused or lost) is the cancel sent again: the wait doubling each time (2, 4, then 8 s), at most 2 re-sends
-// (CANCEL_RESENDS_MAX) and 3 answered lookups (CANCEL_LOOKUPS_MAX) an order within the 60 s cancel memory, which runs from its last re-send
-// (a lookup that fails sends the cancel again within the re-sends instead, at most CANCEL_LOOKUP_FAILS_MAX failed lookups an order). After
-// that an order still shown working is treated as new and the cycle repeats, so a cancel Alpaca keeps refusing costs about 3 cancels and 3
-// lookups a minute at most (measured in a test: a cycle every 78 s). "Cancel every order" is sent in round 1 as before; in a later round only for orders
+// (the cancel refused or lost) is the cancel sent again: the wait doubling each time (2, 4, then 8 s). Per order per 60 s cancel memory: at
+// most 2 re-sends (CANCEL_RESENDS_MAX), so 3 cancels; up to 6 lookups, 3 answered (CANCEL_LOOKUPS_MAX) and 3 failed
+// (CANCEL_LOOKUP_FAILS_MAX; a failed lookup sends the cancel again within the re-sends instead); and up to about 3 stored
+// `cancel_not_confirmed` rows (group 2, night round 2, with failed and answered lookups mixed: 3 cancels, 5 lookups, 3 rows). The memory
+// restarts at the last re-send, or at a failed lookup after the re-sends are used; 60 s after that, an order still shown working is treated
+// as new and the cycle repeats, so a cancel Alpaca keeps refusing costs about 3 cancels and up to 6 lookups a minute at most (measured in a
+// test with answered lookups only: a cycle every 78 s). With too little room above the urgent floor the lookup is skipped and the cancel
+// re-sent directly, as v24 does; a cancel that throws is not counted (CANCEL_THROWS_MAX). "Cancel every order" is sent in round 1 as before; in a later round only for orders
 // not yet asked, or, for shares held by orders the list does not show, on the same bounded schedule. On 2026-11-16 (simulator), a `flatten`
 // whose second round began before Alpaca's 8 s cancels had finished re-sent 81 single cancels for orders already pending cancel.
 export const CANCEL_MEMORY_MS = 60_000;
@@ -675,7 +678,6 @@ export class Liquidator {
           c.resends++;
           c.at = this.d.now().getTime();
           c.waitMs = Math.min(c.waitMs * 2, 8_000);
-          this.d.log?.("cancel_resent", { reason: o.reason, id, resends: c.resends });
           cancelled = true;
           cancelledInAttempt = true;
           steps.cancelsSentAt.push(stamp());
@@ -686,6 +688,8 @@ export class Liquidator {
             this.cancelThrew(id, o.reason);
             throw err;
           }
+          // Logged only once Alpaca took the re-send (group 2, night round 2; logging only).
+          this.d.log?.("cancel_resent", { reason: o.reason, id, resends: c.resends });
           (result.cancelsAccepted ??= []).push(id);
           steps.cancelsAnsweredAt.push(stamp());
         }
