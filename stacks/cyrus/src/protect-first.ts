@@ -33,8 +33,10 @@ export const PROTECT_FIRST_LIMIT_MS = 30_000;
 export const PROTECT_FIRST_REDUCED_GAP_MS = 2_000;
 export const MAX_MARKS = 500;
 
-export const PROTECT_FIRST_PAUSED = "protecting positions first: a held position has no confirmed protective stop, so no new entries for up to 30 seconds";
-export const PROTECT_FIRST_REDUCED = "protecting positions first: a held position still has no confirmed protective stop after 30 seconds, so entries run at a reduced rate (one every 2 seconds)";
+// The refusal reasons fit the daily summary's 70 characters (group 2, night build round 1): "protecting positions first" means a held
+// position has no confirmed protective stop.
+export const PROTECT_FIRST_PAUSED = "protecting positions first: no new entries for up to 30 s";
+export const PROTECT_FIRST_REDUCED = "protecting positions first: entries at one every 2 s";
 
 export type ProtectFirstPhase = "off" | "paused" | "reduced";
 

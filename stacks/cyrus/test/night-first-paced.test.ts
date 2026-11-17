@@ -60,7 +60,9 @@ test("night build, item 3: the wait ends as soon as Alpaca's requests have refil
   assert.equal(r.b.firstRoom(25), true);
 });
 
-test("night build, item 3: a one-entry first try's wait ends at once when a sale of the whole account is asked; a close-out's first try (not wakeable) waits on", async () => {
+// The close-outs' first tries no longer wait at all (v24's code since the night build tuning; see the test below); the second wait here
+// only checks that a wait asked as not wakeable is not ended by a whole-account ask.
+test("night build, item 3: a one-entry first try's wait ends at once when a sale of the whole account is asked; a wait asked as not wakeable waits on", async () => {
   const r = rig(() => 0);
   const sleep = (ms: number) => new Promise<void>((res) => setTimeout(() => (r.advance(ms), res()), 5));
   const p = r.b.paceFirst(25, "missing-exit sale", sleep, true);
@@ -68,7 +70,7 @@ test("night build, item 3: a one-entry first try's wait ends at once when a sale
   r.b.wakeFirstWaiters();
   const waited = await p;
   assert.ok(waited < 250, `woken at once (${waited} ms)`);
-  const q = r.b.paceFirst(60, "close-out", r.sleep, false);
+  const q = r.b.paceFirst(60, "not wakeable", r.sleep, false);
   r.b.wakeFirstWaiters();
   assert.equal(await q, 3_000);
 });

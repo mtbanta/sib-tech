@@ -50,7 +50,7 @@ export const FIRST_TRY_WAIT_MAX_MS = 3_000;
 // its refusal (it asks again on the next 5 second pass), or until the moment it said room would return, plus a moment. Nothing else waits.
 export const CLOSEOUT_FIRST_HOLD_MS = 5_500;
 // What a one-entry first try can send: a missing-exit or remainder sale's 3 rounds (measured on 2026-11-16: 25), and the fast sale.
-// The close-outs' first tries are not paced (night-a2 tuning): measured on 2026-11-16 (simulator, the worker's own 2:55 and mid-day close-outs
+// The close-outs' first tries are not paced (night-a2 tuning): measured on 2026-11-16 (simulator, the worker's own regular (then at 2:55) and mid-day close-outs
 // with Alpaca's remaining at 60), a wait of 1.8 to 3 s before the close-out delayed its sales by as much against v24.
 export const FIRST_TRY_MOST = 25;
 const REFILL_PER_MS = ALPACA_REQUESTS_PER_MINUTE / 60_000;
@@ -60,7 +60,7 @@ export type Refusal = { ok: false; at: number; why: "minute" | "five" | "class" 
 export interface ReserveOptions {
   // False for the close-out retries (they cannot fit 15 in 5 seconds; their burst is bounded by their own single round). Default true.
   fiveSec?: boolean;
-  // Michael's change B: the 2:55 close-out's retry from 2:58 PM Central: counted, never refused.
+  // Michael's change B: the regular close-out's retry (at the set time, 2:55 by default) from 2:58 PM Central: counted, never refused.
   force?: boolean;
   // What the try is, for the log.
   label: string;
@@ -73,7 +73,7 @@ export interface ReserveOptions {
   // The Alpaca client's own retries inside this try stop when its reservation has no room left (only a timed-out stop's tries, checks and
   // cancels, Michael's item 2 of 2026-11-13). Any other try is never stopped halfway (design 3.2): its extra requests are counted.
   limitRetries?: boolean;
-  // Item 5 (b) of the night build: a close-out's retry (the 2:55, mid-day, afternoon or carried-position close-out). While one waits for
+  // Item 5 (b) of the night build: a close-out's retry (the regular close-out at the set time, 2:55 by default, or the mid-day, afternoon or carried-position close-out). While one waits for
   // room, ordinary stuck retries are refused so it gets the room first (`closeOutWaitUntil`).
   closeOut?: boolean;
 }

@@ -470,8 +470,8 @@ export class Liquidator {
     // a one-entry cleanup sale whose turn in this queue comes while a sale of the whole account (a close-out, `flatten`, the loss stop's
     // sale, a carried-position sale) is asked for or running stands aside before sending, cancelling or reading anything; that sale sells
     // these shares. A cleanup sale already running when one is asked for carries on (as in v22), except for the loss stop (item 6).
-    // Group 1, round 3: also from the close-out time (2:55) and while a close-out, mid-day or carried step owns selling (the worker's rule),
-    // so a sale whose turn comes between 2:55:00 and the close-out's own ask does not run ahead of it either (v22's sync started no
+    // Group 1, round 3: also from the close-out time (the set time, 2:55 by default) and while a close-out, mid-day or carried step owns selling (the worker's rule),
+    // so a sale whose turn comes between the close-out time and the close-out's own ask does not run ahead of it either (v22's sync started no
     // cleanup from 2:55:00).
     const standAside: LiquidateResult["stoodAside"] | null = !o.ownEntryOnly ? null : this.runningOthers > 0 ? "whole account" : this.d.ownSalesMayRun?.() === false ? "close-out" : null;
     if (standAside) {

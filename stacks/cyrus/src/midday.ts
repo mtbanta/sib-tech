@@ -1,5 +1,5 @@
 // The mid-day cycle (Michael's decision of 2026-11-09; builds/c2-proposal-2026-11-09.md, part D). Trading runs from the open to
-// 10:30 AM Central. At 10:30 new entries are paused and a mid-day close-out (the 2:55 close-out code, closeout.ts) sells everything
+// 10:30 AM Central. At 10:30 new entries are paused and a mid-day close-out (the regular close-out's code, closeout.ts) sells everything
 // until the account is flat. While flat and paused a deploy may happen. After a deploy the worker resumes on its own under the same
 // day's limits, unless Michael sent `hold`, and only before 1:30 PM Central (or the day's last entry, if earlier). A plain restart
 // stays paused. `go` resumes at any time once the mid-day close-out is flat. This file holds the times, the pause and hold records,

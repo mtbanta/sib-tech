@@ -20,6 +20,18 @@ after(() => {
   PROTECT_FIRST.on = false;
 });
 
+// Group 2, night build round 1: the two refusal reasons fit the daily summary's 70 characters (summary.ts cuts each at 70), differ, and
+// keep the prefix the gate counts as a flow reason.
+test("protect-first's refusal reasons fit the summary's 70 characters with their meaning intact", () => {
+  for (const r of [PROTECT_FIRST_PAUSED, PROTECT_FIRST_REDUCED]) {
+    assert.ok(r.length <= 70, `${r.length}: ${r}`);
+    assert.match(r, /^protecting positions first: /);
+  }
+  assert.notEqual(PROTECT_FIRST_PAUSED, PROTECT_FIRST_REDUCED);
+  assert.match(PROTECT_FIRST_PAUSED, /no new entries for up to 30 s/);
+  assert.match(PROTECT_FIRST_REDUCED, /one every 2 s/);
+});
+
 // Group 2, night build round 1 (B1): the episode's three events are stored in the run log, not only in Fly's log (logging only).
 test("protect-first's events are stored in the run log", () => {
   for (const n of ["protect_first_started", "protect_first_limit_reached", "protect_first_ended"]) {

@@ -131,8 +131,8 @@ export function remainderAlert(sales: Array<{ symbol: string; shares: number }>)
 const FLUSH_EVERY_MS = 60_000;
 // The close-out's first retry wait before the close (item 3 of 2026-11-13: then 40 s, at most 60, and 20 s again in the last minute).
 const CLOSEOUT_RETRY_MS = 20_000;
-// Michael's change B of 2026-11-14: from this long before the close (2:58 PM Central on a normal day) the 2:55 close-out's retry is
-// counted but never refused by the shared request budget, so the account always gets flat before the close.
+// Michael's change B of 2026-11-14: from this long before the close (2:58 PM Central on a normal day) the regular close-out's retry (at
+// the set time, 2:55 by default) is counted but never refused by the shared request budget, so the account always gets flat before the close.
 export const CLOSEOUT_NEVER_REFUSED_MS = 2 * 60_000;
 // Item 3 of 2026-11-13: the wait before the next try after `attempts` tries: `firstMs` after the first, doubling, at most `maxMs`.
 export function retryGapMs(firstMs: number, attempts: number, maxMs = 3 * firstMs): number {
@@ -1108,7 +1108,7 @@ export class Worker {
     if (this.orderStream && (!alive || now >= day.closeAt || this.orderStreamDate !== date)) this.endOrderStream();
 
     const inSession = now >= day.openAt && now < day.closeAt && current.status === "approved";
-    // The mid-day cycle: from 10:30 until the mid-day close-out has finished flat, it alone sells (as the 2:55 close-out does from its
+    // The mid-day cycle: from 10:30 until the mid-day close-out has finished flat, it alone sells (as the regular close-out, at the set time, does from its
     // time on), so the order sync's missing-exit check stands aside and its sales cannot spend Alpaca's requests outside the mid-day
     // close-out's 60 a minute (group 1 review, round 1: 40 positions with refused sales made 80 such sales in 10 minutes).
     const middayToday = this.d.middayCycle === false ? null : middayTimes(current);
@@ -1491,7 +1491,7 @@ export class Worker {
       viewEveryMs: this.orderStreamLive() ? VIEW_EVERY_MS : VIEW_EVERY_NO_STREAM_MS,
       ...(raw ? { rawUpdate: raw } : {}),
       // The redesign of 2026-11-14, part 1: the shared request budget this minute: requests sent by tag (entries, first tries, P1, P2,
-      // routine, and the clock's separate bucket), tries granted and refused (and why), forced (the 2:55 retry from 2:58), overdrafts, the
+      // routine, and the clock's separate bucket), tries granted and refused (and why), forced (the regular close-out's retry from 2:58), overdrafts, the
       // most budgeted requests in any minute and any 5 seconds (at most 60 and 15 unless forced or overdrawn), and entries refused while a
       // P2 try waited on its floor.
       requestBudget: this.budget.takeMinute(),
@@ -1925,8 +1925,8 @@ export class Worker {
   }
 
   // The mid-day close-out (Michael, 2026-11-09): the pause first (the gate refuses every entry from then on, and looks again just
-  // before sending), then the 2:55 close-out code with path "midday". Unlike the 2:55 wrapper it never writes the `closeout` phase or
-  // the close-out's attempt date (the 2:55 close-out, the carried-position sale and the summary must not take it for the day's close),
+  // before sending), then the regular close-out's code with path "midday". Unlike the regular close-out's wrapper it never writes the `closeout` phase or
+  // the close-out's attempt date (the regular close-out, the carried-position sale and the summary must not take it for the day's close),
   // never stops the price stream (a `go` without a deploy trades at once), never sets the not-flat flag, and leaves the borrowing cap
   // alone (closeOut skips that for this path). The missing-exit check is off while it runs (protectNow). The first try is the full
   // close-out; a retry is ONE round of it without the wait for its own sells (the next retry looks again), which is how retries stay
@@ -2149,7 +2149,7 @@ export class Worker {
     const stored = await this.d.store.listOrders(date);
     // Fix of 2026-11-11: the day's orders are read in bounded windows (summary-listing.ts), not in one open-ended listing, which Alpaca
     // answered too slowly (about 28 s) and only in part on a day of about 8,000 orders.
-    // The windows end 10 minutes past the close (the 2:55 close-out's last sales are inside them); without a close time, a minute from now.
+    // The windows end 10 minutes past the close (the regular close-out's last sales, at the set time, 2:55 by default, are inside them); without a close time, a minute from now.
     const listUntil = day.closeAt ? new Date(day.closeAt.getTime() + 10 * 60_000) : new Date(this.d.now().getTime() + 60_000);
     // Only entries Alpaca has (the same rule as the lookups below) count as missing; refused or never-sent rows do not.
     const atAlpaca = stored.filter((s) => s.alpacaOrderId || s.status === "filled" || s.status === "submitted");
