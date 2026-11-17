@@ -65,6 +65,15 @@ const OWN_SELLS_WAIT_NO_CLOSE_MS = 60_000;
 // positions once more before ending (fix B of 2026-11-10).
 const OWN_SELLS_POLL_MS = 2_000;
 const OWN_SELLS_ORDERS_EVERY = 5;
+// Question 5 of 2026-11-16, Michael's morning decision 2 of 2026-11-17: "the 2:45 close-out's NOT FLAT alert after 3 minutes while it keeps
+// waiting". With the close-out at 2:45 the wait for its own sales can run to 2:58, 13 minutes with no word. So the regular close-out (path
+// "close-out" only; its retry, the emergency, carried and mid-day paths are unchanged) posts the NOT FLAT alert once, this long after the
+// close-out started, while it is still waiting for Alpaca to fill its own sells, and keeps waiting. Messages only: it is posted without
+// waiting for Discord (a slow post never holds up a look), stores no `closeout_result` and sets nothing; the result, the final NOT FLAT at the
+// deadline and the `not_flat` state are as before. It is skipped when the deadline is less than one look away (with the close-out at 2:55, the
+// 3 minutes end at the 2:58 deadline, so there is never a second alert seconds before the final one). If the account goes flat after it, one
+// line says so.
+export const CLOSEOUT_EARLY_ALERT_MS = 3 * 60_000;
 
 // Alpaca answering "order pending cancel" means a cancel is already under way: not a problem worth a note.
 const benignError = (e: string) => /cancel answers:/.test(e) && e.split(": ").slice(2).join(": ").split("; ").every((part) => /pending cancel/i.test(part));
@@ -79,6 +88,7 @@ const benignError = (e: string) => /cancel answers:/.test(e) && e.split(": ").sl
 // it goes ahead and sells (the safer direction at the regular close time).
 export async function closeOut(d: CloseoutDeps, tradeDate: string, options: CloseoutOptions = {}): Promise<CloseoutResult> {
   const alert = options.alert !== false;
+  const startedAt = d.now().getTime(); // question 5: the early alert is timed from the close-out's start
   const clock = await d.broker.getClock().catch(() => null);
   const marketClosed = clock ? !clock.isOpen : options.closeAt !== undefined && d.now() >= options.closeAt;
   if (marketClosed) {
@@ -115,6 +125,7 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
     }
   }
   let waitedMs = 0;
+  let earlyAlertAt: number | null = null; // question 5: when the early NOT FLAT alert was posted (once)
   let stillWorking = false; // at the end, every share still held is covered by a sell of ours that Alpaca has not filled
   const sells = res.steps?.sells ?? [];
   if (!flat && waitForOwn && res.working && remaining.length > 0 && remaining.every((s) => res.working!.includes(s))) {
@@ -164,6 +175,19 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
             }
           }
         }
+        // Question 5 (after this look's checks, so only while every share held is still covered): still waiting 3 minutes after the regular
+        // close-out started, with at least one more look before the deadline: post the NOT FLAT alert now (once, not awaited), keep waiting.
+        const nowMs = d.now().getTime();
+        if (alert && path === "close-out" && earlyAlertAt === null && nowMs - startedAt >= CLOSEOUT_EARLY_ALERT_MS && nowMs + OWN_SELLS_POLL_MS < deadline) {
+          earlyAlertAt = nowMs;
+          const n = sells.filter((x) => remaining.includes(x.symbol)).length || remaining.length;
+          const sentAt = sells.length > 0 ? centralClock(new Date(sells[0]!.at)) : "earlier";
+          const mins = Math.floor((nowMs - startedAt) / 60_000);
+          const text = `**Michael: NOT FLAT ${mins} minutes into the close-out: ${remaining.join(", ")}.** ${n} sell${n === 1 ? "" : "s"} sent at ${sentAt}; Alpaca has not filled ${n === 1 ? "it" : "them"} yet. Every share still held is covered by a sell of ours, so I keep waiting until ${centralClock(new Date(deadline))} and will post again. Please check Alpaca.`.slice(0, 1800);
+          void d.say("alerts", text, { mentionOwner: true }).catch(() => undefined);
+          void d.say("commands", text).catch(() => undefined);
+          void d.store.addEvent("warn", "closeout_waiting_alert", { remaining, afterMs: nowMs - startedAt, deadline: new Date(deadline).toISOString() }).catch(() => undefined);
+        }
       } catch {
         // a failed look is just tried again on the next one
       }
@@ -176,6 +200,8 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
     // Flat, but something went wrong on the way (a sell was refused and had to be repeated): say so. Waiting for Alpaca to fill
     // our own sells, or Alpaca saying a cancel was already under way, is not a problem.
     if (alert && errors.length > 0) await d.say("alerts", `Michael: the close-out had trouble but recovered and the account is flat. First problem: ${errors[0]!.slice(0, 200)}`);
+    // Question 5: the early alert said it would post again.
+    if (alert && earlyAlertAt !== null) await d.say("alerts", `Update: the close-out is now flat; Alpaca filled the last sells by ${centralClock(d.now())}.`);
     return path === "midday" ? { flat: true, remaining: [] } : finishFlat(d);
   }
   if (alert) {
