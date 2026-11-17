@@ -45,6 +45,10 @@ export const RETRY_WAIT_HOLD_MS = 2_500;
 // P1 try already keeps): 0.25 s doubling to 1 s, at most FIRST_TRY_WAIT_MAX_MS in all, then it goes ahead whatever the room. A one-entry
 // first try's wait ends at once when a sale of the whole account is asked (`wakeFirstWaiters`). It is still counted, never refused.
 export const FIRST_TRY_WAIT_MAX_MS = 3_000;
+// THE SWITCH for item 3 (Michael's answer of 2026-11-16, about 10:25 PM: "Ship the rest with item 3 switched off; item 3 joins only if it
+// passes the bar in time"): OFF. While off, `paceFirst` returns at once (no wait, no `first_try_paced`, `firstPaced` stays 0), so every first
+// try goes ahead at once as on v24. An object so the tests can switch it on; nothing in the worker changes it.
+export const FIRST_TRY_PACING = { on: false };
 // Item 5 (b) of the night build (Michael: "close-out retries go ahead of stuck retries"): when a close-out's retry is refused for room, ordinary
 // stuck retries (the tries capped at STUCK_RETRY_MINUTE_CAP) are refused as "class" until that retry is granted, and at most this long after
 // its refusal (it asks again on the next 5 second pass), or until the moment it said room would return, plus a moment. Nothing else waits.
@@ -352,6 +356,7 @@ export class RequestBudget {
   // Item 3 of the night build: waits (sending nothing) until `firstRoom(n)`, at most FIRST_TRY_WAIT_MAX_MS, 0.25 s doubling to 1 s; a
   // `wakeable` wait also ends when a sale of the whole account is asked. Returns how long it waited (ms). Logged when it waited.
   async paceFirst(n: number, label: string, sleep: (ms: number) => Promise<void>, wakeable: boolean): Promise<number> {
+    if (!FIRST_TRY_PACING.on) return 0; // item 3 switched off: as on v24
     const start = this.nowMs();
     let wait = 250;
     let woke = false;
