@@ -7,7 +7,6 @@ import { isOwnerCommand } from "./discord-bot.ts";
 import type { Settings } from "./config.ts";
 import { decideLimits, decideLoad, limitLines, parseCommand, type NextSessionFinder } from "./morning.ts";
 import { AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_AFTERNOON_PHASE, LOAD_MAX_POSITION_USD, LOAD_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, beforeLoadWindow, inAfternoonLoad, isLoadDay, loadLine, loadWindow, loadWindowRules } from "./load-mode.ts";
-import { CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
 import type { Liquidator, Say } from "./sells.ts";
 import { inRequestScope } from "./request-scope.ts";
 import { CONTROL_COMMAND_CURSOR, CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
@@ -135,13 +134,13 @@ export function screenCancelledLine(switched: boolean | "switched", after: "go-r
 }
 
 // The `status` line for the afternoon load window (group 2 review, round 1).
-function afternoonStatusLine(day: DayRecord, now: Date, pause: MiddayPause | null): string {
+export function afternoonStatusLine(day: DayRecord, now: Date, pause: MiddayPause | null, closeoutMinutes: number): string {
   const w = afternoonLoadWindow(day)!;
   if (inAfternoonLoad(day, now)) return `Afternoon load window: on since ${centralClock(w.start)}, until ${centralClock(w.end)} (then a close-out to flat, entries paused): 1 share churn, at most ${LOAD_MAX_POSITION_USD} dollars a position, up to ${MAX_TRADES_PER_MINUTE_LOAD_DAY} orders a minute`;
   if (now < w.start) return "";
   // Group 2, round 1: true in each state after the window: the close-out flat, still selling, or overtaken by the regular close-out;
   // entries paused, or trading resumed by a later `go`.
-  const closeoutAt = day.closeAt ? addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) : null;
+  const closeoutAt = day.closeAt ? addMinutes(day.closeAt, -closeoutMinutes) : null;
   const closeTxt = day.phases[AFTERNOON_FLAT_PHASE] ? "its close-out finished flat" : closeoutAt && now >= closeoutAt ? "its close-out did not finish flat before the regular close-out took over" : "its close-out is still selling";
   const resumedAfter = !pause?.on && pause?.resumedAt && Date.parse(pause.resumedAt) >= w.end.getTime() ? pause : null;
   const state = resumedAfter ? `trading resumed at ${centralClock(new Date(resumedAfter.resumedAt!))} (${resumedByText(resumedAfter.resumedBy)})` : "entries paused";
@@ -410,7 +409,7 @@ export class CommandProcessor {
         const pause = await readPause(this.d.store, date);
         const stop = await this.d.store.getControl<StopFlag>(CONTROL_STOP);
         // Michael, 2026-11-12 (afternoon): never while the close-out after the afternoon load window is still selling.
-        const closeoutAt = day?.closeAt ? addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) : null;
+        const closeoutAt = day?.closeAt ? addMinutes(day.closeAt, -this.d.settings.closeoutMinutesBeforeClose) : null;
         const pendingWhy = closeoutAt && now >= closeoutAt ? "the close-out after the afternoon load window did not finish flat (the regular close-out has taken over)" : "the close-out after the afternoon load window has not finished flat yet";
         const why = day && afternoonCloseoutPending(day, now) ? pendingWhy : goRefusal({ hasCycle: Boolean(day && middayTimes(day)), pause, flat: Boolean(day && middayFlat(day)), stop });
         if (why) {
@@ -707,7 +706,7 @@ export class CommandProcessor {
     this.d.log?.("load_afternoon", { date, switched: r.switched, symbols: r.list.length, clearedStop: clearsStop });
     const day = facts.day!;
     const end = afternoonLoadWindow({ ...day, phases: { ...day.phases, [LOAD_AFTERNOON_PHASE]: at.toISOString() } })?.end ?? middayTimes(day)!.lastEntryAt;
-    const closeoutAt = day.closeAt ? centralClock(addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE)) : "the usual time";
+    const closeoutAt = day.closeAt ? centralClock(addMinutes(day.closeAt, -this.d.settings.closeoutMinutesBeforeClose)) : "the usual time";
     await this.say(
       `Afternoon load window on until ${centralClock(end)}: ${loadWindowRules()}; at most ${LOAD_MAX_POSITION_USD} dollars a position and up to ${MAX_TRADES_PER_MINUTE_LOAD_DAY} orders a minute (your ruling, this window only). ${r.switched ? `The live list is now ${r.list.length} cheap names (posted in trading). ` : ""}${clearsStop ? (facts.pause?.on ? "Stop cleared, and the mid-day pause is over: trading resumed. " : "Stop cleared: trading resumed. ") : "Resumed: the mid-day pause is over. "}At ${centralClock(end)} entries pause and a close-out sells to flat; trading does not resume on its own after it. The loss stop counts from the open; the regular close-out runs at ${closeoutAt}.`,
     );
@@ -754,7 +753,7 @@ export class CommandProcessor {
     const w = afternoonLoadWindow(day);
     if (pause?.on && pause.reason === AFTERNOON_PAUSE_REASON && w) {
       // Group 2, round 2: from the regular close-out time on, that close-out has taken over (the afternoon one stops trying).
-      const closeoutAt = day.closeAt ? addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) : null;
+      const closeoutAt = day.closeAt ? addMinutes(day.closeAt, -this.d.settings.closeoutMinutesBeforeClose) : null;
       const state = day.phases[AFTERNOON_FLAT_PHASE] ? "flat" : closeoutAt && this.d.now() >= closeoutAt ? "the regular close-out took over" : "its close-out still selling";
       return `Mid-day cycle: entries paused again at ${centralClock(w.end)}, when the afternoon load window ended (${state})${hold}`;
     }
@@ -780,7 +779,7 @@ export class CommandProcessor {
       next ? `Next session: ${dayWord(next.date)}, opens ${centralClock(next.openAt)}${nextDay ? `, limits ${nextDay.status}` : ", limits request not posted yet"}` : "",
       day ? `Today (${day.tradeDate}): ${day.status}${day.isTradingDay ? `, limits: ${describeLimits(day.limits)}` : ""}` : "Today: not set up yet",
       day && day.isTradingDay ? loadLine(day).replace(/^5\. mode: /, "Mode today: ") : "",
-      day && afternoonLoadWindow(day) ? afternoonStatusLine(day, now, await readPause(this.d.store, day.tradeDate).catch(() => null)) : "",
+      day && afternoonLoadWindow(day) ? afternoonStatusLine(day, now, await readPause(this.d.store, day.tradeDate).catch(() => null), this.d.settings.closeoutMinutesBeforeClose) : "",
       day && day.status === "pending" ? limitLines(day) : "",
       `Live list: ${day?.liveList ? day.liveList.join(" ") || "(empty)" : "not built yet"}`,
       `Entries today: ${orders.filter((o) => o.status !== "failed" && o.status !== "rejected").length}; positions now: ${positions.length}`,

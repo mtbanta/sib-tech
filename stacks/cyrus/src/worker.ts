@@ -20,7 +20,7 @@ import type { Governor } from "./governor.ts";
 import { Liquidator, SellGate, flattenLegs } from "./sells.ts";
 import { formatLiveList } from "./universe.ts";
 import type { Settings } from "./config.ts";
-import { closeOut, CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./closeout.ts";
+import { closeOut } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
 import { ProgressGap, RetryBackoff } from "./retry-backoff.ts";
@@ -438,12 +438,18 @@ export class Worker {
     }
   }
 
+  // The regular close-out's time on a day that closes at `closeAt`: the setting's minutes before it (Michael's night build request of
+  // 2026-11-16, item 4; default 5, 2:55 PM Central).
+  closeoutAt(closeAt: Date): Date {
+    return addMinutes(closeAt, -this.d.settings.closeoutMinutesBeforeClose);
+  }
+
   // May the order sync sell a position whose exits are gone? Not while any liquidation runs or waits (close-out, flatten, loss
   // stop, carried, emergency), and not from the close-out time on: the close-out alone flattens the account. Since the redesign of
   // 2026-11-14 (part 2) one position's own cleanup sale (the loop's, or the fast sale) does not stop the others: they wait their turn in the
   // one-at-a-time sale queue (`isLiquidatingOthers`).
   protectNow(closeAt: Date): boolean {
-    return !this.closingOut && !this.liquidator.isLiquidatingOthers() && !this.inflight.has("closeout") && !this.inflight.has("carried") && !this.inflight.has("midday") && !this.middayOwnsSelling && this.d.now() < addMinutes(closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE);
+    return !this.closingOut && !this.liquidator.isLiquidatingOthers() && !this.inflight.has("closeout") && !this.inflight.has("carried") && !this.inflight.has("midday") && !this.middayOwnsSelling && this.d.now() < this.closeoutAt(closeAt);
   }
 
   private riskDeps() {
@@ -454,6 +460,7 @@ export class Worker {
       say: (c: Channel, t: string, o?: { mentionOwner?: boolean }) => this.say(c, t, o),
       liquidator: this.liquidator,
       lossMemory: this.lossMemory,
+      closeoutMinutesBeforeClose: this.d.settings.closeoutMinutesBeforeClose,
       syncMemory: this.syncMemory,
       governor: this.d.governor,
       log: (e: string, data?: Record<string, unknown>) => this.d.log?.("info", e, data),
@@ -828,7 +835,7 @@ export class Worker {
     if (this.emergencyDate === date || this.closingOut || this.inflight.has("closeout")) return;
     const clock = await this.d.broker.getClock();
     const minutesToClose = (new Date(clock.nextClose).getTime() - now.getTime()) / 60_000;
-    if (!clock.isOpen || minutesToClose > CLOSEOUT_MINUTES_BEFORE_CLOSE) return;
+    if (!clock.isOpen || minutesToClose > this.d.settings.closeoutMinutesBeforeClose) return;
     this.emergencyDate = date;
     await this.say("alerts", `${why}, so I am closing everything from the broker's clock alone.`);
     this.closingOut = true;
@@ -1091,8 +1098,8 @@ export class Worker {
     // close-out's 60 a minute (group 1 review, round 1: 40 positions with refused sales made 80 such sales in 10 minutes).
     const middayToday = this.d.middayCycle === false ? null : middayTimes(current);
     // The close-out after the afternoon load window (Michael, 2026-11-12) owns selling the same way until it has finished flat.
-    const afternoonCloseoutDue = Boolean(inSession && current.phases.armed && afternoonCloseoutPending(current, now) && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE));
-    this.middayOwnsSelling = Boolean(inSession && middayToday && current.phases.armed && now >= middayToday.pauseAt && !current.phases[MIDDAY_PHASE] && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE)) || afternoonCloseoutDue;
+    const afternoonCloseoutDue = Boolean(inSession && current.phases.armed && afternoonCloseoutPending(current, now) && now < this.closeoutAt(day.closeAt));
+    this.middayOwnsSelling = Boolean(inSession && middayToday && current.phases.armed && now >= middayToday.pauseAt && !current.phases[MIDDAY_PHASE] && now < this.closeoutAt(day.closeAt)) || afternoonCloseoutDue;
     // The loss stop is scheduled first, before anything else in the session that waits on the broker.
     if (inSession) this.scheduleLossStop(current, now);
     // Closes the live updates wrote to memory but could not write to the database yet are tried again (item 1). Never waited on.
@@ -1134,7 +1141,7 @@ export class Worker {
       this.carriedAttempts = 0;
     }
     const carriedGapMs = this.carriedAttempts === 0 ? 0 : Math.min(60_000 * 2 ** (this.carriedAttempts - 1), 5 * 60_000);
-    if (this.notFlat && now >= day.openAt && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !closeoutStarted && !this.closingOut && now.getTime() - this.lastCarriedAttempt >= carriedGapMs && this.backgroundReady("carried")) {
+    if (this.notFlat && now >= day.openAt && now < this.closeoutAt(day.closeAt) && !closeoutStarted && !this.closingOut && now.getTime() - this.lastCarriedAttempt >= carriedGapMs && this.backgroundReady("carried")) {
       // The redesign of 2026-11-14 (decision 6, every retry joins): the first try is a first try (counted, never refused); a retry is a P1 try
       // of the shared request budget, reserving the last try's measured cost (at most CLOSEOUT_RETRY_MOST) against the minute only, down to
       // 20 of Alpaca's remaining. Refused, it is not an attempt; the next pass asks again.
@@ -1159,7 +1166,7 @@ export class Worker {
     // The mid-day cycle (Michael, 2026-11-09): at 10:30 AM Central the pause goes on and the mid-day close-out sells everything, retried
     // every 20 seconds until flat, never from the regular close-out time on (that close-out takes over). Its own phase, never `closeout`.
     const mt = this.d.middayCycle === false ? null : middayTimes(current);
-    if (inSession && mt && current.phases.armed && now >= mt.pauseAt && !current.phases[MIDDAY_PHASE] && now < addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !this.closingOut && !this.inflight.has("carried") && !this.inflight.has("midday") && now.getTime() - this.lastMiddayAttempt >= (this.middayAttemptDate === date ? this.middayProgress.gapMs(MIDDAY_RETRY_MS, 60_000, this.middayLastRemaining.length) : 0)) {
+    if (inSession && mt && current.phases.armed && now >= mt.pauseAt && !current.phases[MIDDAY_PHASE] && now < this.closeoutAt(day.closeAt) && !this.closingOut && !this.inflight.has("carried") && !this.inflight.has("midday") && now.getTime() - this.lastMiddayAttempt >= (this.middayAttemptDate === date ? this.middayProgress.gapMs(MIDDAY_RETRY_MS, 60_000, this.middayLastRemaining.length) : 0)) {
       if (this.middayAttemptDate !== date) {
         this.middayAttemptDate = date;
         this.middayAttempts = 0;
@@ -1230,7 +1237,7 @@ export class Worker {
     const attemptsToday = this.closeoutAttemptDate === date ? this.closeoutAttempts : 0;
     const lastMinute = now >= addMinutes(day.closeAt, -1);
     const retryMs = now < day.closeAt ? (lastMinute ? CLOSEOUT_RETRY_MS : retryGapMs(CLOSEOUT_RETRY_MS, attemptsToday, 60_000)) : retryGapMs(5 * 60_000, Math.max(1, this.closeoutAttemptsAfterClose), 15 * 60_000);
-    if (now >= addMinutes(day.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE) && !current.phases.closeout && !this.closingOut && now.getTime() - this.lastCloseoutAttempt >= retryMs && this.backgroundReady("closeout")) {
+    if (now >= this.closeoutAt(day.closeAt) && !current.phases.closeout && !this.closingOut && now.getTime() - this.lastCloseoutAttempt >= retryMs && this.backgroundReady("closeout")) {
       if (this.closeoutAttemptDate !== date) {
         this.closeoutAttemptDate = date;
         this.closeoutAttempts = 0;
@@ -1796,7 +1803,7 @@ export class Worker {
   private async fastLostExit(clientOrderId: string, symbol: string, fillAtMs: number): Promise<void> {
     try {
       const s = this.sessionForSync;
-      if (!s || this.d.now() >= addMinutes(s.closeAt, -CLOSEOUT_MINUTES_BEFORE_CLOSE)) return;
+      if (!s || this.d.now() >= this.closeoutAt(s.closeAt)) return;
       if (this.closingOut || this.middayOwnsSelling || this.inflight.has("closeout") || this.inflight.has("carried") || this.inflight.has("midday")) return;
       if (await this.lossStopInForce(s.day.tradeDate)) return;
       const rows = await this.d.store.listOrders(s.day.tradeDate);

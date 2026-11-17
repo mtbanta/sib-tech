@@ -29,6 +29,29 @@ export interface Settings {
   };
   healthchecksPingUrl: string;
   supabaseDbUrl: string | undefined;
+  // Michael's night build request of 2026-11-16, item 4: the regular close-out runs this many minutes before the market close
+  // (CLOSEOUT_MINUTES_BEFORE_CLOSE; default 5, 2:55 PM Central on a normal day; 15 gives 2:45 PM, or 11:45 AM on a 12:00 PM half day).
+  closeoutMinutesBeforeClose: number;
+  // Settings that were not valid and fell back to their defaults (main.ts logs each one as a warning). Never holds a secret.
+  warnings: string[];
+}
+
+// The regular close-out's time, in minutes before the market close: a whole number from MIN to MAX; anything else is the default plus a
+// warning (it does not stop the worker, unlike a missing key: the default is the time the stack has always used).
+export const DEFAULT_CLOSEOUT_MINUTES_BEFORE_CLOSE = 5;
+export const MIN_CLOSEOUT_MINUTES_BEFORE_CLOSE = 5;
+export const MAX_CLOSEOUT_MINUTES_BEFORE_CLOSE = 30;
+
+export function parseCloseoutMinutes(raw: string | undefined): { minutes: number; warning: string | null } {
+  const value = raw?.trim() ?? "";
+  if (value === "") return { minutes: DEFAULT_CLOSEOUT_MINUTES_BEFORE_CLOSE, warning: null };
+  const n = /^\d{1,3}$/.test(value) ? Number(value) : NaN;
+  if (Number.isInteger(n) && n >= MIN_CLOSEOUT_MINUTES_BEFORE_CLOSE && n <= MAX_CLOSEOUT_MINUTES_BEFORE_CLOSE) return { minutes: n, warning: null };
+  const shown = value.length > 20 ? `${value.slice(0, 20)}...` : value;
+  return {
+    minutes: DEFAULT_CLOSEOUT_MINUTES_BEFORE_CLOSE,
+    warning: `Setting CLOSEOUT_MINUTES_BEFORE_CLOSE is "${shown}", not a whole number from ${MIN_CLOSEOUT_MINUTES_BEFORE_CLOSE} to ${MAX_CLOSEOUT_MINUTES_BEFORE_CLOSE}: using the default, ${DEFAULT_CLOSEOUT_MINUTES_BEFORE_CLOSE}`,
+  };
 }
 
 export class ConfigError extends Error {}
@@ -92,6 +115,8 @@ export function loadSettings(env: Env = process.env, options: { requireDatabase?
     throw new ConfigError("Setting SUPABASE_DB_URL is not a Postgres connection address (use the Postgres connection string from the Connect page of the Supabase project, with the database password filled in)");
   }
 
+  const closeout = parseCloseoutMinutes(env.CLOSEOUT_MINUTES_BEFORE_CLOSE);
+
   return {
     alpaca: {
       keyId,
@@ -109,6 +134,8 @@ export function loadSettings(env: Env = process.env, options: { requireDatabase?
     },
     healthchecksPingUrl: ping,
     supabaseDbUrl,
+    closeoutMinutesBeforeClose: closeout.minutes,
+    warnings: closeout.warning ? [closeout.warning] : [],
   };
 }
 
