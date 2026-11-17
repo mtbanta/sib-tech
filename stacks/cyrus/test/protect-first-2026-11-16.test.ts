@@ -10,6 +10,7 @@ import type { TradeUpdate } from "../src/order-stream.ts";
 import { SimBroker } from "./sim-broker.ts";
 import { FakeBot, order } from "./helpers.ts";
 import { D, rig, settle, z } from "./rig.ts";
+import { STORED_INFO_EVENTS, shouldStoreEvent } from "../src/run-log.ts";
 
 // Protect-first ships switched off (protect-first.ts, PROTECT_FIRST); these tests switch it on, so switching it on later is one line.
 before(() => {
@@ -17,6 +18,14 @@ before(() => {
 });
 after(() => {
   PROTECT_FIRST.on = false;
+});
+
+// Group 2, night build round 1 (B1): the episode's three events are stored in the run log, not only in Fly's log (logging only).
+test("protect-first's events are stored in the run log", () => {
+  for (const n of ["protect_first_started", "protect_first_limit_reached", "protect_first_ended"]) {
+    assert.ok(STORED_INFO_EVENTS.has(n), n);
+    assert.equal(shouldStoreEvent("info", n), true, n);
+  }
 });
 
 function unit() {

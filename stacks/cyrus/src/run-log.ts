@@ -101,6 +101,14 @@ export const STORED_INFO_EVENTS = new Set([
   // The redesign of 2026-11-14, part 2 (rare): an action of the protection loop that threw, when no worker reports it (the worker logs it at
   // error level and alerts; that entry's next action waits 5 s, doubling to 30 s).
   "protection_action_failed",
+  // Night build of 2026-11-16 (group 2, round 1; logging only). Protect-first's episodes (item 2): they fire only while it is switched on
+  // (`PROTECT_FIRST.on`), about one started and one ended row an episode, and one when it reaches its 30 s limit. Item 1: a cancel still
+  // shown working after its last re-send and lookup (rare, at most once an order per 60 s cancel memory). Its re-sends
+  // (`cancel_resent`) and failed lookups (`cancel_lookup_failed`) stay in Fly's log only.
+  "protect_first_started",
+  "protect_first_limit_reached",
+  "protect_first_ended",
+  "cancel_not_confirmed",
 ]);
 
 export function shouldStoreEvent(level: "info" | "warn" | "error", event: string): boolean {

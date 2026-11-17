@@ -7,6 +7,7 @@ import { CANCEL_LOOKUPS_MAX, CANCEL_MEMORY_MS, CANCEL_RESENDS_MAX, CANCEL_RESULT
 import { clientOrderIdFor } from "../src/gate.ts";
 import { SimBroker } from "./sim-broker.ts";
 import { D } from "./rig.ts";
+import { STORED_INFO_EVENTS, shouldStoreEvent } from "../src/run-log.ts";
 
 // `bracketed` positions with both exits resting, `bare` positions whose exits are already gone (their sale goes out in round 1 and, with
 // slow fills, stays open), Alpaca taking `cancelMs` per cancel; a liquidator on a clock the test moves. Counts requests by kind.
@@ -52,6 +53,14 @@ async function world(bracketed: number, bare: number, cancelMs: number) {
 
 test("night build, item 1: the constants", () => {
   assert.deepEqual([CANCEL_MEMORY_MS, CANCEL_RESULT_WAIT_MS, CANCEL_RESENDS_MAX, CANCEL_LOOKUPS_MAX], [60_000, 2_000, 2, 3]);
+});
+
+// Group 2, night build round 1 (B1): a cancel not confirmed is rare and stored; the re-sends and failed lookups stay in Fly's log only.
+test("night build, item 1: cancel_not_confirmed is stored in the run log; cancel_resent and cancel_lookup_failed are not", () => {
+  assert.ok(STORED_INFO_EVENTS.has("cancel_not_confirmed"));
+  assert.equal(shouldStoreEvent("info", "cancel_not_confirmed"), true);
+  assert.equal(shouldStoreEvent("info", "cancel_resent"), false);
+  assert.equal(shouldStoreEvent("info", "cancel_lookup_failed"), false);
 });
 
 test("night build, item 1: a flatten whose own sells are open in round 2, with 8 s cancels, sends no cancel again for orders pending cancel (v24 re-sent one each, every round)", async () => {
