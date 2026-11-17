@@ -312,11 +312,29 @@ export interface LiquidatorDeps {
 // At most MAX_EARLY_WAKES early wake-ups in one liquidation, so a burst of updates cannot turn the waits into a run of extra looks (5
 // since Michael's decision of 2026-11-06, early-wake.ts; the worker's waits also ignore updates while the budget is near the reserve).
 
+// Item 1 of the night build (Michael's request of 2026-11-16, about 8:50 PM: "a flatten or close-out sends each cancel once and then waits
+// for its result (live update or one lookup) instead of re-sending every round"). In a sale of the whole account (and a close-out's retry of
+// some symbols), an order already pending cancel at Alpaca is never cancelled again, and an order this liquidator cancelled in the last
+// CANCEL_MEMORY_MS is not cancelled again while its result is awaited: the open list each round (which live updates bring up to date), and,
+// if it still shows the order working CANCEL_RESULT_WAIT_MS after the cancel, one lookup by its id. Only if that lookup shows it still working
+// (the cancel refused or lost) is the cancel sent again: at most CANCEL_RESENDS_MAX times an order, the wait doubling each time (2, 4, then
+// 8 s), and at most CANCEL_LOOKUPS_MAX lookups an order. "Cancel every order" is sent in round 1 as before; in a later round only for orders
+// not yet asked, or, for shares held by orders the list does not show, on the same bounded schedule. On 2026-11-16 (simulator), a `flatten`
+// whose second round began before Alpaca's 8 s cancels had finished re-sent 81 single cancels for orders already pending cancel.
+export const CANCEL_MEMORY_MS = 60_000;
+export const CANCEL_RESULT_WAIT_MS = 2_000;
+export const CANCEL_RESENDS_MAX = 2;
+export const CANCEL_LOOKUPS_MAX = 3;
+type CancelSent = { at: number; waitMs: number; resends: number; lookups: number };
+
 export class Liquidator {
   private readonly d: LiquidatorDeps;
   private readonly sleep: (ms: number) => Promise<void>;
   private chain: Promise<unknown> = Promise.resolve();
   private running = 0;
+  // Item 1 of the night build: the cancels sent by whole-account sales, by order id, and the last "cancel every order".
+  private readonly cancelSent = new Map<string, CancelSent>();
+  private cancelAll: CancelSent = { at: -Infinity, waitMs: CANCEL_RESULT_WAIT_MS, resends: 0, lookups: 0 };
   // Priority sales (the daily loss stop) asked for and not finished yet.
   private priorityPending = 0;
   constructor(deps: LiquidatorDeps) {
@@ -516,6 +534,10 @@ export class Liquidator {
       //    it would only start the same sale again.
       let cancelled = false;
       let onlyOwn = false;
+      // Item 1 of the night build: a round in which 20ba5bd would have cancelled again (orders still shown, pending cancel included, or
+      // shares held by orders the list does not show) keeps 20ba5bd's timing, its blind half second and then the same looks, without the
+      // cancel, so no sale goes out later than on 20ba5bd.
+      let v24Cancelled = false;
       try {
         const open = await this.openOrders();
         // Release A, fix 2 (the close-out only): every share still held is covered by a sell of ours that is working. Waiting out
@@ -529,21 +551,89 @@ export class Liquidator {
         // round 1 whatever the list says, and again later if shares are still reported as held by orders that nothing visible
         // explains. Never while one of our own sells is open: that would cancel the sale itself.
         const heldByHiddenOrders = positions.some((p) => p.qtyAvailable != null && p.qtyAvailable < p.qty - EPS && openSellQty(open, p.symbol) < p.qty - p.qtyAvailable - EPS);
+        // Item 1 of the night build (whole-account sales and close-out retries; one entry's own sale is unchanged): what still needs a
+        // cancel. `fresh`: shown working and never cancelled here; `awaited`: cancelled here, shown working (or not shown at all), result
+        // awaited. Orders shown pending cancel are left alone.
+        const nowMs = this.d.now().getTime();
+        for (const [id, c] of this.cancelSent) if (nowMs - c.at > CANCEL_MEMORY_MS) this.cancelSent.delete(id);
+        const statusOf = new Map<string, string>();
+        for (const x of others) {
+          statusOf.set(x.id, x.status);
+          for (const l of flattenLegs(x)) statusOf.set(l.id, l.status);
+        }
+        const consider = own ? [] : [...new Set([...openOrderIds(others, targets), ...(only ? cancelIds : [])])].filter((id) => statusOf.get(id) !== "pending_cancel");
+        const fresh = consider.filter((id) => !this.cancelSent.has(id));
+        const awaited = consider.filter((id) => this.cancelSent.has(id));
+        const cancelAllDue = round === 1 || fresh.length > 0 || (heldByHiddenOrders && nowMs - this.cancelAll.at >= this.cancelAll.waitMs && this.cancelAll.resends < CANCEL_RESENDS_MAX);
+        // 20ba5bd's own rule for when this round cancels (a whole-account sale: "cancel every order" while no sell of ours is open and
+        // anything is shown or held; otherwise every order shown, plus a close-out retry's named ids).
+        v24Cancelled = !own && !onlyOwn && (!only && !open.some(ours) ? round === 1 || others.length > 0 || heldByHiddenOrders : openOrderIds(others, targets).length > 0 || (only !== null && cancelIds.length > 0));
         if (onlyOwn) {
           // nothing to cancel: see above
-        } else if (!only && !open.some(ours) && (round === 1 || others.length > 0 || heldByHiddenOrders)) {
+        } else if (!only && !open.some(ours) && cancelAllDue) {
           cancelled = true;
           steps.cancelsSentAt.push(stamp());
           const r = await this.d.broker.cancelAllOrders();
           steps.cancelsAnsweredAt.push(stamp());
           if (r.failed.length > 0) result.errors.push(`round ${round}: cancel answers: ${r.failed.slice(0, 3).join("; ").slice(0, 200)}`);
+          // Every order it covered is now awaited; a later "cancel every order" for hidden holds waits 2 s, then 4 s, at most twice more.
+          if (round === 1 || fresh.length > 0) this.cancelAll = { at: nowMs, waitMs: CANCEL_RESULT_WAIT_MS, resends: 0, lookups: 0 };
+          else this.cancelAll = { at: nowMs, waitMs: this.cancelAll.waitMs * 2, resends: this.cancelAll.resends + 1, lookups: 0 };
+          for (const id of fresh) this.cancelSent.set(id, { at: nowMs, waitMs: CANCEL_RESULT_WAIT_MS, resends: 0, lookups: 0 });
+        } else if (!own) {
+          // Single cancels (one of our own sells is open, or a close-out's retry of some symbols): each fresh order once.
+          for (const id of fresh) {
+            cancelled = true;
+            cancelledInAttempt = true;
+            steps.cancelsSentAt.push(stamp());
+            (result.cancelsTried ??= []).push(id);
+            this.cancelSent.set(id, { at: this.d.now().getTime(), waitMs: CANCEL_RESULT_WAIT_MS, resends: 0, lookups: 0 });
+            await this.d.broker.cancelOrder(id);
+            (result.cancelsAccepted ??= []).push(id);
+            steps.cancelsAnsweredAt.push(stamp());
+          }
+        }
+        // Item 1: an awaited cancel whose result has not shown after its wait gets one lookup; only if that shows the order still working
+        // (not pending cancel, cancelled, filled or gone) is the cancel sent again (bounded, see CANCEL_RESENDS_MAX).
+        if (!onlyOwn) for (const id of awaited) {
+          const c = this.cancelSent.get(id)!;
+          const t = this.d.now().getTime();
+          if (t - c.at < c.waitMs || c.lookups >= CANCEL_LOOKUPS_MAX) continue;
+          c.lookups++;
+          let still = false;
+          try {
+            const x = await this.d.broker.getOrderById(id);
+            still = !!x && OPEN_STATUSES.has(x.status) && x.status !== "pending_cancel";
+          } catch (err) {
+            c.at = this.d.now().getTime(); // unknown: looked up again after the next wait
+            c.waitMs = Math.min(c.waitMs * 2, 8_000);
+            this.d.log?.("cancel_lookup_failed", { reason: o.reason, id, error: (err as Error).message.slice(0, 100) });
+            continue;
+          }
+          if (!still) continue; // the cancel took (or the order ended): nothing more to send
+          if (c.resends >= CANCEL_RESENDS_MAX) {
+            this.d.log?.("cancel_not_confirmed", { reason: o.reason, id, resends: c.resends });
+            continue;
+          }
+          c.resends++;
+          c.at = this.d.now().getTime();
+          c.waitMs = Math.min(c.waitMs * 2, 8_000);
+          this.d.log?.("cancel_resent", { reason: o.reason, id, resends: c.resends });
+          cancelled = true;
+          cancelledInAttempt = true;
+          steps.cancelsSentAt.push(stamp());
+          (result.cancelsTried ??= []).push(id);
+          await this.d.broker.cancelOrder(id);
+          (result.cancelsAccepted ??= []).push(id);
+          steps.cancelsAnsweredAt.push(stamp());
+        }
+        if (onlyOwn || !own) {
+          // done above
         } else {
           // In an `only` sale, the ids the caller named are cancelled too (Alpaca's open list may not show a filled bracket's
           // legs). The client treats "already filled or cancelled" (404, 422) as done.
           // Part B (one entry only): just that entry's own exits; from round 2, only those still shown open.
-          const ids = own
-            ? [...new Set(round === 1 ? cancelIds : openOrderIds(others, targets).filter((id) => cancelIds.includes(id)))]
-            : [...new Set([...openOrderIds(others, targets), ...(only ? cancelIds : [])])];
+          const ids = [...new Set(round === 1 ? cancelIds : openOrderIds(others, targets).filter((id) => cancelIds.includes(id)))];
           for (const id of ids) {
             cancelled = true;
             cancelledInAttempt = true;
@@ -592,7 +682,7 @@ export class Liquidator {
         }
         // If cancels were just asked for and nothing visible shows what they were holding, give them half a second once: a cancel
         // takes about 0.2 s, and neither the open list nor qty_available is guaranteed to show the exits.
-        if (cancelled && polls === 0 && !blindWaitDone) {
+        if ((cancelled || v24Cancelled) && polls === 0 && !blindWaitDone) {
           blindWaitDone = true;
           // A plain half second, never ended early by an update (group 1 review, round 1): Alpaca's open list may not show a filled
           // entry's exits, so this pause is what lets the cancels land before the first look.
