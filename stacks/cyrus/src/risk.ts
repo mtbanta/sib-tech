@@ -1625,7 +1625,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   }
   if (extra.fast && firstSaleAt !== null) d.log?.("lost_exit_fast", { symbol: s.symbol, clientOrderId: s.clientOrderId, msFromFill: firstSaleAt - extra.fast.fillAtMs });
   if (r.yielded && soldQty === 0) {
-    d.log?.(kind === "missing" ? "unprotected_position_yielded" : "bare_remainder_yielded", { symbol: s.symbol, to: r.stoodAside === "whole account" ? "a sale of the whole account (stood aside at its turn)" : r.stoodAside === "close-out" ? "the close-out (stood aside at its turn)" : "the daily loss stop's sale" });
+    d.log?.(kind === "missing" ? "unprotected_position_yielded" : "bare_remainder_yielded", { symbol: s.symbol, to: r.stoodAside === "whole account" ? "a sale of the whole account (stood aside at its turn)" : r.stoodAside === "close-out" ? "the close-out (stood aside at its turn)" : r.gaveWay === "whole account" ? "a sale of the whole account (gave way at its next round)" : "the daily loss stop's sale" });
     return { attempted: true, stuck: false };
   }
   const before = r.heldBefore?.[s.symbol];

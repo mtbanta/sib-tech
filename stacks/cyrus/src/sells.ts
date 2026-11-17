@@ -246,6 +246,9 @@ export interface LiquidateResult {
   // owns selling or the close-out time has come ("close-out").
   yielded?: boolean;
   stoodAside?: "whole account" | "close-out";
+  // Fix (a) of 2026-11-17, only with `ownEntryOnly`: the sale was running and stopped at the start of a later round because a sale of the
+  // whole account covering its symbol was asked for (GIVE_WAY_AT_NEXT_ROUND); what it sold before that is in `sold`.
+  gaveWay?: "whole account";
   // Only with endWhenHiddenHold: the symbols held with no open order visible when the attempt ended early (part A, step 1).
   hiddenHold?: string[];
   // Ruling B (group 1, round 2 of the night release): a cancel this sale sent was not accepted (an error from Alpaca or no answer).
@@ -344,6 +347,16 @@ export const CANCEL_LOOKUP_FAILS_MAX = 3;
 // CANCEL_THROWS_MEMORY_MS); after that a cancel that throws counts as sent and `cancel_not_confirmed` is stored once.
 export const CANCEL_THROWS_MAX = 3;
 export const CANCEL_THROWS_MEMORY_MS = 10 * 60_000;
+
+// Michael's morning decision 2 of 2026-11-17, protect-first fix (a): "a running lost-exit sale gives way to a close-out at its next round".
+// Builder's reading (for Michael to confirm): a one-entry cleanup sale (`ownEntryOnly`: the protection loop's missing-exit and remainder
+// sales and the fast sale) that is already running when a sale of the whole account is asked for (a close-out, `flatten`, the loss stop's
+// sale, a carried-position sale) stops at the start of its next round, before sending, cancelling or reading anything in that round, and the
+// whole-account sale sells its shares. Only when that ask covers the sale's symbol (an ask with no `only`, or an `only` naming it): the
+// mid-day and loss-stop retries sell a few named symbols, and a sale giving way to one of those that leaves its own symbol out would leave
+// its shares with no exit and no seller. Before (v24 to v26) such a sale gave way only before it started (`stoodAside`), else ran all its
+// rounds (3 for a first try; tries of one round never reach a next round). One switch, for Michael's pre-approved split.
+export const GIVE_WAY_AT_NEXT_ROUND = { on: true };
 type CancelSent = { at: number; waitMs: number; resends: number; lookups: number; lookupFails?: number };
 
 export class Liquidator {
@@ -372,6 +385,13 @@ export class Liquidator {
   }
   // Priority sales (the daily loss stop) asked for and not finished yet.
   private priorityPending = 0;
+  // Fix (a) of 2026-11-17: the whole-account sales asked for and not finished yet, each with the symbols it sells (null: every symbol).
+  private readonly othersAsked = new Set<{ only: ReadonlySet<string> | null }>();
+  // True while a whole-account sale that sells one of these symbols is asked for or running (fix (a)).
+  private wholeAccountAskCovers(symbols: ReadonlySet<string>): boolean {
+    for (const a of this.othersAsked) if (a.only === null || [...symbols].some((s) => a.only!.has(s))) return true;
+    return false;
+  }
   constructor(deps: LiquidatorDeps) {
     this.d = deps;
     this.sleep = deps.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -404,6 +424,8 @@ export class Liquidator {
     this.running++;
     const other = !o.ownEntryOnly;
     if (other) this.runningOthers++;
+    const ask = other ? { only: o.only ? new Set(o.only) : null } : null;
+    if (ask) this.othersAsked.add(ask);
     if (other) this.d.onWholeAccountAsk?.();
     if (o.priority) this.priorityPending++;
     const run = this.chain.then(() => this.run(o));
@@ -411,6 +433,7 @@ export class Liquidator {
     return run.finally(() => {
       this.running--;
       if (other) this.runningOthers--;
+      if (ask) this.othersAsked.delete(ask);
       if (o.priority) this.priorityPending--;
     });
   }
@@ -516,6 +539,17 @@ export class Liquidator {
     for (let round = 1; round <= rounds; round++) {
       result.lastLookOk = false; // set true below only by this round's successful look (reported only)
       if (yieldNow()) return yielded();
+      // Fix (a) of 2026-11-17: a running one-entry sale gives way to a whole-account sale that covers its symbol, at the start of its next
+      // round (never in its first, which `standAside` above already decides). Nothing is sent, cancelled or read in that round.
+      if (round > 1 && GIVE_WAY_AT_NEXT_ROUND.on && o.ownEntryOnly && only && this.wholeAccountAskCovers(only)) {
+        result.yielded = true;
+        result.gaveWay = "whole account";
+        result.flat = false;
+        result.remaining = [...only];
+        result.errors.push(`stopped before round ${round}: a sale of the whole account was asked for and sells these shares`);
+        this.d.log?.("liquidation_gave_way", { reason: o.reason, only: o.only ?? null, round });
+        return done();
+      }
       // Nothing is sent while the market is closed: a market sell then queues for the next open (and cancelling the
       // exits first would leave the position bare overnight). If the clock cannot be read, carry on.
       const clock = await this.d.broker.getClock().catch(() => null);
