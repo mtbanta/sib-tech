@@ -6795,3 +6795,13 @@ Round 4's B1 fixed (probe G: 0 answers at every ask, last bracketed sale 8.2 to 
 **Michael's pass rule for the simulations and reviews (2026-11-16, about 6:20 PM, in the session), saved verbatim:**
 
 > Pass rule for the simulations and reviews: no rate-limit answer may hit a sale, cancel or close-out step, and none may delay any position's sale. Up to 2 isolated rate-limit answers per scenario are acceptable on low-priority requests (entries, rechecks, reads), each recovered within a second and never two in a row. Design for zero.
+
+**Michael's pre-approved fallbacks and his "clearly better" (2026-11-16 evening, in the session), saved verbatim:**
+
+> Pre-approved fallbacks, in this order, if tonight's release can't meet the pass rule near a close-out:
+> 1. During any close-out, flatten or loss stop, the regular order check slows to every 10 s and stuck-sale retries give way to the close-out.
+> 2. If that is not enough, the order check returns to every 10 s at all times (as on v24).
+> 3. If still not enough, ship without the 1-second pass and the 6-second check.
+> Use them without asking; record which one you used. Stop and ask only if none of them meets the pass rule.
+> For the protect-first simulation, "clearly better" means it meets my pass rule (not strict zero) and beats v24 on time from lost exits to sale.
+> Never print any token or key.
