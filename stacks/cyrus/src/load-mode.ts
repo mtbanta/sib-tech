@@ -65,7 +65,7 @@ export const isLoadDay = (day: Pick<DayRecord, "phases"> | null | undefined): bo
 // THE AFTERNOON LOAD WINDOW (Michael's standing requirement of 2026-11-11). On any day, while the account is flat and the mid-day pause
 // is on, `load afternoon` (until 1:30 PM Central) makes the rest of the day until the last entry (2:00 PM Central on a full day) a load
 // window: the load day's entries and exits, at most 75 dollars a position, and up to 150 orders a minute even above the day's approved
-// limit (his ruling, only for that window). The day record's phase holds the time it started. The 2:55 close-out runs as normal.
+// limit (his ruling, only for that window). The day record's phase holds the time it started. The regular close-out (at the set time, 2:55 by default) runs as normal.
 export const LOAD_AFTERNOON_PHASE = "loadAfternoon";
 
 type AfternoonDay = Pick<DayRecord, "phases"> & WindowDay;

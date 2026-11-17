@@ -18,17 +18,17 @@ import { fetchUniverseWithNames } from "./universe.ts";
 import { CachingStore } from "./caching-store.ts";
 import { Governor } from "./governor.ts";
 import { RequestBudget } from "./request-budget.ts";
-import { shouldStoreEvent } from "./run-log.ts";
+import { makeLogAndStore, type LogAndStore } from "./run-log.ts";
 import { FeedAlerter } from "./feed-alert.ts";
 import { Worker } from "./worker.ts";
-import { recordStart, releaseLabel } from "./start-note.ts";
+import { logSettingWarnings, logWorkerStarted, recordStart, releaseLabel } from "./start-note.ts";
 
 loadLocalEnv();
 const settings = loadSettings(process.env, { requireDatabase: true });
 const redact = makeRedactor(secretValues(settings, process.env));
 const log = makeLogger(redact);
-// A setting that was not valid fell back to its default (config.ts): say so in the log.
-for (const warning of settings.warnings) log("warn", "setting_invalid", { warning });
+// A setting that was not valid fell back to its default (config.ts): its warnings wait in `settings.warnings` and are logged and stored
+// once the database has answered (below; start-note.ts), or printed to Fly's log if the start fails before that.
 
 const pool = makePool(settings.supabaseDbUrl!);
 // The cache sits in front of the database so the order gate does not wait on it for every decision (see caching-store.ts).
@@ -42,10 +42,7 @@ const data = new AlpacaData(settings);
 const bot = new DiscordBot(settings, redact);
 
 // Which log lines also go into the database's run log (already redacted). See run-log.ts for why.
-const logAndStore: ConstructorParameters<typeof Worker>[0]["log"] = (level, event, fields) => {
-  log(level, event, fields);
-  if (shouldStoreEvent(level, event)) void store.addEvent(level, event, JSON.parse(redact(JSON.stringify(fields ?? {})))).catch(() => undefined);
-};
+const logAndStore: LogAndStore = makeLogAndStore(log, store, redact);
 
 async function buildLiveList(opts: { load?: boolean } = {}): Promise<{ symbols: string[]; names: Record<string, string> }> {
   const { symbols: universe, names } = await fetchUniverseWithNames();
@@ -65,10 +62,13 @@ try {
   await store.getControl("startup_check"); // the database must answer before anything else
   await bot.start();
 } catch (err) {
+  logSettingWarnings(log, settings.warnings); // Fly's log only: the database may be what failed
   log("error", "startup_failed", { error: describeError(err, redact) });
   await ping(settings.healthchecksPingUrl, "fail");
   process.exit(1);
 }
+// The database has answered: the held setting warnings are logged and stored, each once, before `worker_started`.
+logSettingWarnings(logAndStore, settings.warnings);
 
 const worker = new Worker({
   settings,
@@ -113,7 +113,7 @@ await ping(settings.healthchecksPingUrl, "start");
 const started = await recordStart(store, new Date(), releaseLabel(process.env));
 await bot.post("commands", started.text);
 if (started.repeated) await bot.post("alerts", `The worker has started ${started.recentStarts} times in the last hour. If you did not deploy or stop it, it may be crashing: check the Fly logs.`);
-log("info", "worker_started", { feed: settings.alpaca.dataFeed, closeoutMinutesBeforeClose: settings.closeoutMinutesBeforeClose, recentStarts: started.recentStarts, deploy: started.deploy });
+logWorkerStarted(logAndStore, { feed: settings.alpaca.dataFeed, closeoutMinutesBeforeClose: settings.closeoutMinutesBeforeClose, recentStarts: started.recentStarts, deploy: started.deploy });
 // The mid-day cycle: a new release started while flat and paused resumes on its own (unless `hold`); the same release stays paused.
 worker.setStartInfo({ deploy: started.deploy, release: started.release });
 worker.start();

@@ -1089,7 +1089,8 @@ function waitForRoom(d: RiskDeps, mem: SyncMemory, st: StuckEntry | undefined, c
 // finds no room now (another try took it since the walk looked) sends nothing and waits for room.
 async function inTry(d: RiskDeps, mem: SyncMemory, s: OrderRecord, spec: TrySpec | null, label: string, fn: () => Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }>): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number; room?: RoomNeed }> {
   if (!spec) {
-    // Item 3 of the night build (decision 4 changed): a first try waits for room above the urgent floor, at most 3 s, then goes ahead.
+    // Item 3 of the night build (decision 4 changed): a first try would wait for room above the urgent floor, at most 3 s, then go ahead;
+    // switched off (FIRST_TRY_PACING in request-budget.ts), so it goes ahead at once as on v24.
     if (d.sleep) await budgetOf(d, mem).paceFirst(FIRST_TRY_MOST, label, d.sleep, true);
     return withReservation(budgetOf(d, mem).first(label), fn, "first");
   }
@@ -2021,7 +2022,8 @@ async function sweepEntriesNow(d: RiskDeps): Promise<number> {
 // sells nothing if Alpaca kept the exits. Never throws.
 export async function fastLostExitSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, fillAtMs: number): Promise<void> {
   // A first try (the redesign of 2026-11-14, part 1): counted, never refused.
-  // Item 3 of the night build (decision 4 changed): the fast sale's first try waits for room too, at most 3 s.
+  // Item 3 of the night build (decision 4 changed): the fast sale's first try would wait for room too, at most 3 s; switched off
+  // (FIRST_TRY_PACING), so it goes at once as on v24.
   if (d.sleep) await budgetOf(d, mem).paceFirst(FIRST_TRY_MOST, "fast sale", d.sleep, true);
   return withReservation(budgetOf(d, mem).first("fast sale"), () => fastLostExitSaleInner(d, day, mem, s, fillAtMs), "first");
 }

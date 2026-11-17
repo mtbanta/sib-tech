@@ -309,6 +309,9 @@ export interface LiquidatorDeps {
   ownSalesMayRun?: () => boolean;
   // Item 3 of the night build: told the moment a sale of the whole account is asked (the worker wakes one-entry first tries waiting for room).
   onWholeAccountAsk?: () => void;
+  // Item 1 of the night build (round 1 follow-up): whether there is room for one lookup of a cancel's result above the urgent floor (the
+  // shared request budget's `urgentRoom(1)`). Unset: always (the lookup is made, as in the tests that build a liquidator alone).
+  lookupRoom?: () => boolean;
 }
 
 // At most MAX_EARLY_WAKES early wake-ups in one liquidation, so a burst of updates cannot turn the waits into a run of extra looks (5
@@ -319,15 +322,26 @@ export interface LiquidatorDeps {
 // some symbols), an order already pending cancel at Alpaca is never cancelled again, and an order this liquidator cancelled in the last
 // CANCEL_MEMORY_MS is not cancelled again while its result is awaited: the open list each round (which live updates bring up to date), and,
 // if it still shows the order working CANCEL_RESULT_WAIT_MS after the cancel, one lookup by its id. Only if that lookup shows it still working
-// (the cancel refused or lost) is the cancel sent again: at most CANCEL_RESENDS_MAX times an order, the wait doubling each time (2, 4, then
-// 8 s), and at most CANCEL_LOOKUPS_MAX lookups an order. "Cancel every order" is sent in round 1 as before; in a later round only for orders
+// (the cancel refused or lost) is the cancel sent again: the wait doubling each time (2, 4, then 8 s), at most 2 re-sends
+// (CANCEL_RESENDS_MAX) and 3 answered lookups (CANCEL_LOOKUPS_MAX) an order within the 60 s cancel memory, which runs from its last re-send
+// (a lookup that fails sends the cancel again within the re-sends instead, at most CANCEL_LOOKUP_FAILS_MAX failed lookups an order). After
+// that an order still shown working is treated as new and the cycle repeats, so a cancel Alpaca keeps refusing costs about 3 cancels and 3
+// lookups a minute at most (measured in a test: a cycle every 78 s). "Cancel every order" is sent in round 1 as before; in a later round only for orders
 // not yet asked, or, for shares held by orders the list does not show, on the same bounded schedule. On 2026-11-16 (simulator), a `flatten`
 // whose second round began before Alpaca's 8 s cancels had finished re-sent 81 single cancels for orders already pending cancel.
 export const CANCEL_MEMORY_MS = 60_000;
 export const CANCEL_RESULT_WAIT_MS = 2_000;
 export const CANCEL_RESENDS_MAX = 2;
 export const CANCEL_LOOKUPS_MAX = 3;
-type CancelSent = { at: number; waitMs: number; resends: number; lookups: number };
+// Group 1, night build round 1 (finding 3): lookups that failed (threw) count separately, at most this many an order within the memory; each
+// falls back to re-sending the cancel (within CANCEL_RESENDS_MAX), or, with no re-send left, to a later lookup after the doubling wait.
+export const CANCEL_LOOKUP_FAILS_MAX = 3;
+// Group 1, night build round 1 follow-up (the reviewer's cancel-throw probe): a single cancel that threw was not sent. It is tried again in
+// the next round, as on v24, without counting as a re-send or starting the memory, at most this many times an order (kept for
+// CANCEL_THROWS_MEMORY_MS); after that a cancel that throws counts as sent and `cancel_not_confirmed` is stored once.
+export const CANCEL_THROWS_MAX = 3;
+export const CANCEL_THROWS_MEMORY_MS = 10 * 60_000;
+type CancelSent = { at: number; waitMs: number; resends: number; lookups: number; lookupFails?: number };
 
 export class Liquidator {
   private readonly d: LiquidatorDeps;
@@ -337,6 +351,22 @@ export class Liquidator {
   // Item 1 of the night build: the cancels sent by whole-account sales, by order id, and the last "cancel every order".
   private readonly cancelSent = new Map<string, CancelSent>();
   private cancelAll: CancelSent = { at: -Infinity, waitMs: CANCEL_RESULT_WAIT_MS, resends: 0, lookups: 0 };
+  // Group 1, night build round 1 follow-up: cancels that threw (not sent), by order id, and when the last one threw.
+  private readonly cancelThrows = new Map<string, { n: number; at: number }>();
+
+  // A single cancel threw (a 5xx or a network failure after the client's own retries): Alpaca did not take it, so it is not counted as sent.
+  // It is forgotten (neither a re-send nor the start of the 60 s memory) and so sent again in the next round, as on v24, at most
+  // CANCEL_THROWS_MAX times an order. The next one that throws is counted as sent (the item 1 schedule and its bounds apply) and stored once
+  // as not confirmed.
+  private cancelThrew(id: string, reason: string): void {
+    const n = (this.cancelThrows.get(id)?.n ?? 0) + 1;
+    this.cancelThrows.set(id, { n, at: this.d.now().getTime() });
+    if (n <= CANCEL_THROWS_MAX) {
+      this.cancelSent.delete(id);
+      return;
+    }
+    if (n === CANCEL_THROWS_MAX + 1) this.d.log?.("cancel_not_confirmed", { reason, id, thrown: n });
+  }
   // Priority sales (the daily loss stop) asked for and not finished yet.
   private priorityPending = 0;
   constructor(deps: LiquidatorDeps) {
@@ -468,8 +498,8 @@ export class Liquidator {
     // a one-entry cleanup sale whose turn in this queue comes while a sale of the whole account (a close-out, `flatten`, the loss stop's
     // sale, a carried-position sale) is asked for or running stands aside before sending, cancelling or reading anything; that sale sells
     // these shares. A cleanup sale already running when one is asked for carries on (as in v22), except for the loss stop (item 6).
-    // Group 1, round 3: also from the close-out time (2:55) and while a close-out, mid-day or carried step owns selling (the worker's rule),
-    // so a sale whose turn comes between 2:55:00 and the close-out's own ask does not run ahead of it either (v22's sync started no
+    // Group 1, round 3: also from the close-out time (the set time, 2:55 by default) and while a close-out, mid-day or carried step owns selling (the worker's rule),
+    // so a sale whose turn comes between the close-out time and the close-out's own ask does not run ahead of it either (v22's sync started no
     // cleanup from 2:55:00).
     const standAside: LiquidateResult["stoodAside"] | null = !o.ownEntryOnly ? null : this.runningOthers > 0 ? "whole account" : this.d.ownSalesMayRun?.() === false ? "close-out" : null;
     if (standAside) {
@@ -559,6 +589,7 @@ export class Liquidator {
         // awaited. Orders shown pending cancel are left alone.
         const nowMs = this.d.now().getTime();
         for (const [id, c] of this.cancelSent) if (nowMs - c.at > CANCEL_MEMORY_MS) this.cancelSent.delete(id);
+        for (const [id, x] of this.cancelThrows) if (nowMs - x.at > CANCEL_THROWS_MEMORY_MS) this.cancelThrows.delete(id);
         const statusOf = new Map<string, string>();
         for (const x of others) {
           statusOf.set(x.id, x.status);
@@ -591,7 +622,12 @@ export class Liquidator {
             steps.cancelsSentAt.push(stamp());
             (result.cancelsTried ??= []).push(id);
             this.cancelSent.set(id, { at: this.d.now().getTime(), waitMs: CANCEL_RESULT_WAIT_MS, resends: 0, lookups: 0 });
-            await this.d.broker.cancelOrder(id);
+            try {
+              await this.d.broker.cancelOrder(id);
+            } catch (err) {
+              this.cancelThrew(id, o.reason);
+              throw err; // the round goes on as on v24 (the error is recorded below)
+            }
             (result.cancelsAccepted ??= []).push(id);
             steps.cancelsAnsweredAt.push(stamp());
           }
@@ -601,17 +637,35 @@ export class Liquidator {
         if (!onlyOwn) for (const id of awaited) {
           const c = this.cancelSent.get(id)!;
           const t = this.d.now().getTime();
-          if (t - c.at < c.waitMs || c.lookups >= CANCEL_LOOKUPS_MAX) continue;
-          c.lookups++;
+          if (t - c.at < c.waitMs || c.lookups >= CANCEL_LOOKUPS_MAX || (c.lookupFails ?? 0) >= CANCEL_LOOKUP_FAILS_MAX) continue;
           let still = false;
-          try {
+          // Night build round 1 follow-up (a judgment call under Michael's overnight instructions, item 1: "fastest protection of positions
+          // without a stop first, then fewest rate-limit answers on sale, cancel or close-out steps"): when Alpaca's remaining, as the
+          // governor estimates it, less the room reserved unsent, is below the urgent floor of 20 plus the lookup's 1, the lookup is skipped and
+          // the cancel sent again directly, as v24 does (a lookup there cost a sale check a rate-limit answer: sold 18 s later than v24 in the
+          // simulator). The re-send allowance and every other bound are unchanged.
+          if (this.d.lookupRoom && !this.d.lookupRoom()) {
+            if (c.resends >= CANCEL_RESENDS_MAX) continue; // nothing left to send: looked up once there is room (bounded as above)
+            this.d.log?.("cancel_lookup_skipped", { reason: o.reason, id, resends: c.resends }); // Fly's log, at most once a re-send
+            still = true;
+          } else try {
             const x = await this.d.broker.getOrderById(id);
+            c.lookups++; // only a lookup that answered counts toward CANCEL_LOOKUPS_MAX
             still = !!x && OPEN_STATUSES.has(x.status) && x.status !== "pending_cancel";
           } catch (err) {
-            c.at = this.d.now().getTime(); // unknown: looked up again after the next wait
-            c.waitMs = Math.min(c.waitMs * 2, 8_000);
-            this.d.log?.("cancel_lookup_failed", { reason: o.reason, id, error: (err as Error).message.slice(0, 100) });
-            continue;
+            // Group 1, night build round 1 (finding 3): a failed lookup does not use up the allowance; the result is unknown, so the cancel is
+            // sent again within CANCEL_RESENDS_MAX (the client treats 404 and 422 on a cancel as done). Failed lookups have their own limit.
+            c.lookupFails = (c.lookupFails ?? 0) + 1;
+            this.d.log?.("cancel_lookup_failed", { reason: o.reason, id, fails: c.lookupFails, error: (err as Error).message.slice(0, 100) });
+            if (c.resends >= CANCEL_RESENDS_MAX) {
+              // Nothing left to send: looked up again after the next wait while failures allow; at the last allowed failure it is given up
+              // for the memory, and stored as not confirmed (logging only).
+              if (c.lookupFails >= CANCEL_LOOKUP_FAILS_MAX) this.d.log?.("cancel_not_confirmed", { reason: o.reason, id, resends: c.resends, lookupsFailed: c.lookupFails });
+              c.at = this.d.now().getTime();
+              c.waitMs = Math.min(c.waitMs * 2, 8_000);
+              continue;
+            }
+            still = true;
           }
           if (!still) continue; // the cancel took (or the order ended): nothing more to send
           if (c.resends >= CANCEL_RESENDS_MAX) {
@@ -626,7 +680,12 @@ export class Liquidator {
           cancelledInAttempt = true;
           steps.cancelsSentAt.push(stamp());
           (result.cancelsTried ??= []).push(id);
-          await this.d.broker.cancelOrder(id);
+          try {
+            await this.d.broker.cancelOrder(id);
+          } catch (err) {
+            this.cancelThrew(id, o.reason);
+            throw err;
+          }
           (result.cancelsAccepted ??= []).push(id);
           steps.cancelsAnsweredAt.push(stamp());
         }
