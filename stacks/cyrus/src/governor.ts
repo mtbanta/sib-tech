@@ -62,8 +62,9 @@ export class Governor {
   private readonly scaleReserve: boolean;
   // The redesign of 2026-11-14 (decision 5 with Michael's change A): true while a P2 try of the shared request budget has room in its
   // minute but waits on its floor of 80; entries give way then (request-budget.ts `givingWay`). Unset: never.
-  private safetyHold: { givingWay(): boolean; noteGiveWayRefusal?(): void } | null = null;
-  setSafetyHold(h: { givingWay(): boolean; noteGiveWayRefusal?(): void } | null): void {
+  // Michael's ruling of 2026-11-17: also while a stuck sale waits for Alpaca's room (`givingWayReason` says which, for the refusal text).
+  private safetyHold: { givingWay(): boolean; noteGiveWayRefusal?(): void; givingWayReason?(): string } | null = null;
+  setSafetyHold(h: { givingWay(): boolean; noteGiveWayRefusal?(): void; givingWayReason?(): string } | null): void {
     this.safetyHold = h;
   }
 
@@ -152,8 +153,10 @@ export class Governor {
     if (this.tradesInLastMinute() >= cap) return this.refuse(`trades-per-minute limit reached (${cap})`);
     if (!this.canSpend()) return this.refuse(`holding back for safety: Alpaca's request budget is down to ${Math.floor(this.budget())} (the last ${this.reserve()} are kept for the stop command, cancels and the close-out)`);
     if (this.safetyHold?.givingWay()) {
+      const reason = this.safetyHold.givingWayReason?.() ?? "recheck";
       this.safetyHold.noteGiveWayRefusal?.();
       // Group 2, round 1 of the redesign: it starts like the other budget refusal, so the gate counts it in one row a minute (FLOW_REASONS).
+      if (reason === "stuck sale") return this.refuse("holding back for safety: a stuck sale is waiting for Alpaca's request room");
       return this.refuse("holding back for safety: a recheck is waiting for Alpaca's request budget to refill above the reserve");
     }
     this.tradeTimes.push(this.now());

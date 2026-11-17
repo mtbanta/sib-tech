@@ -340,7 +340,10 @@ export class Worker {
     this.loop = new ProtectionLoop({ now: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}), ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {}), look: (ids, kind, extra, until) => this.look(ids, kind, extra, until), log: (e, data) => deps.log?.("info", e, data), onActionFailed: (id, label, err) => this.protectionActionFailed(id, label, err), onLagDropped: () => this.lagWaitOver(), roomAt: (need) => {
       // Group 1, round 4 of part 2: asked locally (no request): when the shared budget would grant that try with the look's reads ahead of it.
       const r = this.budget.roomFor(need.cls, need.n, true, need.reads, need.minuteCap);
-      return r.ok ? null : r.at;
+      if (r.ok) return null;
+      // Michael's ruling of 2026-11-17: a stuck sale still waiting for Alpaca's room keeps new entries giving way until it is checked again.
+      if (need.stuckSale) this.budget.noteStuckSaleWaiting(r, r.at, "stuck sale room check");
+      return r.at;
     } });
     this.sessions = new NextSessionFinder(deps.broker);
     this.view = new BrokerView(deps.broker, () => deps.now().getTime());

@@ -75,7 +75,18 @@ export const CLOSEOUT_SPELL_GAP_MS = 15_000;
 export const FIRST_TRY_MOST = 25;
 const REFILL_PER_MS = ALPACA_REQUESTS_PER_MINUTE / 60_000;
 
-export type Refusal = { ok: false; at: number; why: "minute" | "five" | "class" | "floor" };
+// `floorShort`: Alpaca's remaining requests (as the governor estimates them) would fall below the try's floor (Michael's ruling of 2026-11-17
+// on stuck sales reads it: only then does an entry giving way give the sale room).
+export type Refusal = { ok: false; at: number; why: "minute" | "five" | "class" | "floor"; floorShort?: boolean };
+// MICHAEL'S RULING OF 2026-11-17 (morning, his words: "while a stuck sale is waiting for room, new entries give way (the governor holds entries
+// back) so Alpaca's room goes to the sale"). A stuck sale (an ordinary stuck retry, or a timed-out stop's try) refused because Alpaca's
+// remaining requests are short of its floor of 20 marks the budget as giving way until its next look plus STUCK_SALE_GIVE_WAY_MARGIN_MS; while
+// marked, the governor refuses every new entry (`givingWay`). Each further refusal of a stuck sale on the floor (at its look, or the protection
+// loop's local room check) renews it; it ends on its own when no stuck sale has been refused for room since. Nothing is sent or cancelled
+// here; entries already working are untouched. A refusal for the budgeted minute or the 5 seconds alone holds nothing (entries do not use
+// the budgeted minute, so their giving way would not help). An object so the tests can switch it off; nothing in the worker changes it.
+export const STUCK_SALE_GIVE_WAY = { on: true };
+export const STUCK_SALE_GIVE_WAY_MARGIN_MS = 500;
 
 export interface ReserveOptions {
   // False for the close-out retries (they cannot fit 15 in 5 seconds; their burst is bounded by their own single round). Default true.
@@ -177,9 +188,13 @@ export interface BudgetMinute {
   // looks refused because of it. (Switched off: see the constant, CLOSEOUT_HOLD; both stay 0.)
   closeOutHolds: number;
   closeOutHeldRetries: number;
+  // Michael's ruling of 2026-11-17 on stuck sales (logging only): spells in which entries gave way to a stuck sale waiting for Alpaca's room
+  // (started this minute), and the entries refused for it (each also counted in `givingWayRefusals`).
+  stuckSaleHolds: number;
+  stuckSaleEntriesRefused: number;
 }
 
-const emptyMinute = (): BudgetMinute => ({ sent: { entry: 0, first: 0, P1: 0, P2: 0, routine: 0, clock: 0 }, granted: 0, refused: { minute: 0, five: 0, class: 0, floor: 0 }, forced: 0, overdrafts: 0, sentAfterEnd: 0, mostBudgetedInMinute: 0, mostBudgetedIn5s: 0, mostCappedIn5s: 0, givingWayRefusals: 0, retryHold: { started: 0, renewed: 0, inForceMs: 0, p2Refused: 0 }, firstPaced: 0, firstPacedMs: 0, mostUrgentCappedIn5s: 0, closeOutHolds: 0, closeOutHeldRetries: 0 });
+const emptyMinute = (): BudgetMinute => ({ sent: { entry: 0, first: 0, P1: 0, P2: 0, routine: 0, clock: 0 }, granted: 0, refused: { minute: 0, five: 0, class: 0, floor: 0 }, forced: 0, overdrafts: 0, sentAfterEnd: 0, mostBudgetedInMinute: 0, mostBudgetedIn5s: 0, mostCappedIn5s: 0, givingWayRefusals: 0, retryHold: { started: 0, renewed: 0, inForceMs: 0, p2Refused: 0 }, firstPaced: 0, firstPacedMs: 0, mostUrgentCappedIn5s: 0, closeOutHolds: 0, closeOutHeldRetries: 0, stuckSaleHolds: 0, stuckSaleEntriesRefused: 0 });
 
 export class RequestBudget {
   readonly nowMs: () => number;
@@ -376,7 +391,7 @@ export class RequestBudget {
       this.retryWaitRoom = minuteCap - n;
       this.retryWaitFive = BUDGET_PER_5S - n;
     }
-    return { ok: false, at: when, why };
+    return { ok: false, at: when, why, ...(left < floor ? { floorShort: true } : {}) };
   }
 
   // Statistics only: adds the time the hold was in force since it was last counted, up to `now` or the hold's end, whichever is first.
@@ -500,14 +515,38 @@ export class RequestBudget {
     else this.minute.sent[currentTag()]++;
   }
 
-  // True while a P2 try waits on its floor of 80 (entries give way then).
+  // True while a P2 try waits on its floor of 80, or (Michael's ruling of 2026-11-17) a stuck sale waits for Alpaca's room: entries give way then.
+  // Michael's ruling of 2026-11-17: until when entries give way to a stuck sale waiting for Alpaca's room (see STUCK_SALE_GIVE_WAY).
+  private stuckSaleWaitUntil = 0;
+  // A stuck sale was refused (`refusal`) and will look again at `nextLookMs`. Only a refusal on the floor (Alpaca's room) holds entries back.
+  noteStuckSaleWaiting(refusal: Refusal, nextLookMs: number, label: string): void {
+    if (!STUCK_SALE_GIVE_WAY.on || !refusal.floorShort) return;
+    const now = this.nowMs();
+    const until = Math.max(refusal.at, nextLookMs) + STUCK_SALE_GIVE_WAY_MARGIN_MS;
+    if (until <= this.stuckSaleWaitUntil) return;
+    if (now >= this.stuckSaleWaitUntil) {
+      this.minute.stuckSaleHolds++;
+      this.log?.("stuck_sale_give_way", { label, untilInMs: until - now }); // Fly's log, once a spell
+    }
+    this.stuckSaleWaitUntil = until;
+  }
+  stuckSaleWaiting(): boolean {
+    return STUCK_SALE_GIVE_WAY.on && this.nowMs() < this.stuckSaleWaitUntil;
+  }
+  // What entries are giving way to, for the governor's refusal text: a stuck sale first.
+  givingWayReason(): "stuck sale" | "recheck" {
+    return this.stuckSaleWaiting() ? "stuck sale" : "recheck";
+  }
+
   givingWay(): boolean {
+    if (this.stuckSaleWaiting()) return true;
     const now = this.nowMs();
     for (const [k, until] of this.floorWaits) if (until <= now) this.floorWaits.delete(k);
     return this.floorWaits.size > 0;
   }
   noteGiveWayRefusal(): void {
     this.minute.givingWayRefusals++;
+    if (this.stuckSaleWaiting()) this.minute.stuckSaleEntriesRefused++;
   }
   // Group 1, round 3 of the redesign (decision 5 with change A: entries give way *while* a P2 try waits on its floor): a try whose next attempt
   // is scheduled later than GIVE_WAY_MAX_MS keeps its wait until then (`untilMs`, which its caller bounds). Only a wait already recorded (a

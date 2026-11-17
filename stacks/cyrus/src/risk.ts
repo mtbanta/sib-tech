@@ -2,7 +2,7 @@
 // entry still has a live exit resting at Alpaca, and stop the day if the daily loss limit is reached.
 import { AlpacaError, type Order } from "./alpaca-trading.ts";
 import { activeOrdersOldestFirst } from "./order-index.ts";
-import { FIRST_TRY_MOST, Reservation, RequestBudget, withReservation } from "./request-budget.ts";
+import { FIRST_TRY_MOST, Reservation, RequestBudget, withReservation, type Refusal } from "./request-budget.ts";
 import { inRequestScope } from "./request-scope.ts";
 import type { ProtectionHooks, RoomNeed } from "./protection.ts";
 import type { Broker } from "./broker.ts";
@@ -1054,6 +1054,9 @@ type TrySpec = { n: number; timedOut: boolean };
 // Group 1, round 4 of part 2: what a P1 try of `n` requests waiting for room will ask the budget, with the look's two reads (the order list
 // and the positions) ahead of it, as `roomWaitUntil` counts them. The loop checks it locally (no request) before it looks again.
 const p1Room = (n: number, minuteCap?: number): RoomNeed => ({ cls: "P1", n, reads: 2, ...(minuteCap !== undefined ? { minuteCap } : {}) });
+// Michael's ruling of 2026-11-17: a stuck sale's room need (an ordinary stuck retry or a timed-out stop's try), so its local room check keeps
+// new entries giving way while it waits for Alpaca's room.
+const saleRoom = (n: number, minuteCap?: number): RoomNeed => ({ ...p1Room(n, minuteCap), stuckSale: true });
 // An ordinary stuck retry's ceiling on the budgeted minute (none for a timed-out stop's try).
 const retryCap = (timedOut: boolean): number | undefined => (timedOut ? undefined : STUCK_RETRY_MINUTE_CAP);
 function retryDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string, nowMs: number): { wait: number; room: RoomNeed } | { go: TrySpec | null } {
@@ -1064,7 +1067,7 @@ function retryDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string, nowMs: nu
   if (!timedOut && (!st || st.nextAt === 0)) return { go: null };
   // Group 1, round 4 of part 2: any wait of a retry ends in a try that needs room for its whole try, so the loop's wake for it is a room
   // wake: checked against the budget locally, with no look (and no request) until the try would have room.
-  if (st && st.nextAt > nowMs) return { wait: st.nextAt, room: p1Room(timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS, retryCap(timedOut)) };
+  if (st && st.nextAt > nowMs) return { wait: st.nextAt, room: saleRoom(timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS, retryCap(timedOut)) };
   // The redesign of 2026-11-14, part 1: a retry is class P1 of the shared request budget. It starts only with room for its whole try
   // (TIMED_OUT_TRY_REQUESTS for an entry with a timed-out stop, else STUCK_TRY_REQUESTS); what it sends is counted as it is sent. Part 2
   // (the advisor's point, and group 1's leak note): here the room is only looked at; the reservation is taken when the try starts (`inTry`,
@@ -1072,15 +1075,18 @@ function retryDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string, nowMs: nu
   const n = timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS;
   const room = budgetOf(d, mem).roomFor("P1", n, true, 0, retryCap(timedOut));
   if (room.ok) return { go: { n, timedOut } };
-  return { wait: waitForRoom(d, mem, st, clientOrderId, timedOut, n, room.why, nowMs), room: p1Room(n, retryCap(timedOut)) };
+  return { wait: waitForRoom(d, mem, st, clientOrderId, timedOut, n, room, nowMs), room: saleRoom(n, retryCap(timedOut)) };
 }
 
 // Waiting for room (not a backoff step of the try itself): until there is room for the coming sync's reads and the try, and at least 0.5, 1,
 // 2, then 4 s after refusals in a row (group 2, round 2 of the redesign).
-function waitForRoom(d: RiskDeps, mem: SyncMemory, st: StuckEntry | undefined, clientOrderId: string, timedOut: boolean, n: number, why: string, nowMs: number): number {
+function waitForRoom(d: RiskDeps, mem: SyncMemory, st: StuckEntry | undefined, clientOrderId: string, timedOut: boolean, n: number, refusal: Refusal, nowMs: number): number {
+  const why = refusal.why;
   const waits = st ? (st.roomWaits = (st.roomWaits ?? 0) + 1) : 1;
   const at = roomWaitUntil(d, mem, "P1", n, waits, nowMs, 2, true, retryCap(timedOut));
   if (st) st.nextAt = at;
+  // Michael's ruling of 2026-11-17: refused for Alpaca's room, new entries give way until this sale looks again (request-budget.ts).
+  budgetOf(d, mem).noteStuckSaleWaiting(refusal, at, timedOut ? "timed-out stop try" : "stuck retry");
   if (timedOut && waits === 1) d.log?.("timed_out_try_out_of_room", { clientOrderId, why, retryInMs: at - nowMs });
   return at;
 }
@@ -1096,7 +1102,7 @@ async function inTry(d: RiskDeps, mem: SyncMemory, s: OrderRecord, spec: TrySpec
   }
   const r = budgetOf(d, mem).tryReserve("P1", spec.n, { label: spec.timedOut ? "timed-out stop try" : "stuck retry", limitRetries: spec.timedOut, ...(spec.timedOut ? {} : { minuteCap: STUCK_RETRY_MINUTE_CAP }) });
   const st = mem.stuck.get(s.clientOrderId);
-  if (!(r instanceof Reservation)) return { attempted: true, stuck: true, recheckAt: waitForRoom(d, mem, st, s.clientOrderId, spec.timedOut, spec.n, r.why, d.now().getTime()), room: p1Room(spec.n, retryCap(spec.timedOut)) };
+  if (!(r instanceof Reservation)) return { attempted: true, stuck: true, recheckAt: waitForRoom(d, mem, st, s.clientOrderId, spec.timedOut, spec.n, r, d.now().getTime()), room: saleRoom(spec.n, retryCap(spec.timedOut)) };
   if (st) st.roomWaits = 0;
   return withReservation(r, fn);
 }
@@ -1388,7 +1394,9 @@ async function freshStopTimeout(d: RiskDeps, day: DayRecord, mem: SyncMemory, s:
     st.nextAt = roomWaitUntil(d, mem, "P1", TIMED_OUT_TRY_REQUESTS, st.roomWaits, nowMs);
     st.lastTriedAt = nowMs;
     d.log?.("timed_out_try_out_of_room", { symbol: s.symbol, clientOrderId: s.clientOrderId, stage: "15 second limit", why: sale.why, retryInMs: st.nextAt - nowMs });
-    return { attempted: true, stuck: true, recheckAt: st.nextAt, room: p1Room(TIMED_OUT_TRY_REQUESTS) };
+    // Michael's ruling of 2026-11-17: an unprotected position's sale waiting for Alpaca's room: new entries give way until it looks again.
+    budgetOf(d, mem).noteStuckSaleWaiting(sale, st.nextAt, "15 second limit's sale");
+    return { attempted: true, stuck: true, recheckAt: st.nextAt, room: saleRoom(TIMED_OUT_TRY_REQUESTS) };
   }
   return withReservation(sale, () => cleanupSale(d, day, mem, s, o, "missing", undefined, cancelId ? { alsoCancel: [cancelId], alsoCancelStops: [f.stopClientOrderId], alsoCancelBy: "15 second limit" } : {}));
 }

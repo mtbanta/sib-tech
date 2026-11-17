@@ -1154,11 +1154,11 @@ test("part 2 (group 2, round 5): a stuck retry's backoff wait and its wait for r
   const w = await roomWorld();
   w.mem.stuck.set(w.id, { symbol: "AAA", since: w.sim.simMs - 60_000, nextAt: w.sim.simMs + 5_000, delayMs: 5_000, alerted: true, escalated: false, lastTriedAt: w.sim.simMs - 5_000, why: "x" } as any);
   await w.sync();
-  assert.deepEqual(w.wakes.at(-1)?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 45 }, "its backoff wait");
+  assert.deepEqual(w.wakes.at(-1)?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 45, stuckSale: true }, "its backoff wait");
   w.mem.stuck.get(w.id)!.nextAt = w.sim.simMs - 1;
   w.box.remaining = 25; // no room for the retry's 10
   await w.sync();
-  assert.deepEqual(w.wakes.at(-1)?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 45 }, "its wait for room");
+  assert.deepEqual(w.wakes.at(-1)?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 45, stuckSale: true }, "its wait for room");
   assert.equal(w.acts.length, 0, "no action without room");
 });
 
@@ -1170,7 +1170,7 @@ test("part 2 (group 2, round 5): a retry refused at its action's start (room gon
   w.box.remaining = 25; // gone before the action starts
   const sells0 = w.sim.sellLog.length;
   const r = await w.acts[0]!.run();
-  assert.deepEqual(r?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 45 });
+  assert.deepEqual(r?.room, { cls: "P1", n: w.STUCK_TRY_REQUESTS, reads: 2, minuteCap: 45, stuckSale: true });
   assert.ok(r?.recheckAt > w.sim.simMs);
   assert.equal(w.sim.sellLog.length, sells0, "nothing sold");
 });
@@ -1194,7 +1194,7 @@ test("part 2 (group 2, round 5): the 15 second limit's first try refused for roo
   assert.deepEqual(w.acts.map((a) => a.label), ["15 second limit"]);
   w.box.remaining = 30; // room for the limit's look (2), not for its try (13)
   const r = await w.acts[0]!.run();
-  assert.deepEqual(r?.room, { cls: "P1", n: w.TIMED_OUT_TRY_REQUESTS, reads: 2 });
+  assert.deepEqual(r?.room, { cls: "P1", n: w.TIMED_OUT_TRY_REQUESTS, reads: 2, stuckSale: true }); // a sale: entries give way while it waits (2026-11-17)
 });
 
 // Michael's ruling 1 of 2026-11-14 (night): a stuck sale (here every sale is refused by Alpaca) is tried again within a few seconds while the
