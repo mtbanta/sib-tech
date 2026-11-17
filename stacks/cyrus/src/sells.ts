@@ -598,12 +598,29 @@ export class Liquidator {
       for (;;) {
         if (yieldNow()) return yielded();
         let held: Position[] = [];
+        // Lighter polling (Michael's change of direction of 2026-11-16, pending since 2026-11-07: "fewer looks while cancels are pending"),
+        // in a sale of the whole account only (the `flatten` command, the close-outs, the loss stop's sale; not one entry's own sale). The
+        // look times are 20ba5bd's, so no sale is sent later; two reads are dropped that could not change what the wait decides:
+        //  - the look before the blind half second after cancels (it was read and never used: the wait looks again after that pause);
+        //  - the open orders, at a look whose positions already show shares held by orders (`qty_available` below `qty`): the wait goes on
+        //    whatever the open orders show. At the wait's last look (from `waitCancelMs` on) they are always read, for the sells that follow.
+        const whole = !own;
+        const lastLook = waited >= waitMs || this.d.now().getTime() - t0 > waitMs * 3;
+        const lookAt = this.d.now().getTime(); // when this look began (the clock guard below reads the open orders if it skipped them)
         try {
           if (cheap && cheapView && cheapPositions && polls === 0 && !cancelled) {
             // Item 1: nothing was cancelled, so the round's one read is what Alpaca shows (the wait ends at once: nothing to wait for).
             openOrders = cheapView.open;
             openReadAt = this.d.now().getTime();
             held = cheapPositions;
+          } else if (whole && cancelled && polls === 0 && !blindWaitDone) {
+            // Lighter polling: nothing read before the blind half second (see below).
+          } else if (whole) {
+            held = await heldNow();
+            if (lastLook || !held.some((p) => p.qtyAvailable != null && p.qtyAvailable < p.qty - EPS)) {
+              openOrders = await this.openOrders();
+              openReadAt = this.d.now().getTime();
+            }
           } else {
             openOrders = await this.openOrders();
             openReadAt = this.d.now().getTime();
@@ -639,7 +656,20 @@ export class Liquidator {
         // Poll gently: a cancel usually finishes in a fraction of a second, and every look costs one of Alpaca's 200 requests a minute.
         const pause = [250, 400, 600, 800][Math.min(polls++, 3)]!;
         waited += await pauseFor(symbols, pause);
-        if (this.d.now().getTime() - t0 > waitMs * 3) break; // a clock that moves much faster than the loop
+        if (this.d.now().getTime() - t0 > waitMs * 3) {
+          // A clock that moves much faster than the loop (slow reads, for example). Lighter polling: if this look skipped the open orders,
+          // they are read now, so the sells that follow use a list no older than this look's (as on 20ba5bd); a failed read sends no sell.
+          if (whole && openReadAt < lookAt) {
+            try {
+              openOrders = await this.openOrders();
+              openReadAt = this.d.now().getTime();
+            } catch (err) {
+              result.errors.push(`round ${round}: could not read open orders: ${(err as Error).message.slice(0, 100)}`);
+              readOk = false;
+            }
+          }
+          break;
+        }
       }
 
       // 3. Sell each symbol with an explicit quantity, through the sell gate (never more than is free).

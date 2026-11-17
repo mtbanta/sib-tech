@@ -90,10 +90,14 @@ test("wake-up limits: a full flatten of 1 to 30 positions with early wake-ups an
   if (process.env.SHOW) console.log(rows.join("\n"));
 });
 
-test("wake-up limits: without them (v10 and v11 as deployed), the same spread case hits rate limits", { timeout: 300_000 }, async () => {
+// Before the lighter polling of 2026-11-16 this case, with the wake-up limits off (v10 and v11 as deployed), hit rate limits: every look
+// brought forward by an update read the open orders and the positions. Since then a look of a whole-account sale reads the positions only
+// while they show shares held by orders, and the same case is clean even without the limits (measured at 12, 20 and 30 positions, the
+// `flatten` command, the close-out and the loss stop, 7 and 11 s cancels, seeds 7, 11 and 23: 0 rate-limit answers). The limits stay.
+test("wake-up limits: without them (v10 and v11 as deployed), the same spread case no longer hits rate limits since the lighter polling", { timeout: 300_000 }, async () => {
   let worst = 0;
   for (const n of [12, 20, 30]) for (const seed of [7, 11]) worst += (await flatten(n, "flatten", 7_000, { spread: true, scaled: false, seed, limit: false })).r429;
-  assert.ok(worst > 0, "the case this fix is for");
+  assert.equal(worst, 0, "the lighter polling alone keeps this case clean");
 });
 
 test("wake-up limits, worker: a live update ends a sale's wait early only while the request budget is 20 or more above the reserve", async () => {
