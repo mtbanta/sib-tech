@@ -7,7 +7,7 @@ Asked by Michael on 2026-11-16 (saved verbatim in `builds/build-c2-log.md`, "Mic
 ## The numbers everything below uses (measured this morning)
 
 - **Requests by source, 8:45 to 10:30:** entries and their 5 second cancels 12,925 (75 percent); routine reads 3,815 (22 percent; 30 to 55 a minute, median 37); first tries of safety work 987 (5.7 percent); budgeted retries (P1, P2) 0. Alpaca's clock 527 (a separate bucket).
-- **Requests per entry:** 12,925 / 8,207 = **1.58** (each entry, plus a cancel for the 58 percent that did not fill in 5 seconds). So at the peak, when the governor holds entries back to keep the reserve, **every request a minute taken from entries costs about 0.63 accepted entries a minute** (1 / 1.58), and every request a minute given back gains about 0.63.
+- **Requests per entry:** 12,925 / 8,207 = **1.57** (1.575) (each entry, plus a cancel for the 58 percent that did not fill in 5 seconds). So at the peak, when the governor holds entries back to keep the reserve, **every request a minute taken from entries costs about 0.63 accepted entries a minute** (1 / 1.57), and every request a minute given back gains about 0.63.
 - **Peak:** 116 accepted entries in the busiest calendar minute (8:49), 121 in the busiest 60 seconds; the governor held entries back 448 times (it, not the 150 ceiling, set the pace in the first 20 minutes).
 - **Routine reads, from the code:** the loss stop's account read every 5 s (12 a minute); the account and positions view every 10 s, checked on the 5 second pass, so every 10 to 15 s (about 10 a minute); settings every 30 s (2 a minute); the order sync every 10 s, also started only by the 5 second pass, so 10 to 15 s apart (about 5 a minute, 2 to 5 requests each: the order list's pages, positions, older lookups).
 - **Lost exits noticed late:** 9 `late_notice` cases, found by the order sync 6.4 to 14.1 s after Alpaca's cancel with no live report of it (6 with the stream live, 3 at the 9:54 reconnect, which v24 now covers with a sync at once).
@@ -36,13 +36,29 @@ All rows are estimates from the measured cost per check; the worst-case notice i
 
 ## 2. The reserve
 
-*(Simulated results to follow: a full flatten of 30 positions with slow cancels at reserves of 40, 50 and 60, against today's 80; the lowest that never got a rate-limit answer.)*
+**Result (simulated, 2026-11-16 afternoon; Michael's ruling 2: "use the lowest of 40, 50 or 60 that never gets a rate-limit answer ... If none passes, keep 80 and tell me"): none passes, so the reserve stays 80.**
+
+About 4,700 runs in two harnesses: the real worker in a busy load window then Michael's `flatten` with 30 positions (harness B, 576 runs at the finer time step), and the liquidator alone with set starting points and routine traffic (harness A). Rate-limit answers (runs with one / runs), harness B:
+
+| Reserve | Cancels up to 3 s | up to 8 s | up to 11 s |
+| --- | --- | --- | --- |
+| 40 | (coarse runs only) rate-limit answers in 9 of 48 natural runs and every forced run | | |
+| 50 | 0 of 24 | 2 of 24 | 11 of 24 |
+| 60 | 0 of 56 | 5 of 56 (forced starts) | 40 of 56 |
+| 70 | 0 of 56 | 0 of 56 | 20 of 56 |
+| 80 | 0 of 56 | 0 of 56 | 5 of 56 (forced start 6 below the reserve) |
+
+- The flatten draws about 48 to 58 requests with 3 s cancels, 54 to 66 with 8 s, 64 to 85 with 11 s (2026-11-04 measured cancels near 11 s). Time to flat does not change with the reserve.
+- **The gain from a lower reserve is small:** total entries in a 15 minute load window at 150 a minute: 1,962 at 80, 1,982 at 60, 2,006 at 40 (the busiest 60 s was 150 at every reserve; the steady rate about 125 a minute at every reserve).
+- **What the simulator does not model:** Alpaca's real refill (smooth here), request latency (none here, so bursts are sharper than live: pessimistic), Alpaca's holds and real cancel times.
+- **Side finding:** even 80 gets rate-limit answers with 11 s cancels from a low start; the flatten command's own polling is the larger margin problem. Lighter polling in `flatten` would add more margin than any reserve value; it is money-touching code and is not in this release (for Michael).
+- Scripts and patches to re-run: `builds/reserve-sim-2026-11-16.diff` (apply to an archive of `main` at `1940292`; the reserve is read from `SIM_RESERVE` there, in the copy only).
 
 ## 3. Cheaper entries, fewer routine reads, and the stuck-retry items
 
 ### 3a. Cheaper entries (fewer expiry cancels)
 
-**Today (measured):** 42 percent of entries filled within 5 s; the other 58 percent each needed a cancel, so an entry costs 1.58 requests. The cancels also cause lost exits: an entry that fills just as its cancel lands loses both exits (25 this morning, all sold; 3 sat 16 to 22 s).
+**Today (measured):** 42 percent of entries filled within 5 s; the other 58 percent each needed a cancel, so an entry costs about 1.57 requests. The cancels also cause lost exits: an entry that fills just as its cancel lands loses both exits (25 this morning, all sold; 3 sat 16 to 22 s).
 
 **Option A (recommended to try on one load day): price entries to fill.** The load window's limit buy at or below the last price seen becomes a limit at the price seen plus 1 cent (still a limit order with its bracket at Alpaca). If the fill rate rises from 42 to about 85 percent (an estimate; to measure), cancels fall from 0.58 to about 0.15 an entry and an entry costs about 1.15 requests.
 - **Gain (estimate):** at this morning's entry request rate in the peak minutes (about 165 to 180 a minute), accepted entries rise from about 110 to the 150 ceiling (about +35 to +40 a minute), or the same entries for about 27 percent fewer requests. Lost exits from late cancels fall roughly with the cancels (about 25 to about 7 a load morning, an estimate), which also cuts protection time.
@@ -65,6 +81,7 @@ Not recommended: making the loss stop rely on the shadow book (its largest gap t
 
 From `builds/c2-proposal-stuck-retry-cost.md` (items 1 to 4). This morning had no stuck retries at all (P1 and P2 0), so none of them would have changed today's numbers; they matter on days when positions get stuck (2026-11-09: four positions for 16 to 28 minutes).
 - **Item 1, a retry costing about 3 requests instead of 10:** average wait between one position's tries with 5 stuck, about 75 s to about 20 s (estimate); touches the sell path; needs the gate tested against late and lost live updates.
+  - **As built (2026-11-16 afternoon):** 3 requests when Alpaca holds the shares, 5 for a try that sells, 7 reserved (the most it can send); about 3 for a sale would need the gate to trust cached positions or the live updates, which was not built (it could oversell on a late update). The gate still checks every sell against a read no older than 1 s.
 - **Item 2, a retry budget that grows with spare room (60 at least):** when quiet, about 75 s to about 23 s with 5 stuck (estimate); no help in busy minutes; touches only the request budget.
 - **Item 3, fair turns among stuck positions:** the longest single wait close to the average (5 stuck: up to 257 s in one sweep, about 75 s average); order only.
 - **Item 4, ending the low-priority hold when the waiting retry gets in:** gives low-priority work its room back sooner; the hold counter (v23) measures its time in force (0 this morning).
@@ -85,9 +102,9 @@ Michael's words: "Messaging fix for tonight's release: the bot should recognize 
 | Item | Accepted entries a minute at peak | Protection time |
 | --- | --- | --- |
 | 1, 1 s pass with checks every 6 s (2 s while the updates are down) | -10 to -17 | worst notice of an unreported lost exit 15 to 20 s down to 7 to 11 s |
-| 2, the reserve | (from the simulation) | (from the simulation: time to flat in a full flatten) |
+| 2, the reserve | 0 (stays 80: none of 40, 50, 60 passed) | none |
 | 3a, entries priced to fill | +35 to +40 (to the 150 ceiling) | about 70 percent fewer lost exits from late cancels |
 | 3b, fewer routine reads | about +7 | the loss stop up to 5 s later (if that part is taken) |
-| 3c, stuck retries | 0 | 5 stuck: average wait about 75 s down to about 20 s |
+| 3c, stuck retries | 0 | 5 stuck: average wait about 75 s down to about 20 s (estimate). As built, simulator, positions younger than the 10-minute list window: 5 stuck, quiet, 48 to 95 s down to 10 to 22 s; busy 26 s with live updates on, 100 s with them down. Positions older than the window (the 2026-11-09 case) are not covered: see the log, item 3c's open finding |
 
 Paper trading only. Research input for a human decision, never an instruction to act.
