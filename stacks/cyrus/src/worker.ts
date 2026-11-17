@@ -41,6 +41,7 @@ import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } fr
 import { PAPER_ONLY } from "./discord.ts";
 import { CLOSEOUT_RETRY_MOST, MIDDAY_NOT_FLAT_ALERT_AFTER_MS, MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MIDDAY_RETRY_MS, blockedNext, lossPast, middayFlat, middayTimes, readHold, readPause, resumedByText, retrySymbols, startupAction, updatePause } from "./midday.ts";
 import { Reservation, RequestBudget, withReservation } from "./request-budget.ts";
+import { ProtectFirst } from "./protect-first.ts";
 import { inRequestScope, outsideScope } from "./request-scope.ts";
 import { ProtectionLoop, type WakeKind } from "./protection.ts";
 import type { PingKind } from "./heartbeat.ts";
@@ -295,6 +296,9 @@ export class Worker {
   private shadowNoEstimate = 0;
   // Decision 1 of 2026-11-06: entries whose two exits the live updates reported lost, with the symbol, when, and the syncs tried.
   private readonly lostExitsPending = new Map<string, { symbol: string; at: number; tries: number }>();
+  // Protect-first (Michael's night build request of 2026-11-16, item 2; protect-first.ts): while a held position lacks a confirmed stop,
+  // new entries stop and P2 gives way for up to 30 s, then entries run at a reduced rate until every position is protected or sold.
+  readonly protectFirst: ProtectFirst;
   // Michael's item 1 of 2026-11-13 (afternoon): a remainder whose stop cancel the live update reported complete gets up to 3 more syncs,
   // 0.5, 1 and 2 seconds apart, until it has its fresh stop (or is sold or closed); the 10 second sync is the backstop after that.
   private readonly stopCancelPending = new Map<string, { symbol: string; at: number; tries: number }>();
@@ -339,6 +343,9 @@ export class Worker {
     } });
     this.sessions = new NextSessionFinder(deps.broker);
     this.view = new BrokerView(deps.broker, () => deps.now().getTime());
+    this.protectFirst = new ProtectFirst({ now: () => deps.now().getTime(), heldSince: (symbol, sinceMs) => this.view.heldSince(symbol, sinceMs), stuck: this.syncMemory.stuck, freshStops: this.syncMemory.freshStops, timedOutStops: this.syncMemory.timedOutStops, log: (e, data) => deps.log?.("info", e, data) });
+    this.syncMemory.protectFirst = this.protectFirst;
+    this.budget.p2GivesWay = () => this.protectFirst.p2GivesWay();
     this.sellGate = new SellGate({ broker: deps.broker, say: (c, t, o) => this.say(c, t, o), log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime() });
     this.liquidator = new Liquidator({ broker: deps.broker, gate: this.sellGate, now: deps.now, sleep: deps.sleep, log: (e, data) => deps.log?.("info", e, data), waitEvent: (symbols, ms) => this.waitEvent(symbols, ms), ownSalesMayRun: () => {
       const s = this.sessionForSync;
@@ -373,6 +380,7 @@ export class Worker {
       note: (line, kind) => this.digest.add(line, kind),
       log: (e, data) => deps.log?.("info", e, data),
       entryBlock: () => this.entryBlockReason(),
+      protectFirst: this.protectFirst,
       onLimitEntrySent: (e) => this.entryExpiry.schedule(e, LOAD_ENTRY_WAIT_MS),
     });
   }
@@ -635,6 +643,8 @@ export class Worker {
 
   async tick(): Promise<boolean> {
     if (this.startedAtMs === null) this.startedAtMs = this.d.now().getTime();
+    // Protect-first: its start, 30 s limit and end are logged on time even when no entry asks.
+    this.protectFirst.refresh();
     if (this.ticking) {
       // A pass that is slow or stuck is not reading commands either: the 2 minute rule is checked from here too.
       this.commandsWatch(this.d.now());
@@ -1750,6 +1760,7 @@ export class Worker {
         this.d.log?.("info", "stop_cancelled_at_partial_take_profit", { symbol: info.symbol });
         // Item 1 of 2026-11-13 (afternoon): the order sync takes this live report over an order list that may still show the stop open.
         this.syncMemory.liveStopCancelled.set(info.clientOrderId, info.atMs);
+        this.protectFirst.mark(info.clientOrderId, info.symbol, "a remainder's stop was cancelled");
         this.stopCancelPending.set(info.clientOrderId, { symbol: info.symbol, at: this.d.now().getTime(), tries: 0 });
         this.stopCancelSeen.set(info.symbol, { alpacaAtMs: info.atMs, receivedMs: this.d.now().getTime(), wokeFor: info.atMs + BARE_GRACE_MS });
         // A4 of 2026-11-12: BARE_GRACE_MS is 0, so the entry is looked at once and the remainder gets its fresh stop (the redesign of
@@ -1768,6 +1779,7 @@ export class Worker {
             // Recorded before any early return (group 1, round 5): a sale of that entry running now will not back off afterwards.
             noteTimedOutStopEnded(this.syncMemory, info.clientOrderId, this.d.now().getTime());
             if (this.closingOut || this.liquidator.isLiquidatingOthers() || this.middayOwnsSelling) return;
+            this.protectFirst.mark(entry, info.symbol, "a fresh stop that hit the 15 second limit ended");
             this.loop.wake(entry, this.d.now().getTime(), "protect");
           }
           return;
@@ -1777,6 +1789,7 @@ export class Worker {
         if (info.event === "canceled" || info.event === "expired" || info.event === "rejected") {
           this.d.log?.("info", "fresh_stop_ended", { symbol: info.symbol, stopClientOrderId: info.clientOrderId, event: info.event });
           if (this.closingOut || this.liquidator.isLiquidatingOthers() || this.middayOwnsSelling) return;
+          this.protectFirst.mark(f.entryClientOrderId, info.symbol, "a fresh stop ended");
           this.loop.wake(f.entryClientOrderId, this.d.now().getTime(), "protect");
         }
       },
@@ -1785,6 +1798,7 @@ export class Worker {
       onEntryFill: (info) => {
         const sentAt = this.entryExpiry.cancelSentAt(info.clientOrderId);
         if (sentAt === undefined) return;
+        this.protectFirst.mark(info.clientOrderId, info.symbol, "a load entry filled after its cancel was sent");
         void this.fastLostExit(info.clientOrderId, info.symbol, info.atMs);
       },
       // Decision 1 of 2026-11-06: both exits of a filled entry ended with nothing filled. The order sync runs at once (not at the
@@ -1795,6 +1809,7 @@ export class Worker {
         this.syncMemory.mustLook.add(info.clientOrderId);
         if (this.closingOut || this.liquidator.isLiquidatingOthers()) return;
         this.d.log?.("info", "exits_lost", { symbol: info.symbol });
+        this.protectFirst.mark(info.clientOrderId, info.symbol, "both exits lost");
         this.lostExitsPending.set(info.clientOrderId, { symbol: info.symbol, at: this.d.now().getTime(), tries: 0 });
         this.loop.wake(info.clientOrderId, this.d.now().getTime(), "protect");
       },
