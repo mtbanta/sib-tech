@@ -7160,3 +7160,7 @@ Added to the daily brief (note for Tuesday 2026-11-17).
 ## Michael's request (2026-11-17, about 10:50 AM), saved verbatim
 
 > Bug fix for tonight: the bot still answers "I did not understand" to my deploy approval line. Add the deploy-approval acknowledgement from the speed branch (recognise "Yes, deploy <commit> now." in commands from me, reply that it is noted for the builder, take no action itself). Group 2 review.
+
+### The deploy-approval acknowledgement (branch `fix-deploy-ack`, from `main` at v29's code)
+
+Ported from item 4 of the speed release (`142cb3b`, reviewed there by group 2): `parseCommand` (`src/morning.ts`) recognises the whole line "Yes, deploy <commit> now." (case-insensitive, optional comma and full stop, a commit id of 7 to 40 hexadecimal characters, nothing after "now") as `deployApproval`, and the command processor (`src/commands.ts`) only replies "Deploy approval for <commit> noted; the builder will deploy it if every check passes." Nothing else is done or stored (the usual `command` row for the line, as for every command); commands are still accepted only from Michael in the `commands` channel. Tests: `test/deploy-approval-2026-11-17.test.ts` (the line and near misses; the reply, nothing stored, no order or account call). Full suite and `tsc` pass. Not money-touching (messaging only): group 2 review. For tonight, after the close, as a bug fix (Michael: "nothing more deploys today unless the paper tests or the reviews find a bug"; this is his named bug fix).
