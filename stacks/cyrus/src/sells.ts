@@ -438,9 +438,20 @@ export class Liquidator {
     const steps: LiquidateSteps = { cancelsSentAt: [], cancelsAnsweredAt: [], sells: [] };
     const stamp = () => this.d.now().toISOString();
     const cancelIds = [...new Set(o.cancelIds ?? [])];
-    const cheapOk = o.cheap === true && cancelIds.length === 0 && !!only && only.size === 1;
+    // Group 1, round 1 (2026-11-17): honoured only for the one caller's shape (one symbol, one round, its own entry's shares, nothing to
+    // cancel, no stop to place, no wait on Alpaca's cancel), so no other sale can take it by mistake.
+    const cheapOk = o.cheap === true && cancelIds.length === 0 && !!only && only.size === 1 && o.maxRounds === 1 && !!o.ownEntryOnly && !o.protectWithStop && !o.waitForAlpacaCancel;
     let cheapView: { positions: Position[]; open: Order[] } | null = null;
-    const cview = async () => (cheapView ??= await this.d.gate.look());
+    // Group 1, round 1: the cheap look starts from a fresh read (the gate's view is cleared first), never a read from before an earlier sale
+    // of the same symbol within the last second, which would make the gate refuse the sell and post a false "short sale" alert. Still 2 reads
+    // here, and the gate's sell reuses them: 3 requests.
+    const cview = async () => {
+      if (!cheapView) {
+        this.d.gate.invalidate();
+        cheapView = await this.d.gate.look();
+      }
+      return cheapView;
+    };
     const heldNow = async (): Promise<Position[]> => (cheapOk ? (await cview()).positions : await this.d.broker.listPositions()).filter((p) => !only || only.has(p.symbol));
     const openOrdersR = async (): Promise<Order[]> => (cheapOk ? (await cview()).open : await this.openOrders());
     // Item 6: a remainder sale stops at its next step while the daily loss stop's sale waits or runs; that sale sells these shares too.

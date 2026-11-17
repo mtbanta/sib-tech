@@ -143,3 +143,26 @@ test("the cheap path's conditions, one at a time: only an ordinary retry of a mi
     CHEAP_RETRY.on = true;
   }
 });
+
+// Group 1, round 1: a cheap sale left the gate's read in place; a second cheap try of the same symbol within the second reused it, the gate
+// (counting its own sell sent since) refused, and posted a false "short sale" alert. The cheap look now clears the gate's read first.
+test("two cheap one-entry sales of the same symbol within a second: the second reads afresh, sends nothing, and posts no short-sale alert", async () => {
+  const sim: any = new SimBroker(Date.UTC(2026, 10, 2, 15, 0));
+  const id = clientOrderIdFor(D, "AAA", 1);
+  await sim.submitEntry({ symbol: "AAA", qty: 5, stopPrice: 9.87, takeProfitPrice: 10.08, referencePrice: 10, clientOrderId: id });
+  sim.fillEntry(id, 10);
+  for (const l of sim.orders.find((o: any) => o.clientOrderId === id)!.legs) await sim.cancelOrder(l.id);
+  sim.advance(5_000);
+  const alerts: string[] = [];
+  const gate = new SellGate({ broker: sim, say: async (_c: string, t: string) => (alerts.push(t), true), nowMs: () => sim.simMs });
+  const liq = new Liquidator({ broker: sim, gate, now: () => new Date(sim.simMs), sleep: async () => undefined });
+  const opts = { reason: "protective stop not confirmed", tradeDate: D, only: ["AAA"], ownEntryOnly: { maxQty: { AAA: 5 } }, maxRounds: 1, cheap: true } as any;
+  await liq.flatten(opts);
+  assert.equal(sim.sellLog.filter((x: any) => x.symbol === "AAA").length, 1, "the first cheap sale sold");
+  sim.advance(200); // well within the gate's one second
+  const before = sim.sellLog.length;
+  await liq.flatten(opts);
+  assert.equal(sim.sellLog.length, before, "the second sends nothing (the shares are sold or covered by the open sell)");
+  assert.ok(!alerts.some((t) => /short sale/.test(t)), `no false short-sale alert: ${JSON.stringify(alerts)}`);
+  assert.equal(sim.oversellAttempts ?? 0, 0);
+});
