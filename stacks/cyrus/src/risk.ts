@@ -7,6 +7,7 @@ import { inRequestScope } from "./request-scope.ts";
 import type { ProtectionHooks, RoomNeed } from "./protection.ts";
 import type { Broker } from "./broker.ts";
 import { centralClock, etInstant } from "./time.ts";
+import { DEFAULT_CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./config.ts";
 import { CONTROL_STOP, type DayRecord, type OrderRecord, type StopFlag, type Store } from "./store.ts";
 import { OPEN_STATUSES, flattenLegs, openOrderIds, openSellQty, type Liquidator, type Say } from "./sells.ts";
 
@@ -19,6 +20,9 @@ export interface RiskDeps {
   log?: (event: string, data?: Record<string, unknown>) => void;
   // Optional: the worker passes its own, so the loss stop remembers that it fired even when the stop flag cannot be read.
   lossMemory?: LossStopMemory;
+  // The regular close-out's time in minutes before the close (the setting, Michael's night build request of 2026-11-16, item 4). The
+  // loss stop's retry goes quiet one minute before it. Absent: the default, 5.
+  closeoutMinutesBeforeClose?: number;
   // Optional: the order-rate governor. When given, the loss stop's retry never spends Alpaca's last requests (the reserve in force,
   // decision 7 of 2026-11-06; the fixed SAFETY_RESERVE when the governor does not say), and the first sale's requests (as Alpaca
   // counted them) are charged to the loss stop's budget.
@@ -1745,9 +1749,13 @@ export class LossStopMemory {
 // (it is the stop's whole job), ONE round of the liquidator (cancel the exits, wait, sell each symbol), a bounded burst, counted.
 // At most this many requests in one retry check, so the minute's budget is spread over the checks instead of spent in one burst.
 export const LOSS_STOP_RETRY_PER_CHECK = 15;
-// From this long before the close the retry is quiet: the close-out (5 minutes before the close) sells everything still held, and
-// the minute before it is left to it, so the close-out never starts on a request bucket the retry has just used.
-const RETRY_QUIET_BEFORE_CLOSE_MS = 6 * 60_000;
+// From one minute before the regular close-out the retry is quiet: the close-out (5 minutes before the close by default; the setting,
+// Michael's night build request of 2026-11-16, item 4) sells everything still held, and the minute before it is left to it, so the
+// close-out never starts on a request bucket the retry has just used. 6 minutes before the close at the default.
+export const RETRY_QUIET_BEFORE_CLOSEOUT_MS = 60_000;
+export function retryQuietBeforeCloseMs(closeoutMinutesBeforeClose = DEFAULT_CLOSEOUT_MINUTES_BEFORE_CLOSE): number {
+  return closeoutMinutesBeforeClose * 60_000 + RETRY_QUIET_BEFORE_CLOSEOUT_MS;
+}
 const RETRY_BACKOFF_FIRST_MS = 10_000;
 const RETRY_BACKOFF_MAX_MS = 60_000;
 const LOSS_REFUSED_BACKOFF_FIRST_MS = 5_000;
@@ -1853,7 +1861,7 @@ async function retryLossStopSale(d: RiskDeps, day: DayRecord): Promise<void> {
   const nowMs = d.now().getTime();
   if (d.liquidator.isLiquidating()) return;
   if (nowMs < mem.backoffUntil) return;
-  if (day.closeAt && nowMs >= day.closeAt.getTime() - RETRY_QUIET_BEFORE_CLOSE_MS) return;
+  if (day.closeAt && nowMs >= day.closeAt.getTime() - retryQuietBeforeCloseMs(d.closeoutMinutesBeforeClose)) return;
   // The redesign of 2026-11-14, part 1: the check's whole room is reserved in the shared request budget first (P1, at most
   // LOSS_STOP_RETRY_PER_CHECK requests, down to 20 of Alpaca's remaining). Without room the check waits for the next one (5 seconds).
   const res = budgetOf(d, mem).tryReserve("P1", LOSS_STOP_RETRY_PER_CHECK, { label: "loss stop re-sell" });

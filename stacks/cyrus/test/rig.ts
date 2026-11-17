@@ -12,7 +12,7 @@ export const D = "2026-11-02";
 export const z = (t: string) => new Date(t.includes("T") ? t : `${D}T${t}Z`);
 export const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setImmediate(r)); };
 
-export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryStore>(opts: { store?: S; bot?: FakeBot; broker?: B; sleep?: (ms: number) => Promise<void>; governor?: Governor; liveList?: string[]; log?: (level: string, event: string, data?: Record<string, unknown>) => void; simClock?: { simMs: number; advanceTo(ms: number): void }; orderStream?: boolean; midday?: boolean; loadAfternoon?: boolean } = {}) {
+export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryStore>(opts: { store?: S; bot?: FakeBot; broker?: B; sleep?: (ms: number) => Promise<void>; governor?: Governor; liveList?: string[]; log?: (level: string, event: string, data?: Record<string, unknown>) => void; simClock?: { simMs: number; advanceTo(ms: number): void }; orderStream?: boolean; midday?: boolean; loadAfternoon?: boolean; closeoutMinutes?: number } = {}) {
   const store = (opts.store ?? new MemoryStore()) as S;
   const broker = (opts.broker ?? new FakeBroker()) as B;
   const bot = opts.bot ?? new FakeBot();
@@ -47,7 +47,8 @@ export function rig<B extends FullBroker = FakeBroker, S extends Store = MemoryS
   let screens = 0;
   const screenOpts: Array<{ load?: boolean } | undefined> = [];
   const worker = new Worker({
-    settings, broker, store, bot, governor,
+    // Michael's night build request of 2026-11-16, item 4: `closeoutMinutes` sets the close-out setting (default 5).
+    settings: opts.closeoutMinutes === undefined ? settings : { ...settings, closeoutMinutesBeforeClose: opts.closeoutMinutes }, broker, store, bot, governor,
     now: getNow,
     ping: async (k) => (pings.push(k), true),
     buildLiveList: async (o?: { load?: boolean }) => (screens++, screenOpts.push(o), opts.liveList ? { symbols: opts.liveList, names: {} as Record<string, string> } : { symbols: ["AAA", "BBB"], names: { AAA: "Alpha Corp", BBB: "Beta" } as Record<string, string> }),

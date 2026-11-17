@@ -27,6 +27,8 @@ loadLocalEnv();
 const settings = loadSettings(process.env, { requireDatabase: true });
 const redact = makeRedactor(secretValues(settings, process.env));
 const log = makeLogger(redact);
+// A setting that was not valid fell back to its default (config.ts): say so in the log.
+for (const warning of settings.warnings) log("warn", "setting_invalid", { warning });
 
 const pool = makePool(settings.supabaseDbUrl!);
 // The cache sits in front of the database so the order gate does not wait on it for every decision (see caching-store.ts).
@@ -111,7 +113,7 @@ await ping(settings.healthchecksPingUrl, "start");
 const started = await recordStart(store, new Date(), releaseLabel(process.env));
 await bot.post("commands", started.text);
 if (started.repeated) await bot.post("alerts", `The worker has started ${started.recentStarts} times in the last hour. If you did not deploy or stop it, it may be crashing: check the Fly logs.`);
-log("info", "worker_started", { feed: settings.alpaca.dataFeed, recentStarts: started.recentStarts, deploy: started.deploy });
+log("info", "worker_started", { feed: settings.alpaca.dataFeed, closeoutMinutesBeforeClose: settings.closeoutMinutesBeforeClose, recentStarts: started.recentStarts, deploy: started.deploy });
 // The mid-day cycle: a new release started while flat and paused resumes on its own (unless `hold`); the same release stays paused.
 worker.setStartInfo({ deploy: started.deploy, release: started.release });
 worker.start();

@@ -69,7 +69,9 @@ const OWN_SELLS_ORDERS_EVERY = 5;
 // Alpaca answering "order pending cancel" means a cancel is already under way: not a problem worth a note.
 const benignError = (e: string) => /cancel answers:/.test(e) && e.split(": ").slice(2).join(": ").split("; ").every((part) => /pending cancel/i.test(part));
 
-export const CLOSEOUT_MINUTES_BEFORE_CLOSE = 5;
+// The regular close-out's time (minutes before the market close) is a setting since Michael's night build request of 2026-11-16, item 4:
+// `closeoutMinutesBeforeClose` in config.ts (CLOSEOUT_MINUTES_BEFORE_CLOSE, default 5). The worker decides when to call this; the waits
+// in here stay timed from the market close itself.
 
 // While the market is closed this never sends a sell: a market order sent after the close would queue for the
 // next open and, because selling cancels the open orders first, would also cancel what protects the position. It
