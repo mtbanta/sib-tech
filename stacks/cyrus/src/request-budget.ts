@@ -50,6 +50,8 @@ export const FIRST_TRY_WAIT_MAX_MS = 3_000;
 // its refusal (it asks again on the next 5 second pass), or until the moment it said room would return, plus a moment. Nothing else waits.
 export const CLOSEOUT_FIRST_HOLD_MS = 5_500;
 // What a one-entry first try can send: a missing-exit or remainder sale's 3 rounds (measured on 2026-11-16: 25), and the fast sale.
+// The close-outs' first tries are not paced (night-a2 tuning): measured on 2026-11-16 (simulator, the worker's own 2:55 and mid-day close-outs
+// with Alpaca's remaining at 60), a wait of 1.8 to 3 s before the close-out delayed its sales by as much against v24.
 export const FIRST_TRY_MOST = 25;
 const REFILL_PER_MS = ALPACA_REQUESTS_PER_MINUTE / 60_000;
 

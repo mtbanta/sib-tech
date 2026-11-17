@@ -73,12 +73,14 @@ test("night build, item 3: a one-entry first try's wait ends at once when a sale
   assert.equal(await q, 3_000);
 });
 
-test("night build, item 3: which first tries are paced (missing-exit, remainder, fast sale; the 2:55, mid-day and afternoon close-outs) and which are not", () => {
+test("night build, item 3: which first tries are paced (missing-exit, remainder, fast sale) and which are not (the close-outs, the loss stop, the start-up check, the carried sale)", () => {
   const risk = readFileSync(new URL("../src/risk.ts", import.meta.url), "utf8");
   const worker = readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
   assert.match(risk, /if \(d\.sleep\) await budgetOf\(d, mem\)\.paceFirst\(FIRST_TRY_MOST, label, d\.sleep, true\);\n    return withReservation\(budgetOf\(d, mem\)\.first\(label\), fn, "first"\);/);
   assert.match(risk, /paceFirst\(FIRST_TRY_MOST, "fast sale", d\.sleep, true\)/);
-  for (const l of ["mid-day close-out", "afternoon close-out", "close-out"]) assert.ok(worker.includes(`await this.paceFirstTry("${l}")`), l);
+  // The close-outs' first tries are not paced (night-a2 tuning): measured on 2026-11-16 (simulator, the worker's own 2:55 and mid-day
+  // close-outs, Alpaca's remaining forced to 60 at the loss), waiting 1.8 to 3 s before the close-out delayed its sales by as much against v24.
+  assert.ok(!worker.includes("paceFirst"), "no close-out first try waits");
   assert.match(worker, /onWholeAccountAsk: \(\) => this\.budget\.wakeFirstWaiters\(\),/);
   // Not paced: the loss stop's first sale (the most urgent), the start-up protection check (reads only), the carried-position sale.
   assert.doesNotMatch(risk, /paceFirst\([^)]*"loss stop first sale"/);
