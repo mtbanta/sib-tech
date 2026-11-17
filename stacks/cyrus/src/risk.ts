@@ -178,7 +178,8 @@ export const STUCK_TRY_REQUESTS = 10;
 // is held less the sells already open. Anything else (live updates down, a first try, a timed-out stop's try, the 15 second limit's sale,
 // every remainder sale, the fast sale, anything to cancel) takes the full path. Bounds on the now cheaper loop (rule 6): admitted on 10
 // within the stuck retries' 60 of the shared 75, the 15 in any 5 seconds, the floor of 20, and its 2 s gap after each try (no growing
-// backoff for ordinary retries since 2026-11-14), so one stuck position may now take about 11 tries a minute where it took about 4. An object so the tests can switch it off;
+// backoff for ordinary retries since 2026-11-14), so one stuck position may now take about 16 to 17 tries a minute (3 requests each, each
+// admitted on 10 under the stuck retries' 60) where the full path takes about 6 of 10 (group 2, round 2; a simulator harness figure). An object so the tests can switch it off;
 // nothing in the worker changes it.
 export const CHEAP_RETRY = { on: true };
 // Whether a stuck retry takes the cheap path: only an ordinary retry of a missing-exit sale (every remainder sale takes the full path), not
@@ -1793,7 +1794,8 @@ export class LossStopMemory {
 
 // THE LOSS STOP'S RE-SELLS AND THE SHARED REQUEST BUDGET (the redesign of 2026-11-14, part 1, Michael's approval with his change A): each
 // retry check is class P1 of the shared budget (request-budget.ts: 75 a minute (60 before 2026-11-17) and 15 in any 5 seconds for every retry and check together),
-// reserving LOSS_STOP_RETRY_PER_CHECK before it starts, and starts only while Alpaca's remaining requests stay at or above 20 after it. The
+// reserving LOSS_STOP_RETRY_PER_CHECK before it starts, and starts only while Alpaca's remaining requests stay at or above 20 after it; since
+// decision 2 of 2026-11-17 it may use the whole shared 75 (Michael's answer of about 9:30 AM: "Free to 75"), so it shares the urgent 15. The
 // equity check every 5 seconds is routine work (counted, not limited). The first sale when the stop fires is a first try: never held back
 // (it is the stop's whole job), ONE round of the liquidator (cancel the exits, wait, sell each symbol), a bounded burst, counted.
 // At most this many requests in one retry check, so the minute's budget is spread over the checks instead of spent in one burst.
@@ -1913,9 +1915,8 @@ async function retryLossStopSale(d: RiskDeps, day: DayRecord): Promise<void> {
   if (day.closeAt && nowMs >= day.closeAt.getTime() - retryQuietBeforeCloseMs(d.closeoutMinutesBeforeClose)) return;
   // The redesign of 2026-11-14, part 1: the check's whole room is reserved in the shared request budget first (P1, at most
   // LOSS_STOP_RETRY_PER_CHECK requests, down to 20 of Alpaca's remaining). Without room the check waits for the next one (5 seconds).
-  // Michael's ruling of 2026-11-09 ("within 60 Alpaca requests a minute (like the loss stop's retry)"): it keeps its 60 of the shared 75
-  // (RULED_MINUTE_CAP, decision 2 of 2026-11-17; group 2, round 1).
-  const res = budgetOf(d, mem).tryReserve("P1", LOSS_STOP_RETRY_PER_CHECK, { label: "loss stop re-sell", ruledCap: true });
+  // Michael's answer of 2026-11-17 (about 9:30 AM, "Free to 75"): it may use the whole shared minute, the urgent 15 included.
+  const res = budgetOf(d, mem).tryReserve("P1", LOSS_STOP_RETRY_PER_CHECK, { label: "loss stop re-sell" });
   if (!(res instanceof Reservation)) return;
   await withReservation(res, () => retryLossStopCheck(d, day, mem));
 }

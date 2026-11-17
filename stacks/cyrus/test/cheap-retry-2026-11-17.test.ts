@@ -71,6 +71,7 @@ test("with the live updates connected, an ordinary stuck retry sends 3 requests 
   w.sim.refuseSellIf = () => true;
   const first = await w.oneTry(); // the first try: full path, never refused
   assert.ok(first.total > 3, `the first try takes the full path (${first.total})`);
+  assert.ok((first.counts.findOrderByClientId ?? 0) >= 1, "the first try looks the entry up (the cheap path is for ordinary retries only)");
   const retry = await w.oneTry();
   assert.equal(retry.total, 3, JSON.stringify(retry.counts));
   assert.deepEqual([retry.counts.listOrdersPaged, retry.counts.listPositions, retry.counts.submitSell, retry.counts.findOrderByClientId ?? 0], [1, 1, 1, 0], "open orders, positions, the sell; no entry lookup");
