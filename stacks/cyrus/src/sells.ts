@@ -320,7 +320,8 @@ export interface LiquidatorDeps {
 // CANCEL_MEMORY_MS is not cancelled again while its result is awaited: the open list each round (which live updates bring up to date), and,
 // if it still shows the order working CANCEL_RESULT_WAIT_MS after the cancel, one lookup by its id. Only if that lookup shows it still working
 // (the cancel refused or lost) is the cancel sent again: the wait doubling each time (2, 4, then 8 s), at most 2 re-sends
-// (CANCEL_RESENDS_MAX) and 3 lookups (CANCEL_LOOKUPS_MAX) an order within the 60 s cancel memory, which runs from its last re-send. After
+// (CANCEL_RESENDS_MAX) and 3 answered lookups (CANCEL_LOOKUPS_MAX) an order within the 60 s cancel memory, which runs from its last re-send
+// (a lookup that fails sends the cancel again within the re-sends instead, at most CANCEL_LOOKUP_FAILS_MAX failed lookups an order). After
 // that an order still shown working is treated as new and the cycle repeats, so a cancel Alpaca keeps refusing costs about 3 cancels and 3
 // lookups a minute at most (measured in a test: a cycle every 78 s). "Cancel every order" is sent in round 1 as before; in a later round only for orders
 // not yet asked, or, for shares held by orders the list does not show, on the same bounded schedule. On 2026-11-16 (simulator), a `flatten`
@@ -329,7 +330,10 @@ export const CANCEL_MEMORY_MS = 60_000;
 export const CANCEL_RESULT_WAIT_MS = 2_000;
 export const CANCEL_RESENDS_MAX = 2;
 export const CANCEL_LOOKUPS_MAX = 3;
-type CancelSent = { at: number; waitMs: number; resends: number; lookups: number };
+// Group 1, night build round 1 (finding 3): lookups that failed (threw) count separately, at most this many an order within the memory; each
+// falls back to re-sending the cancel (within CANCEL_RESENDS_MAX), or, with no re-send left, to a later lookup after the doubling wait.
+export const CANCEL_LOOKUP_FAILS_MAX = 3;
+type CancelSent = { at: number; waitMs: number; resends: number; lookups: number; lookupFails?: number };
 
 export class Liquidator {
   private readonly d: LiquidatorDeps;
@@ -603,17 +607,23 @@ export class Liquidator {
         if (!onlyOwn) for (const id of awaited) {
           const c = this.cancelSent.get(id)!;
           const t = this.d.now().getTime();
-          if (t - c.at < c.waitMs || c.lookups >= CANCEL_LOOKUPS_MAX) continue;
-          c.lookups++;
+          if (t - c.at < c.waitMs || c.lookups >= CANCEL_LOOKUPS_MAX || (c.lookupFails ?? 0) >= CANCEL_LOOKUP_FAILS_MAX) continue;
           let still = false;
           try {
             const x = await this.d.broker.getOrderById(id);
+            c.lookups++; // only a lookup that answered counts toward CANCEL_LOOKUPS_MAX
             still = !!x && OPEN_STATUSES.has(x.status) && x.status !== "pending_cancel";
           } catch (err) {
-            c.at = this.d.now().getTime(); // unknown: looked up again after the next wait
-            c.waitMs = Math.min(c.waitMs * 2, 8_000);
-            this.d.log?.("cancel_lookup_failed", { reason: o.reason, id, error: (err as Error).message.slice(0, 100) });
-            continue;
+            // Group 1, night build round 1 (finding 3): a failed lookup does not use up the allowance; the result is unknown, so the cancel is
+            // sent again within CANCEL_RESENDS_MAX (the client treats 404 and 422 on a cancel as done). Failed lookups have their own limit.
+            c.lookupFails = (c.lookupFails ?? 0) + 1;
+            this.d.log?.("cancel_lookup_failed", { reason: o.reason, id, fails: c.lookupFails, error: (err as Error).message.slice(0, 100) });
+            if (c.resends >= CANCEL_RESENDS_MAX) {
+              c.at = this.d.now().getTime(); // nothing left to send: looked up again after the next wait, while failures allow
+              c.waitMs = Math.min(c.waitMs * 2, 8_000);
+              continue;
+            }
+            still = true;
           }
           if (!still) continue; // the cancel took (or the order ended): nothing more to send
           if (c.resends >= CANCEL_RESENDS_MAX) {

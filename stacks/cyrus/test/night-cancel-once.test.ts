@@ -3,7 +3,7 @@
 // began before Alpaca's 8 s cancels had finished re-sent a single cancel for every order still pending cancel, each round (81 cancels).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CANCEL_LOOKUPS_MAX, CANCEL_MEMORY_MS, CANCEL_RESENDS_MAX, CANCEL_RESULT_WAIT_MS, Liquidator, SellGate } from "../src/sells.ts";
+import { CANCEL_LOOKUP_FAILS_MAX, CANCEL_LOOKUPS_MAX, CANCEL_MEMORY_MS, CANCEL_RESENDS_MAX, CANCEL_RESULT_WAIT_MS, Liquidator, SellGate } from "../src/sells.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
 import { SimBroker } from "./sim-broker.ts";
 import { D } from "./rig.ts";
@@ -173,6 +173,84 @@ test("night build, item 1: an order that always stays working, over more than 70
   assert.equal(w.events.filter((x) => x.e === "cancel_not_confirmed").length, Math.floor(lookupsAt.length / CANCEL_LOOKUPS_MAX), "one a cycle, after its third lookup");
   assert.equal(w.sim.oversellAttempts, 0);
   // Measured when written: cancels at 0.05, 7.6, 15.15 s, then 78.15, 85.7, 94.55 s (the memory runs from the last re-send).
+});
+
+// Group 1, night build round 1 (finding 3), the reviewer's probe `lookup-fail.mts` as a test: one exit's first cancel is lost and the lookups
+// of its result fail `fails` times (an Alpaca 503); close-out retries of both symbols, one every 20 s. On v24 (20ba5bd) the symbol was sold
+// at 20.55 s in every case; before this fix the night build sold it at 40.55 s after 1 failed lookup and not within 80 s after 3.
+for (const fails of [1, 3, 10]) {
+  test(`night build, item 1: a failed cancel-result lookup (${fails} in a row) does not use up the allowance; the cancel is sent again and the symbol sold no later than on v24`, async () => {
+    const w = await world(2, 0, 200);
+    w.sim.sellFillDelayMs = 0;
+    const bad = w.legIds[0]!;
+    let lost = 1;
+    let lookFails = fails;
+    const realCancel = w.sim.cancelOrder;
+    w.sim.cancelOrder = async (id: string) => {
+      if (id === bad && lost > 0) {
+        lost--;
+        return; // lost: the order stays working
+      }
+      return realCancel(id);
+    };
+    const realGet = w.sim.getOrderById;
+    w.sim.getOrderById = async (id: string) => {
+      if (lookFails > 0) {
+        lookFails--;
+        throw new Error("Alpaca 503 on lookup");
+      }
+      return realGet(id);
+    };
+    const soldAt: Record<string, number> = {};
+    const realSell = w.sim.submitSell;
+    w.sim.submitSell = (x: { symbol: string }) => {
+      soldAt[x.symbol] ??= w.sim.simMs;
+      return realSell(x);
+    };
+    const t0 = w.sim.simMs;
+    for (let k = 0; k < 4; k++) {
+      const p = w.liq.flatten({ reason: "close-out", tradeDate: D, only: ["QAA", "QAB"], maxRounds: 1 });
+      await w.drive(w.sim.simMs + 20_000);
+      await p;
+    }
+    assert.ok(soldAt.QAA !== undefined && soldAt.QAA - t0 <= 20_550, `QAA sold at ${soldAt.QAA === undefined ? "never" : soldAt.QAA - t0} ms (v24: 20550)`);
+    assert.ok(w.events.some((x) => x.e === "cancel_lookup_failed"));
+    assert.equal(w.sim.oversellAttempts, 0);
+  });
+}
+
+test("night build, item 1: lookups that keep failing stay bounded (at most 3 failed lookups and 2 re-sends an order within the memory)", async () => {
+  const w = await world(2, 0, 200);
+  const bad = w.legIds[0]!;
+  let sends = 0;
+  let looks = 0;
+  const realCancel = w.sim.cancelOrder;
+  w.sim.cancelOrder = async (id: string) => {
+    if (id === bad) {
+      sends++;
+      return; // always lost
+    }
+    return realCancel(id);
+  };
+  w.sim.getOrderById = async (id: string) => {
+    if (id === bad) looks++;
+    throw new Error("Alpaca 503 on lookup");
+  };
+  const t0 = w.sim.simMs;
+  for (let k = 0; k < 10 && w.sim.simMs - t0 < 50_000; k++) {
+    let done = false;
+    const p = w.liq.flatten({ reason: "close-out", tradeDate: D, only: ["QAA", "QAB"], maxRounds: 4 }).finally(() => (done = true));
+    const cap = w.sim.simMs + 60_000; // the clock moves until it ends, so it is never awaited with the clock stopped
+    while (!done && w.sim.simMs < cap) await w.drive(w.sim.simMs + 500);
+    assert.ok(done, "each liquidation ends");
+    await p;
+    await w.drive(w.sim.simMs + 1_000);
+  }
+  assert.ok(w.sim.simMs - t0 >= 50_000 && w.sim.simMs - t0 < 60_000 + 61_000, "about 50 s of retries, inside the 60 s memory of the last re-send");
+  assert.ok(sends <= 1 + CANCEL_RESENDS_MAX, `cancels ${sends}`);
+  assert.ok(looks <= CANCEL_LOOKUP_FAILS_MAX, `failed lookups ${looks}`);
+  assert.ok(sends >= 2, "the failed lookup fell back to sending the cancel again");
+  assert.equal(CANCEL_LOOKUP_FAILS_MAX, 3);
 });
 
 test("night build, item 1: a round where 20ba5bd would have cancelled again keeps its timing (the blind half second, then the same looks) without the cancel: with 8 s cancels the sale goes out within 0.1 s of the exits ending, as on 20ba5bd", async () => {
