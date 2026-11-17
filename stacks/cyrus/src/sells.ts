@@ -345,8 +345,9 @@ export interface LiquidatorDeps {
 // for a side-by-side sale (at its start and before each of its rounds, whenever another side-by-side sale is running) asks that Alpaca's
 // remaining, less the room budgeted tries hold unsent and the most the rounds in flight and the new one can send, stays at or above this.
 // Group 1 (round 4) measured lost-exit sales running side by side just before a sale of the whole account leaving Alpaca's remaining at 41 to
-// 52 when that sale started (59 to 72 rate-limit answers on its sells and cancels, against 0 to 20 on v24). The sale running alone always goes
-// ahead, as before.
+// 52 when that sale started (59 to 72 rate-limit answers on its sells and cancels, against 0 to 20 on v24). A sale running alone, or a first
+// one starting when none runs, needs room above the urgent floor of 20 instead (`sideBySideRoomAlone`, Michael's lone-sale answer), and goes
+// ahead after SIDE_BY_SIDE_LONE_WAIT_MAX_MS waited alone whatever the estimate says.
 export const SIDE_BY_SIDE_HEADROOM = 120;
 // Michael's answer of 2026-11-16 ("Lone sale waits above 20"): the only side-by-side sale running, or a first one starting when none runs,
 // waits (sending nothing) until Alpaca has room for its round above the urgent floor of 20 (`sideBySideRoomAlone`). Measured: with the
@@ -467,11 +468,11 @@ export class Liquidator {
     });
   }
 
-  // Michael's ruling on item 2 of 2026-11-16: a side-by-side sale starts when no other is running (never worse than the one-at-a-time queue)
-  // or while the request budget allows one more above the headroom of SIDE_BY_SIDE_HEADROOM (`sideBySideRoom`, Michael's answer on the round
-  // 4 blocker). Otherwise it waits, 0.25 s doubling to 2 s (woken at once when a sale of the whole account is asked, `roomWait`), with
-  // no request: the wait ends when room comes, when every running side-by-side sale has ended (each is bounded by its rounds and waits), or
-  // at once when a sale of the whole account (a close-out, `flatten`, the loss stop, a carried position) is asked for, in which case
+  // Michael's ruling on item 2 of 2026-11-16 and his answers on the round 4 blocker: a side-by-side sale starts while the request budget
+  // allows one more above the headroom of SIDE_BY_SIDE_HEADROOM when another is running (`sideBySideRoom`), or above the urgent floor of 20
+  // when none is running (`sideBySideRoomAlone`; after SIDE_BY_SIDE_LONE_WAIT_MAX_MS waited alone it goes ahead whatever the estimate says).
+  // Otherwise it waits, 0.25 s doubling to 2 s (woken at once when a sale of the whole account is asked, `roomWait`), with no request: the
+  // wait ends when room comes (the 20 applies once no other is running), when the bound on waiting alone is reached, or at once when a sale of the whole account (a close-out, `flatten`, the loss stop, a carried position) is asked for, in which case
   // `run` stands aside before sending anything: a close-out request stops new ones from starting. Sales already running carry on.
   private async runSideBySide(o: LiquidateOptions): Promise<LiquidateResult> {
     let wait = 250;

@@ -12,7 +12,7 @@ Michael's words (build C2 log, "Michael's answers on the end-of-day questions (2
 
 **No, not in any way worth the risk.** Alpaca's documentation says nothing about the single-position close cancelling the exits, and an Alpaca staff member says it is refused (Alpaca's refusal code 403) while a take-profit or stop still holds the shares. The bulk close-all call does cancel first, but as two steps, not one. On 2026-11-02 it cancelled the stops and then had every sale refused (the reason was not recorded; the likely one is that the cancels had not finished). Neither call touches the two long waits in Monday's gap: Alpaca's 5.0 second cancel and its 11.5 to 11.9 second hold before it submitted the sales. The most either call could save is the stack's own part, 1.5 to 2.5 seconds, and probably less, because the stack would still have to see the cancels finish before sending a single close. To get that, it would have to go around the sell gate and undo a rule written because of a real failure.
 
-**Recommendation:** do not adopt either call. First measure the hold, read only, from order history Alpaca already has (section 7). If the hold turns out to be tied to the 2:55 moment, the cheaper lever is the timing change already proposed as fix A in the Monday review.
+**Recommendation:** do not adopt either call. First measure the hold, read only, from order history Alpaca already has (section 7). (Done: section 9 measured it. The hold is tied to the 2:55 clock, not to the number of sales; whether an earlier close-out avoids it is still open.) If the hold turns out to be tied to the 2:55 moment, the cheaper lever is the timing change already proposed as fix A in the Monday review.
 
 ## 1. The 2:55 gap, as measured on Monday 2026-11-16
 

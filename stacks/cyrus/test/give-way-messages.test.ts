@@ -4,6 +4,7 @@
 // each logs are checked here. A give-way is not a failed sale.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { SimBroker } from "./sim-broker.ts";
 import { rig, settle, D } from "./rig.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
@@ -111,6 +112,9 @@ test("item 4: a side-by-side sale running when `flatten` is asked gives way at i
   assert.equal(shouldStoreEvent("info", "unprotected_position_yielded"), true);
   assert.equal(shouldStoreEvent("info", "liquidation_yielded"), true);
   assert.equal(shouldStoreEvent("info", "side_by_side_waited"), true);
+  assert.equal(shouldStoreEvent("info", "side_by_side_lone_wait_over"), true);
+  // The lone-sale rule replaced "the sale running alone always goes ahead" (group 2, round 4).
+  assert.ok(!readFileSync(new URL("../src/sells.ts", import.meta.url), "utf8").includes("always goes"), "no comment says a lone sale always goes ahead");
   assert.equal(shouldStoreEvent("info", "liquidation_result"), true);
 });
 
