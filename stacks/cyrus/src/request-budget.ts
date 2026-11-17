@@ -43,7 +43,8 @@ export const RETRY_WAIT_HOLD_MS = 2_500;
 // only for Alpaca's requests to refill, at most about 3 s"). A first try waits before it starts, sending nothing, while Alpaca's remaining
 // requests less the room budgeted tries hold unsent less what the try can send are below the urgent floor of 20 (P1_FLOOR, the floor every
 // P1 try already keeps): 0.25 s doubling to 1 s, at most FIRST_TRY_WAIT_MAX_MS in all, then it goes ahead whatever the room. A one-entry
-// first try's wait ends at once when a sale of the whole account is asked (`wakeFirstWaiters`). It is still counted, never refused.
+// first try's wait ends at once when a sale of the whole account is asked (`wakeFirstWaiters`; not wired in this release: the hook was in
+// item 1's sells.ts, left out, and item 3 is switched off). It is still counted, never refused.
 export const FIRST_TRY_WAIT_MAX_MS = 3_000;
 // THE SWITCH for item 3 (Michael's answer of 2026-11-16, about 10:25 PM: "Ship the rest with item 3 switched off; item 3 joins only if it
 // passes the bar in time"): OFF. While off, `paceFirst` returns at once (no wait, no `first_try_paced`, `firstPaced` stays 0), so every first
@@ -412,12 +413,6 @@ export class RequestBudget {
 
   // Item 3 of the night build: room for a first try of `n` requests above the urgent floor (no request; the governor's estimate).
   firstRoom(n: number): boolean {
-    return this.urgentRoom(n);
-  }
-
-  // Room for `n` requests above the urgent floor of 20: Alpaca's remaining as the governor estimates it, less the room reserved unsent, less
-  // `n` (no request). Item 1's cancel-result lookup asks it for 1 (night build round 1 follow-up).
-  urgentRoom(n: number): boolean {
     return this.remaining() - this.usage(this.nowMs()).unsentMinute - n >= P1_FLOOR;
   }
 
@@ -449,7 +444,7 @@ export class RequestBudget {
   }
 
   // Item 3 of the night build: a sale of the whole account was asked; one-entry first tries waiting for room go ahead now (they then stand
-  // aside at their turn in the sale queue, as before).
+  // aside at their turn in the sale queue, as before). Not called in this release (item 1's sells.ts, which called it, is left out).
   wakeFirstWaiters(): void {
     for (const w of [...this.firstWaiters]) w();
   }
