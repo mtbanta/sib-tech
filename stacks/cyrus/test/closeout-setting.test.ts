@@ -10,8 +10,8 @@ import { rig, settle, z, D } from "./rig.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
 import { DEFAULT_CLOSEOUT_MINUTES_BEFORE_CLOSE, loadSettings, parseCloseoutMinutes } from "../src/config.ts";
 import { retryQuietBeforeCloseMs } from "../src/risk.ts";
-import { MIDDAY_PHASE } from "../src/midday.ts";
-import { LOAD_AFTERNOON_PHASE } from "../src/load-mode.ts";
+import { MIDDAY_PHASE, readPause } from "../src/midday.ts";
+import { AFTERNOON_FLAT_PHASE, LOAD_AFTERNOON_PHASE } from "../src/load-mode.ts";
 import { centralClock } from "../src/time.ts";
 import { CONTROL_STOP, MemoryStore, type DayRecord, type StopFlag, type Store } from "../src/store.ts";
 import { makeLogAndStore } from "../src/run-log.ts";
@@ -254,6 +254,47 @@ test("the `status` line after the afternoon window: the regular close-out takes 
   assert.match(line("20:45:00", 15), /its close-out did not finish flat before the regular close-out took over/);
   assert.match(line("20:54:59", 5), /its close-out is still selling/, "the default: not before 2:55 PM CT");
   assert.match(line("20:55:00", 5), /regular close-out took over/);
+});
+
+// Group 2, night build round 1 (B5): the `go` refusal and the `status` Mid-day cycle line at a setting other than 5, in the worker. The
+// afternoon window from 10:40 to 11:10 AM CT, a position held, its close-out kept from going flat (sales refused) up to the set close-out time.
+test("with 15 and the afternoon close-out still pending: `go` at 2:44:59 PM CT says not finished flat yet; at 2:45:00 PM CT that the regular close-out has taken over; `status` at 2:45:00 says it took over", async () => {
+  const { sim, r } = await flatAtMidday(15);
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  await r.at("16:40:10");
+  assert.ok((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_PHASE], "the window started");
+  await r.at("16:50:00");
+  await hold(sim, r.store, "AAA", 1, 10);
+  sim.refuseSellsTimes = 1_000_000;
+  await r.at("17:10:06");
+  await until(() => !r.worker["inflight"].has("midday"));
+  await r.at("20:44:00");
+  await until(() => !r.worker["inflight"].has("midday"));
+  const pending = async (when: string) => {
+    const day = (await r.store.getDay(D))!;
+    assert.equal(day.phases[AFTERNOON_FLAT_PHASE], undefined, `the afternoon close-out has not finished flat (${when})`);
+    assert.equal((await readPause(r.store, D))?.on, true, `the pause is still on (${when})`);
+  };
+  // The reply to a command (other lines the worker posts on the same pass are skipped).
+  const ask = async (text: string, t: string, prefix: string) => {
+    const before = r.said("commands").length;
+    r.ownerSays(text, t);
+    await r.at(t); // commands are read on the worker's pass
+    const replies = () => r.said("commands").slice(before).filter((x) => x.startsWith(prefix));
+    await until(() => replies().length > 0);
+    assert.equal(replies().length, 1, `one reply to ${text}: ${r.said("commands").slice(before).join(" | ")}`);
+    return replies()[0]!;
+  };
+  await pending("2:44 PM CT");
+  assert.equal(await ask("go", "20:44:59", "Not resumed"), "Not resumed: the close-out after the afternoon load window has not finished flat yet.");
+  await pending("2:44:59 PM CT");
+  assert.equal(await ask("go", "20:45:00", "Not resumed"), "Not resumed: the close-out after the afternoon load window did not finish flat (the regular close-out has taken over).");
+  await pending("2:45:00 PM CT");
+  const st = await ask("status", "20:45:00", "**Status**");
+  assert.ok(st.startsWith("**Status**"), st);
+  assert.match(st, /Mid-day cycle: entries paused again at 11:10 AM CT, when the afternoon load window ended \(the regular close-out took over\)/);
+  assert.ok(!st.includes("its close-out still selling"), st);
 });
 
 // The worker passes the setting to the loss stop's retry (risk.ts): quiet from one minute before the close-out, so from 20:44 UTC
