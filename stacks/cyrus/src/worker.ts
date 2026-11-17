@@ -1191,11 +1191,7 @@ export class Worker {
         const only = retry ? retrySymbols(this.middayLastRemaining, this.middayAttempts - 1) : null;
         this.middayProgress.started(retry ? this.middayLastRemaining.length : Infinity);
         this.middayAttempts++;
-        if (!this.background("midday", async () => {
-          // Item 3 of the night build (decision 4 changed): the first try waits for room above the urgent floor, at most 3 s.
-          if (!retry) await this.paceFirstTry("mid-day close-out");
-          return withReservation(res, () => this.middayPhase(date, current, mt.pauseAt, retry, only, res), retry ? undefined : "first");
-        })) res.end();
+        if (!this.background("midday", () => withReservation(res, () => this.middayPhase(date, current, mt.pauseAt, retry, only, res), retry ? undefined : "first"))) res.end();
       }
     }
     // The close-out after the afternoon load window (Michael, 2026-11-12): when the window's 30 minutes are up (or the last entry comes
@@ -1219,11 +1215,7 @@ export class Worker {
         this.afternoonProgress.started(retry ? this.afternoonLastRemaining.length : Infinity);
         this.afternoonAttempts++;
         // The same background name as the mid-day close-out, so every guard that stands aside for it stands aside for this too.
-        if (!this.background("midday", async () => {
-          // Item 3 of the night build (decision 4 changed): the first try waits for room above the urgent floor, at most 3 s.
-          if (!retry) await this.paceFirstTry("afternoon close-out");
-          return withReservation(res, () => this.afternoonCloseoutPhase(date, retry, only, res), retry ? undefined : "first");
-        })) res.end();
+        if (!this.background("midday", () => withReservation(res, () => this.afternoonCloseoutPhase(date, retry, only, res), retry ? undefined : "first"))) res.end();
       }
     }
     // The second alert: still not flat 5 minutes after a try first ended not flat (once a day).
@@ -1269,29 +1261,21 @@ export class Worker {
         this.closeoutAttempts++;
         if (now >= day.closeAt) this.closeoutAttemptsAfterClose++;
         const closeAt = day.closeAt;
-        const started = this.background("closeout", async () => {
-          // Item 3 of the night build (decision 4 changed): the first try waits for room above the urgent floor, at most 3 s.
-          if (path !== "retry") await this.paceFirstTry("close-out");
-          return withReservation(res, async () => {
+        const started = this.background("closeout", () =>
+          withReservation(res, async () => {
             try {
               await this.closeoutPhase(date, now >= addMinutes(closeAt, 30), closeAt, path);
             } finally {
               this.closeoutLastCost = res.used;
             }
-          }, path === "retry" ? undefined : "first");
-        });
+          }, path === "retry" ? undefined : "first"),
+        );
         if (!started) res.end();
       }
     }
     if (now >= addMinutes(day.closeAt, 5) && current.phases.closeout && !current.phases.summary) {
       this.background("summary", () => this.summaryPhase(date));
     }
-  }
-
-  // Item 3 of the night build (decision 4 changed): a close-out's first try waits for room above the urgent floor (its cost estimated at
-  // CLOSEOUT_RETRY_MOST, the estimate its retries already use), at most FIRST_TRY_WAIT_MAX_MS, then goes ahead. Without a clock, at once.
-  private async paceFirstTry(label: string): Promise<void> {
-    if (this.d.sleep) await this.budget.paceFirst(CLOSEOUT_RETRY_MOST, label, this.d.sleep, false);
   }
 
   // The order sync, in the background: a sale that takes a while (a liquidation waits for cancels) must never hold up reading
