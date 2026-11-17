@@ -101,7 +101,8 @@ export interface EntryOrder {
   // With a take-profit price the entry is a bracket (two linked exits held at Alpaca, only one can fill);
   // without it, an OTO order with the protective stop only.
   takeProfitPrice?: number;
-  // The speed release (the load window): a limit buy at this price, at or below the reference price, instead of a market buy.
+  // The speed release (the load window): a limit buy at this price, at most 1 cent above the reference price (Michael's ruling 3 of
+  // 2026-11-16; before: at or below it), instead of a market buy.
   // Alpaca then checks the exits against this limit price.
   limitPrice?: number;
 }
@@ -500,8 +501,8 @@ export class AlpacaTrading {
     }
   }
 
-  // The only way this client opens a position: a long, whole-share market buy (or, with `limitPrice`, a limit buy at or below the
-  // reference price) that carries its exits held at Alpaca. With `takeProfitPrice` it is a bracket (a take-profit limit and a
+  // The only way this client opens a position: a long, whole-share market buy (or, with `limitPrice`, a limit buy at most 1 cent above
+  // the reference price, Michael's ruling 3 of 2026-11-16) that carries its exits held at Alpaca. With `takeProfitPrice` it is a bracket (a take-profit limit and a
   // protective stop, only one of which can fill); without it, an OTO order (the protective stop only).
   async submitEntry(entry: EntryOrder): Promise<Order> {
     if (!/^[A-Z.]{1,6}$/.test(entry.symbol)) throw new AlpacaError("Bad symbol", 0);
@@ -513,7 +514,8 @@ export class AlpacaTrading {
       throw new AlpacaError("Take-profit must be above the reference price", 0);
     }
     if (entry.limitPrice !== undefined) {
-      if (!(entry.limitPrice > 0) || !Number.isFinite(entry.limitPrice) || entry.limitPrice > entry.referencePrice) throw new AlpacaError("Limit price must be positive and at or below the reference price", 0);
+      // Michael's ruling 3 of 2026-11-16: a load entry may be priced up to 1 cent above the price seen (the reference price), never more.
+      if (!(entry.limitPrice > 0) || !Number.isFinite(entry.limitPrice) || entry.limitPrice > entry.referencePrice + 0.01 + 1e-9) throw new AlpacaError("Limit price must be positive and at most 1 cent above the reference price", 0);
       if (!(entry.stopPrice < entry.limitPrice) || (entry.takeProfitPrice !== undefined && !(entry.takeProfitPrice > entry.limitPrice))) throw new AlpacaError("The exits must be on either side of the limit price", 0);
     }
     if (!/^[\w.-]{8,128}$/.test(entry.clientOrderId)) throw new AlpacaError("Bad client order id", 0);

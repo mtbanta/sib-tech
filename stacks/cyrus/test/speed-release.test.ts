@@ -40,21 +40,23 @@ const upd = (event: string, o: Parameters<typeof order>[0], positionQty: number 
 
 // ------------------------------------------------ decision 4: limit entries in the load window ------------------------------------
 
-test("decision 4: a load-window signal is a limit buy at the print rounded down to the cent, take-profit 1 cent above and stop 2 cents below that limit; a normal signal is unchanged", () => {
+// Michael's ruling 3 of 2026-11-16 (the speed release): the limit is the print rounded down to the cent plus 1 cent (before: rounded down).
+test("decision 4 (ruling 3 of 2026-11-16): a load-window signal is a limit buy at the print rounded down to the cent plus 1 cent, take-profit 1 cent above and stop 2 cents below that limit; a normal signal is unchanged", () => {
   assert.equal(LOAD_TAKE_PROFIT_CENTS, 1);
   assert.equal(LOAD_ENTRY_WAIT_MS, 5_000);
-  assert.equal(limitEntryPrice(13.415), 13.41);
-  assert.equal(limitEntryPrice(13.41), 13.41, "a whole-cent print is the limit itself");
+  assert.equal(limitEntryPrice(13.415), 13.42);
+  assert.equal(limitEntryPrice(13.41), 13.42, "a whole-cent print plus 1 cent");
+  assert.equal(limitEntryPrice(0.999), 1, "no float drift: 0.99 plus 1 cent is 1.00");
   const s = new BusyPlaceholder(["AAA"], { loadActive: () => true }).onTrade({ symbol: "AAA", price: 13.415, size: 100, time: z("14:46:00").toISOString() })!;
-  assert.deepEqual([s.limitPrice, s.takeProfitPrice, s.stopPrice, s.load], [13.41, 13.42, 13.39, true]);
+  assert.deepEqual([s.limitPrice, s.takeProfitPrice, s.stopPrice, s.load], [13.42, 13.43, 13.4, true]);
   const normal = new BusyPlaceholder(["AAA"]);
   let last = null;
   for (let i = 0; i < 13; i++) last = normal.onTrade({ symbol: "AAA", price: i < 12 ? 50 : 50.4, size: 100, time: new Date(z("14:46:00").getTime() + i * 1000).toISOString() });
   assert.ok(last && last.limitPrice === undefined && !last.load, "the normal placeholder still sends market entries");
-  assert.ok(loadWindowRules().includes("limit buy at or below the price seen, cancelled if not filled in 5 seconds, take-profit 1 cent up and stop 2 cents down"));
+  assert.ok(loadWindowRules().includes("limit buy at the price seen plus 1 cent, cancelled if not filled in 5 seconds, take-profit 1 cent up and stop 2 cents down"), loadWindowRules());
 });
 
-test("decision 4: the broker client sends a limit bracket at the limit price, and refuses a limit above the price seen or exits not around it", async () => {
+test("decision 4 (ruling 3 of 2026-11-16): the broker client sends a limit bracket at the limit price, allows a limit up to 1 cent above the price seen, and refuses one more than 1 cent above it or exits not around it", async () => {
   const settings = loadSettings({ ...FAKE_ENV });
   const bodies: any[] = [];
   const impl = (async (_u: URL | string, init?: RequestInit) => {
@@ -65,10 +67,13 @@ test("decision 4: the broker client sends a limit bracket at the limit price, an
   const e = { symbol: "AAA", qty: 1, stopPrice: 13.39, takeProfitPrice: 13.42, referencePrice: 13.415, limitPrice: 13.41, clientOrderId: "cyrus-20261102-AAA-1" };
   await c.submitEntry(e);
   assert.deepEqual([bodies[0].type, bodies[0].limit_price, bodies[0].order_class, bodies[0].take_profit.limit_price, bodies[0].stop_loss.stop_price, bodies[0].side], ["limit", "13.41", "bracket", "13.42", "13.39", "buy"]);
-  await assert.rejects(c.submitEntry({ ...e, limitPrice: 13.42 }), AlpacaError, "a limit above the price seen");
+  await assert.rejects(c.submitEntry({ ...e, limitPrice: 13.43, takeProfitPrice: 13.45 }), AlpacaError, "a limit more than 1 cent above the price seen");
   await assert.rejects(c.submitEntry({ ...e, stopPrice: 13.41 }), AlpacaError, "a stop not below the limit");
   await assert.rejects(c.submitEntry({ ...e, referencePrice: 13.43, takeProfitPrice: 13.44, limitPrice: 13.44 }), AlpacaError);
   assert.equal(bodies.length, 1, "nothing else was sent");
+  await c.submitEntry({ ...e, limitPrice: 13.42, takeProfitPrice: 13.43, stopPrice: 13.4 });
+  assert.equal(bodies[1].limit_price, "13.42", "1 cent above the price seen rounded down is allowed");
+  bodies.splice(1, 1);
   await c.submitEntry({ ...e, limitPrice: undefined });
   assert.equal(bodies[1].type, "market", "without a limit price: a market buy, as before");
   assert.equal(bodies[1].limit_price, undefined);
@@ -80,7 +85,7 @@ test("decision 4, worker: a window entry goes out as a 1-share limit buy and is 
   await r.trade("BBB", 50.004, "14:46:01");
   await r.trade("CCC", 20, "14:46:01");
   const [b, c] = entries(r);
-  assert.deepEqual([b!.qty, b!.limitPrice, b!.takeProfitPrice, b!.stopPrice], [1, 50, 50.01, 49.98]);
+  assert.deepEqual([b!.qty, b!.limitPrice, b!.takeProfitPrice, b!.stopPrice], [1, 50.01, 50.02, 49.99], "ruling 3 of 2026-11-16: the price seen plus 1 cent");
   const cOrder = r.broker.orders.find((o) => o.clientOrderId === c!.clientOrderId)!;
   await r.orderUpdate(upd("fill", { id: cOrder.id, clientOrderId: c!.clientOrderId, symbol: "CCC", side: "buy", status: "filled", qty: 1, filledQty: 1, filledAvgPrice: 20, groupId: "gC" }, 1, z("14:46:02").getTime()));
   r.setNow(plus("14:46:01", 4.9));

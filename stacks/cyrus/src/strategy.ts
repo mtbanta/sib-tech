@@ -9,9 +9,9 @@
 // decides whether it goes out. The same trades always give the same signals (no clock, no randomness).
 //
 // Load day (load-mode.ts, release B and the speed release): while the load window is on, ANY new print is a signal once 1 second
-// has passed since that name's last signal. The entry is a limit buy at the print rounded down to the cent (at or below the price
-// seen), with the take-profit LOAD_TAKE_PROFIT_CENTS above and the stop LOAD_STOP_CENTS below that limit price, so positions turn
-// over fast. Outside the window, and on every normal day, the rule above is unchanged.
+// has passed since that name's last signal. The entry is a limit buy at the print rounded down to the cent plus 1 cent (Michael's ruling
+// 3 of 2026-11-16, `limitEntryPrice`; before: at or below the price seen), with the take-profit LOAD_TAKE_PROFIT_CENTS above and the stop
+// LOAD_STOP_CENTS below that limit price, so positions turn over fast. Outside the window, and on every normal day, the rule above is unchanged.
 import type { Trade } from "./stream.ts";
 import { LOAD_COOLDOWN_SECONDS, LOAD_STOP_CENTS, LOAD_TAKE_PROFIT_CENTS, limitEntryPrice } from "./load-mode.ts";
 

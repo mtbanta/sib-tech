@@ -168,9 +168,10 @@ test("after `load afternoon` a print is a 1-share limit entry with the load day'
   await until(() => sent.length > 0);
   assert.equal(sent.length, 1);
   assert.equal(sent[0].qty, 1);
-  assert.equal(sent[0].limitPrice, 20);
-  assert.equal(sent[0].takeProfitPrice, 20.01);
-  assert.equal(sent[0].stopPrice, 19.98);
+  // Ruling 3 of 2026-11-16: the print plus 1 cent, and the exits around that price.
+  assert.equal(sent[0].limitPrice, 20.01);
+  assert.equal(sent[0].takeProfitPrice, 20.02);
+  assert.equal(sent[0].stopPrice, 19.99);
 
   const w2 = await flatAtMidday();
   const sent2: any[] = [];
@@ -749,4 +750,22 @@ test("release of 2026-11-12: main.ts switches `load afternoon` on, in exactly on
   const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
   assert.equal((main.match(/loadAfternoon\s*:/g) ?? []).length, 1, "one switch");
   assert.match(main, /^\s*loadAfternoon: true,$/m, "main.ts switches `load afternoon` on in this release");
+});
+
+// Michael's ruling 3 of 2026-11-16, ported alone onto v27 on 2026-11-17: the gate accepts a load entry priced up to 1 cent above the
+// price seen (its exits around that limit price), and refuses one priced more than 1 cent above, sending nothing.
+test("ruling 3 (2026-11-16): the gate sends a load entry at the price seen plus 1 cent and refuses one 2 cents above", async () => {
+  const s = await gateAt("17:00:00", { [MIDDAY_PHASE]: "x", middayFlat: "yes", [LOAD_AFTERNOON_PHASE]: z("16:40:00").toISOString() });
+  const at = (symbol: string, price: number, limit: number): Signal => ({ symbol, price, tradeTime: new Date(s.now().getTime() - 300), stopPrice: Math.round((limit - 0.02) * 100) / 100, takeProfitPrice: Math.round((limit + 0.01) * 100) / 100, load: true, limitPrice: limit });
+  const ok = await s.gate.enter(at("P1", 20, 20.01));
+  assert.equal(ok.status, "sent", (ok as any).reason);
+  const subs = () => s.broker.calls.filter((c) => c.fn === "submitEntry");
+  const sent = subs().at(-1)!.args[0] as any;
+  assert.deepEqual([sent.limitPrice, sent.takeProfitPrice, sent.stopPrice, sent.referencePrice], [20.01, 20.02, 19.99, 20]);
+  const before = subs().length;
+  s.setNow("17:00:02");
+  const no = await s.gate.enter(at("P2", 20, 20.02));
+  assert.equal(no.status, "refused");
+  assert.equal((no as any).reason, "the limit price is more than 1 cent above the price seen");
+  assert.equal(subs().length, before, "nothing sent");
 });
