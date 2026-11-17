@@ -792,10 +792,6 @@ for (const reason of ["close-out", "flatten command"]) {
     sim.advance(15_000);
     wk.lastSync = sim.simMs; // no regular sync during the test
     const liq: any = wk.liquidator;
-    // Michael's ruling on item 2 of 2026-11-16: side by side only while the request budget has room above the urgent floor; here none for a
-    // second sale, so the other three wait (not started) when the sale of the whole account is asked for: "A close-out request stops new ones
-    // from starting".
-    liq.d.sideBySideRoom = () => false;
     let current: any = null;
     const realRun = liq.run.bind(liq);
     liq.run = async (o: any) => {
@@ -923,10 +919,6 @@ for (const when of ["2:55", "mid-day pause", "mid-day step", "carried step", "st
     const stuckD = { symbol: "QXD", since: sim.simMs - 120_000, nextAt: 0, delayMs: 10_000, alerted: true, escalated: false, lastTriedAt: sim.simMs - 30_000, why: "x" };
     wk.syncMemory.stuck.set(ids[3], { ...stuckD });
     const liq: any = wk.liquidator;
-    // Michael's ruling on item 2 of 2026-11-16: side by side only while the request budget has room above the urgent floor; here none for a
-    // second sale, so the other three wait (not started) when the sale of the whole account is asked for: "A close-out request stops new ones
-    // from starting".
-    liq.d.sideBySideRoom = () => false;
     let current: any = null;
     const realRun = liq.run.bind(liq);
     liq.run = async (o: any) => {
@@ -1002,11 +994,9 @@ for (const when of ["2:55", "mid-day pause", "mid-day step", "carried step", "st
 // positions without exits whose every sale Alpaca holds 8 s and then fails, for 12 minutes. A retry waiting for room in the shared budget
 // waits locally (no request) and makes a look only once its try would have room. Before: each refused retry re-read the order list and the
 // positions every 0.5 to 4 s with no end (group 1 measured 470 s below 80 left, 280 s below 20, and 49 rate-limit answers; v22 never below
-// 120). Now: no rate-limit answer, and Alpaca's remaining never below 80.
-// Michael's ruling on item 2 of 2026-11-16: missing-exit sales of different stocks run side by side "as many at once as the request budget
-// allows at that moment, above the floor for urgent work"; his test: "30 stuck sales held at Alpaca: no rate-limit answers, remaining never
-// below the urgent floor of 20" (before item 2 this test held remaining at 80 or more; the time below 80 is still reported).
-test("part 2 (group 1, round 4, B1; item 2 of 2026-11-16): 30 stuck sales held 8 s at Alpaca for 12 minutes: no rate-limit answer, remaining never below the urgent floor of 20", async () => {
+// 120). Now: no rate-limit answer, and Alpaca's remaining never below 80. (Michael's change of direction of 2026-11-16: selling stays one at
+// a time, so this test holds the 80 again, as on 20ba5bd.)
+test("part 2 (group 1, round 4, B1): 30 stuck sales held 8 s at Alpaca for 12 minutes: retries waiting for room wait locally; no rate-limit answer, remaining never below 80", async () => {
   const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
   const bot = new FakeBot();
   const holds: Array<{ until: number; res: () => void }> = [];
@@ -1037,21 +1027,19 @@ test("part 2 (group 1, round 4, B1; item 2 of 2026-11-16): 30 stuck sales held 8
   let lastTok = 200;
   let lastTokAt = sim.simMs;
   let below80 = 0;
-  let below20 = 0;
   let lowest = 200;
   const prev = (sim as any).onRate;
   (sim as any).onRate = (k: number) => {
     const now = sim.simMs;
     if (now > loseAt) {
       if (lastTok < 80) below80 += now - lastTokAt;
-      if (lastTok < 20) below20 += now - lastTokAt;
       lowest = Math.min(lowest, k);
     }
     lastTok = k;
     lastTokAt = now;
     prev?.(k);
-    // Michael's ruling 6 of 2026-11-16: Alpaca's live remaining count reaches the governor (as main.ts wires it), so the side-by-side room
-    // check works from the real budget (group 1's item 2 round 1 note: before, the governor's estimate stayed at 200).
+    // Alpaca's live remaining count reaches the governor, as main.ts wires it (group 1's note of 2026-11-16: before, the governor's estimate
+    // stayed at 200 in this test).
     r.governor.observe({ path: "/v2/orders", status: 200, limit: 200, remaining: k, reset: null });
   };
   const r429 = sim.rejected429;
@@ -1074,7 +1062,7 @@ test("part 2 (group 1, round 4, B1; item 2 of 2026-11-16): 30 stuck sales held 8
   }
   assert.ok(lost);
   assert.equal(sim.rejected429 - r429, 0, "no rate-limit answer");
-  assert.ok(lowest >= 20 && below20 === 0, `remaining never below the urgent floor of 20 (lowest ${Math.round(lowest)}, ${Math.round(below80 / 1000)} s below 80)`);
+  assert.equal(below80, 0, `remaining never below 80 (lowest ${Math.round(lowest)}, ${Math.round(below80 / 1000)} s below 80)`);
   timed = false;
   for (const h of holds.splice(0)) h.res();
   r.worker.stop?.();
@@ -1246,9 +1234,9 @@ test("Michael's ruling 1 of 2026-11-14: in the worker, a stuck sale retries with
   r.worker.stop?.();
 });
 
-// Michael's ruling 6 of 2026-11-16 (the speed release, item 3d): with 30 positions whose sales Alpaca holds 8 s, a `flatten` asked partway
-// through must start no slower than on 20ba5bd (before side-by-side sales): running side-by-side sales give way at their next step. Alpaca's
-// live remaining count reaches the governor, as main.ts wires it. Returns when the whole-account sale started after it was asked, and more.
+// The speed release, item 3d: with 30 positions whose sales Alpaca holds 8 s, a `flatten` asked partway through must start no slower than on
+// 20ba5bd (Michael's change of direction of 2026-11-16: selling stays one at a time, as on 20ba5bd). Alpaca's live remaining count reaches
+// the governor, as main.ts wires it. Returns when the whole-account sale started after it was asked, and more.
 async function flattenPartway(flattenAfterMs: number, minutes: number) {
   const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
   const bot = new FakeBot();
@@ -1284,7 +1272,6 @@ async function flattenPartway(flattenAfterMs: number, minutes: number) {
   };
   timed = true;
   let lowest = 200;
-  let peak = 0;
   const prev = (sim as any).onRate;
   (sim as any).onRate = (k: number) => {
     if (sim.simMs > loseAt) lowest = Math.min(lowest, k);
@@ -1303,7 +1290,6 @@ async function flattenPartway(flattenAfterMs: number, minutes: number) {
       for (const s of bad) for (const l of sim.orders.find((o: any) => o.clientOrderId === clientOrderIdFor(D, s, 1))!.legs) await sim.cancelOrder(l.id);
     }
     if (!flatP && sim.simMs >= flatAt) flatP = liq.flatten({ reason: "flatten command", tradeDate: D });
-    peak = Math.max(peak, liq.sideBySideNow?.() ?? 0);
     if (sim.simMs >= nextPass) {
       void r.at(iso(sim.simMs));
       nextPass += 5_000;
@@ -1314,7 +1300,7 @@ async function flattenPartway(flattenAfterMs: number, minutes: number) {
     }
     await settle();
   }
-  const out = { startAfterMs: wholeStartAt === null ? null : wholeStartAt - flatAt, rateLimited: sim.rejected429 - r429, lowest: Math.round(lowest), peakSideBySide: peak, oversell: sim.oversellAttempts };
+  const out = { startAfterMs: wholeStartAt === null ? null : wholeStartAt - flatAt, rateLimited: sim.rejected429 - r429, lowest: Math.round(lowest), oversell: sim.oversellAttempts };
   timed = false;
   for (const h of holds.splice(0)) h.res();
   r.worker.stop?.();
@@ -1323,12 +1309,10 @@ async function flattenPartway(flattenAfterMs: number, minutes: number) {
 
 // The baselines are 20ba5bd's own figures for these same runs (the one-at-a-time queue), measured by the builder with this function on a
 // clean extract of 20ba5bd on 2026-11-16: asked 20 s in, the flatten started 13.0 s later; asked 60 s in, 27.0 s later (group 1 measured 13 s
-// and 27 s). Measured at 9fd9060: 2.0 s in both (side-by-side peak 5 and 7, lowest remaining 73). Since 142cb3b (ruling 1, the order sync every 6 s) and on the
-// merged speed release before its round 1 fixes: 5.0 s in both (side-by-side peak 4 and 7, lowest remaining 65), measured by the builder on
-// 2026-11-16; the cause (more frequent syncs ahead of the flatten) is inferred, not measured. On e78f79a (the per-round room check): 5.0 s in
-// both, side-by-side peaks 9 and 13, lowest remaining 45, no rate-limit answer (group 2, round 2).
+// and 27 s). With side-by-side sales (from 9fd9060 to be439ee) it was 2.0 to 7.0 s; they are out of this release (Michael's change of
+// direction of 2026-11-16), so the one-at-a-time figure is pinned again.
 for (const [after, baselineMs] of [[20_000, 13_000], [60_000, 27_000]] as const) {
-  test(`speed release, item 3d (Michael's ruling 6): a flatten asked ${after / 1000} s into 30 held sales starts no slower than on 20ba5bd (${baselineMs / 1000} s)`, async () => {
+  test(`speed release, item 3d: a flatten asked ${after / 1000} s into 30 held sales starts no slower than on 20ba5bd (${baselineMs / 1000} s)`, async () => {
     const r = await flattenPartway(after, after === 20_000 ? 2 : 3);
     assert.ok(r.startAfterMs !== null, "the flatten started");
     assert.ok(r.startAfterMs <= baselineMs, `started ${r.startAfterMs} ms after the ask (20ba5bd: ${baselineMs} ms); ${JSON.stringify(r)}`);
