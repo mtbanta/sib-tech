@@ -333,6 +333,11 @@ export const CANCEL_LOOKUPS_MAX = 3;
 // Group 1, night build round 1 (finding 3): lookups that failed (threw) count separately, at most this many an order within the memory; each
 // falls back to re-sending the cancel (within CANCEL_RESENDS_MAX), or, with no re-send left, to a later lookup after the doubling wait.
 export const CANCEL_LOOKUP_FAILS_MAX = 3;
+// Group 1, night build round 1 follow-up (the reviewer's cancel-throw probe): a single cancel that threw was not sent. It is tried again in
+// the next round, as on v24, without counting as a re-send or starting the memory, at most this many times an order (kept for
+// CANCEL_THROWS_MEMORY_MS); after that a cancel that throws counts as sent and `cancel_not_confirmed` is stored once.
+export const CANCEL_THROWS_MAX = 3;
+export const CANCEL_THROWS_MEMORY_MS = 10 * 60_000;
 type CancelSent = { at: number; waitMs: number; resends: number; lookups: number; lookupFails?: number };
 
 export class Liquidator {
@@ -343,6 +348,22 @@ export class Liquidator {
   // Item 1 of the night build: the cancels sent by whole-account sales, by order id, and the last "cancel every order".
   private readonly cancelSent = new Map<string, CancelSent>();
   private cancelAll: CancelSent = { at: -Infinity, waitMs: CANCEL_RESULT_WAIT_MS, resends: 0, lookups: 0 };
+  // Group 1, night build round 1 follow-up: cancels that threw (not sent), by order id, and when the last one threw.
+  private readonly cancelThrows = new Map<string, { n: number; at: number }>();
+
+  // A single cancel threw (a 5xx or a network failure after the client's own retries): Alpaca did not take it, so it is not counted as sent.
+  // It is forgotten (neither a re-send nor the start of the 60 s memory) and so sent again in the next round, as on v24, at most
+  // CANCEL_THROWS_MAX times an order. The next one that throws is counted as sent (the item 1 schedule and its bounds apply) and stored once
+  // as not confirmed.
+  private cancelThrew(id: string, reason: string): void {
+    const n = (this.cancelThrows.get(id)?.n ?? 0) + 1;
+    this.cancelThrows.set(id, { n, at: this.d.now().getTime() });
+    if (n <= CANCEL_THROWS_MAX) {
+      this.cancelSent.delete(id);
+      return;
+    }
+    if (n === CANCEL_THROWS_MAX + 1) this.d.log?.("cancel_not_confirmed", { reason, id, thrown: n });
+  }
   // Priority sales (the daily loss stop) asked for and not finished yet.
   private priorityPending = 0;
   constructor(deps: LiquidatorDeps) {
@@ -565,6 +586,7 @@ export class Liquidator {
         // awaited. Orders shown pending cancel are left alone.
         const nowMs = this.d.now().getTime();
         for (const [id, c] of this.cancelSent) if (nowMs - c.at > CANCEL_MEMORY_MS) this.cancelSent.delete(id);
+        for (const [id, x] of this.cancelThrows) if (nowMs - x.at > CANCEL_THROWS_MEMORY_MS) this.cancelThrows.delete(id);
         const statusOf = new Map<string, string>();
         for (const x of others) {
           statusOf.set(x.id, x.status);
@@ -597,7 +619,12 @@ export class Liquidator {
             steps.cancelsSentAt.push(stamp());
             (result.cancelsTried ??= []).push(id);
             this.cancelSent.set(id, { at: this.d.now().getTime(), waitMs: CANCEL_RESULT_WAIT_MS, resends: 0, lookups: 0 });
-            await this.d.broker.cancelOrder(id);
+            try {
+              await this.d.broker.cancelOrder(id);
+            } catch (err) {
+              this.cancelThrew(id, o.reason);
+              throw err; // the round goes on as on v24 (the error is recorded below)
+            }
             (result.cancelsAccepted ??= []).push(id);
             steps.cancelsAnsweredAt.push(stamp());
           }
@@ -641,7 +668,12 @@ export class Liquidator {
           cancelledInAttempt = true;
           steps.cancelsSentAt.push(stamp());
           (result.cancelsTried ??= []).push(id);
-          await this.d.broker.cancelOrder(id);
+          try {
+            await this.d.broker.cancelOrder(id);
+          } catch (err) {
+            this.cancelThrew(id, o.reason);
+            throw err;
+          }
           (result.cancelsAccepted ??= []).push(id);
           steps.cancelsAnsweredAt.push(stamp());
         }

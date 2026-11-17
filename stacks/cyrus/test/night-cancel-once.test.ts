@@ -3,7 +3,7 @@
 // began before Alpaca's 8 s cancels had finished re-sent a single cancel for every order still pending cancel, each round (81 cancels).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CANCEL_LOOKUP_FAILS_MAX, CANCEL_LOOKUPS_MAX, CANCEL_MEMORY_MS, CANCEL_RESENDS_MAX, CANCEL_RESULT_WAIT_MS, Liquidator, SellGate } from "../src/sells.ts";
+import { CANCEL_LOOKUP_FAILS_MAX, CANCEL_THROWS_MAX, CANCEL_LOOKUPS_MAX, CANCEL_MEMORY_MS, CANCEL_RESENDS_MAX, CANCEL_RESULT_WAIT_MS, Liquidator, SellGate } from "../src/sells.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
 import { SimBroker } from "./sim-broker.ts";
 import { D } from "./rig.ts";
@@ -173,6 +173,79 @@ test("night build, item 1: an order that always stays working, over more than 70
   assert.equal(w.events.filter((x) => x.e === "cancel_not_confirmed").length, Math.floor(lookupsAt.length / CANCEL_LOOKUPS_MAX), "one a cycle, after its third lookup");
   assert.equal(w.sim.oversellAttempts, 0);
   // Measured when written: cancels at 0.05, 7.6, 15.15 s, then 78.15, 85.7, 94.55 s (the memory runs from the last re-send).
+});
+
+// Group 1, night build round 1 follow-up, the reviewer's probe `cancel-throw.mts` as a test: one exit's cancel throws (an Alpaca 503 after
+// the client's own retries) the first `throws` times; close-out retries of both symbols, one every 20 s. A cancel that threw was not sent, so
+// it is sent again in the next retry, as on v24 (20ba5bd), which sold both symbols at 20.55, 40.55 and 60.55 s with 1, 2 and 3 throws and not
+// within 80 s with 4 (before this fix the night build did not sell QAA within 80 s with 3).
+for (const [throws, v24] of [[1, 20_550], [2, 40_550], [3, 60_550], [4, null]] as const) {
+  test(`night build, item 1: a cancel that throws ${throws} time(s) is not counted as sent; sold no later than on v24 (${v24 === null ? "not within 80 s" : `${v24} ms`})`, async () => {
+    const w = await world(2, 0, 200);
+    w.sim.sellFillDelayMs = 0;
+    const bad = w.legIds[0]!;
+    let left: number = throws;
+    let sends = 0;
+    const realCancel = w.sim.cancelOrder;
+    w.sim.cancelOrder = async (id: string) => {
+      if (id === bad) {
+        sends++;
+        if (left > 0) {
+          left--;
+          throw new Error("Alpaca 503");
+        }
+      }
+      return realCancel(id);
+    };
+    const soldAt: Record<string, number> = {};
+    const realSell = w.sim.submitSell;
+    w.sim.submitSell = (x: { symbol: string }) => {
+      soldAt[x.symbol] ??= w.sim.simMs;
+      return realSell(x);
+    };
+    const t0 = w.sim.simMs;
+    for (let k = 0; k < 4; k++) {
+      const p = w.liq.flatten({ reason: "close-out", tradeDate: D, only: ["QAA", "QAB"], maxRounds: 1 });
+      await w.drive(w.sim.simMs + 20_000);
+      await p;
+    }
+    const at = soldAt.QAA === undefined ? null : soldAt.QAA - t0;
+    if (v24 !== null) assert.ok(at !== null && at <= v24, `QAA sold at ${at} ms (v24: ${v24})`);
+    assert.ok(sends <= throws + 1, `one cancel a retry at most (${sends})`);
+    const notConfirmed = w.events.filter((x) => x.e === "cancel_not_confirmed" && x.d.id === bad).length;
+    assert.equal(notConfirmed, throws > CANCEL_THROWS_MAX ? 1 : 0, "stored once when the thrown cancels are used up");
+    assert.equal(w.sim.oversellAttempts, 0);
+  });
+}
+
+test("night build, item 1: a cancel that always throws stays bounded (one try a retry; after 3 uncounted, the item 1 schedule)", async () => {
+  const w = await world(2, 0, 200);
+  const bad = w.legIds[0]!;
+  let sends = 0;
+  const realCancel = w.sim.cancelOrder;
+  w.sim.cancelOrder = async (id: string) => {
+    if (id === bad) {
+      sends++;
+      throw new Error("Alpaca 503");
+    }
+    return realCancel(id);
+  };
+  const t0 = w.sim.simMs;
+  for (let k = 0; k < 10 && w.sim.simMs - t0 < 50_000; k++) {
+    let done = false;
+    const p = w.liq.flatten({ reason: "close-out", tradeDate: D, only: ["QAA", "QAB"], maxRounds: 4 }).finally(() => (done = true));
+    const cap = w.sim.simMs + 60_000;
+    while (!done && w.sim.simMs < cap) await w.drive(w.sim.simMs + 500);
+    assert.ok(done, "each liquidation ends");
+    await p;
+    await w.drive(w.sim.simMs + 1_000);
+  }
+  assert.equal(CANCEL_THROWS_MAX, 3);
+  assert.ok(sends <= CANCEL_THROWS_MAX + 1 + CANCEL_RESENDS_MAX, `cancels in about 50 s: ${sends}`);
+  // Stored when the thrown cancels are used up, and again when the item 1 schedule ends with the cancel still not confirmed.
+  const rows = w.events.filter((x) => x.e === "cancel_not_confirmed" && x.d.id === bad);
+  assert.ok(rows.length >= 1 && rows.length <= 2, `rows ${rows.length}`);
+  assert.equal(rows[0]!.d.thrown, CANCEL_THROWS_MAX + 1);
 });
 
 // Group 1, night build round 1 (finding 3), the reviewer's probe `lookup-fail.mts` as a test: one exit's first cancel is lost and the lookups
