@@ -2,7 +2,7 @@
 // entry still has a live exit resting at Alpaca, and stop the day if the daily loss limit is reached.
 import { AlpacaError, type Order } from "./alpaca-trading.ts";
 import { activeOrdersOldestFirst } from "./order-index.ts";
-import { FIRST_TRY_MOST, Reservation, RequestBudget, withReservation } from "./request-budget.ts";
+import { FIRST_TRY_MOST, Reservation, RequestBudget, withReservation, type Refusal } from "./request-budget.ts";
 import { inRequestScope } from "./request-scope.ts";
 import type { ProtectionHooks, RoomNeed } from "./protection.ts";
 import type { Broker } from "./broker.ts";
@@ -137,12 +137,15 @@ export const STUCK_VISIBLE_RETRY_FIRST_MS = 10_000;
 // Michael's ruling 1 of 2026-11-14 (night), replacing the two waits above for an ordinary stuck retry (one without a timed-out fresh stop):
 // each retry is one round (so it fits the 10 requests it reserves), and the next one is due this long after it, then runs as soon as the
 // shared request budget has room (a room wake: checked locally, no request, until there is room). Rule 6: its limit is the budget's cap
-// (60 a minute, 15 in 5 seconds, shared); its wait grows while the budget has no room (0.5, 1, 2, then 4 s, `roomWaitUntil`).
+// (75 a minute since Michael's decision 2 of 2026-11-17, 60 before; 15 in 5 seconds; shared); its wait grows while the budget has no room (0.5, 1, 2, then 4 s, `roomWaitUntil`).
 export const STUCK_RETRY_MIN_GAP_MS = 2_000;
 // Michael's answer of 2026-11-14 (night) on rulings 1 and 2: ordinary stuck retries stop at 45 of the budget's 60 a minute, leaving 15 for
-// urgent work (unclear fresh-stop lookups, the 15 second limit's try of 13, timed-out stop checks and tries, close-out retries), so one
+// urgent work (unclear fresh-stop lookups, the 15 second limit's try of 13, timed-out stop checks and tries, and then close-out retries), so one
 // stuck position whose sales Alpaca refuses can never fill the minute.
-export const STUCK_RETRY_MINUTE_CAP = 45;
+// Michael's decision 2 of 2026-11-17 (about 8:25 AM): "raise stuck sales to 60 a minute ... only in the version where urgent work keeps its 15
+// (shared budget 75) and the three behaviour tests (timed-out stop, unclear stop) pass". So 60 of the shared 75 (BUDGET_PER_MINUTE); the
+// last 15 stay for urgent work as before, and one refused stuck position still cannot fill the minute.
+export const STUCK_RETRY_MINUTE_CAP = 60;
 // Michael's decision of 2026-11-13 (item 2, first point): with the live updates down, an entry with a timed-out fresh stop is tried at
 // least every 10 seconds (5, then 10), within the shared request budget.
 export const STUCK_RETRY_MAX_NO_STREAM_MS = 10_000;
@@ -161,11 +164,32 @@ export const TIMED_OUT_TRY_REQUESTS = 13;
 export const TIMED_OUT_CHECK_REQUESTS = 2;
 export const STUCK_ESCALATE_MS = 5 * 60_000;
 // The redesign of 2026-11-14, part 1 (Michael's approval): the short retries of stuck entries are class P1 of the shared request budget
-// (request-budget.ts: 60 a minute and 15 in any 5 seconds for every retry and check together, down to 20 of Alpaca's remaining). Each
+// (request-budget.ts: 75 a minute (60 before 2026-11-17) and 15 in any 5 seconds for every retry and check together, down to 20 of Alpaca's remaining). Each
 // retry reserves STUCK_TRY_REQUESTS before it starts (one lookup plus one short round of the sale; at most 8 were measured in the simulator
 // on 2026-11-09, the 2 more are margin); what it really sends is counted as it is sent. A retry that does not fit waits for room. A
 // position's first sale is never refused (it is counted, as a first try).
 export const STUCK_TRY_REQUESTS = 10;
+// MICHAEL'S DECISION 1 OF 2026-11-17 (about 9:10 AM): "Cheap retry: build version C for real (admits on today's 10, sends 3, gives back 7)."
+// While Alpaca's live order updates are connected, an ordinary stuck retry of a missing-exit sale whose entry shows no exit still open in the
+// sync's own list, and which has nothing to cancel, skips the entry lookup and reads open orders and positions once, through the sell gate
+// (2 requests); its round decides from that one read and the gate's sell reuses it while it is under a second old (1 request): 3 requests,
+// where the full path sends about 10. It is still admitted on STUCK_TRY_REQUESTS (10) and gives the unused room back when the try ends.
+// The sell gate's own check is unchanged (open orders first, then positions, less the sells it sent since), so it can never sell more than
+// is held less the sells already open. Anything else (live updates down, a first try, a timed-out stop's try, the 15 second limit's sale,
+// every remainder sale, the fast sale, anything to cancel) takes the full path. Bounds on the now cheaper loop (rule 6): admitted on 10
+// within the stuck retries' 60 of the shared 75, the 15 in any 5 seconds, the floor of 20, and its 2 s gap after each try (no growing
+// backoff for ordinary retries since 2026-11-14), so one stuck position may now take about 16 to 17 tries a minute (3 requests each, each
+// admitted on 10 under the stuck retries' 60) where the full path takes about 6 of 10 (group 2, round 2; a simulator harness figure). An object so the tests can switch it off;
+// nothing in the worker changes it.
+export const CHEAP_RETRY = { on: true };
+// Whether a stuck retry takes the cheap path: only an ordinary retry of a missing-exit sale (every remainder sale takes the full path), not
+// the fast sale, with the live updates connected, nothing to cancel, and no sell leg of the entry open in the sync's own list. The sell gate's
+// one read is then the only look: it counts any sell of ours it shows as holding the shares, and Alpaca's free-share count (`qtyAvailable`)
+// caps the sale too, so a leg the open list does not show still cannot be oversold (group 2, round 1: the gate's check, not the list, is
+// what makes it safe).
+export function cheapRetryApplies(c: { ordinaryRetry: boolean; kind: "missing" | "bare"; fast: boolean; streamLive: boolean; alsoCancel: number; listedCopy: Order }): boolean {
+  return CHEAP_RETRY.on && c.ordinaryRetry && c.kind === "missing" && !c.fast && c.streamLive && c.alsoCancel === 0 && !flattenLegs(c.listedCopy).some((l) => l.side === "sell" && OPEN_STATUSES.has(l.status));
+}
 export interface StuckEntry {
   // Group 2 review of 2026-11-12: true when the stuck case is a remainder the stack is trying to give a fresh stop (A4), so the alerts say
   // "protect or sell", not only "sell". Since Michael's answer of 2026-11-14 (night) on ruling 1 it is also read by the order sync: such a
@@ -1054,6 +1078,9 @@ type TrySpec = { n: number; timedOut: boolean };
 // Group 1, round 4 of part 2: what a P1 try of `n` requests waiting for room will ask the budget, with the look's two reads (the order list
 // and the positions) ahead of it, as `roomWaitUntil` counts them. The loop checks it locally (no request) before it looks again.
 const p1Room = (n: number, minuteCap?: number): RoomNeed => ({ cls: "P1", n, reads: 2, ...(minuteCap !== undefined ? { minuteCap } : {}) });
+// Michael's ruling of 2026-11-17: a stuck sale's room need (an ordinary stuck retry or a timed-out stop's try), so its local room check keeps
+// new entries giving way while it waits for Alpaca's room.
+const saleRoom = (n: number, minuteCap?: number): RoomNeed => ({ ...p1Room(n, minuteCap), stuckSale: true });
 // An ordinary stuck retry's ceiling on the budgeted minute (none for a timed-out stop's try).
 const retryCap = (timedOut: boolean): number | undefined => (timedOut ? undefined : STUCK_RETRY_MINUTE_CAP);
 function retryDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string, nowMs: number): { wait: number; room: RoomNeed } | { go: TrySpec | null } {
@@ -1064,23 +1091,26 @@ function retryDue(d: RiskDeps, mem: SyncMemory, clientOrderId: string, nowMs: nu
   if (!timedOut && (!st || st.nextAt === 0)) return { go: null };
   // Group 1, round 4 of part 2: any wait of a retry ends in a try that needs room for its whole try, so the loop's wake for it is a room
   // wake: checked against the budget locally, with no look (and no request) until the try would have room.
-  if (st && st.nextAt > nowMs) return { wait: st.nextAt, room: p1Room(timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS, retryCap(timedOut)) };
+  if (st && st.nextAt > nowMs) return { wait: st.nextAt, room: saleRoom(timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS, retryCap(timedOut)) };
   // The redesign of 2026-11-14, part 1: a retry is class P1 of the shared request budget. It starts only with room for its whole try
   // (TIMED_OUT_TRY_REQUESTS for an entry with a timed-out stop, else STUCK_TRY_REQUESTS); what it sends is counted as it is sent. Part 2
   // (the advisor's point, and group 1's leak note): here the room is only looked at; the reservation is taken when the try starts (`inTry`,
   // inside the loop's action, after its busy check and the stand-aside rules are asked again).
-  const n = timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS;
+  const n = timedOut ? TIMED_OUT_TRY_REQUESTS : STUCK_TRY_REQUESTS; // the cheap retry (CHEAP_RETRY) is admitted on the same 10
   const room = budgetOf(d, mem).roomFor("P1", n, true, 0, retryCap(timedOut));
   if (room.ok) return { go: { n, timedOut } };
-  return { wait: waitForRoom(d, mem, st, clientOrderId, timedOut, n, room.why, nowMs), room: p1Room(n, retryCap(timedOut)) };
+  return { wait: waitForRoom(d, mem, st, clientOrderId, timedOut, n, room, nowMs), room: saleRoom(n, retryCap(timedOut)) };
 }
 
 // Waiting for room (not a backoff step of the try itself): until there is room for the coming sync's reads and the try, and at least 0.5, 1,
 // 2, then 4 s after refusals in a row (group 2, round 2 of the redesign).
-function waitForRoom(d: RiskDeps, mem: SyncMemory, st: StuckEntry | undefined, clientOrderId: string, timedOut: boolean, n: number, why: string, nowMs: number): number {
+function waitForRoom(d: RiskDeps, mem: SyncMemory, st: StuckEntry | undefined, clientOrderId: string, timedOut: boolean, n: number, refusal: Refusal, nowMs: number): number {
+  const why = refusal.why;
   const waits = st ? (st.roomWaits = (st.roomWaits ?? 0) + 1) : 1;
   const at = roomWaitUntil(d, mem, "P1", n, waits, nowMs, 2, true, retryCap(timedOut));
   if (st) st.nextAt = at;
+  // Michael's ruling of 2026-11-17: refused for Alpaca's room, new entries give way until this sale looks again (request-budget.ts).
+  budgetOf(d, mem).noteStuckSaleWaiting(refusal, at, timedOut ? "timed-out stop try" : "stuck retry");
   if (timedOut && waits === 1) d.log?.("timed_out_try_out_of_room", { clientOrderId, why, retryInMs: at - nowMs });
   return at;
 }
@@ -1096,7 +1126,7 @@ async function inTry(d: RiskDeps, mem: SyncMemory, s: OrderRecord, spec: TrySpec
   }
   const r = budgetOf(d, mem).tryReserve("P1", spec.n, { label: spec.timedOut ? "timed-out stop try" : "stuck retry", limitRetries: spec.timedOut, ...(spec.timedOut ? {} : { minuteCap: STUCK_RETRY_MINUTE_CAP }) });
   const st = mem.stuck.get(s.clientOrderId);
-  if (!(r instanceof Reservation)) return { attempted: true, stuck: true, recheckAt: waitForRoom(d, mem, st, s.clientOrderId, spec.timedOut, spec.n, r.why, d.now().getTime()), room: p1Room(spec.n, retryCap(spec.timedOut)) };
+  if (!(r instanceof Reservation)) return { attempted: true, stuck: true, recheckAt: waitForRoom(d, mem, st, s.clientOrderId, spec.timedOut, spec.n, r, d.now().getTime()), room: saleRoom(spec.n, retryCap(spec.timedOut)) };
   if (st) st.roomWaits = 0;
   return withReservation(r, fn);
 }
@@ -1388,7 +1418,9 @@ async function freshStopTimeout(d: RiskDeps, day: DayRecord, mem: SyncMemory, s:
     st.nextAt = roomWaitUntil(d, mem, "P1", TIMED_OUT_TRY_REQUESTS, st.roomWaits, nowMs);
     st.lastTriedAt = nowMs;
     d.log?.("timed_out_try_out_of_room", { symbol: s.symbol, clientOrderId: s.clientOrderId, stage: "15 second limit", why: sale.why, retryInMs: st.nextAt - nowMs });
-    return { attempted: true, stuck: true, recheckAt: st.nextAt, room: p1Room(TIMED_OUT_TRY_REQUESTS) };
+    // Michael's ruling of 2026-11-17: an unprotected position's sale waiting for Alpaca's room: new entries give way until it looks again.
+    budgetOf(d, mem).noteStuckSaleWaiting(sale, st.nextAt, "15 second limit's sale");
+    return { attempted: true, stuck: true, recheckAt: st.nextAt, room: saleRoom(TIMED_OUT_TRY_REQUESTS) };
   }
   return withReservation(sale, () => cleanupSale(d, day, mem, s, o, "missing", undefined, cancelId ? { alsoCancel: [cancelId], alsoCancelStops: [f.stopClientOrderId], alsoCancelBy: "15 second limit" } : {}));
 }
@@ -1439,7 +1471,9 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   const ordinaryRetry = !timedOutTry && mem.stuck.has(s.clientOrderId);
   // A5: the fast sale has just looked the entry up itself, so it is not looked up a second time here. Item 2 of 2026-11-13: nor a try for an
   // entry with a timed-out stop (whose bracket exits ended long ago): the copy from this sync's own list or lookup is used.
-  if (!extra.fast && !timedOutTry) try {
+  // Michael's decision 1 of 2026-11-17 (CHEAP_RETRY): the cheap path skips the entry lookup and sells against the sell gate's one read.
+  const cheap = cheapRetryApplies({ ordinaryRetry, kind, fast: !!extra.fast, streamLive: mem.streamLive, alsoCancel: extra.alsoCancel?.length ?? 0, listedCopy });
+  if (!extra.fast && !timedOutTry && !cheap) try {
     const fresh = await d.broker.findOrderByClientId(s.clientOrderId);
     if (fresh) o = fresh;
     else d.log?.("cleanup_lookup_empty", { symbol: s.symbol, clientOrderId: s.clientOrderId, kind });
@@ -1482,6 +1516,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     maxRounds: extra.fast || timedOutTry || ordinaryRetry ? 1 : 3,
     cancelIds,
     yieldToPriority: true,
+    ...(cheap ? { cheap: true } : {}), // CHEAP_RETRY: one read through the sell gate for the whole round
     ownEntryOnly: { maxQty: { [s.symbol]: ownShares } },
     endWhenHiddenHold: !extra.fast,
     onSellSent: sent,
@@ -1571,7 +1606,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     // Group 1, round 3 of the night release (Michael's decision 1 of 2026-11-13, and his rule that every retry loop has a limit and a
     // backoff): only the FIRST accepted cancel of a stop gets a look in a second, a P1 try of the shared request budget (Alpaca's cancel then
     // shows, and the sale waits for it if still pending). If the stop still holds the shares after a cancel Alpaca accepted, or Alpaca refused the cancel, the entry goes on
-    // the stuck backoff (5, 10, 20, then every 30 seconds), each retry a P1 try of the shared request budget (60 requests a minute, 15 in 5
+    // the stuck backoff (5, 10, 20, then every 30 seconds), each retry a P1 try of the shared request budget (75 requests a minute since 2026-11-17, 60 before; 15 in 5
     // seconds). A live update that the stop ended still runs the sale at once (worker.ts, onFreshStopUpdate).
     if (stopEndedDuringTry()) return dueNow(now);
     const acceptedBefore = mem.timedOutCancelAccepted.has(heldBy.clientOrderId);
@@ -1758,8 +1793,9 @@ export class LossStopMemory {
 }
 
 // THE LOSS STOP'S RE-SELLS AND THE SHARED REQUEST BUDGET (the redesign of 2026-11-14, part 1, Michael's approval with his change A): each
-// retry check is class P1 of the shared budget (request-budget.ts: 60 a minute and 15 in any 5 seconds for every retry and check together),
-// reserving LOSS_STOP_RETRY_PER_CHECK before it starts, and starts only while Alpaca's remaining requests stay at or above 20 after it. The
+// retry check is class P1 of the shared budget (request-budget.ts: 75 a minute (60 before 2026-11-17) and 15 in any 5 seconds for every retry and check together),
+// reserving LOSS_STOP_RETRY_PER_CHECK before it starts, and starts only while Alpaca's remaining requests stay at or above 20 after it; since
+// decision 2 of 2026-11-17 it may use the whole shared 75 (Michael's answer of about 9:30 AM: "Free to 75"), so it shares the urgent 15. The
 // equity check every 5 seconds is routine work (counted, not limited). The first sale when the stop fires is a first try: never held back
 // (it is the stop's whole job), ONE round of the liquidator (cancel the exits, wait, sell each symbol), a bounded burst, counted.
 // At most this many requests in one retry check, so the minute's budget is spread over the checks instead of spent in one burst.
@@ -1879,6 +1915,7 @@ async function retryLossStopSale(d: RiskDeps, day: DayRecord): Promise<void> {
   if (day.closeAt && nowMs >= day.closeAt.getTime() - retryQuietBeforeCloseMs(d.closeoutMinutesBeforeClose)) return;
   // The redesign of 2026-11-14, part 1: the check's whole room is reserved in the shared request budget first (P1, at most
   // LOSS_STOP_RETRY_PER_CHECK requests, down to 20 of Alpaca's remaining). Without room the check waits for the next one (5 seconds).
+  // Michael's answer of 2026-11-17 (about 9:30 AM, "Free to 75"): it may use the whole shared minute, the urgent 15 included.
   const res = budgetOf(d, mem).tryReserve("P1", LOSS_STOP_RETRY_PER_CHECK, { label: "loss stop re-sell" });
   if (!(res instanceof Reservation)) return;
   await withReservation(res, () => retryLossStopCheck(d, day, mem));

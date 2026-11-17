@@ -340,7 +340,10 @@ export class Worker {
     this.loop = new ProtectionLoop({ now: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}), ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {}), look: (ids, kind, extra, until) => this.look(ids, kind, extra, until), log: (e, data) => deps.log?.("info", e, data), onActionFailed: (id, label, err) => this.protectionActionFailed(id, label, err), onLagDropped: () => this.lagWaitOver(), roomAt: (need) => {
       // Group 1, round 4 of part 2: asked locally (no request): when the shared budget would grant that try with the look's reads ahead of it.
       const r = this.budget.roomFor(need.cls, need.n, true, need.reads, need.minuteCap);
-      return r.ok ? null : r.at;
+      if (r.ok) return null;
+      // Michael's ruling of 2026-11-17: a stuck sale still waiting for Alpaca's room keeps new entries giving way until it is checked again.
+      if (need.stuckSale) this.budget.noteStuckSaleWaiting(r, r.at, "stuck sale room check");
+      return r.at;
     } });
     this.sessions = new NextSessionFinder(deps.broker);
     this.view = new BrokerView(deps.broker, () => deps.now().getTime());
@@ -1113,7 +1116,7 @@ export class Worker {
     const inSession = now >= day.openAt && now < day.closeAt && current.status === "approved";
     // The mid-day cycle: from 10:30 until the mid-day close-out has finished flat, it alone sells (as the regular close-out, at the set time, does from its
     // time on), so the order sync's missing-exit check stands aside and its sales cannot spend Alpaca's requests outside the mid-day
-    // close-out's 60 a minute (group 1 review, round 1: 40 positions with refused sales made 80 such sales in 10 minutes).
+    // close-out's 60 a minute (CLOSEOUT_MINUTE_CAP; the shared minute is 75 since Michael's decision 2 of 2026-11-17) (group 1 review, round 1: 40 positions with refused sales made 80 such sales in 10 minutes).
     const middayToday = this.d.middayCycle === false ? null : middayTimes(current);
     // The close-out after the afternoon load window (Michael, 2026-11-12) owns selling the same way until it has finished flat.
     const afternoonCloseoutDue = Boolean(inSession && current.phases.armed && afternoonCloseoutPending(current, now) && now < this.closeoutAt(day.closeAt));
@@ -1496,7 +1499,8 @@ export class Worker {
       // The redesign of 2026-11-14, part 1: the shared request budget this minute: requests sent by tag (entries, first tries, P1, P2,
       // routine, and the clock's separate bucket), tries granted and refused (and why), forced (the regular close-out's retry from 2:58), overdrafts, the
       // most budgeted requests in any minute and any 5 seconds (at most 60 and 15 unless forced or overdrawn), and entries refused while a
-      // P2 try waited on its floor.
+      // P2 try waited on its floor or (Michael's ruling of 2026-11-17) a stuck sale waited for Alpaca's room (`stuckSaleHolds`,
+      // `stuckSaleEntriesRefused`).
       requestBudget: this.budget.takeMinute(),
       // The redesign of 2026-11-14, part 2: the protection loop this minute (looks run, list-lag looks, failed, put off while a sync ran,
       // waited for room, actions started, wakes asked for; wakes pending and actions running now).

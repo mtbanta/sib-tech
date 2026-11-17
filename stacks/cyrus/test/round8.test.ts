@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { AlpacaError } from "../src/alpaca-trading.ts";
 import { ensureDay } from "../src/morning.ts";
 import { enforceDailyLoss, LossStopMemory, LOSS_STOP_RETRY_PER_CHECK } from "../src/risk.ts";
-import { BUDGET_PER_MINUTE, P1_FLOOR } from "../src/request-budget.ts";
+import { BUDGET_PER_MINUTE, P1_FLOOR, RULED_MINUTE_CAP, RequestBudget, Reservation } from "../src/request-budget.ts";
 import { Liquidator, SellGate } from "../src/sells.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
 import { SAFETY_RESERVE } from "../src/governor.ts";
@@ -47,7 +47,7 @@ async function afterLossStop(symbols: string[], opts: { governor?: { budget(): n
   const check = async () => enforceDailyLoss(deps, (await store.getDay(D))!);
   const step = (seconds: number) => void (clock.t = new Date(clock.t.getTime() + seconds * 1000));
   const sells = (sym?: string) => broker.calls.filter((c) => c.fn === "submitSell" && (!sym || (c.args[0] as { symbol: string }).symbol === sym)).length;
-  return { store, broker, clock, said, check, step, sells };
+  return { store, broker, clock, said, check, step, sells, mem: deps.lossMemory };
 }
 
 test("after a failed loss stop sale, only the sales that failed are retried: no second whole-account liquidation", async () => {
@@ -115,7 +115,8 @@ test("the redesign of 2026-11-14 (change A): the retry may spend below the reser
   assert.equal(low.broker.count("listPositions") + low.sells(), 0, "below the floor of 20 after the try: nothing sent");
 });
 
-test("the retry keeps inside its budget of 60 requests a minute, with 40 positions all refused, and every symbol gets its turn", async () => {
+// Michael's answer of 2026-11-17 (about 9:30 AM, "Free to 75"): the loss stop's re-sells may use the whole shared 75 (60 before that day).
+test("the retry keeps inside the shared budget of 75 requests a minute (60 before 2026-11-17), with 40 positions all refused, and every symbol gets its turn", async () => {
   const syms = Array.from({ length: 40 }, (_, i) => `S${String(i).padStart(2, "0")}`);
   const p = await afterLossStop(syms);
   p.broker.onSell = async () => { throw new AlpacaError("sell refused (test)", 403); };
@@ -331,4 +332,25 @@ test("the daily summary and the fee code say the paper account is charged regula
   assert.ok(line.includes("paper account too"), line);
   const src = readFileSync(new URL("../src/fees.ts", import.meta.url), "utf8");
   assert.ok(!/charges none/.test(src), "the fee code's comment no longer says paper charges none");
+});
+
+// Michael's answer of 2026-11-17 (about 9:30 AM), asked whether the loss stop's re-sells stay at 60 or may use the shared 75: "Free to 75".
+// So with 55 of the minute already used by other urgent work a re-sell check (it reserves 15) still goes (70, above 60, within 75), unlike a
+// close-out retry (held to RULED_MINUTE_CAP); with 61 used it would pass 75, so it sends nothing.
+test("Michael's answer of 2026-11-17 (Free to 75): the loss stop's re-sell may use the whole shared 75: with 55 already in the minute it goes, with 61 it sends nothing", async () => {
+  assert.equal(RULED_MINUTE_CAP, 60);
+  assert.equal(BUDGET_PER_MINUTE, 75);
+  for (const [used, goes] of [[55, true], [61, false]] as const) {
+    const p = await afterLossStop(["AAA"]);
+    p.mem.budget = new RequestBudget({ now: () => p.clock.t.getTime(), remaining: () => 200 });
+    const other = p.mem.budget.tryReserve("P1", used, { label: "other urgent work", fiveSec: false }) as Reservation;
+    assert.ok(other instanceof Reservation);
+    for (let k = 0; k < used; k++) other.charge("/v2/test");
+    other.end();
+    p.step(6); // out of the 5 seconds, still in the minute
+    await p.check();
+    const sent = p.broker.count("listPositions") + p.sells();
+    if (goes) assert.ok(sent > 0, `with ${used} used: ${used} + ${LOSS_STOP_RETRY_PER_CHECK} = ${used + LOSS_STOP_RETRY_PER_CHECK}, above 60 but within 75, so it goes`);
+    else assert.equal(sent, 0, `with ${used} used: ${used} + ${LOSS_STOP_RETRY_PER_CHECK} would pass 75, so nothing is sent`);
+  }
 });

@@ -5,7 +5,7 @@
 //
 //  - Budgeted work (class P1: sales of shares without a confirmed stop, the timed-out stop's tries, checks and cancels, the close-out
 //    retries, the loss stop's re-sells, an unclear fresh stop's lookup since Michael's ruling 2 of 2026-11-14; class P2: the list-lag rechecks
-//    and a confirmed fresh stop's periodic lookup; ordinary stuck retries stop at 45, `minuteCap`) shares at most BUDGET_PER_MINUTE
+//    and a confirmed fresh stop's periodic lookup; ordinary stuck retries stop at STUCK_RETRY_MINUTE_CAP, 60 of the 75 since 2026-11-17 (45 of 60 before), `minuteCap`) shares at most BUDGET_PER_MINUTE
 //    requests in any 60 seconds and BUDGET_PER_5S in any 5 seconds. P2 may draw only while it leaves P1_KEEP of the minute for P1.
 //  - A budgeted try asks for its whole room before it starts (`tryReserve`, its most requests). It starts only when the minute (and,
 //    unless it is a close-out retry, the 5 seconds) has room, its class leaves P1 its share, and Alpaca's remaining requests stay at or
@@ -16,16 +16,35 @@
 //    nothing is charged for a request that never ran, nothing runs uncharged, and the Alpaca client's own retries are counted too.
 //  - First tries of safety work are counted (per tag, for the statistics) but never refused (decision 4); they are not part of the
 //    budgeted minute. Entries keep the governor's reserve and their ceilings (unchanged). Routine work is counted, not limited.
-//  - Entries give way only while a P2 try has room in the minute but waits on its floor of 80 (decision 5 with change A): the governor
-//    refuses an entry then (`givingWay`). A P1 try's floor of 20 is below the entries' 80, so entries never hold one back.
+//  - Entries give way while a P2 try has room in the minute but waits on its floor of 80 (decision 5 with change A), and, since Michael's
+//    ruling of 2026-11-17, while a stuck sale waits for Alpaca's room (STUCK_SALE_GIVE_WAY, below): the governor refuses an entry then
+//    (`givingWay`). A P1 try's floor of 20 is below the entries' reserve of 80, so entries rarely hold one back; the stuck-sale give-way
+//    covers the rest (room reserved unsent can bring a sale short of its floor while the estimate is above 80).
 // Nothing here sends, cancels or sizes an order; it only says whether a budgeted try may start, and counts.
 import { SAFETY_RESERVE, ALPACA_REQUESTS_PER_MINUTE } from "./governor.ts";
 import { currentTag, requestScope, separateBucket, type ScopeReservation, type Scope, type Tag } from "./request-scope.ts";
 
 export type BudgetClass = "P1" | "P2";
-export const BUDGET_PER_MINUTE = 60;
+// Michael's decision 2 of 2026-11-17 (about 8:25 AM): "raise stuck sales to 60 a minute ... only in the version where urgent work keeps its 15
+// (shared budget 75)". So the shared minute is 75 (60 until then): ordinary stuck retries stop at 60 of it (STUCK_RETRY_MINUTE_CAP in risk.ts),
+// urgent P1 work (unclear fresh-stop lookups, the 15 second limit's sale, timed-out stop checks and tries, and the daily loss stop's re-sells,
+// Michael's answer of 2026-11-17, about 9:30 AM: "Free to 75") keeps the last 15, and P2 keeps its share of 40. Close-out retries keep their
+// own 60 (RULED_MINUTE_CAP, below), so they never draw on the 15; a close-out still gets up to 60 because stuck retries stand aside while a regular, mid-day or afternoon close-out owns selling (not between a carried position's tries) (P1_KEEP is 35, was 20, so 75 - 35 = 40 as before). The 15 in any 5 seconds is unchanged.
+export const BUDGET_PER_MINUTE = 75;
 export const BUDGET_PER_5S = 15;
-export const P1_KEEP = 20;
+export const P1_KEEP = 35;
+// A close-out's retry (the regular, mid-day, afternoon or carried-position close-out) keeps Michael's ruling of 2026-11-09 ("Keep trying every
+// 20 seconds, but only within 60 Alpaca requests a minute (like the loss stop's retry)"): it starts only while the shared minute's use plus its
+// own stays at or below 60, though the minute is now 75 (decision 2 of 2026-11-17). Without this, a close-out retry may start in the 15 above
+// 60 and its unreserved extra requests (a try is never stopped halfway) reached 104 in 60 s in the mid-day test. The daily loss stop's
+// re-sells do not take this ceiling: Michael's answer of 2026-11-17 (about 9:30 AM), asked whether they stay at 60 or may use the shared 75,
+// was "Free to 75" (held to 60, a re-sell could wait up to about 35 s after stuck retries had filled their 60; free, the round 8 test's
+// busiest minute is 52 where it was 39).
+// Stuck retries stand aside while a regular, mid-day or afternoon close-out owns selling, so those do not compete for the 60 (between a
+// carried position's tries they can). Refused between 60 and 75 it counts as
+// `refused.class` (within the minute, above its own share), not `minute`.
+export const RULED_MINUTE_CAP = 60;
+export const CLOSEOUT_MINUTE_CAP = RULED_MINUTE_CAP;
 export const P1_FLOOR = 20;
 // Protect-first: when a P2 try refused because P2 gives way may look again (a local check; the try's own window and schedule bound it).
 export const PROTECT_FIRST_RECHECK_MS = 250;
@@ -34,9 +53,9 @@ export const P2_FLOOR = SAFETY_RESERVE;
 // caller extends the wait to its next try (`extendWait`: the list-lag recheck, bounded by its 30 s window; the unclear fresh-stop lookup is P1
 // since Michael's ruling 2 of 2026-11-14, night).
 export const GIVE_WAY_MAX_MS = 2_000;
-// Michael's answer of 2026-11-14 (night, after group 1's rulings round 2): while an ordinary stuck retry waits for room under its ceiling of
-// 45, and P2's use is what keeps it out, P2 (list-lag rechecks, a confirmed fresh stop's periodic lookup) may draw only while it leaves room
-// for that retry (its share is in effect 45 less the retry's size, 35, instead of 40), until the retry looks again (when room may return)
+// Michael's answer of 2026-11-14 (night, after group 1's rulings round 2): while an ordinary stuck retry waits for room under its ceiling
+// (STUCK_RETRY_MINUTE_CAP: 60 since 2026-11-17, 45 before), and P2's use is what keeps it out, P2 (list-lag rechecks, a confirmed fresh stop's periodic lookup) may draw only while it leaves room
+// for that retry (its share is in effect the retry's ceiling less its size: 60 - 10 = 50 since 2026-11-17, so in the minute P2 keeps its 40 and the hold acts in the 5 seconds; 45 - 10 = 35 before), until the retry looks again (when room may return)
 // and at least this long; each refused look of the retry renews it.
 export const RETRY_WAIT_HOLD_MS = 2_500;
 // Item 3 of the night build (Michael's request of 2026-11-16, about 8:50 PM, decision 4 changed: "First tries: paced, not exempt; they wait
@@ -75,7 +94,22 @@ export const CLOSEOUT_SPELL_GAP_MS = 15_000;
 export const FIRST_TRY_MOST = 25;
 const REFILL_PER_MS = ALPACA_REQUESTS_PER_MINUTE / 60_000;
 
-export type Refusal = { ok: false; at: number; why: "minute" | "five" | "class" | "floor" };
+// `floorShort`: Alpaca's remaining requests (as the governor estimates them) would fall below the try's floor, and `floorAt` when the floor
+// alone would have room again at Alpaca's refill rate (Michael's ruling of 2026-11-17 on stuck sales reads them: only Alpaca's room is what an
+// entry giving way can give the sale, so the hold lasts no longer than that shortfall).
+export type Refusal = { ok: false; at: number; why: "minute" | "five" | "class" | "floor"; floorShort?: boolean; floorAt?: number };
+// MICHAEL'S RULING OF 2026-11-17 (morning, his words: "while a stuck sale is waiting for room, new entries give way (the governor holds entries
+// back) so Alpaca's room goes to the sale"). A stuck sale (an ordinary stuck retry, a timed-out stop's try, or the 15 second limit's sale)
+// refused while Alpaca's remaining requests (the governor's estimate, less the room reserved unsent and the look's reads) are short of its
+// floor of 20 marks the budget as giving way until the earlier of the moment that shortfall would end at Alpaca's refill rate (`floorAt`) and
+// the sale's next look, plus STUCK_SALE_GIVE_WAY_MARGIN_MS; while marked, the governor refuses every new entry (`givingWay`). Each further
+// refusal of a stuck sale on the floor (at its look, or the protection loop's local room check) renews it; it ends on its own when no stuck
+// sale has been refused for room since. Nothing is sent or cancelled here; entries already working are untouched. A refusal for the budgeted
+// minute or the 5 seconds alone holds nothing, and a sale short on both holds entries only for the floor's part (entries do not use the
+// budgeted minute, so their giving way would not help with it; group 2, round 1). An object so the tests can switch it off; nothing in the
+// worker changes it.
+export const STUCK_SALE_GIVE_WAY = { on: true };
+export const STUCK_SALE_GIVE_WAY_MARGIN_MS = 500;
 
 export interface ReserveOptions {
   // False for the close-out retries (they cannot fit 15 in 5 seconds; their burst is bounded by their own single round). Default true.
@@ -87,8 +121,8 @@ export interface ReserveOptions {
   // A P2 try that will be tried again when room returns (the list-lag recheck): while it waits on its floor, entries give way.
   waitKey?: string;
   // Michael's answer of 2026-11-14 (night) on rulings 1 and 2: a lower ceiling on the budgeted minute for this try (an ordinary stuck retry:
-  // STUCK_RETRY_MINUTE_CAP, 45), so the rest of the 60 stays for urgent work (unclear fresh-stop lookups, the 15 second limit's try, timed-out
-  // stop checks, close-out retries). Refused above it as "class" (its share of the minute).
+  // STUCK_RETRY_MINUTE_CAP, 60 of 75 since 2026-11-17, 45 of 60 before), so the rest of the minute stays for urgent work (unclear fresh-stop lookups, the 15 second limit's try, timed-out
+  // stop checks; close-out retries and the loss stop's re-sells until 2026-11-17, which now keep their own 60). Refused above it as "class".
   minuteCap?: number;
   // The Alpaca client's own retries inside this try stop when its reservation has no room left (only a timed-out stop's tries, checks and
   // cancels, Michael's item 2 of 2026-11-13). Any other try is never stopped halfway (design 3.2): its extra requests are counted.
@@ -158,6 +192,8 @@ export interface BudgetMinute {
   // Group 2, round 1 of the redesign: the most in any 5 seconds sent by tries capped by the 5 seconds (close-out retries left out; they
   // reserve against the minute only, design 3.2). Above 15 only if a try overdrew, or a request came after its try ended.
   mostCappedIn5s: number;
+  // Entries the governor refused because they give way: to a P2 try waiting on its floor of 80 (a list-lag recheck) or, since Michael's
+  // ruling of 2026-11-17, to a stuck sale waiting for Alpaca's room (those also in `stuckSaleEntriesRefused`).
   givingWayRefusals: number;
   // Michael's approval of 2026-11-15 (logging only): P2's hold for a waiting ordinary stuck retry ("rechecks leave room"), this minute.
   // `started`: refused looks or tries of such a retry that set the hold while it was not in force; `renewed`: those that renewed it while
@@ -177,9 +213,13 @@ export interface BudgetMinute {
   // looks refused because of it. (Switched off: see the constant, CLOSEOUT_HOLD; both stay 0.)
   closeOutHolds: number;
   closeOutHeldRetries: number;
+  // Michael's ruling of 2026-11-17 on stuck sales (logging only): spells in which entries gave way to a stuck sale waiting for Alpaca's room
+  // (started this minute), and the entries refused for it (each also counted in `givingWayRefusals`).
+  stuckSaleHolds: number;
+  stuckSaleEntriesRefused: number;
 }
 
-const emptyMinute = (): BudgetMinute => ({ sent: { entry: 0, first: 0, P1: 0, P2: 0, routine: 0, clock: 0 }, granted: 0, refused: { minute: 0, five: 0, class: 0, floor: 0 }, forced: 0, overdrafts: 0, sentAfterEnd: 0, mostBudgetedInMinute: 0, mostBudgetedIn5s: 0, mostCappedIn5s: 0, givingWayRefusals: 0, retryHold: { started: 0, renewed: 0, inForceMs: 0, p2Refused: 0 }, firstPaced: 0, firstPacedMs: 0, mostUrgentCappedIn5s: 0, closeOutHolds: 0, closeOutHeldRetries: 0 });
+const emptyMinute = (): BudgetMinute => ({ sent: { entry: 0, first: 0, P1: 0, P2: 0, routine: 0, clock: 0 }, granted: 0, refused: { minute: 0, five: 0, class: 0, floor: 0 }, forced: 0, overdrafts: 0, sentAfterEnd: 0, mostBudgetedInMinute: 0, mostBudgetedIn5s: 0, mostCappedIn5s: 0, givingWayRefusals: 0, retryHold: { started: 0, renewed: 0, inForceMs: 0, p2Refused: 0 }, firstPaced: 0, firstPacedMs: 0, mostUrgentCappedIn5s: 0, closeOutHolds: 0, closeOutHeldRetries: 0, stuckSaleHolds: 0, stuckSaleEntriesRefused: 0 });
 
 export class RequestBudget {
   readonly nowMs: () => number;
@@ -246,7 +286,7 @@ export class RequestBudget {
     const size = Math.max(0, Math.ceil(n));
     const fiveSec = opts.fiveSec !== false;
     if (!opts.force) {
-      const refusal = this.refusal(cls, size, fiveSec, now, 0, opts.minuteCap);
+      const refusal = this.refusal(cls, size, fiveSec, now, 0, opts.minuteCap, opts.closeOut ? RULED_MINUTE_CAP : undefined);
       // Item 5 (b): a close-out's retry kept out by the stuck retries' own use holds them back until it gets in, at most 10 s in all in one
       // waiting spell (see CLOSEOUT_FIRST_HOLD_MS and CLOSEOUT_HOLD_TOTAL_MS).
       if (refusal && opts.closeOut && CLOSEOUT_HOLD.on) this.closeOutRefused(refusal, size, now);
@@ -314,14 +354,17 @@ export class RequestBudget {
   private stuckUseKeepsOut(n: number, now: number): boolean {
     const u = this.usage(now);
     const total = u.minute + u.unsentMinute + n;
-    if (total <= BUDGET_PER_MINUTE) return false;
+    // A close-out retry's own ceiling (CLOSEOUT_MINUTE_CAP, 60 of the shared 75 since decision 2 of 2026-11-17) is what refuses it on the minute.
+    if (total <= CLOSEOUT_MINUTE_CAP) return false;
     let stuck = 0;
     for (const x of this.sent) if (x.stuck && now - x.t < 60_000) stuck++;
     for (const r of this.open) if (r.stuckRetry) stuck += r.unsent();
-    return total - stuck <= BUDGET_PER_MINUTE && this.remaining() - u.unsentMinute - n >= P1_FLOOR;
+    return total - stuck <= CLOSEOUT_MINUTE_CAP && this.remaining() - u.unsentMinute - n >= P1_FLOOR;
   }
 
-  private refusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead = 0, minuteCap?: number): Refusal | null {
+  // `ceiling`: a lower ceiling on the shared minute that is not a stuck retry's (a close-out retry's CLOSEOUT_MINUTE_CAP); it never sets the
+  // stuck retries' holds.
+  private refusal(cls: BudgetClass, n: number, fiveSec: boolean, now: number, routineAhead = 0, minuteCap?: number, ceiling?: number): Refusal | null {
     // Item 5 (b): an ordinary stuck retry (capped) gives way while a close-out's retry waits for room; it looks again when that wait ends.
     // Neither early refusal below is one the retry's hold alone caused, so each clears that flag (statistics only; group 2, night build of
     // 2026-11-16, round 1: a stale flag counted these refusals into `retryHold.p2Refused`).
@@ -339,7 +382,7 @@ export class RequestBudget {
     // P2 leaves room, in the minute and in the 5 seconds, for a waiting capped retry (Michael's answer after group 1's rulings round 2).
     const holding = now < this.retryWaitUntil;
     const p2Cap = holding ? Math.min(BUDGET_PER_MINUTE - P1_KEEP, this.retryWaitRoom) : BUDGET_PER_MINUTE - P1_KEEP;
-    const cap = Math.min(cls === "P1" ? BUDGET_PER_MINUTE : p2Cap, minuteCap ?? Infinity);
+    const cap = Math.min(cls === "P1" ? BUDGET_PER_MINUTE : p2Cap, minuteCap ?? Infinity, ceiling ?? Infinity);
     const fiveCap = cls === "P2" && holding ? Math.min(BUDGET_PER_5S, this.retryWaitFive) : BUDGET_PER_5S;
     const at: number[] = [];
     let why: Refusal["why"] | null = null;
@@ -353,7 +396,7 @@ export class RequestBudget {
       why ??= "five";
       at.push(this.agedOutAt(u.five + u.unsentFive + n - fiveCap, 5_000, now, u.unsentFive));
     }
-    // A capped retry (an ordinary stuck retry, under its ceiling of 45) kept out by the minute or the 5 seconds: if the urgent work alone (P1,
+    // A capped retry (an ordinary stuck retry, under its ceiling, STUCK_RETRY_MINUTE_CAP) kept out by the minute or the 5 seconds: if the urgent work alone (P1,
     // sent and reserved) leaves it room in both, P2's use is what keeps it out, so P2 holds back for it until it looks again. If P1 alone already
     // fills either, holding P2 back would not help, and P2 keeps its share.
     const holdForRetry = cls === "P1" && minuteCap !== undefined && (minuteShort || fiveShort) && (!minuteShort || (cap === minuteCap && this.p1Use(now, 60_000) + n <= minuteCap)) && (!fiveShort || this.p1Use(now, 5_000, true) + n <= BUDGET_PER_5S);
@@ -376,7 +419,7 @@ export class RequestBudget {
       this.retryWaitRoom = minuteCap - n;
       this.retryWaitFive = BUDGET_PER_5S - n;
     }
-    return { ok: false, at: when, why };
+    return { ok: false, at: when, why, ...(left < floor ? { floorShort: true, floorAt: now + Math.ceil((floor - left) / REFILL_PER_MS) } : {}) };
   }
 
   // Statistics only: adds the time the hold was in force since it was last counted, up to `now` or the hold's end, whichever is first.
@@ -500,14 +543,44 @@ export class RequestBudget {
     else this.minute.sent[currentTag()]++;
   }
 
-  // True while a P2 try waits on its floor of 80 (entries give way then).
+  // Michael's ruling of 2026-11-17: until when entries give way to a stuck sale waiting for Alpaca's room (see STUCK_SALE_GIVE_WAY).
+  private stuckSaleWaitUntil = 0;
+  // What a give-way refusal is for, read once by the governor (group 2, round 1: one clock read, so the text and the counts agree).
+  // A stuck sale was refused (`refusal`) and will look again at `nextLookMs`. Only a refusal on the floor (Alpaca's room) holds entries back,
+  // until the earlier of the floor's own return (`floorAt`) and the next look, plus the margin.
+  noteStuckSaleWaiting(refusal: Refusal, nextLookMs: number, label: string): void {
+    if (!STUCK_SALE_GIVE_WAY.on || !refusal.floorShort) return;
+    const now = this.nowMs();
+    const until = Math.min(refusal.floorAt ?? refusal.at, nextLookMs) + STUCK_SALE_GIVE_WAY_MARGIN_MS;
+    if (until <= this.stuckSaleWaitUntil) return;
+    if (now >= this.stuckSaleWaitUntil) {
+      this.minute.stuckSaleHolds++;
+      this.log?.("stuck_sale_give_way", { label, untilInMs: until - now }); // Fly's log, once a spell
+    }
+    this.stuckSaleWaitUntil = until;
+  }
+  stuckSaleWaiting(): boolean {
+    return STUCK_SALE_GIVE_WAY.on && this.nowMs() < this.stuckSaleWaitUntil;
+  }
+  // Whether entries give way now, and to what (a stuck sale first); null: they do not.
+  givingWayReason(): "stuck sale" | "recheck" | null {
+    if (this.stuckSaleWaiting()) return "stuck sale";
+    return this.p2FloorWaiting() ? "recheck" : null;
+  }
+
+  // True while a P2 try waits on its floor of 80, or (Michael's ruling of 2026-11-17) a stuck sale waits for Alpaca's room: entries give way then.
   givingWay(): boolean {
+    return this.givingWayReason() !== null;
+  }
+
+  private p2FloorWaiting(): boolean {
     const now = this.nowMs();
     for (const [k, until] of this.floorWaits) if (until <= now) this.floorWaits.delete(k);
     return this.floorWaits.size > 0;
   }
-  noteGiveWayRefusal(): void {
+  noteGiveWayRefusal(reason: "stuck sale" | "recheck" | null = this.givingWayReason()): void {
     this.minute.givingWayRefusals++;
+    if (reason === "stuck sale") this.minute.stuckSaleEntriesRefused++;
   }
   // Group 1, round 3 of the redesign (decision 5 with change A: entries give way *while* a P2 try waits on its floor): a try whose next attempt
   // is scheduled later than GIVE_WAY_MAX_MS keeps its wait until then (`untilMs`, which its caller bounds). Only a wait already recorded (a

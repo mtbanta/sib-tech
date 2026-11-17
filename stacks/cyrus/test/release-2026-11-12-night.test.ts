@@ -2388,7 +2388,7 @@ for (const how of ["floor", "minute"] as const) {
     const { w, dd, id, box } = await unclearLookup();
     let filler: any = null;
     if (how === "floor") box.remaining = 20;
-    else filler = w.memory.budget!.tryReserve("P1", 60, { label: "other P1 work", fiveSec: false });
+    else filler = w.memory.budget!.tryReserve("P1", 75, { label: "other P1 work", fiveSec: false }); // the whole minute: 75 since Michael's decision 2 of 2026-11-17 (was 60)
     const placedAt = w.memory.freshStops.get(id)!.placedAt;
     let r: any = { recheckAt: w.sim.simMs + 100 };
     let syncs = 0;

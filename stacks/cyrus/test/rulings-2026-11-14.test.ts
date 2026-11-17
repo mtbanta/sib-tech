@@ -1,6 +1,6 @@
 // Michael's rulings of 2026-11-14 (night) on part 2 of the redesign, and his two answers after them, with the reviewers' probes of rulings
-// round 1 turned into tests: ordinary stuck retries stop at 45 of the budget's 60 a minute, so urgent work keeps room (group 1's finding 1,
-// group 2's B3); a remainder already being protected keeps its fresh stop only before any fresh stop was recorded for it (group 1's finding
+// round 1 turned into tests: ordinary stuck retries stop at 45 of the budget's 60 a minute (60 of 75 since Michael's decision 2 of
+// 2026-11-17), so urgent work keeps room (group 1's finding 1, group 2's B3); a remainder already being protected keeps its fresh stop only before any fresh stop was recorded for it (group 1's finding
 // 2); `asRemainder` is logged (group 2's B2); the "sold" resolution line's 2 minute window (group 2's note).
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -10,7 +10,7 @@ import { MemoryStore } from "../src/store.ts";
 import { ensureDay } from "../src/morning.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
 import { AlpacaError } from "../src/alpaca-trading.ts";
-import { RequestBudget, Reservation } from "../src/request-budget.ts";
+import { BUDGET_PER_5S, BUDGET_PER_MINUTE, P1_KEEP, RequestBudget, Reservation } from "../src/request-budget.ts";
 import { SimBroker } from "./sim-broker.ts";
 import { rig, settle, D } from "./rig.ts";
 import { FakeBot } from "./helpers.ts";
@@ -57,9 +57,11 @@ async function workerWorld() {
 }
 
 // Group 1's probe P8: S stuck with every sale refused (one-round retries of 10, under ruling 1); T has a timed-out fresh stop and no stop at
-// Alpaca, so its try needs 13. Before the 45 cap, T was never sold in 300 s; with it, T is sold within seconds.
-for (const delay of [30_000, 45_000]) {
-  test(`Michael's answer (45 for stuck retries): with another position stuck and every sale refused, a timed-out position's try (13) still gets room (it becomes due ${delay / 1000} s after the other got stuck)`, async () => {
+// Alpaca, so its try needs 13. Before the 45 cap, T was never sold in 300 s; with it, T is sold within seconds. Michael's decision 2 of
+// 2026-11-17: the cap is 60 of a shared 75, and S's retries (10 about every 5 s) reach their 60 by about 35 s, so T becomes due at 40 s
+// (was 30 s, when S had reached the old 45) or 45 s, each while S is at its most (checked).
+for (const delay of [40_000, 45_000]) {
+  test(`Michael's answer (60 of 75 for stuck retries, decision 2 of 2026-11-17; was 45 of 60): with another position stuck and every sale refused, a timed-out position's try (13) still gets room (it becomes due ${delay / 1000} s after the other got stuck)`, async () => {
     const { sim, r, wk, hold, drive } = await workerWorld();
     const S = await hold("QXA");
     const T = await hold("QXB");
@@ -76,6 +78,7 @@ for (const delay of [30_000, 45_000]) {
     mem.timedOutStops.set("cyrus-p-20261102-QXB-x-s1", T);
     mem.stuck.set(T, { symbol: "QXB", since: sim.simMs, nextAt: 0, delayMs: 0, alerted: true, escalated: false, lastTriedAt: sim.simMs, why: "x" });
     const tT = sim.simMs;
+    assert.ok(wk.budget.inUse().minute + 10 > STUCK_RETRY_MINUTE_CAP, `S's retries are at their most (a further one would pass the ${STUCK_RETRY_MINUTE_CAP}): ${wk.budget.inUse().minute} in the minute`);
     wk.loop.wake(T, sim.simMs, "protect");
     while (sim.simMs < tT + 60_000 && sim.heldQty("QXB") > 0) await drive(sim.simMs + 1_000);
     assert.equal(sim.heldQty("QXB"), 0, "T sold");
@@ -89,7 +92,7 @@ for (const delay of [30_000, 45_000]) {
 
 // Group 2's B3 and group 1's probe P10: S stuck with every sale refused; a second position's remainder gets a fresh stop whose answer is
 // unclear but which rests at Alpaca. Its lookup (urgent work) gets room: confirmed, never timed out, nothing sold, no mention for it.
-test("Michael's answer (45 for stuck retries): with another position stuck and every sale refused, an unclear fresh stop's lookup still gets room; confirmed, nothing of it sold, no 15 second limit", async () => {
+test("Michael's answer (60 of 75 for stuck retries, decision 2 of 2026-11-17; was 45 of 60): with another position stuck and every sale refused, an unclear fresh stop's lookup still gets room; confirmed, nothing of it sold, no 15 second limit", async () => {
   const { sim, r, wk, ev, hold, drive } = await workerWorld();
   const S = await hold("QXA");
   const U = await hold("QXU");
@@ -105,31 +108,40 @@ test("Michael's answer (45 for stuck retries): with another position stuck and e
     return realSell(x);
   };
   const t0 = sim.simMs;
-  await drive(t0 + 40_000); // S has reserved 40 of the minute (a fifth retry would pass its 45)
+  await drive(t0 + 40_000); // S has reserved 60 of the minute (a seventh retry would pass its 60; Michael's decision 2 of 2026-11-17, was 40 of 45)
   const tU = sim.simMs;
+  assert.ok(wk.budget.inUse().minute + 10 > STUCK_RETRY_MINUTE_CAP, `S's retries are at their most: ${wk.budget.inUse().minute} in the minute`);
+  // Group 2, round 1 of decision 2 (2026-11-17): the fresh stop is hidden from the routine order list, so it can only be confirmed by its
+  // budgeted lookup, which must win room while S's retries hold their 60 (before, the routine list confirmed it and no lookup ran).
+  const realList = sim.listOrders.bind(sim);
+  sim.listOrders = async (...a: any[]) => (await (realList as any)(...a)).filter((o: any) => !(o.symbol === "QXU" && String(o.clientOrderId).startsWith("cyrus-p-")));
   sim.partialTakeProfit(U, 2, 12.08);
   wk.loop.wake(U, sim.simMs, "protect");
   await drive(tU + 60_000);
   const uEv = (name: string) => ev.filter((x) => x.t >= tU && x.e === name && JSON.stringify(x.d ?? {}).includes("QXU"));
   assert.equal(uEv("fresh_stop_confirmed").length, 1, "confirmed by its lookup");
+  assert.notEqual((uEv("fresh_stop_confirmed")[0]!.d as any).by, "order list", `confirmed by the budgeted lookup, not the routine list: ${JSON.stringify(uEv("fresh_stop_confirmed")[0]!.d)}`);
+  assert.ok(wk.budget.peak.minute > STUCK_RETRY_MINUTE_CAP, `the lookup used the urgent room above the stuck retries' 60: peak ${wk.budget.peak.minute}`);
   assert.equal(uEv("fresh_stop_timeout").length, 0, "the 15 second limit never fired");
   assert.equal(sim.heldQty("QXU"), 3, "the remainder kept (its stop rests)");
   assert.ok(!r.bot.posts.some((p: any) => p.text.includes("QXU") && /not confirmed within 15 seconds/.test(p.text)), "no 15 second alert");
-  assert.ok(wk.budget.peak.minute <= 60);
+  assert.ok(wk.budget.peak.minute <= BUDGET_PER_MINUTE, `within the shared minute (75 since Michael's decision 2 of 2026-11-17, was 60): ${wk.budget.peak.minute}`);
   r.worker.stop?.();
 });
 
-test("Michael's answer: the cap is 45 of the 60", () => {
-  assert.equal(STUCK_RETRY_MINUTE_CAP, 45);
+// Michael's decision 2 of 2026-11-17: the cap is 60 of a shared 75 (was 45 of 60), so urgent work keeps its 15.
+test("Michael's answer, raised by his decision 2 of 2026-11-17: the cap is 60 of the 75", () => {
+  assert.equal(STUCK_RETRY_MINUTE_CAP, 60);
+  assert.equal(BUDGET_PER_MINUTE - STUCK_RETRY_MINUTE_CAP, 15, "urgent work keeps 15 of the minute, as before");
   let t = 0;
   const b = new RequestBudget({ now: () => t });
   const reserve = () => b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP, fiveSec: false });
   const held: Reservation[] = [];
-  for (let i = 0; i < 4; i++) held.push(reserve() as Reservation);
-  assert.ok(held.every((x) => x instanceof Reservation), "40 fit");
-  const fifth = reserve();
-  assert.ok(!(fifth instanceof Reservation) && fifth.why === "class", "a fifth (50) would pass 45");
-  assert.ok(b.tryReserve("P1", 13, { label: "timed-out stop try", fiveSec: false }) instanceof Reservation, "urgent work still fits (53 of 60)");
+  for (let i = 0; i < 6; i++) held.push(reserve() as Reservation);
+  assert.ok(held.every((x) => x instanceof Reservation), "60 fit");
+  const seventh = reserve();
+  assert.ok(!(seventh instanceof Reservation) && seventh.why === "class", "a seventh (70) would pass 60");
+  assert.ok(b.tryReserve("P1", 13, { label: "timed-out stop try", fiveSec: false }) instanceof Reservation, "urgent work still fits (73 of 75)");
 });
 
 // ---------------- the remainder rule, exactly Michael's answer ----------------
@@ -232,7 +244,7 @@ test("rulings round 1 (group 1, finding 2): a timed-out fresh stop's remainder i
   }
   w.sim.submitSell = realSubmit;
   w.memory.budget ??= new RequestBudget({ now: () => w.sim.simMs, remaining: () => 200 });
-  const other = w.memory.budget.tryReserve("P1", 60, { label: "other P1 work", fiveSec: false });
+  const other = w.memory.budget.tryReserve("P1", 75, { label: "other P1 work", fiveSec: false }); // the whole minute: 75 since Michael's decision 2 of 2026-11-17 (was 60)
   assert.ok(other instanceof Reservation);
   for (let i = 0; i < 9; i++) {
     w.sim.advance(2_000);
@@ -276,55 +288,77 @@ for (const [agoMs, line] of [[60_000, "sold"], [150_000, "no longer held"]] as c
 
 // ---------------- Michael's answer after group 1's rulings round 2: rechecks leave room for a waiting stuck retry ----------------
 
-test("Michael's answer (rechecks leave room): while a capped stuck retry waits and P2 is what keeps it out, P2 may draw only up to 35 of the minute; the retry gets in at 35", () => {
+// Michael's decision 2 of 2026-11-17: the retry's ceiling is 60 of a shared 75, so the hold's room in the minute (60 - 10 = 50) is above
+// P2's own share of 40: in the minute P2's share alone already leaves a waiting retry its room, and the hold no longer narrows P2 there.
+// P2 can keep the retry out only in the 5 seconds, where the hold still holds P2 to 15 - 10 = 5 (before: P2 held to 45 - 10 = 35 of the
+// minute, the retry getting in at 35).
+test("Michael's answer (rechecks leave room): while a capped stuck retry waits and P2 is what keeps it out, P2 may draw only up to 5 in the 5 seconds (in the minute its own 40 leave the retry room under 60); the retry gets in once the 5 seconds have room", () => {
   let t = 0;
-  const b = new RequestBudget({ now: () => t });
-  for (let i = 0; i < 38; i++) {
-    t = i * 1_000;
+  const b: any = new RequestBudget({ now: () => t });
+  const p2Send = () => {
     const r = b.tryReserve("P2", 1, { label: "list lag recheck", fiveSec: false }) as Reservation;
     assert.ok(r instanceof Reservation);
     r.charge("/v2/test");
     r.end();
+  };
+  for (let i = 0; i < 33; i++) {
+    t = i * 1_000;
+    p2Send();
   }
-  t = 38_000;
+  for (let i = 0; i < 6; i++) {
+    t = 36_000 + i * 800; // six of P2's 39 in the last 5 seconds
+    p2Send();
+  }
+  t = 40_100;
   assert.ok(b.roomFor("P2", 1, false).ok, "before any retry waits, P2 may go to 40");
   const retry = b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP });
-  assert.ok(!(retry instanceof Reservation) && retry.why === "class", "38 + 10 passes 45");
+  assert.ok(!(retry instanceof Reservation) && retry.why === "five", "39 + 10 fits the 60, but 6 + 10 passes the 15 in 5 seconds");
+  assert.equal(b.retryWaitRoom, STUCK_RETRY_MINUTE_CAP - 10);
+  assert.ok(b.retryWaitRoom >= BUDGET_PER_MINUTE - P1_KEEP, "the hold's room in the minute (50) is not below P2's share (40)");
+  assert.equal(b.retryWaitFive, BUDGET_PER_5S - 10);
   // The hold lasts until the retry looks again (when room may return), not only a moment: else P2 takes the room back meanwhile.
-  assert.ok((b as any).retryWaitUntil >= retry.at + 500 && retry.at - t > 3_000, `held until the retry's next look (${(b as any).retryWaitUntil - t} ms)`);
-  const p2 = b.tryReserve("P2", 1, { label: "list lag recheck", fiveSec: false });
-  assert.ok(!(p2 instanceof Reservation) && p2.why === "class", "P2 holds back above 35 while the retry waits");
-  t = 62_500; // the requests sent at 0, 1 and 2 s have aged out: 35 left
-  assert.equal(b.inUse().minute, 35);
-  assert.ok(b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP }) instanceof Reservation, "the retry gets in at 35");
+  assert.ok(b.retryWaitUntil >= retry.at + 500 && b.retryWaitUntil >= t + 2_500, `held until the retry's next look (${b.retryWaitUntil - t} ms)`);
+  const p2 = b.tryReserve("P2", 1, { label: "list lag recheck" });
+  assert.ok(!(p2 instanceof Reservation) && p2.why === "five", "P2 holds back above 5 in the 5 seconds while the retry waits");
+  assert.ok(b.roomFor("P2", 1, false).ok, "in the minute P2 still has its 40 while the retry waits");
+  t = 41_000; // the request sent at 36.0 s has left the 5 seconds: 5 left there
+  assert.equal(b.inUse().five, 5);
+  assert.ok(b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP }) instanceof Reservation, "the retry gets in at 5 in the 5 seconds");
 });
 
-test("Michael's answer (rechecks leave room): P2 keeps its share when holding back would not help (the stuck retries' own use fills their 45), and the hold lapses when the retry stops looking", () => {
+test("Michael's answer (rechecks leave room): P2 keeps its share when holding back would not help (the stuck retries' own use fills their 60), and the hold lapses when the retry stops looking", () => {
   let t = 0;
   const b: any = new RequestBudget({ now: () => t });
-  for (let i = 0; i < 4; i++) {
+  // Michael's decision 2 of 2026-11-17: six retries of 10 fill the stuck retries' 60 (was four filling 45).
+  for (let i = 0; i < 6; i++) {
     t = i * 6_000;
     const r = b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP, fiveSec: false }) as Reservation;
     for (let k = 0; k < 10; k++) r.charge("/v2/test");
     r.end();
   }
-  t = 24_000;
-  const fifth = b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP });
-  assert.ok(!(fifth instanceof Reservation), "its own 40 keep a fifth out");
+  t = 36_000;
+  const seventh = b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP });
+  assert.ok(!(seventh instanceof Reservation), "its own 60 keep a seventh out");
   assert.ok(b.retryWaitUntil <= t, "no hold on P2: it would not help");
-  // a retry kept out by P2 sets the hold, which lapses once the retry stops looking
-  const b2: any = new RequestBudget({ now: () => t });
+  // a retry kept out by P2 sets the hold, which lapses once the retry stops looking (since decision 2 P2 can keep it out only in the 5
+  // seconds: six P2 requests in the last 5 seconds)
   t = 0;
-  const p2 = b2.tryReserve("P2", 38, { label: "list lag recheck", fiveSec: false }) as Reservation;
-  for (let k = 0; k < 38; k++) p2.charge("/v2/test");
-  p2.end();
+  const b2: any = new RequestBudget({ now: () => t });
+  for (let i = 0; i < 6; i++) {
+    t = 36_000 + i * 800;
+    const p2 = b2.tryReserve("P2", 1, { label: "list lag recheck" }) as Reservation;
+    p2.charge("/v2/test");
+    p2.end();
+  }
+  t = 40_100;
   b2.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP });
   assert.ok(b2.retryWaitUntil > t, "held");
   t = b2.retryWaitUntil;
-  assert.ok(b2.roomFor("P2", 1, false).ok, "at its end P2 has room (its 38 have left the minute by then; the exact end is checked in the rulings round 3 test)");
+  assert.ok(b2.roomFor("P2", 7).ok, "at its end P2 has its 15 in the 5 seconds again (the exact end is checked in the rulings round 3 test)");
 });
 
-test("group 1, rulings round 2 (finding 2): a timed-out stop's try is not under the 45: it starts with 40 budgeted requests already in the minute", async () => {
+// Michael's decision 2 of 2026-11-17: the stuck retries' ceiling is 60 of the shared 75 (was 45 of 60), so the minute starts at 55 here.
+test("group 1, rulings round 2 (finding 2): a timed-out stop's try is not under the stuck retries' 60: it starts with 55 budgeted requests already in the minute", async () => {
   const w = syncWorld();
   await ensureDay({ store: w.store, broker: w.sim, now: w.now } as any, D);
   const dd = (await w.store.getDay(D))!;
@@ -337,14 +371,15 @@ test("group 1, rulings round 2 (finding 2): a timed-out stop's try is not under 
   w.memory.timedOutStops.set("cyrus-p-test-QXB", id);
   w.memory.stuck.set(id, { symbol: "QXB", since: w.sim.simMs - 30_000, nextAt: 0, delayMs: 0, alerted: true, escalated: false, lastTriedAt: w.sim.simMs - 30_000, why: "x" } as any);
   w.memory.budget = new RequestBudget({ now: () => w.sim.simMs, remaining: () => 200 });
-  for (let i = 0; i < 4; i++) {
-    const r = w.memory.budget.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP, fiveSec: false }) as Reservation;
-    for (let k = 0; k < 10; k++) r.charge("/v2/test");
+  for (let i = 0; i < 5; i++) {
+    const r = w.memory.budget.tryReserve("P1", 11, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP, fiveSec: false }) as Reservation;
+    for (let k = 0; k < 11; k++) r.charge("/v2/test");
     r.end();
   }
-  w.sim.advance(6_000); // out of the 5 seconds, still in the minute (40)
+  w.sim.advance(6_000); // out of the 5 seconds, still in the minute (55)
+  assert.equal(w.memory.budget.roomFor("P1", 10, false, 0, STUCK_RETRY_MINUTE_CAP).ok, false, "an ordinary stuck retry of 10 would be held (65 above its 60)");
   await syncOrders(w.risk, dd, { protect: true });
-  assert.deepEqual(w.sim.sellLog.filter((x: any) => x.symbol === "QXB").map((x: any) => x.qty), [5], "tried and sold (53 of 60; an ordinary retry would be held to 45)");
+  assert.deepEqual(w.sim.sellLog.filter((x: any) => x.symbol === "QXB").map((x: any) => x.qty), [5], "tried and sold (55 + 13 = 68 of 75; an ordinary retry would be held to 60)");
 });
 
 // Group 1's probe P13d, rulings round 2: the order list keeps lagging (list-lag rechecks, P2, chained 30 s windows through the loop) from 90 s
@@ -412,10 +447,12 @@ test("Michael's answer (rechecks leave room): with the order list lagging throug
   r.worker.stop?.();
 });
 
-// Group 2, rulings round 3 (finding 2): the hold from below and its length. While a waiting stuck retry holds P2 back, P2 is granted up to 35
-// of the minute and 5 in the 5 seconds (one above each is refused); the hold is set to exactly those values when a retry of 10 under its 45
-// is refused with P2 in the way, and it ends at the later of 2.5 s after the refusal and the time room may return plus 0.5 s.
-test("rulings round 3: a refused stuck retry sets the hold to 35 of the minute and 5 in the 5 seconds, ending at the later of 2.5 s and its room time plus 0.5 s", () => {
+// Group 2, rulings round 3 (finding 2): the hold from below and its length. While a waiting stuck retry holds P2 back, P2 is granted up to the
+// retry's ceiling less its size in the minute and 5 in the 5 seconds (one above each is refused); the hold is set to exactly those values
+// when a retry of 10 under its ceiling is refused with P2 in the way, and it ends at the later of 2.5 s after the refusal and the time room
+// may return plus 0.5 s. Michael's decision 2 of 2026-11-17: the ceiling is 60 (was 45), so the minute's value is 50 (was 35), above P2's own
+// share of 40; only the 5 seconds' value narrows P2.
+test("rulings round 3: a refused stuck retry sets the hold to 50 of the minute (above P2's 40) and 5 in the 5 seconds, ending at the later of 2.5 s and its room time plus 0.5 s", () => {
   let t = 0;
   const b: any = new RequestBudget({ now: () => t });
   for (let i = 0; i < 6; i++) {
@@ -427,7 +464,7 @@ test("rulings round 3: a refused stuck retry sets the hold to 35 of the minute a
   t = 40_100;
   const retry = b.tryReserve("P1", 10, { label: "stuck retry", minuteCap: STUCK_RETRY_MINUTE_CAP });
   assert.ok(!(retry instanceof Reservation) && retry.why === "five", "6 + 10 passes 15 in the 5 seconds");
-  assert.equal(b.retryWaitRoom, 35);
+  assert.equal(b.retryWaitRoom, 50);
   assert.equal(b.retryWaitFive, 5);
   assert.equal(b.retryWaitUntil, Math.max(t + 2_500, retry.at + 500), "the hold's end");
   const p2 = b.tryReserve("P2", 1, { label: "list lag recheck" });

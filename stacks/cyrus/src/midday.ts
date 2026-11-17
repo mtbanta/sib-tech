@@ -17,7 +17,8 @@ export const MIDDAY_NOT_AFTER_MINUTES_BEFORE_CLOSE = 5;
 // within 60 Alpaca requests a minute (like the loss stop's retry), never below the reserve of 80"). Since the redesign of 2026-11-14
 // (part 1, Michael's approval with his change A) a retry is class P1 of the shared request budget (request-budget.ts): it reserves its
 // estimated cost (the last try's measured cost, at most CLOSEOUT_RETRY_MOST) against the budget's minute only (a close-out retry cannot
-// fit 15 in 5 seconds), down to 20 of Alpaca's remaining.
+// fit 15 in 5 seconds), down to 20 of Alpaca's remaining. Since Michael's decision 2 of 2026-11-17 the shared minute is 75, but a close-out
+// retry still starts only within 60 of it (CLOSEOUT_MINUTE_CAP in request-budget.ts), as this ruling says.
 export const MIDDAY_RETRY_MS = 20_000;
 export const CLOSEOUT_RETRY_MOST = 60;
 // At most this many positions a retry (builder's choice, like the loss stop's retry cap of 15 requests a check): one round with 40
