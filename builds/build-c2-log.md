@@ -6791,3 +6791,7 @@ Round 4's B1 fixed (probe G: 0 answers at every ask, last bracketed sale 8.2 to 
 ### Michael's change of direction (2026-11-16, about 6:15 PM, in the session), saved verbatim
 
 > Change of direction:1. Tonight's release ships without side-by-side sales: selling stays one at a time as on v24. Everything else approved goes in (plus 1 cent entries, the 1-second pass, fewer reads, the four stuck-retry items, lighter flatten polling, the deploy-approval reply). Review both groups; deploy by 7:30 AM only if both pass.2. In parallel, simulate one simple rule instead of side-by-side sales: while any position lacks a confirmed stop, new entries stop and low-priority work gives way, until every position is protected or sold. Compare against v24 and against the side-by-side build, for 10 lost exits in a busy load window and for a close-out shortly after: time from lost exits to each sale, rate-limit answers, entries lost. If it is clearly better with 0 rate-limit answers, add it to tonight's release with its own review; otherwise bring me the results tomorrow.Never print any token or key.
+
+**Michael's pass rule for the simulations and reviews (2026-11-16, about 6:20 PM, in the session), saved verbatim:**
+
+> Pass rule for the simulations and reviews: no rate-limit answer may hit a sale, cancel or close-out step, and none may delay any position's sale. Up to 2 isolated rate-limit answers per scenario are acceptable on low-priority requests (entries, rechecks, reads), each recovered within a second and never two in a row. Design for zero.
