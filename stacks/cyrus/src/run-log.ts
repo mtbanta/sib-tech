@@ -8,6 +8,10 @@ export const STORED_INFO_EVENTS = new Set([
   // The speed release (group 2, round 1): a sale giving way (a remainder sale to the daily loss stop's sale) is stored, so the reviews can
   // count it.
   "liquidation_yielded",
+  // The floor of 20 (Michael's ruling of 2026-11-16 evening): one entry's own sale that waited for room before a round, and one that went
+  // ahead at the 30 s bound (logging only).
+  "sale_room_waited",
+  "sale_room_wait_over",
   "limits_decision",
   "stream_started",
   "worker_started",

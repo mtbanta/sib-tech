@@ -40,7 +40,7 @@ import { listDaySliced, summaryWindows } from "./summary-listing.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
 import { PAPER_ONLY } from "./discord.ts";
 import { CLOSEOUT_RETRY_MOST, MIDDAY_NOT_FLAT_ALERT_AFTER_MS, MIDDAY_NOTE_PHASE, MIDDAY_PHASE, MIDDAY_RETRY_MS, blockedNext, lossPast, middayFlat, middayTimes, readHold, readPause, resumedByText, retrySymbols, startupAction, updatePause } from "./midday.ts";
-import { Reservation, RequestBudget, withReservation } from "./request-budget.ts";
+import { P1_FLOOR, Reservation, RequestBudget, withReservation } from "./request-budget.ts";
 import { inRequestScope, outsideScope } from "./request-scope.ts";
 import { ProtectionLoop, type WakeKind } from "./protection.ts";
 import type { PingKind } from "./heartbeat.ts";
@@ -369,7 +369,11 @@ export class Worker {
     this.liquidator = new Liquidator({ broker: deps.broker, gate: this.sellGate, now: deps.now, sleep: deps.sleep, log: (e, data) => deps.log?.("info", e, data), waitEvent: (symbols, ms) => this.waitEvent(symbols, ms), ownSalesMayRun: () => {
       const s = this.sessionForSync;
       return !s || this.protectNow(s.closeAt);
-    } });
+    },
+      // The floor of 20 (Michael's ruling of 2026-11-16 evening): one entry's own sale starts each round only while Alpaca's remaining
+      // requests, less the room budgeted tries hold unsent and the most that round can send, stay at or above the urgent floor of 20.
+      saleRoom: (most) => deps.governor.budget() - this.budget.inUse().reservedUnsent - most >= P1_FLOOR,
+    });
     // The load window's 5 second cancels are part of entering (tagged as entries for the shared request budget's statistics).
     this.entryExpiry = new EntryExpiry({ cancelOrder: (id) => inRequestScope({ tag: "entry" }, () => deps.broker.cancelOrder(id)), wasFilled: (id) => this.orderHandler?.wasFilled(id) ?? false, log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime(), ...(deps.setTimer ? { setTimer: deps.setTimer } : {}) });
     this.commands = new CommandProcessor({

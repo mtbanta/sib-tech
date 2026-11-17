@@ -315,6 +315,47 @@ export interface LiquidatorDeps {
   // close-out or the afternoon close-out owns selling: no selling action"): the worker's own stand-aside rule (false from the close-out
   // time, and while a close-out, mid-day or carried step owns selling), asked when a one-entry cleanup sale's turn comes.
   ownSalesMayRun?: () => boolean;
+  // Michael's ruling of 2026-11-16 evening (the floor of 20, decision 4 changed): may one entry's own sale (`ownEntryOnly`) start its next
+  // round now? `most`: the most that round can send (`ownSaleRoundMost`). The worker answers from Alpaca's remaining requests (the
+  // governor's estimate) less the room budgeted tries hold unsent less `most`, at or above the urgent floor of 20. Without it, every round
+  // goes ahead at once, as before.
+  saleRoom?: (most: number) => boolean;
+}
+
+// The floor of 20 (Michael's ruling of 2026-11-16 evening): one entry's own sale (a missing-exit sale, its retries, a remainder sale, the
+// fast sale) waits before each round, sending nothing, while `saleRoom` says no: 0.25 s doubling to 2 s, and at most SALE_ROOM_WAIT_MAX_MS
+// a round, after which it goes ahead whatever the estimate says (as the queue did before). A sale of the whole account asked meanwhile ends
+// the wait at once, and the waiting sale stands aside (that sale sells these shares). Sales of the whole account never wait.
+export const SALE_ROOM_WAIT_MAX_MS = 30_000;
+
+// The most one round of a liquidation can send, from the steps of `run`: the positions (1), the open orders (`openPages`), any cancels (one
+// each), the wait's looks (the open orders and the positions each time: once when nothing was cancelled and nothing is waited for, else
+// every look the wait can make up to `waitCancelMs`, plus one for each early wake), the positions again (1), the sell gate's read of the open
+// orders and the positions, and the sell (1); the last round also its last look at the positions (counted by the caller). The Alpaca
+// client's own retries of a failed request are not in it.
+export function ownSaleRoundMost(o: Pick<LiquidateOptions, "cancelIds" | "waitCancelMs" | "waitForAlpacaCancel">, openPages = 1): number {
+  const pages = Number.isFinite(openPages) && openPages > 1 ? Math.ceil(openPages) : 1;
+  const look = pages + 1; // the open orders, then the positions
+  const cancels = new Set(o.cancelIds ?? []).size;
+  let looks = 1;
+  if (o.waitForAlpacaCancel === true || cancels > 0) {
+    // As the wait in `run`: half a second blind after cancels (a look before it and one after), then looks after pauses of 0.25, 0.4, 0.6,
+    // then 0.8 s until `waitCancelMs` has passed, and at most MAX_EARLY_WAKES pauses ended early by a live update (each can add a look).
+    const waitMs = o.waitCancelMs ?? 6_000;
+    let waited = 0;
+    looks = 0;
+    if (cancels > 0) {
+      looks++;
+      waited += 500;
+    }
+    for (let polls = 0; ; polls++) {
+      looks++;
+      if (waited >= waitMs) break;
+      waited += [250, 400, 600, 800][Math.min(polls, 3)]!;
+    }
+    looks += MAX_EARLY_WAKES;
+  }
+  return 1 + pages + cancels + looks * look + 1 + look + 1;
 }
 
 // At most MAX_EARLY_WAKES early wake-ups in one liquidation, so a burst of updates cannot turn the waits into a run of extra looks (5
@@ -325,6 +366,10 @@ export class Liquidator {
   private readonly sleep: (ms: number) => Promise<void>;
   private chain: Promise<unknown> = Promise.resolve();
   private running = 0;
+  // The floor of 20: the pages of open orders the last read here returned (each page is one request), for `ownSaleRoundMost`; and the
+  // sales waiting for room, woken the moment a sale of the whole account is asked (`flatten` wakes them).
+  private openPages = 1;
+  private readonly floorWaiters = new Set<() => void>();
   // Priority sales (the daily loss stop) asked for and not finished yet.
   private priorityPending = 0;
   constructor(deps: LiquidatorDeps) {
@@ -359,6 +404,8 @@ export class Liquidator {
     this.running++;
     const other = !o.ownEntryOnly;
     if (other) this.runningOthers++;
+    // The floor of 20: one entry's own sale waiting for room wakes now, and stands aside (this sale sells its shares).
+    if (other) for (const wake of [...this.floorWaiters]) wake();
     if (o.priority) this.priorityPending++;
     const run = this.chain.then(() => this.run(o));
     this.chain = run.catch(() => undefined);
@@ -376,8 +423,22 @@ export class Liquidator {
 
   private async openOrders(): Promise<Order[]> {
     const listed = await this.d.broker.listOrdersPaged("open", FAR_PAST, 5);
+    this.openPages = Number.isFinite(listed.pages) && listed.pages > 0 ? listed.pages : 1;
     if (!listed.complete) throw new Error("the list of open orders is longer than I can read");
     return listed.orders;
+  }
+
+  // The floor of 20: a wait of `ms` (sending nothing), or less: it ends at once when a sale of the whole account is asked. No polling: the
+  // asking side wakes it.
+  private floorWait(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const wake = (): void => {
+        if (!this.floorWaiters.delete(wake)) return;
+        resolve();
+      };
+      this.floorWaiters.add(wake);
+      void this.sleep(ms).then(wake);
+    });
   }
 
   private async run(o: LiquidateOptions): Promise<LiquidateResult> {
@@ -475,6 +536,34 @@ export class Liquidator {
     for (let round = 1; round <= rounds; round++) {
       result.lastLookOk = false; // set true below only by this round's successful look (reported only)
       if (yieldNow()) return yielded();
+      // The floor of 20 (Michael's ruling of 2026-11-16 evening): one entry's own sale waits for room above the urgent floor before each
+      // round (see SALE_ROOM_WAIT_MAX_MS). If a sale of the whole account is asked while it waits, it stands aside at once.
+      if (o.ownEntryOnly && this.d.saleRoom) {
+        const most = ownSaleRoundMost(o, this.openPages) + (round >= rounds ? 1 : 0);
+        let wait = 250;
+        let waited = 0;
+        while (this.runningOthers === 0 && !this.d.saleRoom(most)) {
+          if (waited >= SALE_ROOM_WAIT_MAX_MS) {
+            this.d.log?.("sale_room_wait_over", { reason: o.reason, only: o.only ?? null, round, waitedMs: waited });
+            break;
+          }
+          await this.floorWait(wait);
+          // A turn for other work too (a test's pause can return at once).
+          await new Promise<void>((r) => setImmediate(r));
+          waited += wait;
+          wait = Math.min(wait * 2, 2_000);
+        }
+        if (waited > 0) this.d.log?.("sale_room_waited", { reason: o.reason, only: o.only ?? null, round, waitedMs: waited });
+        if (waited > 0 && this.runningOthers > 0) {
+          result.yielded = true;
+          result.stoodAside = "whole account";
+          result.flat = false;
+          result.errors.push("stood aside: a sale of the whole account was asked for and sells these shares");
+          this.d.log?.("liquidation_stood_aside", { reason: o.reason, only: o.only ?? null, for: "whole account", round });
+          return done();
+        }
+        if (yieldNow()) return yielded();
+      }
       // Nothing is sent while the market is closed: a market sell then queues for the next open (and cancelling the
       // exits first would leave the position bare overnight). If the clock cannot be read, carry on.
       const clock = await this.d.broker.getClock().catch(() => null);
