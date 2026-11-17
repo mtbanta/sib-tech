@@ -134,7 +134,7 @@ test("the retry keeps inside its budget of 60 requests a minute, with 40 positio
   let worstCheck = 0;
   for (let i = 0; i + 12 < marks.length; i++) worst = Math.max(worst, marks[i + 12]! - marks[i]!); // 12 checks = 60 seconds
   for (let i = 0; i + 1 < marks.length; i++) worstCheck = Math.max(worstCheck, marks[i + 1]! - marks[i]!);
-  assert.ok(worst <= BUDGET_PER_MINUTE, `at most ${BUDGET_PER_MINUTE} in any minute (was ${worst})`);
+  assert.ok(worst <= 60, `at most 60 in any minute, Michael's ruling of 2026-11-09 kept within the shared 75 (RULED_MINUTE_CAP) (was ${worst})`);
   assert.ok(worstCheck <= LOSS_STOP_RETRY_PER_CHECK, `at most ${LOSS_STOP_RETRY_PER_CHECK} in one check, spread over the minute (was ${worstCheck})`);
   const tried = new Set(p.broker.calls.filter((c) => c.fn === "submitSell").map((c) => (c.args[0] as { symbol: string }).symbol));
   assert.equal(tried.size, 40, "every symbol was tried");

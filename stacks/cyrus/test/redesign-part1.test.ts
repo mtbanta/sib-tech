@@ -58,7 +58,8 @@ test("part 1: the minute and the 5 seconds count what was sent plus what running
   assert.ok(granted(b.tryReserve("P1", 11, { label: "g" })));
 });
 
-test("part 1: P2 may draw only while it leaves 20 of the minute for P1 (decision 2); P1 may use the whole minute", () => {
+// Michael's decision 2 of 2026-11-17: P1_KEEP is 35 of a shared 75 (was 20 of 60), so P2 still stops at 40.
+test("part 1: P2 may draw only while it leaves P1_KEEP of the minute for P1 (decision 2; 35 of 75 since 2026-11-17, was 20 of 60); P1 may use the whole minute", () => {
   let t = 0;
   const b = new RequestBudget({ now: () => t });
   for (let i = 0; i < 4; i++) {
@@ -69,9 +70,9 @@ test("part 1: P2 may draw only while it leaves 20 of the minute for P1 (decision
     t += 5_000;
   }
   const p2 = b.tryReserve("P2", 1, { label: "recheck" });
-  assert.ok(!granted(p2) && p2.why === "class", "40 used: P2 stops (20 kept for P1)");
+  assert.ok(!granted(p2) && p2.why === "class", "40 used: P2 stops (35 kept for P1 since 2026-11-17, was 20)");
   const p1 = b.tryReserve("P1", 15, { label: "stuck" });
-  assert.ok(granted(p1), "P1 still has its 20");
+  assert.ok(granted(p1), "P1 still has its share");
 });
 
 // Michael's decision 2 of 2026-11-17 (the shared minute 75) with his ruling of 2026-11-09 for close-outs ("Keep trying every 20 seconds, but
