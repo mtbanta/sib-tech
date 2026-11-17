@@ -29,7 +29,7 @@ export type BudgetClass = "P1" | "P2";
 // (shared budget 75)". So the shared minute is 75 (60 until then): ordinary stuck retries stop at 60 of it (STUCK_RETRY_MINUTE_CAP in risk.ts),
 // urgent P1 work (unclear fresh-stop lookups, the 15 second limit's sale, timed-out stop checks and tries) keeps the last 15, and P2 keeps
 // its share of 40. Close-out retries and the loss stop's re-sells keep their own 60 (RULED_MINUTE_CAP, below), so they never draw on the 15;
-// a close-out still gets up to 60 because stuck retries stand aside while a close-out owns selling (P1_KEEP is 35, was 20, so 75 - 35 = 40 as before). The 15 in any 5 seconds is unchanged.
+// a close-out still gets up to 60 because stuck retries stand aside while a regular, mid-day or afternoon close-out owns selling (not between a carried position's tries) (P1_KEEP is 35, was 20, so 75 - 35 = 40 as before). The 15 in any 5 seconds is unchanged.
 export const BUDGET_PER_MINUTE = 75;
 export const BUDGET_PER_5S = 15;
 export const P1_KEEP = 35;
@@ -38,7 +38,8 @@ export const P1_KEEP = 35;
 // while the shared minute's use plus its own stays at or below 60, though the minute is now 75 (decision 2 of 2026-11-17). Without this, a
 // close-out retry may start in the 15 above 60 and its unreserved extra requests (a try is never stopped halfway) reached 104 in 60 s in the
 // mid-day test, and the loss stop's re-sells reached 52 in a minute in the round 8 test where they had reached 39 (group 2, round 1).
-// Stuck retries stand aside while a close-out owns selling, so the two do not compete for the 60. Refused between 60 and 75 it counts as
+// Stuck retries stand aside while a regular, mid-day or afternoon close-out owns selling, so those do not compete for the 60 (between a
+// carried position's tries they can). Refused between 60 and 75 it counts as
 // `refused.class` (within the minute, above its own share), not `minute`.
 export const RULED_MINUTE_CAP = 60;
 export const CLOSEOUT_MINUTE_CAP = RULED_MINUTE_CAP;
