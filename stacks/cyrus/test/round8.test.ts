@@ -115,7 +115,8 @@ test("the redesign of 2026-11-14 (change A): the retry may spend below the reser
   assert.equal(low.broker.count("listPositions") + low.sells(), 0, "below the floor of 20 after the try: nothing sent");
 });
 
-test("the retry keeps inside its budget of 60 requests a minute, with 40 positions all refused, and every symbol gets its turn", async () => {
+// Michael's answer of 2026-11-17 (about 9:30 AM, "Free to 75"): the loss stop's re-sells may use the whole shared 75 (60 before that day).
+test("the retry keeps inside the shared budget of 75 requests a minute (60 before 2026-11-17), with 40 positions all refused, and every symbol gets its turn", async () => {
   const syms = Array.from({ length: 40 }, (_, i) => `S${String(i).padStart(2, "0")}`);
   const p = await afterLossStop(syms);
   p.broker.onSell = async () => { throw new AlpacaError("sell refused (test)", 403); };
@@ -134,7 +135,7 @@ test("the retry keeps inside its budget of 60 requests a minute, with 40 positio
   let worstCheck = 0;
   for (let i = 0; i + 12 < marks.length; i++) worst = Math.max(worst, marks[i + 12]! - marks[i]!); // 12 checks = 60 seconds
   for (let i = 0; i + 1 < marks.length; i++) worstCheck = Math.max(worstCheck, marks[i + 1]! - marks[i]!);
-  assert.ok(worst <= 60, `at most 60 in any minute, Michael's ruling of 2026-11-09 kept within the shared 75 (RULED_MINUTE_CAP) (was ${worst})`);
+  assert.ok(worst <= BUDGET_PER_MINUTE, `at most ${BUDGET_PER_MINUTE} in any minute (was ${worst})`);
   assert.ok(worstCheck <= LOSS_STOP_RETRY_PER_CHECK, `at most ${LOSS_STOP_RETRY_PER_CHECK} in one check, spread over the minute (was ${worstCheck})`);
   const tried = new Set(p.broker.calls.filter((c) => c.fn === "submitSell").map((c) => (c.args[0] as { symbol: string }).symbol));
   assert.equal(tried.size, 40, "every symbol was tried");
@@ -333,13 +334,13 @@ test("the daily summary and the fee code say the paper account is charged regula
   assert.ok(!/charges none/.test(src), "the fee code's comment no longer says paper charges none");
 });
 
-// Michael's decision 2 of 2026-11-17 made the shared minute 75; his ruling of 2026-11-09 ("within 60 Alpaca requests a minute (like the
-// loss stop's retry)") keeps the loss stop's re-sell within 60 of it (RULED_MINUTE_CAP; group 1, rounds 1 and 2). With 50 of the minute
-// already used by other urgent work, a re-sell check (it reserves 15) would pass 60, so it sends nothing; with 45 used it goes (60).
-test("decision 2 of 2026-11-17: the loss stop's re-sell keeps within 60 of the shared 75: with 50 already in the minute it sends nothing, with 45 it goes", async () => {
+// Michael's answer of 2026-11-17 (about 9:30 AM), asked whether the loss stop's re-sells stay at 60 or may use the shared 75: "Free to 75".
+// So with 55 of the minute already used by other urgent work a re-sell check (it reserves 15) still goes (70, above 60, within 75), unlike a
+// close-out retry (held to RULED_MINUTE_CAP); with 61 used it would pass 75, so it sends nothing.
+test("Michael's answer of 2026-11-17 (Free to 75): the loss stop's re-sell may use the whole shared 75: with 55 already in the minute it goes, with 61 it sends nothing", async () => {
   assert.equal(RULED_MINUTE_CAP, 60);
   assert.equal(BUDGET_PER_MINUTE, 75);
-  for (const [used, goes] of [[50, false], [45, true]] as const) {
+  for (const [used, goes] of [[55, true], [61, false]] as const) {
     const p = await afterLossStop(["AAA"]);
     p.mem.budget = new RequestBudget({ now: () => p.clock.t.getTime(), remaining: () => 200 });
     const other = p.mem.budget.tryReserve("P1", used, { label: "other urgent work", fiveSec: false }) as Reservation;
@@ -349,7 +350,7 @@ test("decision 2 of 2026-11-17: the loss stop's re-sell keeps within 60 of the s
     p.step(6); // out of the 5 seconds, still in the minute
     await p.check();
     const sent = p.broker.count("listPositions") + p.sells();
-    if (goes) assert.ok(sent > 0, `with ${used} used: ${used} + ${LOSS_STOP_RETRY_PER_CHECK} = ${used + LOSS_STOP_RETRY_PER_CHECK}, within 60, so it goes`);
-    else assert.equal(sent, 0, `with ${used} used: ${used} + ${LOSS_STOP_RETRY_PER_CHECK} would pass 60 (though within 75), so nothing is sent`);
+    if (goes) assert.ok(sent > 0, `with ${used} used: ${used} + ${LOSS_STOP_RETRY_PER_CHECK} = ${used + LOSS_STOP_RETRY_PER_CHECK}, above 60 but within 75, so it goes`);
+    else assert.equal(sent, 0, `with ${used} used: ${used} + ${LOSS_STOP_RETRY_PER_CHECK} would pass 75, so nothing is sent`);
   }
 });
