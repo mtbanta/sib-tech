@@ -319,8 +319,10 @@ export interface LiquidatorDeps {
 // some symbols), an order already pending cancel at Alpaca is never cancelled again, and an order this liquidator cancelled in the last
 // CANCEL_MEMORY_MS is not cancelled again while its result is awaited: the open list each round (which live updates bring up to date), and,
 // if it still shows the order working CANCEL_RESULT_WAIT_MS after the cancel, one lookup by its id. Only if that lookup shows it still working
-// (the cancel refused or lost) is the cancel sent again: at most CANCEL_RESENDS_MAX times an order, the wait doubling each time (2, 4, then
-// 8 s), and at most CANCEL_LOOKUPS_MAX lookups an order. "Cancel every order" is sent in round 1 as before; in a later round only for orders
+// (the cancel refused or lost) is the cancel sent again: the wait doubling each time (2, 4, then 8 s), at most 2 re-sends
+// (CANCEL_RESENDS_MAX) and 3 lookups (CANCEL_LOOKUPS_MAX) an order within the 60 s cancel memory, which runs from its last re-send. After
+// that an order still shown working is treated as new and the cycle repeats, so a cancel Alpaca keeps refusing costs about 3 cancels and 3
+// lookups a minute at most (measured in a test: a cycle every 78 s). "Cancel every order" is sent in round 1 as before; in a later round only for orders
 // not yet asked, or, for shares held by orders the list does not show, on the same bounded schedule. On 2026-11-16 (simulator), a `flatten`
 // whose second round began before Alpaca's 8 s cancels had finished re-sent 81 single cancels for orders already pending cancel.
 export const CANCEL_MEMORY_MS = 60_000;

@@ -127,6 +127,54 @@ test("night build, item 1: a cancel Alpaca lost is looked up once after 2 s and 
   assert.equal(w.sim.oversellAttempts, 0, "the stop still holding its shares: never sold past it");
 });
 
+// Group 2, night build round 1 (B4): the bound holds within the 60 s cancel memory only. After it, an order still shown working is
+// treated as new and the cycle repeats, so a cancel Alpaca keeps refusing costs about 3 cancels and 3 lookups a minute.
+test("night build, item 1: an order that always stays working, over more than 70 s of close-out retries: at most 3 cancels and 3 lookups in any 60 s, and the cycle repeats after the memory", async () => {
+  const w = await world(2, 0, 200);
+  const lost = w.legIds[1]!;
+  const cancelsAt: number[] = [];
+  const lookupsAt: number[] = [];
+  const realCancel = w.sim.cancelOrder;
+  w.sim.cancelOrder = async (id: string) => {
+    if (id === lost) {
+      cancelsAt.push(w.sim.simMs);
+      return; // refused every time: it stays working
+    }
+    return realCancel(id);
+  };
+  const realLookup = w.sim.getOrderById;
+  w.sim.getOrderById = async (id: string) => {
+    if (id === lost) lookupsAt.push(w.sim.simMs);
+    return realLookup(id);
+  };
+  const syms = ["QAA", "QAB"];
+  const t0 = w.sim.simMs;
+  const end = t0 + 150_000;
+  // The close-out's retries, one liquidation after another, as the worker sends them while a position is not flat.
+  for (let n = 0; n < 40 && w.sim.simMs < end; n++) {
+    let done = false;
+    const p = w.liq.flatten({ reason: "close-out", tradeDate: D, only: syms, maxRounds: 4 }).finally(() => (done = true));
+    // Moves the clock until this liquidation ends (at most 60 s each), so it is never awaited with the clock stopped.
+    const cap = w.sim.simMs + 60_000;
+    while (!done && w.sim.simMs < cap) await w.drive(w.sim.simMs + 500);
+    assert.ok(done, "each liquidation ends");
+    await p;
+    await w.drive(w.sim.simMs + 1_000); // the worker's retries are about a second or more apart
+  }
+  const inAny60 = (ts: number[]) => Math.max(0, ...ts.map((a) => ts.filter((b) => b >= a && b < a + 60_000).length));
+  const lastAt = Math.max(...cancelsAt, ...lookupsAt);
+  assert.ok(lastAt - t0 > 70_000, `activity past 70 s (${lastAt - t0} ms)`);
+  assert.ok(inAny60(cancelsAt) <= 1 + CANCEL_RESENDS_MAX, `cancels in any 60 s: ${inAny60(cancelsAt)} (${cancelsAt.map((t) => t - t0).join(", ")})`);
+  assert.ok(inAny60(lookupsAt) <= CANCEL_LOOKUPS_MAX, `lookups in any 60 s: ${inAny60(lookupsAt)} (${lookupsAt.map((t) => t - t0).join(", ")})`);
+  assert.ok(cancelsAt.length > 1 + CANCEL_RESENDS_MAX, `the cycle repeats after the memory (${cancelsAt.length} cancels)`);
+  const minutes = Math.ceil((w.sim.simMs - t0) / 60_000);
+  assert.ok(cancelsAt.length <= (1 + CANCEL_RESENDS_MAX) * minutes, `about 3 cancels a minute: ${cancelsAt.length} in ${minutes} minutes`);
+  assert.ok(lookupsAt.length <= CANCEL_LOOKUPS_MAX * minutes, `about 3 lookups a minute: ${lookupsAt.length} in ${minutes} minutes`);
+  assert.equal(w.events.filter((x) => x.e === "cancel_not_confirmed").length, Math.floor(lookupsAt.length / CANCEL_LOOKUPS_MAX), "one a cycle, after its third lookup");
+  assert.equal(w.sim.oversellAttempts, 0);
+  // Measured when written: cancels at 0.05, 7.6, 15.15 s, then 78.15, 85.7, 94.55 s (the memory runs from the last re-send).
+});
+
 test("night build, item 1: a round where 20ba5bd would have cancelled again keeps its timing (the blind half second, then the same looks) without the cancel: with 8 s cancels the sale goes out within 0.1 s of the exits ending, as on 20ba5bd", async () => {
   const w = await world(5, 0, 8_000);
   const sold: number[] = [];
