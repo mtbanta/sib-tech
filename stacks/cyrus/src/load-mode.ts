@@ -8,8 +8,9 @@
 //   - no entry before the load window, which runs from 15 minutes after the open (8:45 AM Central) to the mid-day pause (10:30 AM
 //     Central; Michael's decision of 2026-11-10, before 9:00), so the mid-day close-out runs with the window's positions open;
 //   - in the window the placeholder churns (release B, Michael's approval of 2026-11-04, changed by the speed release of 2026-11-05):
-//     any new print is a signal once 1 second has passed since that name's last signal; every entry is 1 share, a LIMIT buy at or
-//     below the price seen (the print rounded down to the cent), with its take-profit LOAD_TAKE_PROFIT_CENTS above and its stop
+//     any new print is a signal once 1 second has passed since that name's last signal; every entry is 1 share, a LIMIT buy at the
+//     price seen rounded down to the cent plus 1 cent (Michael's ruling 3 of 2026-11-16, LOAD_ENTRY_ABOVE_CENTS; before: at or below
+//     the price seen), with its take-profit LOAD_TAKE_PROFIT_CENTS above and its stop
 //     LOAD_STOP_CENTS below that limit price; an entry not filled within LOAD_ENTRY_WAIT_MS is cancelled (entry-expiry.ts). The
 //     60 second time limit is gone (Michael's decision 2: Alpaca refused all 19 tries on 2026-11-05);
 //   - after the window the normal placeholder runs for the rest of the day;
