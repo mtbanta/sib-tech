@@ -176,9 +176,19 @@ export const STUCK_TRY_REQUESTS = 10;
 // where the full path sends about 10. It is still admitted on STUCK_TRY_REQUESTS (10) and gives the unused room back when the try ends.
 // The sell gate's own check is unchanged (open orders first, then positions, less the sells it sent since), so it can never sell more than
 // is held less the sells already open. Anything else (live updates down, a first try, a timed-out stop's try, the 15 second limit's sale,
-// a remainder being given a fresh stop, the fast sale, anything to cancel) takes the full path. An object so the tests can switch it off;
+// every remainder sale, the fast sale, anything to cancel) takes the full path. Bounds on the now cheaper loop (rule 6): admitted on 10
+// within the stuck retries' 60 of the shared 75, the 15 in any 5 seconds, the floor of 20, and its 2 s gap after each try (no growing
+// backoff for ordinary retries since 2026-11-14), so one stuck position may now take about 11 tries a minute where it took about 4. An object so the tests can switch it off;
 // nothing in the worker changes it.
 export const CHEAP_RETRY = { on: true };
+// Whether a stuck retry takes the cheap path: only an ordinary retry of a missing-exit sale (every remainder sale takes the full path), not
+// the fast sale, with the live updates connected, nothing to cancel, and no sell leg of the entry open in the sync's own list. The sell gate's
+// one read is then the only look: it counts any sell of ours it shows as holding the shares, and Alpaca's free-share count (`qtyAvailable`)
+// caps the sale too, so a leg the open list does not show still cannot be oversold (group 2, round 1: the gate's check, not the list, is
+// what makes it safe).
+export function cheapRetryApplies(c: { ordinaryRetry: boolean; kind: "missing" | "bare"; fast: boolean; streamLive: boolean; alsoCancel: number; listedCopy: Order }): boolean {
+  return CHEAP_RETRY.on && c.ordinaryRetry && c.kind === "missing" && !c.fast && c.streamLive && c.alsoCancel === 0 && !flattenLegs(c.listedCopy).some((l) => l.side === "sell" && OPEN_STATUSES.has(l.status));
+}
 export interface StuckEntry {
   // Group 2 review of 2026-11-12: true when the stuck case is a remainder the stack is trying to give a fresh stop (A4), so the alerts say
   // "protect or sell", not only "sell". Since Michael's answer of 2026-11-14 (night) on ruling 1 it is also read by the order sync: such a
@@ -1460,9 +1470,8 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   const ordinaryRetry = !timedOutTry && mem.stuck.has(s.clientOrderId);
   // A5: the fast sale has just looked the entry up itself, so it is not looked up a second time here. Item 2 of 2026-11-13: nor a try for an
   // entry with a timed-out stop (whose bracket exits ended long ago): the copy from this sync's own list or lookup is used.
-  // Michael's decision 1 of 2026-11-17 (CHEAP_RETRY): the cheap path skips the entry lookup; the gate's one read of open orders shows any
-  // exit of the entry still open (then nothing is sold: the gate counts it as a sell already holding the shares).
-  const cheap = CHEAP_RETRY.on && ordinaryRetry && kind === "missing" && !extra.fast && mem.streamLive && (extra.alsoCancel?.length ?? 0) === 0 && !flattenLegs(listedCopy).some((l) => l.side === "sell" && OPEN_STATUSES.has(l.status));
+  // Michael's decision 1 of 2026-11-17 (CHEAP_RETRY): the cheap path skips the entry lookup and sells against the sell gate's one read.
+  const cheap = cheapRetryApplies({ ordinaryRetry, kind, fast: !!extra.fast, streamLive: mem.streamLive, alsoCancel: extra.alsoCancel?.length ?? 0, listedCopy });
   if (!extra.fast && !timedOutTry && !cheap) try {
     const fresh = await d.broker.findOrderByClientId(s.clientOrderId);
     if (fresh) o = fresh;

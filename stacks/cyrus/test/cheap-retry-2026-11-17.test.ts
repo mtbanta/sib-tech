@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { SimBroker } from "./sim-broker.ts";
 import { D } from "./rig.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
-import { syncOrders, SyncMemory, CHEAP_RETRY, STUCK_TRY_REQUESTS } from "../src/risk.ts";
+import { syncOrders, SyncMemory, CHEAP_RETRY, STUCK_TRY_REQUESTS, cheapRetryApplies } from "../src/risk.ts";
 import { Liquidator, SellGate } from "../src/sells.ts";
 import { MemoryStore } from "../src/store.ts";
 import { ensureDay } from "../src/morning.ts";
@@ -46,11 +46,12 @@ async function world(opts: { streamLive?: boolean } = {}) {
   const loop = { busy: () => false, act: async (_id: string, label: string, run: () => Promise<any>) => void acts.push({ label, run }), wake: () => undefined };
   const sync = () => syncOrders({ broker: sim, store, now, say: async () => true, liquidator, syncMemory: mem } as any, dd, { protect: true, loop, streamLive: opts.streamLive ?? true } as any);
   // One try: the sync's look (not counted), then the try's action (counted).
-  const oneTry = async () => {
+  const oneTry = async (beforeRun?: () => Promise<void>) => {
     const st = mem.stuck.get(id);
     if (st) st.nextAt = sim.simMs - 1;
     acts.length = 0;
     await sync();
+    if (beforeRun) await beforeRun();
     for (const k of Object.keys(counts)) delete counts[k];
     counting = true;
     spends = 0;
@@ -62,7 +63,7 @@ async function world(opts: { streamLive?: boolean } = {}) {
     sim.advance(5_000);
     return { label: acts[0]?.label ?? null, counts: { ...counts }, total: requests, budgeted: sent, open: budget.inUse().reservedUnsent };
   };
-  return { sim, id, mem, budget, oneTry };
+  return { sim, id, mem, budget, oneTry, acts, store, counts, setCounting: (on: boolean) => { counting = on; if (on) for (const k of Object.keys(counts)) delete counts[k]; } };
 }
 
 test("with the live updates connected, an ordinary stuck retry sends 3 requests (open orders, positions, the sell) and keeps nothing reserved after it", async () => {
@@ -107,17 +108,38 @@ test("switched off, the retry takes the full path", async () => {
   }
 });
 
-test("the gate's check is unchanged: with a sell of ours already open for every share, the cheap retry sends no sell", async () => {
+test("the gate's check is unchanged: a sell of ours for every share appearing after the sync decided, before the cheap retry runs: its one read sees it and no sell is sent", async () => {
   const w = await world();
   w.sim.refuseSellIf = () => true;
   await w.oneTry();
-  // A sell of all 5 shares rests at Alpaca (as if an earlier sell is still working).
   w.sim.refuseSellIf = null;
-  await w.sim.submitSell({ symbol: "AAA", qty: 5, clientOrderId: "cyrus-x-test-AAA-hold", stopPrice: 5 });
-  const sells0 = w.sim.sellLog.length;
-  const retry = await w.oneTry();
-  assert.equal(retry.counts.findOrderByClientId ?? 0, 0, "the cheap path ran (no entry lookup)");
+  // Group 2, round 1: the covering sell lands after the sync's look (which decided the try) and before the try runs.
+  const retry = await w.oneTry(async () => {
+    await w.sim.submitSell({ symbol: "AAA", qty: 5, clientOrderId: "cyrus-x-test-AAA-hold", stopPrice: 5 });
+  });
+  assert.equal(retry.label, "missing-exit sale", "the cheap retry was decided and ran");
+  assert.equal(retry.counts.findOrderByClientId ?? 0, 0, "the cheap path (no entry lookup)");
+  assert.deepEqual([retry.counts.listOrdersPaged, retry.counts.listPositions], [1, 1], "its one read of open orders and positions");
   assert.equal(retry.counts.submitSell ?? 0, 0, `no sell sent (${JSON.stringify(retry.counts)})`);
-  assert.equal(w.sim.sellLog.length, sells0);
   assert.equal(w.sim.oversellAttempts ?? 0, 0);
+});
+
+// Group 2, round 1: each condition of the cheap path, one at a time (a remainder sale, the fast sale, live updates down, something to
+// cancel, an exit of the entry still open in the sync's list, the switch off, a first try): each sends the retry down the full path.
+test("the cheap path's conditions, one at a time: only an ordinary retry of a missing-exit sale, not fast, live updates up, nothing to cancel, no exit open in the sync's list", () => {
+  const entry = (legStatus: string) => ({ id: "e", clientOrderId: "cyrus-20261102-AAA-1", symbol: "AAA", side: "buy", qty: 5, filledQty: 5, filledAvgPrice: 10, status: "filled", orderClass: "bracket", type: "market", stopPrice: null, limitPrice: null, createdAt: null, filledAt: null, legs: [{ id: "s", clientOrderId: "x-s", symbol: "AAA", side: "sell", qty: 5, filledQty: 0, filledAvgPrice: null, status: legStatus, orderClass: "", type: "stop", stopPrice: 9.87, limitPrice: null, createdAt: null, filledAt: null, legs: [] }] }) as any;
+  const base = { ordinaryRetry: true, kind: "missing" as const, fast: false, streamLive: true, alsoCancel: 0, listedCopy: entry("canceled") };
+  assert.equal(cheapRetryApplies(base), true, "the cheap case");
+  assert.equal(cheapRetryApplies({ ...base, kind: "bare" }), false, "a remainder sale: full path");
+  assert.equal(cheapRetryApplies({ ...base, ordinaryRetry: false }), false, "a first try: full path");
+  assert.equal(cheapRetryApplies({ ...base, fast: true }), false, "the fast sale: full path");
+  assert.equal(cheapRetryApplies({ ...base, streamLive: false }), false, "live updates down: full path");
+  assert.equal(cheapRetryApplies({ ...base, alsoCancel: 1 }), false, "something to cancel: full path");
+  assert.equal(cheapRetryApplies({ ...base, listedCopy: entry("new") }), false, "an exit of the entry open in the sync's list: full path");
+  CHEAP_RETRY.on = false;
+  try {
+    assert.equal(cheapRetryApplies(base), false, "switched off");
+  } finally {
+    CHEAP_RETRY.on = true;
+  }
 });
