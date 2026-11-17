@@ -6829,3 +6829,16 @@ Report: scratchpad `protect-first/RESULTS.md`. Built as a PROBE ONLY patch on th
 **Decision under Michael's rule** ("If it is worse than v24 on time in any case, do not deploy; Tuesday runs on v24"): **no deploy tonight. Tuesday 2026-11-17 runs on v24 (`20ba5bd`).** Protect-first could not qualify either (against v24 it is worse in some refused-sale close-out cells, and it exists only as a probe with no time limit), so its comparison run was stopped; its results stand as reported above, for Michael tomorrow.
 
 **Cause of the regression the protect-first run found (measured):** with sales accepted and `flatten` asked 5 or 10 s after the losses with 8 s cancels, the flatten's first round waits only 6 s for cancels that take 8 s; round 2 starts at about 7.5 s while Alpaca is still cancelling, and since the sale's own sells are open it may not use "cancel all", so it re-sends a single cancel for every order still pending cancel, every round (81 cancels in that cell; v24 does the same, 263 answers there). `b1a9bb8` passed only because its stretched pauses pushed round 2 past 8 s. The fix (stop re-cancelling orders this sale already asked Alpaca to cancel) changes the cancel path; not built, for Michael.
+
+## Michael's night build request (2026-11-16, about 8:50 PM, in the session), saved verbatim
+
+> Tonight, on a new branch, building on v24 (one-at-a-time selling):
+> 1. Cancel fix first: a flatten or close-out sends each cancel once and then waits for its result (live update or one lookup) instead of re-sending every round.
+> 2. Protect-first, designed properly: while any position lacks a confirmed stop, new entries stop and low-priority work gives way, with a time limit of about 30 s, after which entries resume at a reduced rate.
+> 3. First tries (changes decision 4): paced, not exempt; they wait only for Alpaca's requests to refill, at most about 3 s.
+> 4. The close-out time becomes a setting; set it to 2:45 PM Central for the test.
+> 5. Fix the 15-in-5-seconds logging gap; close-out retries go ahead of stuck retries; measure flatten's request use after the cancel fix.
+> Bar to ship: no worse than v24 on rate-limit answers on sale, cancel or close-out steps, and on time from lost exits to each sale, in every measured case. My pass rule stays the goal. Both groups review, up to 8 rounds. Deploy before 7:30 AM if it passes; otherwise bring it to the Tuesday mid-day pause for my written yes.
+> Never print any token or key.
+
+Built on branch `night-2026-11-16` from `main` (`2b2896c`, stack code identical to v24 `20ba5bd`). None of the speed release's code is in it. Review rounds are named "night build, round n".
