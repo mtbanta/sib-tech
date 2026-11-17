@@ -1,8 +1,8 @@
 // Protect-first (Michael's night build request of 2026-11-16, item 2): while any position lacks a confirmed stop, new entries stop and
 // low-priority work gives way, for at most about 30 s, after which entries resume at a reduced rate.
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { MAX_MARKS, PROTECT_FIRST_LIMIT_MS, PROTECT_FIRST_PAUSED, PROTECT_FIRST_REDUCED, PROTECT_FIRST_REDUCED_GAP_MS, ProtectFirst } from "../src/protect-first.ts";
+import { MAX_MARKS, PROTECT_FIRST, PROTECT_FIRST_LIMIT_MS, PROTECT_FIRST_PAUSED, PROTECT_FIRST_REDUCED, PROTECT_FIRST_REDUCED_GAP_MS, ProtectFirst } from "../src/protect-first.ts";
 import { BrokerView } from "../src/broker-view.ts";
 import { RequestBudget, Reservation } from "../src/request-budget.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
@@ -10,6 +10,14 @@ import type { TradeUpdate } from "../src/order-stream.ts";
 import { SimBroker } from "./sim-broker.ts";
 import { FakeBot, order } from "./helpers.ts";
 import { D, rig, settle, z } from "./rig.ts";
+
+// Protect-first ships switched off (protect-first.ts, PROTECT_FIRST); these tests switch it on, so switching it on later is one line.
+before(() => {
+  PROTECT_FIRST.on = true;
+});
+after(() => {
+  PROTECT_FIRST.on = false;
+});
 
 function unit() {
   let now = 1_000_000;

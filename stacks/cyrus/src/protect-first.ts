@@ -19,6 +19,12 @@
 // memory is bounded: one mark per open entry (at most MAX_MARKS), and the ids last cleared as sold only while their stuck or fresh-stop
 // record lasts.
 
+// THE SWITCH (night build of 2026-11-16, decision after the simulation of protect-first against v24): OFF. Measured with jittered
+// runs, protect-first beat v24 when Alpaca accepts the sales, but was worse in 7 or 8 of 18 refused-sale cells at every refusal length
+// tried (25, 30 and 40 s). It speeds the sales up, so their tries fall inside Alpaca's refusal and the next try lands later. The fixes
+// lie in the sale queue and the stuck backoff, outside item 2, and go to Michael. While off: no mark is kept, no protect_first event is
+// stored, the gate never refuses for it and P2 never gives way for it. Switching it on is this one line (the tests set it).
+export const PROTECT_FIRST = { on: false };
 export const PROTECT_FIRST_LIMIT_MS = 30_000;
 // The reduced rate after the 30 s: one entry every 2 seconds (30 a minute). Builder's choice for Michael to confirm (night build of
 // 2026-11-16): a load entry costs about 2 of Alpaca's 200 requests a minute (the order and its 5 second cancel), so 30 entries a minute
@@ -60,6 +66,7 @@ export class ProtectFirst {
 
   // An entry lacks a confirmed stop (`why`: what said so). A mark already in force keeps its time.
   mark(entryClientOrderId: string, symbol: string, why: string): void {
+    if (!PROTECT_FIRST.on) return;
     this.soldIds.delete(entryClientOrderId);
     if (this.marks.has(entryClientOrderId)) return;
     if (this.marks.size >= MAX_MARKS) return;
@@ -87,6 +94,7 @@ export class ProtectFirst {
 
   // Re-evaluates the marks and the episode, logging its start, its 30 s limit and its end. Returns the phase.
   refresh(): ProtectFirstPhase {
+    if (!PROTECT_FIRST.on) return "off";
     const now = this.d.now();
     for (const id of [...this.soldIds]) if (!this.d.stuck.has(id) && !this.d.freshStops.has(id)) this.soldIds.delete(id);
     for (const [id, st] of this.d.stuck) if (!this.soldIds.has(id) && !this.marks.has(id) && this.marks.size < MAX_MARKS) this.marks.set(id, { symbol: st.symbol, since: now, why: "on the stuck list" });
@@ -126,6 +134,7 @@ export class ProtectFirst {
   // The gate, before an entry: the refusal reason, or null. `recheck` (just before sending): only the paused phase refuses, since the
   // reduced rate's slot was taken when the entry passed the governor.
   entryRefusal(recheck = false): string | null {
+    if (!PROTECT_FIRST.on) return null;
     const phase = this.refresh();
     if (phase === "paused") {
       this.totals.entryRefusals++;
@@ -147,6 +156,7 @@ export class ProtectFirst {
 
   // The shared request budget, before a P2 try: true while P2 gives way (the paused phase only).
   p2GivesWay(): boolean {
+    if (!PROTECT_FIRST.on) return false;
     if (this.refresh() !== "paused") return false;
     this.totals.p2Refusals++;
     this.episode.p2Refusals++;
