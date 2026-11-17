@@ -7067,3 +7067,17 @@ Against v26: 52 of 54 pass, the same 2 probe G cases worse as with the ceiling o
 **Reviews, round 2 (on `fdb9fc3`): group 1 PASS, group 2 PASS.** Group 1 reran its probe through the real sync: entries now admitted at 17 s, when the reserve of 80 alone frees them (round 1: 41 s); every removed call site fails a test (five mutants). Non-blocking from both: a short gap can follow a floor-only hold before the sale's next look (entries could spend in it only with about 47 to 50 requests reserved unsent); the hold is not cleared early when the sale is granted (bounded by the floor's own refill, at most about 30 s, and the next look); no total cap across renewals (only non-entry traffic can renew it; a question for Michael); the hold rarely refuses an entry the reserve of 80 would allow; the 15 second limit's sale and the timed-out stop's try counted as stuck sales, the status checks and cancels not (one line to Michael); one comment above `noteStuckSaleWaiting` belongs to `givingWayReason` (left for a later commit, so the reviewed code stays as reviewed); the briefs' "identical to v26" was measured on `d454af3`.
 
 **The bar rerun on the fixed code (v26 plus `fdb9fc3`'s change, tree `gw2`):** against v26 54 of 54 pass; against v24 53 of 60, the same 7 accepted cases; every probe G, close-out grid and scenario result identical to v26. So the briefs' sentence holds for `fdb9fc3`. Ready for the mid-day pause with Michael's written yes for that deploy (the mid-day route, `tools/midday-deploy.mjs` with `--michael-yes`).
+## Michael's decisions (2026-11-17, about 8:25 AM), saved verbatim
+
+> Decisions:
+> 1. Yes: entries-give-way at the mid-day pause. I will write my yes in commands.
+> 2. Yes: raise stuck sales to 60 a minute, accepting 1 to 3 extra rate-limit answers in those 2 cases, but only in the version where urgent work keeps its 15 (shared budget 75) and the three behaviour tests (timed-out stop, unclear stop) pass. Build it on top of entries-give-way, measure together, both groups; mid-day if ready, otherwise tonight.
+> 3. Yes, the wider reading.
+> 4. Agreed, no time cap.
+> Also, in parallel, for bigger gains (proposal and measurements, no money-path code until I approve):
+> a. Cut a stuck retry from about 10 requests to about 3, using live updates instead of re-reads.
+> b. Research first hand, and test on the paper account with one position at a time if the docs are unclear: does the close-position call (DELETE /v2/positions/{symbol}) cancel that symbol's open exits and sell in one step? Can a bracket's take-profit be replaced to a marketable price above the stop, to sell without a cancel? Report request cost and time to fill.
+> c. Report "Alpaca refuses for 30 s" cases separately from pass or fail.
+> Never print any token or key.
+
+So: (1) `fdb9fc3` deploys at the mid-day pause by the mid-day route once his yes is in `commands` (never inferred); (2) stuck retries 60 with the shared budget 75 (urgent work keeps its 15), built on `morning-giveway`, measured together; his acceptance covers the 2 probe G cases at 1 to 3 extra rate-limit answers, nothing else; (3) the 15 second limit's sale counts as a stuck sale; (4) no time cap on the hold; (a) and (b) proposals and measurements only, no money-path code; (c) the bar's summaries report the cases where Alpaca refuses sales for 30 s apart from pass or fail.
