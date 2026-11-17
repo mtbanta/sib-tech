@@ -3,6 +3,10 @@
 // Now the info events that tell the story of a day are stored too: commands, limit decisions, the stream start,
 // unprotected positions, sale problems, the start and stop of the worker. Per-trade events (signals, each entry
 // sent) are NOT stored here: the orders table already holds every entry, and a busy day would bury this log.
+import type { Logger } from "./log.ts";
+import type { Redactor } from "./redact.ts";
+import type { Store } from "./store.ts";
+
 export const STORED_INFO_EVENTS = new Set([
   "command",
   "limits_decision",
@@ -113,4 +117,15 @@ export const STORED_INFO_EVENTS = new Set([
 
 export function shouldStoreEvent(level: "info" | "warn" | "error", event: string): boolean {
   return level !== "info" || STORED_INFO_EVENTS.has(event);
+}
+
+export type LogAndStore = (level: "info" | "warn" | "error", event: string, fields?: Record<string, unknown>) => void;
+
+// Every line goes to Fly's log; the ones `shouldStoreEvent` picks also go into the run log, already redacted. A failed write is dropped
+// (the line is still in Fly's log). Moved here from main.ts unchanged (group 2, night build of 2026-11-16, round 1) so it can be tested.
+export function makeLogAndStore(log: Logger, store: Pick<Store, "addEvent">, redact: Redactor): LogAndStore {
+  return (level, event, fields) => {
+    log(level, event, fields);
+    if (shouldStoreEvent(level, event)) void store.addEvent(level, event, JSON.parse(redact(JSON.stringify(fields ?? {})))).catch(() => undefined);
+  };
 }

@@ -2,6 +2,7 @@
 // so the message can tell a new release from the same release coming back, and a run of starts in a short time
 // (a crash loop) raises an alert instead of looking like routine restarts.
 import { CONTROL_START_HISTORY, type Store } from "./store.ts";
+import type { LogAndStore } from "./run-log.ts";
 import { centralClock } from "./time.ts";
 
 interface StartHistory {
@@ -45,6 +46,18 @@ export async function recordStart(store: Store, now: Date, release: string): Pro
     deploy: history !== null && history.release !== release,
     release,
   };
+}
+
+// Group 2, night build of 2026-11-16, round 1: the start-up lines go into the run log, not only Fly's log, so the reviews read the day's
+// close-out setting from the stored `worker_started` row. A setting that was not valid fell back to its default (config.ts): its warnings
+// are found before the store exists, so main.ts holds them (in `settings.warnings`) and logs them here once the database has answered,
+// each once, before `worker_started`. `setting_invalid` is a warning, so it is stored; `worker_started` is in STORED_INFO_EVENTS.
+export function logSettingWarnings(out: LogAndStore, warnings: readonly string[]): void {
+  for (const warning of warnings) out("warn", "setting_invalid", { warning });
+}
+
+export function logWorkerStarted(out: LogAndStore, fields: { feed: string; closeoutMinutesBeforeClose: number; recentStarts: number; deploy: boolean }): void {
+  out("info", "worker_started", fields);
 }
 
 // A short, safe label for the running release, from Fly's image reference (its last 8 characters). "local" off Fly.

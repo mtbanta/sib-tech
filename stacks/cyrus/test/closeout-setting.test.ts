@@ -13,7 +13,9 @@ import { retryQuietBeforeCloseMs } from "../src/risk.ts";
 import { MIDDAY_PHASE } from "../src/midday.ts";
 import { LOAD_AFTERNOON_PHASE } from "../src/load-mode.ts";
 import { centralClock } from "../src/time.ts";
-import { CONTROL_STOP, type DayRecord, type StopFlag, type Store } from "../src/store.ts";
+import { CONTROL_STOP, MemoryStore, type DayRecord, type StopFlag, type Store } from "../src/store.ts";
+import { makeLogAndStore } from "../src/run-log.ts";
+import { logSettingWarnings, logWorkerStarted } from "../src/start-note.ts";
 import { afternoonStatusLine } from "../src/commands.ts";
 import { FakeBroker } from "./helpers.ts";
 import { FAKE_ENV } from "./fakes.ts";
@@ -57,6 +59,45 @@ test("fly.toml's setting, when present, is a valid whole number (no fallback war
   const s = loadSettings({ ...FAKE_ENV, CLOSEOUT_MINUTES_BEFORE_CLOSE: m[1] });
   assert.deepEqual(s.warnings, []);
   assert.equal(s.closeoutMinutesBeforeClose, Number(m[1]));
+});
+
+// Group 2, night build round 1 (B2): `setting_invalid` and `worker_started` reach the run log, not only Fly's log, so the reviews take the
+// day's setting from the stored `worker_started` row.
+test("start-up lines: an invalid setting's warning and worker_started (with the setting) go to Fly's log and into the run log, in that order, each once", async () => {
+  const s = loadSettings({ ...FAKE_ENV, CLOSEOUT_MINUTES_BEFORE_CLOSE: "abc" });
+  assert.equal(s.warnings.length, 1);
+  const fly: Array<{ level: string; event: string; fields?: Record<string, unknown> }> = [];
+  const store = new MemoryStore();
+  const out = makeLogAndStore((level, event, fields) => void fly.push({ level, event, fields }), store, (t) => t);
+  logSettingWarnings(out, s.warnings);
+  logWorkerStarted(out, { feed: s.alpaca.dataFeed, closeoutMinutesBeforeClose: s.closeoutMinutesBeforeClose, recentStarts: 1, deploy: true });
+  await settle();
+  assert.deepEqual(fly.map((x) => `${x.level} ${x.event}`), ["warn setting_invalid", "info worker_started"]);
+  assert.deepEqual(store.events.map((x) => `${x.level} ${x.event}`), ["warn setting_invalid", "info worker_started"]);
+  assert.match(String(store.events[0]!.data?.warning), /CLOSEOUT_MINUTES_BEFORE_CLOSE/);
+  assert.equal(store.events[1]!.data?.closeoutMinutesBeforeClose, 5, "the value in use, from the stored row");
+  const fifteen = loadSettings({ ...FAKE_ENV, CLOSEOUT_MINUTES_BEFORE_CLOSE: "15" });
+  const store2 = new MemoryStore();
+  const out2 = makeLogAndStore(() => undefined, store2, (t) => t);
+  logSettingWarnings(out2, fifteen.warnings);
+  logWorkerStarted(out2, { feed: fifteen.alpaca.dataFeed, closeoutMinutesBeforeClose: fifteen.closeoutMinutesBeforeClose, recentStarts: 1, deploy: false });
+  await settle();
+  assert.deepEqual(store2.events.map((x) => x.event), ["worker_started"], "a valid setting: no warning");
+  assert.equal(store2.events[0]!.data?.closeoutMinutesBeforeClose, 15);
+});
+
+test("start-up lines (structure): main.ts logs both through the run log's logger, the warnings once the database has answered, and prints them to Fly's log alone only if the start fails", () => {
+  const main = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
+  assert.match(main, /const logAndStore: LogAndStore = makeLogAndStore\(log, store, redact\);/);
+  assert.match(main, /logWorkerStarted\(logAndStore, \{ feed: settings\.alpaca\.dataFeed, closeoutMinutesBeforeClose: settings\.closeoutMinutesBeforeClose,/);
+  assert.doesNotMatch(main, /log\("(info|warn)", "(worker_started|setting_invalid)"/, "never straight to Fly's log only");
+  const check = main.indexOf('await store.getControl("startup_check")');
+  const failed = main.indexOf('log("error", "startup_failed"');
+  const stored = main.indexOf("logSettingWarnings(logAndStore, settings.warnings);");
+  const started = main.indexOf("logWorkerStarted(logAndStore");
+  assert.ok(check > 0 && failed > check && stored > failed && started > stored, "the database check, the failure path, then the stored warnings, then worker_started");
+  assert.ok(main.slice(check, failed).includes("logSettingWarnings(log, settings.warnings);"), "the failure path still prints them");
+  assert.equal(main.split("logSettingWarnings(").length - 1, 2, "logged once on each path");
 });
 
 test("the close-out time: the default gives 2:55 PM CT; 15 gives 2:45 PM CT on a normal day and 11:45 AM CT on a half day", () => {
