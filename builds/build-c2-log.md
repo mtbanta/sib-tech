@@ -7271,3 +7271,25 @@ The afternoon window ran 10:56:50 to 11:26:49 on v29, with entries stopped from 
     - **Next day's limits (Michael's decision):** today cost about 1.16 cents a filled load entry in the morning window and about 1.05 in the afternoon window; the normal afternoon lost 66.80 on 188 entries (about 35.5 cents an entry, larger positions). Lowering a limit is a tightening he can make; raising the loss stop or a ceiling is a hard stop, his alone.
 
 At 3:40 PM: 0 positions, 0 open orders, stop flag on (Michael's `stop` of 2:47 PM), cap 1, Healthchecks up. Paper trading only; research input for a human decision, never an instruction to act.
+
+## Michael's decisions after the end-of-day review (2026-11-17, about 4:15 PM), saved verbatim
+
+> Decisions:
+> 1. v30 stays live; no deploy. A load morning tomorrow, to give the stuck-sale features a chance to act.
+> 2. Tomorrow after the 10:30 mid-day close-out is flat and my stop is on: run more take-profit paper trials (move the take-profit instead of cancelling and selling), finishing before 10:55: a winning position with the take-profit lowered toward the price (e.g. 10 cents above entry to 5, and 5 to 2); a losing position; a position whose stop is triggering at that moment; a partly filled exit on 2 or 3 shares; and 2 or 3 different stocks. Report for each: accepted or refused, whether Alpaca cancels the stop itself, requests, and time to fill. Tell me in commands before starting so I can send stop; I will send go or load afternoon after.
+> 3. If the trials hold up, propose using the moved take-profit in the sell path (positions that still have exits), with the request math, for building tomorrow afternoon and review tomorrow night.
+> 4. Set the mid-day wait as before.
+> Never print any token or key.
+
+**State and plan (builder):**
+- **Wednesday 2026-11-18** is approved as a load day (Michael's `load on`, position 250, loss 500, trades 150, cap 1 at 4:44 PM). **His stop flag is still on** from 2:47 PM, and it carries overnight (the evening checklist says "Type `resume` or there will be no entries"), so the load morning needs his `resume` before the window.
+- **The mid-day wait:** scratchpad `midday-wait-1118/wait.sh` (background): reads the day phase `middayFlat` every 20 s from 10:30:30, ends on a flat result or at 11:15, and in any case by 11:20; it never matches process names.
+- **The trials:** scratchpad `papertest/trials.mjs`, paper URL only. It refuses unless all of these hold: the date is 2026-11-18; the start is between 10:30 and 10:52 AM CT; today's mid-day close-out is flat; the stop flag is on from Michael's own command; Alpaca shows no positions and no open orders; and the symbol already has a stored order of the stack's today. Each trial cleans up after itself (open test orders cancelled, any long sold, any short bought back).
+  - Trials:
+    - `win`: 1 share, take-profit 10 cents above, then lowered to fill plus 5 cents, then plus 2.
+    - `lose`: the take-profit moved below the fill.
+    - `trigger`: stop 1 cent below the bid. The take-profit is moved when the bid reaches the stop. If it does not within 15 s, the stop is raised to the bid in the same instant as the replace, recorded as "forced".
+    - `partial`: 3 shares, take-profit 1 cent above the ask. A seen partial fill gets the rest moved at once. Paper fills in parts only at random, so a partial may not occur.
+  - On 2 or 3 of the stack's own symbols.
+  - Reported per trial: accepted or refused, whether Alpaca cancels the stop itself, trading requests, time to fill.
+- **Why the stack's own symbols (found while preparing, a reason, not a change):** during the session the worker scans every 30 s for any held symbol with no stored order today. It treats such a symbol as carried: it alerts Michael with his mention, sets the not-flat flag, and runs the carried-position sale of everything (`scanForCarried` and the carried sale in `src/worker.ts`). Yesterday's 2:47 PM tests escaped it only because the regular close-out had started (the carried sale never runs after it) and each test share was held about 2 s. At 10:30 the carried sale would run and sell the trial positions, so the trials use symbols the stack traded that morning. The order stream ignores orders whose client id is not the stack's, apart from updating its cached position count, and the trials end flat before Michael's `go` or `load afternoon`.
