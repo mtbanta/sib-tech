@@ -7457,3 +7457,30 @@ Research input for Michael's decision, never an instruction to act. Paper only. 
 - On a load day nothing qualifies: no change at all, apart from one market-data read.
 - 5 of the 19 normal-day positions did not qualify, because a 0.4 percent stop on a stock under about 7.50 dollars is within 3 cents.
 - The time-to-flat step reflects the simulator's 0.5 s granularity; on paper, the other sales start when the last move fills, at most 2 s.
+
+**Before review: the advisor's points, fixed (same afternoon):**
+- **Moves are expected before each replace is sent**, by the bracket's group and the old take-profit's id. A fill that arrives before the answer is caught (tested with the fill at 0.1 s and the answer at 0.24 s).
+- **The wait is bounded by time** (2 s after the last replace). The count is only a backstop, 40 plus 20 per move, far above a move's 3 or 4 updates (tested with an update every 50 ms).
+- **The replace has its own 2 s limit** (answers took 50 to 244 ms on paper today). Without an answer it is "unclear", and no further replace is sent in that sale. The same goes after a rate-limit answer.
+- **The phase has its own catch:** an error there never skips round 1's cancels.
+- **No quote read** when no bracket has room: the take-profit must sit at least 4 cents above the stop for any price to qualify. A load day's bracket (1 cent up, 2 down) never does, so a load-day sale makes no quote read and does not wait. The quote read's limit is 1 s (46 to 405 ms on paper today, median 68).
+- **The replaces' check uses the sale's own read** for up to 4 s, since a replace adds no shares. So a sale with moves costs today's requests plus 2, whatever the number of moves.
+- **Moved positions count as sold** by the sale (the close-out's record, and the loss stop's message, which otherwise would say "nothing was held").
+- **In the summary's part lines, a moved take-profit's fill counts as "closed later"**, like the close-out's own sales, not as a take-profit close (its client id `cyrus-m-` tells them apart).
+- **A worker-level test** (2:55 close-out, live updates connected, quotes wired, the stop from the sync's copy): the move, the early end of the wait, the stored row, and no replace outside a request scope.
+- **The shared request budget:** inside a sale a retry is never limited (a try is never stopped halfway; its extra requests are counted). The only exception is a timed-out stop's work, which never moves a take-profit. So the replaces cannot starve the sale's own cancels or sells.
+- **995 tests pass.**
+
+**Simulator measurement again, with the measured answer times** (a replace answers in 120 ms, a quote in 70 ms; the replaces go one at a time through the sell gate):
+
+| Day | Moves | Trading requests | Replaces | Market sales | Time to flat | Seconds without a stop (all positions) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Normal | off | 31 | 0 | 19 | 2.0 s | 34.2 |
+| Normal | on | 33 | 14 | 5 | 4.25 s | 9.0 |
+| Load | off or on | 31 | 0 | 19 | 2.0 s | 34.2 |
+| Half and half | on | 33 | 7 | 12 | 3.4 s | 21.6 |
+
+**Reading:**
+- On a normal day the account is flat about 2 s later (the replaces are sent one at a time, then the wait for the last fill). The time positions spend without a stop falls by about three quarters.
+- On a load day nothing changes.
+- **Scope note for Michael:** the move phase runs in every sale of the whole account, which includes the afternoon load window's close-out and the emergency close-out besides the two he named. His decision said "all whole-account sales".
