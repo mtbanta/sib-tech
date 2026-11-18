@@ -124,8 +124,18 @@ export interface DayResult {
 // Matches sells to earlier buys first-in first-out, per symbol, over the day's fills. Entries can repeat in a symbol,
 // so profit is matched by quantity, not by order. A sell with no buy before it today (a carried position) is counted as
 // unmatched and not given a profit.
+// The moved take-profit (Michael's decision of 2026-11-18): the ids of orders that a replacement replaced (named in its `replaces`). A
+// replacement's filled quantity and average price include the fills of the order it replaced (paper, 2026-11-18), so the replaced order is
+// left out of every count: a replaced leg's fills are never counted twice.
+export function replacedIds(alpacaOrders: Order[]): Set<string> {
+  const out = new Set<string>();
+  for (const o of alpacaOrders) for (const x of [o, ...flattenLegs(o)]) if (x.replaces) out.add(x.replaces);
+  return out;
+}
+
 export function computeDay(alpacaOrders: Order[]): DayResult {
-  const all = alpacaOrders.flatMap((o) => [o, ...flattenLegs(o)]);
+  const replaced = replacedIds(alpacaOrders);
+  const all = alpacaOrders.flatMap((o) => [o, ...flattenLegs(o)]).filter((o) => !replaced.has(o.id));
   const filled = all.filter((o) => o.filledQty > 0 && o.filledAvgPrice !== null);
   const seen = new Set<string>();
   const events = filled
@@ -212,6 +222,7 @@ export function busiestMinute(rows: OrderRecord[]): number {
 // the loss stop) is counted, without profit, as closed later.
 export function partLines(label: string, rows: OrderRecord[], alpacaOrders: Order[]): string[] {
   const byId = new Map(alpacaOrders.map((o) => [o.clientOrderId, o]));
+  const replaced = replacedIds(alpacaOrders);
   const sent = rows.filter(isSentEntry);
   let tp = 0;
   let stop = 0;
@@ -222,7 +233,7 @@ export function partLines(label: string, rows: OrderRecord[], alpacaOrders: Orde
     const o = byId.get(r.clientOrderId);
     if (!o || !(o.filledQty > 0) || o.filledAvgPrice === null) continue;
     filled++;
-    const legs = flattenLegs(o).filter((l) => l.side === "sell" && l.filledQty > 0 && l.filledAvgPrice !== null);
+    const legs = flattenLegs(o).filter((l) => l.side === "sell" && l.filledQty > 0 && l.filledAvgPrice !== null && !replaced.has(l.id));
     const exitQty = legs.reduce((n, l) => n + l.filledQty, 0);
     if (exitQty >= o.filledQty - 1e-9) {
       pnl += legs.reduce((n, l) => n + l.filledQty * l.filledAvgPrice!, 0) - o.filledQty * o.filledAvgPrice;

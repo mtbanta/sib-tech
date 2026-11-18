@@ -264,3 +264,21 @@ test("the live updates never count a replaced leg twice: the replacement's count
   await h2.handle(up({ id: "n2", side: "sell", type: "limit", status: "partially_filled", qty: 3, filledQty: 2, groupId: "g2", replaces: "o2" }, "partial_fill"));
   assert.deepEqual(h2dropped, []);
 });
+
+// ---- the summary ----
+test("the summary never counts a replaced leg twice: an order a replacement replaced (looked up from the fills list) is left out", async () => {
+  const { computeDay, partLines, replacedIds } = await import("../src/summary.ts");
+  const entry = order({ id: "e1", clientOrderId: "cyrus-20261118-AAA-1", symbol: "AAA", side: "buy", status: "filled", qty: 3, filledQty: 3, filledAvgPrice: 20, filledAt: "2026-11-18T16:00:00Z", orderClass: "bracket", legs: [
+    order({ id: "new-tp", clientOrderId: "cyrus-m-20261118-AAA-x", symbol: "AAA", side: "sell", type: "limit", status: "filled", qty: 3, filledQty: 3, filledAvgPrice: 20.1, filledAt: "2026-11-18T16:00:05Z", replaces: "old-tp" }),
+    order({ id: "sl", symbol: "AAA", side: "sell", type: "stop", status: "canceled", qty: 3, filledQty: 0 }),
+  ] });
+  // the old take-profit had filled 1 share before the replace; the fills check fetched it by its id, as a top-level order
+  const old = order({ id: "old-tp", symbol: "AAA", side: "sell", type: "limit", status: "replaced", qty: 3, filledQty: 1, filledAvgPrice: 20.1, filledAt: "2026-11-18T16:00:02Z" });
+  assert.deepEqual([...replacedIds([entry, old])], ["old-tp"]);
+  const day = computeDay([entry, old]);
+  assert.equal(day.symbols[0]!.sold, 3, "3 sold, not 4");
+  assert.ok(Math.abs(day.realized - 0.3) < 1e-9);
+  assert.equal(day.unmatchedSellShares, 0);
+  const rows = [{ clientOrderId: "cyrus-20261118-AAA-1", tradeDate: "2026-11-18", symbol: "AAA", qty: 3, referencePrice: 20, stopPrice: 19.92, status: "filled" as const, alpacaOrderId: "e1", filledQty: 3, filledAvgPrice: 20, note: null, createdAt: "2026-11-18T15:59:59Z", acceptMs: 50 }];
+  assert.ok(partLines("Day", rows as never, [entry, old])[0]!.includes("Closed by take-profit 1"), "one take-profit close");
+});

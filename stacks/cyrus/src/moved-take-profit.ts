@@ -35,11 +35,12 @@ export const MOVE_QUOTE_MAX_AGE_MS = 5_000;
 // long has passed since the phase began. What is not moved takes today's path.
 export const MOVE_MAX_PER_SALE = 30;
 export const MOVE_SEND_WINDOW_MS = 3_000;
-// The client id a replacement carries, when Alpaca keeps it (the 1-share test of 2026-11-18). Never `cyrus-x-`: every whole-account sale
-// treats an open cyrus-x- sell as its own market sale still working (the close-out then waits for it to its deadline, and the 2 second
-// fallback would never run).
+// The client id a replacement carries. The 1-share paper test of 2026-11-18 (12:17 PM CT, Michael's yes) showed Alpaca keeps the client id
+// asked for on a replaced take-profit (both replaces), finds the order by it, and shows it in the open list and in the entry's legs, in the
+// same group. Never `cyrus-x-`: every whole-account sale treats an open cyrus-x- sell as its own market sale still working (the close-out
+// then waits for it to its deadline, and the 2 second fallback would never run). The new id is also tracked (MoveWatch), whatever it is.
 export const MOVE_CLIENT_ID_PREFIX = "cyrus-m-";
-export const MOVE_SETS_CLIENT_ID = { on: false };
+export const MOVE_SETS_CLIENT_ID = { on: true };
 
 const EPS = 1e-9;
 const floorCents = (x: number): number => Math.floor(x * 100 + 1e-9) / 100;

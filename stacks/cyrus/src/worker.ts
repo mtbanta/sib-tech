@@ -37,7 +37,7 @@ import { ShadowLedger } from "./shadow-ledger.ts";
 import { earlyLookAllowed } from "./early-wake.ts";
 import type { Trade } from "./stream.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
-import { computeDay, formatSummary, isSentEntry, type StopGapDay } from "./summary.ts";
+import { computeDay, formatSummary, isSentEntry, replacedIds, type StopGapDay } from "./summary.ts";
 import { listDaySliced, summaryWindows } from "./summary-listing.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
 import { PAPER_ONLY } from "./discord.ts";
@@ -2229,7 +2229,8 @@ export class Worker {
     let fillsCheck: { complete: boolean; found: number; stillMissing: number } | null = null;
     try {
       const fills = await this.d.broker.listFillsForDay(date, 400, () => this.summaryPace());
-      const known = new Set(listed.orders.flatMap((o) => [o.id, ...flattenLegs(o).map((l) => l.id)]));
+      // The moved take-profit (2026-11-18): an order a listed replacement replaced is known too (its fills are inside the replacement's).
+      const known = new Set([...listed.orders.flatMap((o) => [o.id, ...flattenLegs(o).map((l) => l.id)]), ...replacedIds(listed.orders)]);
       const unknown = [...new Set(fills.fills.map((f) => f.orderId).filter((id) => id && !known.has(id)))];
       let found = 0;
       for (const id of unknown) {
