@@ -7558,3 +7558,9 @@ Research input for Michael's decision, never an instruction to act. Paper only. 
 
 > Add the take-profit to the same setting: "load afternoon stop 5 take 3" (stop 2 to 10 cents, take-profit 1 to 10 cents; each defaults to today's value if left out; that window only, then back to the defaults). The bot's reply shows both values in force. Same review and the mid-day pause deploy with my written yes. Tell me tonight exactly what to send for a normal morning.
 > Never print any token or key.
+
+## Release v31 deployed at 3:07 PM CT (2026-11-18)
+
+- The daily summary posted at 3:06 PM CT. The off-hours deploy checks then passed: Alpaca's clock closed, 0 positions, 0 open orders, the checkout clean at `8a165fa`, Michael's stop flag off (his `resume`).
+- Deployed `8a165fa` by the off-hours route under Michael's decision ("deploy after the close, before 7:30 AM, only if both groups pass"; both passed). Fly release v31; `worker_started` at 3:07:29 PM CT (`deploy: true`, close-out 15 minutes before the close).
+- `moved-tp-2026-11-18` fast-forwarded into `main`. Rollback: v30.
