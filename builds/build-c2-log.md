@@ -7520,3 +7520,23 @@ Research input for Michael's decision, never an instruction to act. Paper only. 
 - **The quote read's time limit is 1 s** (the earlier 1.5 s in this log is superseded).
 - **The worst case before today's path starts in a sale with moves**, summing the built limits: the stop lookup 0.3 s, the quote read 1 s, the send window 3 s, the last replace up to 2 s, then the 2 s wait after the last send. That is about 6.3 s in all, against a typical 2 to 4 s (the simulator measurement above). The positions keep their brackets during that time.
 - **Tests:** 1001 pass. The wall-clock test in `midday.test.ts` (item 4 of 2026-11-16) failed once more under full-suite load and passed on the next full run.
+
+**Review round 2 (group 1: PASS; group 2: CHANGES REQUIRED, one blocking finding), and what was changed:**
+- **Group 1 PASS.** Its round 1 finding was fixed and none of the changes added a risk to the money path. It left two reporting notes:
+  - a move sent before an internal error in the phase was not counted;
+  - a partly filled move counts only the market sale of the rest.
+- **Group 2, blocking: a partly filled move stored "stop cancelled by Alpaca: false"** although Alpaca cancels the whole stop at a take-profit's first partial fill.
+  - The verdict now compares the worker's own clock throughout: when it heard each update, and when today's path sent its first cancel.
+  - True: some shares filled (all or part) and the stop's cancel was heard before today's path sent any cancel.
+  - False: nothing filled and the moved take-profit was cancelled after today's cancels were sent.
+  - Otherwise null, which includes the stop filling and Alpaca cancelling the take-profit.
+  - Unit tests cover group 2's probe and those two cases.
+- **Group 2's notes, done:**
+  - the filled quantity is null when no fill was heard (not 0);
+  - moves never sent (refused by the sell gate, or stopped before the send) store `fallback: true`;
+  - an error after a replace went out still has round 1 start again and judge that move by the next positions read (also group 1's note). Tested.
+- **Not changed:**
+  - `liveUpdates` is read once, at the start of the moves (the field's comment says so);
+  - the hung-lookup test uses the real clock (under 2 s);
+  - the "18 of 18" read was one request at 12:53 PM by the scratchpad script `papertest/opengroup.mjs`, which printed counts only.
+- **Tests:** 1003. One full run failed the same wall-clock test in `midday.test.ts` (item 4 of 2026-11-16, the morning line's lookups, code this build does not touch); the next two full runs passed every test. Its failure message was not captured.
