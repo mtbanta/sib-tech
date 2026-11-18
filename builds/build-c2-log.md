@@ -7310,3 +7310,19 @@ At 3:40 PM: 0 positions, 0 open orders, stop flag on (Michael's `stop` of 2:47 P
   - **It stops at once when:** a trial is refused by a guard (for example, Michael's stop was cleared); a trial ends not flat or leaves anything open; the `noop` clean-up did not cancel the legs and sell; or the time is past 10:52.
 - **Item 3** goes into the proposal: if the moved take-profit is built, the stack stores one row per move: accepted or refused with Alpaca's answer, whether Alpaca cancelled the stop itself, and the time from the replace to the fill.
 - **The end-of-day review wait:** scratchpad `eod-wait-1118/wait.sh` (background). It reads day phase `summary` every 30 s from 3:04 PM CT and ends on a posted result or at 3:45, in any case by 3:50.
+
+**Michael's addition for the trials (2026-11-17, evening), saved verbatim:**
+
+> Add to tomorrow's trials, after the take-profit cases and before 10:52, as time allows:
+> 1. Raising the stop: on a position that rises, replace its stop price upward twice. Report whether each replace is accepted, whether the take-profit stays in place, whether Alpaca gives the order a new id, and the requests.
+> 2. Research only, no trial needed tomorrow: does Alpaca allow a trailing stop order (trail_price or trail_percent) as part of a bracket, or only on its own? If only on its own, would a design work that cancels the bracket and places a trailing stop once the price clears a set level? Include how a trailing stop fills when triggered.
+> Never print any token or key.
+
+**Applied (builder):**
+- **Item 1:** a `raisestop` trial in `trials.mjs`, run by `run-trials.mjs` once per stock after the three rounds of take-profit cases and before the partial fill, with no start after 10:52.
+  - **The trial:** 1 share, take-profit 15 cents above so it stays resting, stop 30 cents below. It waits up to 10 s for the bid to rise above the fill, recorded either way. Then it raises the stop twice, 10 cents each time, never closer than 2 cents below the bid.
+  - **Recorded per raise:** accepted or refused (Alpaca's answer), a new id or not, and the take-profit's id, status and limit afterwards. The requests are counted all together and as sends alone.
+- **Item 2:** `builds/c2-research-trailing-stop-2026-11-17.md`.
+  - **What Alpaca allows:** trailing stops "are currently supported only with single orders", not as a bracket's stop leg. Once triggered, one "turns into a market order, and it may fill above or below the stop trigger price"; it can be changed by PATCH of the trail while pending.
+  - **Cancel-then-trail:** can be built, at about 2 sent requests a switch, but leaves the position with no stop from Alpaca's cancel to the trailing stop's acceptance. Today's comparable step took 1.6 to 5.2 s. It also drops the take-profit.
+  - **Recommendation, for after tomorrow's trial:** prefer raising the bracket's own stop by replace, a stepped trail at 1 request a step with no gap, if the trial holds up. Either is a strategy change for the next phase and money-touching.
