@@ -7548,3 +7548,8 @@ Research input for Michael's decision, never an instruction to act. Paper only. 
 - **Tests:** 1004 pass.
 - **Daily review brief:** a bullet on the moved take-profit tells the review to count `cyrus-m-` fills as close-out sales and how to report the `take_profit_moved` rows.
 - **Next:** deploy `8a165fa` after the close, once the 3:05 daily summary has posted (a restart must not cut it off), by the off-hours route (flat, no open orders, Alpaca's clock closed, a clean checkout of the reviewed commit). Then merge to `main`.
+
+## Michael's request for 2026-11-19 (2026-11-18, about 1:25 PM CT), saved verbatim
+
+> For tomorrow: a normal morning (the 10:30 close-out tests the moved take-profit). Tonight, after 8a165fa is live, build a separate small change: the load window's stop distance becomes a setting (default 2 cents as today), which I can set for an afternoon load window, for example 5 cents, so load positions qualify for the moves. Group 1 and group 2. Target the mid-day pause for my written yes. Make sure the mid-day and end-of-day briefs report the per-move rows (accepted, stop cancelled by Alpaca, time to fill, fallback used) for every close-out and for a deliberate flatten I will send in the afternoon.
+> Never print any token or key.
