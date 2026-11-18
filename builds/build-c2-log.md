@@ -7392,3 +7392,68 @@ Research input for Michael's decision, never an instruction to act. Paper only. 
 - **The client id** on the replacement is `cyrus-m-` (never `cyrus-x-`, which the close-out would treat as its own working sale), set only if the test shows Alpaca keeps it.
 - **One stored row per move** (`take_profit_moved`), built from the live updates only, with no lookups inside the sale.
 - **The switch:** one constant, so the build can ship switched off.
+
+## The moved take-profit build (2026-11-18, afternoon), branch `moved-tp-2026-11-18`
+
+**The client-id test** (Michael's yes in the session; 12:17 PM CT, SMCI, 1 share, his stop on from 12:16:31, flat before and after):
+- Both replaces were accepted (HTTP 200) and kept the client id asked for (`cyrus-m-20261118-SMCI-...-t1`, then `-t2`).
+- The order was found by that id, shown in the open list with it (at the top level), and shown in the entry's nested legs with it. The group id was kept.
+- The selling replace (bid less 1 cent) filled 0.87 s after it was sent, and Alpaca cancelled the stop 2 ms after the fill.
+- The worker's only stored event was the `stop` command.
+- So the build sets the stack's own id (`MOVE_SETS_CLIENT_ID` on).
+
+**What was built** (all money-touching, group 1; the messages and logging are group 2):
+- **`AlpacaTrading.replaceOrder`:** one PATCH, never retried, prices rounded down to the cent, no quantity sent. It is on the sell broker type only. Structure tests: only `alpaca-trading.ts` sends a PATCH of an order, and only `sells.ts` calls `replaceOrder`.
+- **`SellGate.replace`:** in the same one-at-a-time queue as every sell.
+  - Refused when the shares named exceed the shares held, or when the order, if the open list shows it, is not a sell of that symbol for those shares.
+  - A stop leg, which the open list never shows, is not refused for that alone, so the stepped stop raise can use it later.
+  - Nothing is added to the gate's memory of sells, since a replace adds no shares.
+  - It may use the sale's own reads while they are under a second old, the gate's usual freshness rule.
+- **The move phase** (`src/moved-take-profit.ts` and `Liquidator.run`):
+  - Runs once, in round 1 of every sale that is not one entry's own: the close-outs (regular, mid-day, afternoon, emergency, carried), `flatten`, the loss stop's sale, and a close-out's retry of named symbols.
+  - Uses only reads round 1 already made; when nothing qualifies, no trading request is added (tested).
+  - Prices come from one market-data read with a 1.5 s limit; a quote over 5 s old is not used.
+  - Bounds: at most 30 replaces, none sent after 3 s, each only with room for one more request above the shared budget's urgent floor.
+  - Then a wait of up to 2 s, ending early when the live updates report every move filled (at most 40 waits of at most 0.5 s).
+  - If any replace was sent, round 1 starts again from fresh reads, unchanged from today. Its cancels reach a moved take-profit that did not fill, whatever its id: the cancel-everything request, or in a retry of named symbols the single cancels taken from a fresh open list. Those shares are then sold at market. That is the fallback.
+- **One stored row per move** (`take_profit_moved`), built from the live updates only:
+  - accepted or refused, with Alpaca's status and message, or "unclear";
+  - stop cancelled by Alpaca (true, false, or null when the updates did not say);
+  - time to fill, from the send to Alpaca's fill time;
+  - whether the fallback was used.
+- **No double counting** of a replaced leg's fills:
+  - The live updates' exit tally drops the replaced order (by Alpaca's `replaces` or the stack's own record).
+  - The daily summary leaves out any order another order replaced (`replacedIds`), in its profit match and in its fills check. The fills check also skips the lookup of such an order.
+- **The simulator** (`test/sim-broker.ts`, a 2026-11-18 mode) models what was measured today:
+  - a replace gives a new id with `replaces` and the same group; the old order is "replaced";
+  - a take-profit at or below the stop is refused (422);
+  - a selling limit fills after a set delay, and Alpaca cancels the stop;
+  - the open list shows a filled bracket as its take-profit alone, with the stop hidden;
+  - cancelling one leg cancels its sibling;
+  - a pending cancel can still fill;
+  - due events are handled in time order.
+- **Tests:** 991 pass, 15 of them new. One wall-clock test (`midday.test.ts`, item 4 of 2026-11-16) failed once under full-suite load and passes alone.
+
+**Every cached id after a replace, checked (Michael's design point):**
+- **Whole-account sales:** cancel everything, or single cancels from a fresh open list each round, so the new id is reached. The liquidator's cancel memory is keyed by ids this liquidator cancelled; a take-profit was never cancelled before it was moved.
+- **One entry's own sale** (`cleanupSale`): its cancels come from a fresh lookup of the entry, whose nested legs show the newest leg (seen on paper today). The exceptions are the fast sale (no cancels) and the timed-out-stop and cheap paths (the sync's copy, used only when no exit of the entry is open). These sales stand aside during any sale of the whole account, which is the only time a take-profit is moved.
+- **The order sync's copies** are refreshed by its next listing, and the missing-exit check is off during any sale of the whole account.
+- **The live updates** key exits by group id, which a replace keeps. The replaced order is dropped from the fill tally and from the ended-legs set.
+- **The sell gate's view** is cleared after the moves.
+- **Residual case:** a whole-account sale that ends (for example, the market closing) after a move was accepted but before the fallback could leave a moved take-profit resting. The next close-out retry or sync reads fresh lists.
+
+**Simulator measurement** (19 positions in one close-out; prices 5 to 45 dollars; fills 0.3 to 1.4 s after a replace; market sales fill 1.5 s after sending):
+
+| Day | Moves | Trading requests | Replaces | Market sales | Time to flat | Seconds without a stop (all positions) |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Normal (0.4 percent stop) | off | 31 | 0 | 19 | 2.0 s | 34.2 |
+| Normal | on | 33 | 14 | 5 | 2.5 s | 9.0 |
+| Load (2 cent stop) | off | 31 | 0 | 19 | 2.0 s | 34.2 |
+| Load | on | 31 | 0 | 19 | 2.0 s | 34.2 |
+| Half and half | on | 33 | 7 | 12 | 2.5 s | 21.6 |
+
+**Reading:**
+- A sale with moves costs today's trading requests plus 2: round 1's fresh reads after the moves. Each replace stands in for one market sale.
+- On a load day nothing qualifies: no change at all, apart from one market-data read.
+- 5 of the 19 normal-day positions did not qualify, because a 0.4 percent stop on a stock under about 7.50 dollars is within 3 cents.
+- The time-to-flat step reflects the simulator's 0.5 s granularity; on paper, the other sales start when the last move fills, at most 2 s.
