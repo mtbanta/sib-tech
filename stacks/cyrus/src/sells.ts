@@ -615,8 +615,12 @@ export class Liquidator {
         sent = await movePhaseInner(held, open, readAtMs);
       } catch (err) {
         this.d.log?.("move_phase_failed", { reason: o.reason, error: (err as Error).message.slice(0, 160), sent });
-        sent = Math.max(sent, moveRows.some((r) => r.accepted || r.httpStatus !== null || (r.answer ?? "").startsWith("unclear")) ? 1 : 0);
+        // A replace may have gone out before the error (group 1 and group 2, round 2): round 1 then starts again and judges the moves as usual.
+        sent = Math.max(sent, moveRows.some((r) => r.accepted || r.httpStatus !== null || r.answer === null || (r.answer ?? "").startsWith("unclear")) ? 1 : 0);
+        if (sent > 0) moveCheckPending = true;
       }
+      // Moves that were never sent (refused by the sell gate, or stopped before the send): today's path sells those shares.
+      if (sent === 0) for (const row of moveRows) row.fallback ??= true;
       return sent > 0;
     };
     const movePhaseInner = async (held: Position[], open: Order[], readAtMs: number): Promise<number> => {

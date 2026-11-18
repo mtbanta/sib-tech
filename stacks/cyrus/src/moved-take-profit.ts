@@ -196,7 +196,7 @@ export interface MoveRow {
 // as an answer (fills 0.27 s and more after the send, answers up to 0.24 s), so an update about the replacement may arrive before the answer
 // names it. Until then the replacement is recognised as the bracket's take-profit (a limit sell in that group) that is not the old order.
 export class MoveWatch {
-  private readonly byGroup = new Map<string, { oldId: string; newId: string | null; qty: number; filledAtMs: number | null; filledSeenAtMs: number | null; filledQty: number; canceledAtMs: number | null; stopCanceledAtMs: number | null }>();
+  private readonly byGroup = new Map<string, { oldId: string; newId: string | null; qty: number; filledAtMs: number | null; filledSeenAtMs: number | null; filledQty: number; fillHeard: boolean; canceledAtMs: number | null; canceledSeenAtMs: number | null; stopCanceledAtMs: number | null; stopCanceledSeenAtMs: number | null }>();
   private readonly oldOf = new Map<string, string>();
   private readonly now: () => number;
   constructor(now: () => number) {
@@ -204,7 +204,7 @@ export class MoveWatch {
   }
   // Before a replace is sent: the bracket's group, the old take-profit's id, and its shares.
   expect(groupId: string, oldId: string, qty: number): void {
-    this.byGroup.set(groupId, { oldId, newId: null, qty, filledAtMs: null, filledSeenAtMs: null, filledQty: 0, canceledAtMs: null, stopCanceledAtMs: null });
+    this.byGroup.set(groupId, { oldId, newId: null, qty, filledAtMs: null, filledSeenAtMs: null, filledQty: 0, fillHeard: false, canceledAtMs: null, canceledSeenAtMs: null, stopCanceledAtMs: null, stopCanceledSeenAtMs: null });
   }
   // The replace was accepted: the new order's id.
   register(groupId: string, newId: string): void {
@@ -240,23 +240,33 @@ export class MoveWatch {
         this.oldOf.set(o.id, m.oldId);
       }
       if (u.event === "fill" || u.event === "partial_fill") {
+        m.fillHeard = true;
         m.filledQty = Math.max(m.filledQty, o.filledQty);
         if (o.filledQty >= m.qty - EPS && m.filledAtMs === null) {
           m.filledAtMs = at;
           m.filledSeenAtMs = this.now(); // the worker's own clock, to compare with its own cancels
         }
-      } else if (u.event === "canceled" || u.event === "expired" || u.event === "rejected") m.canceledAtMs ??= at;
+      } else if (u.event === "canceled" || u.event === "expired" || u.event === "rejected") {
+        if (m.canceledAtMs === null) {
+          m.canceledAtMs = at;
+          m.canceledSeenAtMs = this.now();
+        }
+      }
       return;
     }
-    if (o.side === "sell" && (o.type === "stop" || o.stopPrice !== null) && u.event === "canceled") m.stopCanceledAtMs ??= at;
+    if (o.side === "sell" && (o.type === "stop" || o.stopPrice !== null) && u.event === "canceled" && m.stopCanceledAtMs === null) {
+      m.stopCanceledAtMs = at;
+      m.stopCanceledSeenAtMs = this.now(); // the worker's clock, to compare with its own cancels
+    }
   }
   filled(groupId: string): boolean {
     return this.byGroup.get(groupId)?.filledAtMs != null;
   }
   // What the live updates said about one move so far.
-  seen(groupId: string): { newId: string | null; filledAtMs: number | null; filledSeenAtMs: number | null; filledQty: number | null; stopCanceledAtMs: number | null; canceledAtMs: number | null } {
+  // `filledQty` is null when no fill was heard at all (not 0: the updates may not have been connected).
+  seen(groupId: string): MoveSeen {
     const m = this.byGroup.get(groupId);
-    return { newId: m?.newId ?? null, filledAtMs: m?.filledAtMs ?? null, filledSeenAtMs: m?.filledSeenAtMs ?? null, filledQty: m ? m.filledQty : null, stopCanceledAtMs: m?.stopCanceledAtMs ?? null, canceledAtMs: m?.canceledAtMs ?? null };
+    return { newId: m?.newId ?? null, filledAtMs: m?.filledAtMs ?? null, filledSeenAtMs: m?.filledSeenAtMs ?? null, filledQty: m && m.fillHeard ? m.filledQty : null, canceledAtMs: m?.canceledAtMs ?? null, canceledSeenAtMs: m?.canceledSeenAtMs ?? null, stopCanceledAtMs: m?.stopCanceledAtMs ?? null, stopCanceledSeenAtMs: m?.stopCanceledSeenAtMs ?? null };
   }
   // Forget the last sale's moves (called at the start of each move phase): bounded memory. The old-to-new map is kept longer (the fill
   // tally may meet a late update), at most 2,000 entries.
@@ -266,12 +276,27 @@ export class MoveWatch {
   }
 }
 
-// The row's verdict on the stop (group 2, round 1 of 2026-11-18: "unknown" is never stored as "no"). True only when the moved take-profit's
-// fill was seen before today's path sent its first cancel (`firstCancelAtMs`, the worker's clock; null when it sent none) and the stop's
-// cancel was seen: only Alpaca can have cancelled it then. False only when the moved take-profit was seen cancelled with nothing filled.
-// Otherwise null.
-export function stopVerdict(seen: { filledSeenAtMs: number | null; stopCanceledAtMs: number | null; canceledAtMs: number | null; filledAtMs: number | null }, firstCancelAtMs: number | null): boolean | null {
-  if (seen.filledSeenAtMs !== null && seen.stopCanceledAtMs !== null && (firstCancelAtMs === null || seen.filledSeenAtMs < firstCancelAtMs)) return true;
-  if (seen.canceledAtMs !== null && seen.filledAtMs === null) return false;
+export interface MoveSeen {
+  newId: string | null;
+  filledAtMs: number | null;
+  filledSeenAtMs: number | null;
+  filledQty: number | null;
+  canceledAtMs: number | null;
+  canceledSeenAtMs: number | null;
+  stopCanceledAtMs: number | null;
+  stopCanceledSeenAtMs: number | null;
+}
+
+// The row's verdict on the stop (group 2, rounds 1 and 2 of 2026-11-18: "unknown" is never stored as "no"). Times compared are the worker's
+// own (when it heard each update, and when today's path sent its first cancel, `firstCancelAtMs`, null when it sent none).
+//   true:  the moved take-profit had filled some shares (all, or part: Alpaca cancels the whole stop at a take-profit's first partial fill,
+//          measured 2026-11-04 and 2026-11-18) and the stop's cancel was heard before today's path sent any cancel: only Alpaca can have
+//          cancelled it then.
+//   false: nothing filled, and the moved take-profit was cancelled after today's path sent its cancels: today's path cancelled the bracket.
+//   null:  anything else (not heard, or heard after today's cancels were sent, or the stop filled and Alpaca cancelled the take-profit).
+export function stopVerdict(seen: MoveSeen, firstCancelAtMs: number | null): boolean | null {
+  const filledSome = seen.filledQty !== null && seen.filledQty > 0;
+  if (filledSome && seen.stopCanceledSeenAtMs !== null && (firstCancelAtMs === null || seen.stopCanceledSeenAtMs < firstCancelAtMs)) return true;
+  if (!filledSome && seen.canceledSeenAtMs !== null && firstCancelAtMs !== null && seen.canceledSeenAtMs >= firstCancelAtMs) return false;
   return null;
 }

@@ -482,3 +482,53 @@ test("the summary's fills check knows a replaced order (no lookup for it): its f
   const entry = order({ id: "e1", side: "buy", status: "filled", legs: [order({ id: "new-tp", side: "sell", type: "limit", replaces: "old-tp" }), order({ id: "sl", side: "sell", type: "stop" })] });
   assert.deepEqual([...knownOrderIds([entry])].sort(), ["e1", "new-tp", "old-tp", "sl"]);
 });
+
+// ---- group 2, round 2 ----
+test("stop verdict: a partly filled move whose stop Alpaca cancelled before today's cancels is 'yes'; the stop filling instead is 'not known'; 'no' only with nothing filled after today's cancels", async () => {
+  const { stopVerdict } = await import("../src/moved-take-profit.ts");
+  let now = 0;
+  const watch = new MoveWatch(() => now);
+  const up = (event: string, o: Record<string, unknown>): TradeUpdate => ({ event, order: order({ symbol: "AAA", groupId: "g", ...o }), positionQty: null, atMs: now });
+  watch.expect("g", "old", 10);
+  now = 1_400;
+  watch.onUpdate(up("partial_fill", { id: "new", side: "sell", type: "limit", status: "partially_filled", qty: 10, filledQty: 4 }));
+  now = 1_402;
+  watch.onUpdate(up("canceled", { id: "sl", side: "sell", type: "stop", stopPrice: 19.92, status: "canceled", qty: 10 }));
+  now = 3_100;
+  watch.onUpdate(up("canceled", { id: "new", side: "sell", type: "limit", status: "canceled", qty: 10, filledQty: 4 }));
+  assert.equal(stopVerdict(watch.seen("g"), 3_000), true, "partly filled at 1.4 s, the stop cancelled at 1.402 s, today's first cancel at 3.0 s");
+  assert.equal(watch.seen("g").filledQty, 4);
+  // the stop filled during the wait and Alpaca cancelled the moved take-profit (nothing filled on it)
+  const w2 = new MoveWatch(() => now);
+  w2.expect("g", "old", 10);
+  now = 1_000;
+  w2.onUpdate(up("canceled", { id: "new", side: "sell", type: "limit", status: "canceled", qty: 10, filledQty: 0 }));
+  assert.equal(stopVerdict(w2.seen("g"), 3_000), null, "cancelled before today's cancels: not by today's path");
+  assert.equal(w2.seen("g").filledQty, null, "no fill heard: not known, not 0");
+  // nothing filled, cancelled after today's cancels: today's path cancelled the bracket
+  const w3 = new MoveWatch(() => now);
+  w3.expect("g", "old", 10);
+  now = 3_200;
+  w3.onUpdate(up("canceled", { id: "new", side: "sell", type: "limit", status: "canceled", qty: 10, filledQty: 0 }));
+  assert.equal(stopVerdict(w3.seen("g"), 3_000), false);
+});
+
+test("an error after a replace went out still judges that move by the next read (counted as sold), and moves never sent are marked as today's path", async () => {
+  const w = world();
+  await normal(w, "AAA", 10);
+  await hold(w, "BBB", 4, 30, 29.88, 30.08);
+  let calls = 0;
+  (w.liquidator as any).d.moves.room = () => { if (++calls === 2) throw new Error("test fault"); return true; };
+  const r = await w.liquidator.flatten({ reason: "daily loss stop", tradeDate: D, maxRounds: 1, priority: true });
+  w.sim.advance(3_000);
+  assert.ok(w.logs.some((l) => l.e === "move_phase_failed"));
+  const aaa = w.rows().find((x) => x.symbol === "AAA")!;
+  assert.equal(aaa.accepted, true);
+  assert.notEqual(aaa.fallback, null, "judged by the next read");
+  assert.ok(r.sold.some((x) => x.symbol === "AAA"), "AAA sold, by its move or today's path");
+  const g = world();
+  await normal(g, "CCC", 10);
+  (g.liquidator as any).d.gate.replace = async () => ({ status: "refused", reason: "test" });
+  await g.liquidator.flatten({ reason: "close-out", tradeDate: D });
+  assert.equal(g.rows()[0]!.fallback, true, "never sent: today's path sold it");
+});
