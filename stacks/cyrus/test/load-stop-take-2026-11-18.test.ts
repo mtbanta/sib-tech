@@ -226,5 +226,159 @@ test("`help` stays one Discord message (under 2000 characters) and names the new
   await r.at("16:41:05");
   const help = r.said("commands").find((t) => t.startsWith("**Commands**"))!;
   assert.ok(help.length < 2000, String(help.length));
-  assert.ok(help.includes("Add `stop 5 take 3` for that window only (stop 2 to 10 cents, take-profit 1 to 10; defaults 2 and 1)."));
+  assert.ok(help.includes("`load afternoon stop 5 take 3`: that window only (stop 2 to 10 cents, take 1 to 10; default 2, 1)."));
+  // The example is the whole line: `stop 5 take 3` alone would be read as the `stop` command.
+  assert.ok(!help.includes(" Add `stop 5 take 3`"));
+});
+
+test("a window starting again with other values: a print in the moment after the command (before the pass reads the day again) already uses the new values", async () => {
+  const { r, sent } = await flatAtMidday({ load: true });
+  r.ownerSays("load afternoon stop 5 take 3", "16:40:00");
+  await r.at("16:40:05");
+  r.ownerSays("flatten", "16:50:00");
+  await r.at("16:50:05");
+  await r.at("16:50:30");
+  for (const t of ["16:52:00", "16:53:30", "16:54:50"]) await r.at(t); // passes keep reading commands (no 2 minute gap)
+  const n = sent.length;
+  // The print arrives while the start reply is being posted: after the window's start, the pause and the stop are written, before the
+  // pass goes on to read the day record again.
+  const bot = r.bot as any;
+  const post = bot.post.bind(bot);
+  let fed = false;
+  bot.post = async (channel: string, text: string) => {
+    if (!fed && text.startsWith("Afternoon load window on again")) {
+      fed = true;
+      await r.trade("BBB", 10.004, "16:55:00");
+    }
+    return post(channel, text);
+  };
+  r.ownerSays("load afternoon", "16:55:00");
+  await r.at("16:55:00");
+  assert.ok(fed, r.said("commands").join(" | "));
+  await until(() => sent.length > n);
+  assert.equal(sent.length, n + 1);
+  assert.deepEqual([sent.at(-1).symbol, sent.at(-1).stopPrice, sent.at(-1).takeProfitPrice], ["BBB", 9.99, 10.02], "the defaults, not the earlier window's stop 5 take 3");
+});
+
+test("the same on a normal morning (the screen route): the window starting again prices its first print with its own values", async () => {
+  const { r, sent } = await flatAtMidday();
+  r.ownerSays("load afternoon stop 5 take 3", "16:40:00");
+  await r.at("16:40:05");
+  await r.at("16:40:10");
+  assert.ok(r.said("commands").some((t) => t.startsWith("Afternoon load window on until")), r.said("commands").join(" | "));
+  r.ownerSays("flatten", "16:50:00");
+  await r.at("16:50:05");
+  await r.at("16:50:30");
+  for (const t of ["16:52:00", "16:53:30", "16:54:50"]) await r.at(t);
+  const n = sent.length;
+  const bot = r.bot as any;
+  const post = bot.post.bind(bot);
+  let fed = false;
+  bot.post = async (channel: string, text: string) => {
+    if (!fed && text.startsWith("Afternoon load window on again")) {
+      fed = true;
+      await r.trade("BBB", 10.004, "16:55:06");
+    }
+    return post(channel, text);
+  };
+  r.ownerSays("load afternoon take 4", "16:55:00");
+  await r.at("16:55:00");
+  await r.at("16:55:05");
+  await r.at("16:55:06");
+  assert.ok(fed, r.said("commands").join(" | "));
+  await until(() => sent.length > n);
+  assert.deepEqual([sent.at(-1).symbol, sent.at(-1).stopPrice, sent.at(-1).takeProfitPrice], ["BBB", 9.99, 10.05], "stop 2 (default) and take 4, not the earlier stop 5 take 3");
+});
+
+test("the purpose end to end: an afternoon window with stop 5 take 3 ends, and its own close-out sells by moving each take-profit (cyrus-m-), one row per move, no market sale", async () => {
+  const { MOVE_CLIENT_ID_PREFIX } = await import("../src/moved-take-profit.ts");
+  const { AFTERNOON_FLAT_PHASE } = await import("../src/load-mode.ts");
+  const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
+  sim.openShape20261118 = true;
+  sim.replaceAnswerMs = 60;
+  const events: Array<{ e: string; d: any }> = [];
+  const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, orderStream: true, loadAfternoon: true, log: (_l, e, d) => void events.push({ e, d: d ?? {} }), latestQuotes: async (symbols) => new Map(symbols.map((s) => [s, { bid: sim.prices.get(s)!, ask: sim.prices.get(s)! + 0.01, atMs: sim.simMs }])) });
+  sim.onOrderEvent = (event, o, atMs) => void r.orderUpdate({ event, order: o, positionQty: null, atMs });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("trades 20\nposition 300\napprove", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  for (const t of ["14:15:00", "14:25:00", "14:30:05", "16:30:00"]) await r.at(t);
+  await until(async () => Boolean((await r.store.getDay(D))!.phases[MIDDAY_PHASE]));
+  const sent: any[] = [];
+  const orig = sim.submitEntry.bind(sim);
+  sim.submitEntry = async (e: any) => (sent.push(e), orig(e));
+  r.ownerSays("load afternoon stop 5 take 3", "16:40:00");
+  await r.at("16:40:05");
+  await r.at("16:40:10");
+  // Two 1-share entries, filled at their limits; the price then sits at the limit (bid 20.01 and 10.01).
+  for (const [sym, print, t] of [["AAA", 20.004, "16:40:20"], ["BBB", 10.004, "16:40:30"]] as const) {
+    sim.setPrice(sym, print);
+    await r.trade(sym, print, t);
+    await until(() => sent.some((e) => e.symbol === sym));
+    const e = sent.find((x) => x.symbol === sym)!;
+    sim.fillEntry(e.clientOrderId, e.limitPrice);
+    sim.setPrice(sym, e.limitPrice);
+  }
+  assert.deepEqual(sent.map((e) => [e.symbol, e.limitPrice, e.stopPrice, e.takeProfitPrice]), [["AAA", 20.01, 19.96, 20.04], ["BBB", 10.01, 9.96, 10.04]]);
+  for (const t of ["16:42:00", "16:44:00", "16:46:00", "16:48:00", "16:50:00", "16:52:00", "16:54:00", "16:56:00", "16:58:00", "17:00:00", "17:02:00", "17:04:00", "17:06:00", "17:08:00", "17:10:00"]) await r.at(t);
+  assert.equal(sim.heldQty("AAA") + sim.heldQty("BBB"), 2, "both held at the window's end");
+  // The window started at 16:40:10 (the screen route starts it in the pass after the screen), so it ends at 17:10:10.
+  await r.at("17:10:15");
+  await until(async () => Boolean((await r.store.getDay(D))!.phases[AFTERNOON_FLAT_PHASE]));
+  assert.equal(sim.heldQty("AAA") + sim.heldQty("BBB"), 0, "flat");
+  assert.equal(sim.replaceLog.length, 2, "both take-profits moved");
+  assert.equal(sim.sellLog.length, 0, "no market sale");
+  const rows = events.filter((x) => x.e === "take_profit_moved").map((x) => x.d);
+  assert.equal(rows.length, 2, "one row per move");
+  for (const row of rows) {
+    assert.ok(String(row.clientId).startsWith(MOVE_CLIENT_ID_PREFIX), row.clientId);
+    assert.deepEqual([row.accepted, row.fallback, row.stopCancelledByAlpaca], [true, false, true], JSON.stringify(row));
+  }
+  assert.deepEqual(rows.map((x) => [x.symbol, x.limit, x.stopPrice]).sort(), [["AAA", 20, 19.96], ["BBB", 10, 9.96]]);
+});
+
+// ---------------- group 2, round 1: the replies that answer a line carrying values ----------------
+
+test("the screen reply with no values names the defaults as such; a second line with values while the screen runs says they were not used", async () => {
+  const { r } = await flatAtMidday();
+  let release: ((v: unknown) => void) | undefined;
+  const real = (r.worker as any).d.buildLiveList;
+  (r.worker as any).d.buildLiveList = (o: unknown) => new Promise((res) => (release = () => res(real(o))));
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  assert.ok(r.said("commands").some((t) => t.startsWith("Running the cheap-symbol screen") && t.endsWith("The window will use the defaults, stop 2 cents and take-profit 1 cent.")), r.said("commands").join(" | "));
+  r.ownerSays("load afternoon stop 5 take 3", "16:40:30");
+  await r.at("16:40:35");
+  assert.ok(r.said("commands").includes("Not started yet: the cheap-symbol screen for the afternoon load window is already running. The stop and take-profit in this line were not used; the window keeps the values sent with the earlier `load afternoon`."), r.said("commands").join(" | "));
+  release?.(undefined);
+  await r.at("16:40:40");
+  await r.at("16:40:45");
+  assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_EXITS_PHASE], "stop 2 take 1", "the first line's values (the defaults)");
+});
+
+test("a line with values sent while a cancelled screen is still finishing: the reply says the values were not kept and gives the line to send again", async () => {
+  const { r } = await flatAtMidday();
+  (r.worker as any).d.buildLiveList = () => new Promise(() => undefined); // a screen that never finishes
+  r.ownerSays("load afternoon stop 5 take 3", "16:40:00");
+  await r.at("16:40:05");
+  r.ownerSays("stop", "16:40:30");
+  await r.at("16:40:35");
+  const cancelled = r.said("commands").find((t) => t.includes("To try again, send `load afternoon` again"));
+  assert.ok(cancelled?.includes("with `stop N take M` again if you want other values than the defaults."), r.said("commands").join(" | "));
+  r.ownerSays("load afternoon stop 5 take 3", "16:41:00");
+  await r.at("16:41:05");
+  assert.ok(r.said("commands").includes("The earlier screen is still finishing. Send `load afternoon` again in a minute or two. The stop and take-profit in this line were not kept; include them again (`load afternoon stop 5 take 3`)."), r.said("commands").join(" | "));
+  r.ownerSays("load afternoon", "16:42:00");
+  await r.at("16:42:05");
+  assert.ok(r.said("commands").at(-1) === "The earlier screen is still finishing. Send `load afternoon` again in a minute or two.", "no note when the line carried no values");
+});
+
+test("the summary's window settings line and the after-window status line give the window's own values", async () => {
+  const { loadExtraLines } = await import("../src/summary.ts");
+  const { afternoonStatusLine } = await import("../src/commands.ts");
+  const x = { orderStream: null, entryExpiry: null } as any;
+  assert.match(loadExtraLines(x, undefined, { stopCents: 5, takeProfitCents: 3 })[0]!, /^- window settings: .*take-profit 3 cents up and stop 5 cents down from the limit price$/);
+  assert.match(loadExtraLines(x)[0]!, /take-profit 1 cent up and stop 2 cents down from the limit price$/, "the morning window: the defaults");
+  const day = dayWith({ [LOAD_AFTERNOON_PHASE]: z("16:40:00").toISOString(), [LOAD_AFTERNOON_EXITS_PHASE]: "stop 5 take 3", afternoonFlat: z("17:10:20").toISOString() });
+  assert.match(afternoonStatusLine(day, z("17:15:00"), { on: true } as any, 15), /^Afternoon load window: ran from 10:40 AM CT to 11:10 AM CT \(stop 5 cents and take-profit 3 cents\); its close-out finished flat, entries paused$/);
 });

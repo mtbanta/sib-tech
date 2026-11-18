@@ -225,13 +225,13 @@ export function loadCeilingOn(day: (Pick<DayRecord, "phases"> & WindowDay) | nul
   return !!day && loadState(day) === "on" && loadRulesApply(day, t); // by the clock alone: 100 from 10:30:00 (the tighter direction)
 }
 
-// The churn is on: a load day still switched on, inside its window.
 // The exits for a load entry signalled at time t: the afternoon window's own values while it is on (Michael's request of 2026-11-18),
 // otherwise (the morning load window) the defaults.
 export function loadExitsAt(day: (Pick<DayRecord, "phases"> & WindowDay) | null | undefined, t: Date): LoadExits {
   return inAfternoonLoad(day, t) ? afternoonLoadExits(day) : { ...DEFAULT_LOAD_EXITS };
 }
 
+// The churn is on: a load day still switched on, inside its window.
 export function inLoadWindow(day: (Pick<DayRecord, "phases"> & WindowDay) | null | undefined, t: Date): boolean {
   if (inAfternoonLoad(day, t)) return true; // the afternoon load window (Michael, 2026-11-11)
   if (!day || loadState(day) !== "on") return false;

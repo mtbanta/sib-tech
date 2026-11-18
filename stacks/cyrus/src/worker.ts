@@ -385,6 +385,10 @@ export class Worker {
       afternoonScreen: (date, route, exits) => this.startAfternoonScreen(date, route, exits),
       cancelAfternoonScreen: (date) => this.cancelAfternoonScreen(date),
       loadAfternoonEnabled: deps.loadAfternoon === true,
+      // Michael's request of 2026-11-18: the day just written with an afternoon window's start becomes the copy the strategy reads.
+      dayWritten: (d) => {
+        if (d.tradeDate === etDate(this.d.now())) this.lastDay = d;
+      },
       log: (e, data) => deps.log?.("info", e, data),
     });
     this.gate = new OrderGate({

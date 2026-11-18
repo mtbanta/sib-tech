@@ -41,6 +41,10 @@ export interface CommandDeps {
   // `load afternoon` was built but switched OFF in the release of 2026-11-11 (option B). The release of 2026-11-12 fixes group 1's
   // round 3 findings and main.ts switches it on (one line there, `loadAfternoon: true`, turns it off again).
   loadAfternoonEnabled?: boolean;
+  // Michael's request of 2026-11-18 (group 1, found by the builder before round 1 returned): the day record just written with an afternoon
+  // window's start and its stop and take-profit. The worker keeps it as its copy of the day at once, so a print that arrives before the
+  // pass reads the day again (while the reply is posted) is priced with this window's values, not an earlier window's.
+  dayWritten?: (day: DayRecord) => void;
 }
 
 // Why `load afternoon` cannot start now, or null (Michael's standing requirement of 2026-11-11): today has a mid-day cycle, is approved
@@ -124,7 +128,8 @@ export function screenCancelledLine(switched: boolean | "switched", after: "go-r
   const base = switched === "switched" ? SCREEN_CANCELLED_SWITCHED : SCREEN_CANCELLED;
   const tooLate = "`load afternoon` is no longer accepted today (its time has passed).";
   const pauseOver = o.tooLate ? `Trading has resumed normally; ${tooLate}` : "Trading has resumed normally. To start the window instead, send `stop` (or `flatten`), then `load afternoon` once flat (accepted until 1:30 PM CT, or the last entry if earlier).";
-  const tryAgain = o.tooLate ? tooLate : "To try again, send `load afternoon` again once the account is flat (accepted until 1:30 PM CT, or the last entry if earlier).";
+  // Group 2, round 1 of 2026-11-18: the stop and take-profit given with the cancelled line are not kept, so the line says to give them again.
+  const tryAgain = o.tooLate ? tooLate : "To try again, send `load afternoon` again once the account is flat (accepted until 1:30 PM CT, or the last entry if earlier), with `stop N take M` again if you want other values than the defaults.";
   const why = o.why ?? "";
   let next: string;
   if (after === "go-resumed") next = o.lastEntryPassed ? "" : pauseOver;
@@ -153,7 +158,7 @@ export function afternoonStatusLine(day: DayRecord, now: Date, pause: MiddayPaus
   return `Afternoon load window: ran from ${centralClock(w.start)} to ${centralClock(w.end)} (${exits}); ${closeTxt}, ${state}`;
 }
 
-const LOAD_AFTERNOON_HELP = "`load afternoon` while flat, during the mid-day pause or after `stop` or `flatten`, which it clears, before 1:30 PM CT (or the last entry, if earlier): a load window of at most 30 minutes (1 share churn, 75 dollars a position, up to 150 orders a minute even above today's approved limit), then entries pause and a close-out sells to flat. Add `stop 5 take 3` for that window only (stop 2 to 10 cents, take-profit 1 to 10; defaults 2 and 1). On a normal morning the cheap-symbol screen runs first (a few minutes; `stop`, `flatten` or `go` meanwhile cancels it: after `stop` or `flatten` send `load afternoon` again, after a `go` first `stop` or `flatten`).";
+const LOAD_AFTERNOON_HELP = "`load afternoon` while flat, during the mid-day pause or after `stop` or `flatten`, which it clears, before 1:30 PM CT (or the last entry, if earlier): a load window of at most 30 minutes (1 share churn, 75 dollars a position, up to 150 orders a minute even above today's approved limit), then entries pause and a close-out sells to flat. `load afternoon stop 5 take 3`: that window only (stop 2 to 10 cents, take 1 to 10; default 2, 1). On a normal morning the cheap-symbol screen runs first (a few minutes; `stop`, `flatten` or `go` meanwhile cancels it: after `stop` or `flatten` send `load afternoon` again, after a `go` first `stop` or `flatten`).";
 const LOAD_AFTERNOON_OFF_HELP = "`load afternoon` is switched off in this release while a fix to it is finished; it changes nothing.";
 export const LOAD_AFTERNOON_OFF = "`load afternoon` is switched off in this release while a fix to it is finished, so nothing changed. `go` still resumes a normal afternoon.";
 
@@ -468,10 +473,11 @@ export class CommandProcessor {
         }
         const started = this.d.afternoonScreen(date, plainStop(facts.stop) ? "stop" : "pause", cmd.exits);
         // Michael's request of 2026-11-18: the reply names the stop and take-profit the window will use.
-        const values = ` The window will use ${exitsInWords(cmd.exits)} (this window only).`;
+        const isDefault = cmd.exits.stopCents === DEFAULT_LOAD_EXITS.stopCents && cmd.exits.takeProfitCents === DEFAULT_LOAD_EXITS.takeProfitCents;
+        const values = isDefault ? ` The window will use the defaults, ${exitsInWords(cmd.exits)}.` : ` The window will use ${exitsInWords(cmd.exits)} (this window only).`;
         await this.say(
           started === "finishing"
-            ? SCREEN_STILL_FINISHING
+            ? SCREEN_STILL_FINISHING + (cmd.given ? ` The stop and take-profit in this line were not kept; include them again (\`load afternoon ${formatLoadExits(cmd.exits)}\`).` : "")
             : started
               ? plainStop(facts.stop)
                 ? // Michael's ruling E (2026-11-12): on a normal morning with his own stop on, the screen runs while the stop keeps entries off.
@@ -758,7 +764,9 @@ export class CommandProcessor {
     // Michael's request of 2026-11-18: the window's stop and take-profit are written in the same write as its start, every time (the
     // defaults when none were given), so a window never runs with an earlier window's values.
     const exits: LoadExits = r.exits ?? { ...DEFAULT_LOAD_EXITS };
-    await setPhase(this.d.store, date, LOAD_AFTERNOON_PHASE, at.toISOString(), { [LOAD_AFTERNOON_EXITS_PHASE]: formatLoadExits(exits), ...(previous ? { [LOAD_AFTERNOON_PREVIOUS_PHASE]: previous.toISOString(), [AFTERNOON_FLAT_PHASE]: "" } : {}) });
+    const written = await setPhase(this.d.store, date, LOAD_AFTERNOON_PHASE, at.toISOString(), { [LOAD_AFTERNOON_EXITS_PHASE]: formatLoadExits(exits), ...(previous ? { [LOAD_AFTERNOON_PREVIOUS_PHASE]: previous.toISOString(), [AFTERNOON_FLAT_PHASE]: "" } : {}) });
+    // Before the pause ends or the stop clears (both written next), so no entry can be priced from an earlier copy of the day.
+    this.d.dayWritten?.(written);
     await updatePause(this.d.store, date, { on: false, resumedAt: at.toISOString(), resumedBy: "load afternoon" });
     if (clearsStop) await this.setStop(false, "owner command (load afternoon)", at);
     this.d.log?.("load_afternoon", { date, switched: r.switched, symbols: r.list.length, clearedStop: clearsStop, stopCents: exits.stopCents, takeProfitCents: exits.takeProfitCents, ...(previous ? { again: true, previousStart: previous.toISOString() } : {}) });
