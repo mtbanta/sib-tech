@@ -7540,3 +7540,11 @@ Research input for Michael's decision, never an instruction to act. Paper only. 
   - the hung-lookup test uses the real clock (under 2 s);
   - the "18 of 18" read was one request at 12:53 PM by the scratchpad script `papertest/opengroup.mjs`, which printed counts only.
 - **Tests:** 1003. One full run failed the same wall-clock test in `midday.test.ts` (item 4 of 2026-11-16, the morning line's lookups, code this build does not touch); the next two full runs passed every test. Its failure message was not captured.
+
+**Review rounds 3 and 4: both groups PASS on `8a165fa`.**
+- **Group 1, round 3:** PASS on the round 2 fixes. Round 1 starts again only after something may have been sent; a throw before any send goes to today's path; nothing can be counted or sold twice.
+- **Group 2, round 3:** PASS (B4 fixed). One non-blocking note was then fixed: the cancel branch of the live-update tracker takes the order's filled count too, so a missed partial-fill update can never give "false".
+- **Round 4, both groups:** PASS on that change. It touches only the stored row; `MoveWatch.filled`, which ends the sale's wait, is unchanged.
+- **Tests:** 1004 pass.
+- **Daily review brief:** a bullet on the moved take-profit tells the review to count `cyrus-m-` fills as close-out sales and how to report the `take_profit_moved` rows.
+- **Next:** deploy `8a165fa` after the close, once the 3:05 daily summary has posted (a restart must not cut it off), by the off-hours route (flat, no open orders, Alpaca's clock closed, a clean checkout of the reviewed commit). Then merge to `main`.
