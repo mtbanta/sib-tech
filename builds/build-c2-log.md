@@ -7484,3 +7484,39 @@ Research input for Michael's decision, never an instruction to act. Paper only. 
 - On a normal day the account is flat about 2 s later (the replaces are sent one at a time, then the wait for the last fill). The time positions spend without a stop falls by about three quarters.
 - On a load day nothing changes.
 - **Scope note for Michael:** the move phase runs in every sale of the whole account, which includes the afternoon load window's close-out and the emergency close-out besides the two he named. His decision said "all whole-account sales".
+
+**Michael's confirmation (2026-11-18, about 12:45 PM), saved verbatim:** "Confirmed: all whole-account sales, including the afternoon load window's close-out and the emergency close-out, use the moves. I accept the trade-off (flat about 2 s later, far less time without a stop). If I later widen the load-day stop, the same qualifying rule should let load positions use the moves without a separate change; confirm that holds. Never print any token or key."
+- **Builder's confirmation:** the rule has no case for load days. It reads each bracket's own stop, its take-profit and the bid. Worked through the code's own functions for a 5.00 entry with the take-profit at 5.01:
+  - stop 2 cents below: no bid qualifies;
+  - 3 cents: 5.01 only;
+  - 4 cents: 5.00 to 5.01;
+  - 5 cents: 4.99 to 5.01;
+  - 10 cents: 4.94 to 5.01.
+- So with the take-profit 1 cent above the entry, the stop needs to be about 5 cents or more below it before positions near their entry price use the moves.
+
+**Review round 1 (group 1 and group 2: CHANGES REQUIRED), and what was changed:**
+- **Group 1, blocking: the stop-price lookup had no overall time limit.** A cache miss reaches the database, which is slowest exactly when it is in trouble.
+  - Now one limit of 300 ms for the whole lookup (`MOVE_STOPS_TIMEOUT_MS`). A stop not found by then takes today's path.
+  - Tested with a lookup that never answers: today's path ran, with no replace.
+- **Group 2, blocking: the row stored "no" for "not known", and missed unclear replaces that happened.**
+  - `fallback` now comes from the sale's next read of positions after the wait (round 1 makes that read anyway). Still held: today's path ran. Gone: the move sold it. Read failed: null.
+  - "Stop cancelled by Alpaca" is true only when the live updates showed the fill before today's path sent any cancel and showed the stop cancelled; false only when they showed the moved take-profit cancelled with nothing filled; otherwise null.
+  - New fields: whether the live updates were connected, and the filled quantity seen.
+  - Tested: a late fill during the fallback's cancels (null); live updates not connected (fallback false, verdict null); an unclear replace that filled at 0.3 s (fallback false, counted as sold).
+- **Group 2, blocking: moved shares the live updates did not report were not counted as sold**, so the loss stop's message could say "nothing was held". Every moved symbol gone at that read is now counted as sold by the sale.
+- **Group 2, blocking: the trade digest counted a moved fill as a take-profit.** It no longer does (`cyrus-m-`); like the close-out's own sales, it is not counted there. Tested.
+- **Group 1, non-blocking, done:**
+  - A stop the order sync's copy shows ended makes the leg unknown (Michael's "both legs open").
+  - Evidence that Alpaca's open list carries what the rule reads: one read at 12:53 PM showed 18 of 18 open take-profit legs with order class `bracket` and a group id.
+  - Tests for no further replace after a 429, the cap of 30, and an error inside the phase.
+- **Group 2, non-blocking, done:**
+  - `move_phase_failed` and `move_phase_none` are stored.
+  - The header comment now says 10 of 11 for the stop cancelled at the fill (in the partial one, Alpaca had cancelled it before the move).
+  - The simulator reports the stop's cancel once, and one line that could never run is gone.
+  - Test names corrected.
+  - The worker test now proves the stop came from the sync's copy (the stored row differs) and that exactly one row was logged.
+  - The fills check's known-id rule is its own tested function (`knownOrderIds`).
+- **Measured on paper (2026-11-18, the partial trial):** a replacement's filled quantity and average price include the fills of the order it replaced. The replacement showed 3 filled at 24.253333 after the original had filled 1 at 24.26.
+- **The quote read's time limit is 1 s** (the earlier 1.5 s in this log is superseded).
+- **The worst case before today's path starts in a sale with moves**, summing the built limits: the stop lookup 0.3 s, the quote read 1 s, the send window 3 s, the last replace up to 2 s, then the 2 s wait after the last send. That is about 6.3 s in all, against a typical 2 to 4 s (the simulator measurement above). The positions keep their brackets during that time.
+- **Tests:** 1001 pass. The wall-clock test in `midday.test.ts` (item 4 of 2026-11-16) failed once more under full-suite load and passed on the next full run.
