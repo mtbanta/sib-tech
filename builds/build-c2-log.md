@@ -7598,3 +7598,29 @@ Group 1 and group 2, round 1, started on `71a6d32`.
 **Other work this evening.**
 - The review briefs (`builds/midday-review-brief.md`, `builds/daily-review-brief.md`) now ask for the per-move rows: one line per move, for every close-out and Michael's afternoon flatten, with accepted, stop cancelled by Alpaca, time to fill and fallback used. Committed on `main` as `304fc98`, from a separate checkout of main. Its secret scan reported "0 local secret values checked": the hook did not find the key file from that checkout, but the pattern scan ran. The two files are brief text only.
 - Thursday 2026-11-19's limits request posted at 3:10 PM CT, pending. Suggested: largest position 250 dollars, daily loss stop 500, 100 orders a minute, borrowing cap 1. Load not on.
+
+### Round 1 results and fixes (load afternoon stop and take)
+
+- **Group 1: CHANGES REQUIRED.** One blocking finding: a window starting again could send its first entries with the earlier window's stop and take-profit. The worker's in-memory copy of the day was refreshed only later in the pass, after the reply's Discord post, while the stop clear had already let entries through. The builder had found and reproduced the same gap just before the report came back. A print fed during the start reply sent BBB at stop 9.96 and take-profit 10.04, the earlier window's 5 and 3, while the record said stop 2 take 1.
+  - **Fix:** the command hands the day record it just wrote to the worker, which keeps it as its copy before the pause ends or the stop clears (`dayWritten`).
+  - **Tests:** one per route (load day; normal morning, the screen route). Each fails without the fix and passes with it.
+  - **Notes fixed:** a misplaced comment in `load-mode.ts`, and the comment in `withStops` that said a load bracket never qualifies.
+- **Group 2: CHANGES REQUIRED.**
+  - **Finding (a):** the "earlier screen is still finishing" reply dropped values without saying so. It now says "The stop and take-profit in this line were not kept; include them again (`load afternoon stop 5 take 3`)." The cancelled-screen line's "To try again" now adds "with `stop N take M` again if you want other values than the defaults."
+  - **Finding (b):** two review-brief sentences said every load window is 1 up and 2 down. Both briefs now say that is the default and give the stored values to check against. They also note that the afternoon close-out's move rows carry the reason "mid-day close-out", like the 10:30 one, and should be told apart by time. "About 100 ms" was an unmarked guess and is removed (the clocks' difference is not measured).
+  - **Notes fixed:** `help` now shows the whole line (`load afternoon stop 5 take 3`), since `stop 5 take 3` alone is read as the `stop` command; 1,989 characters. The screen reply names the defaults as such. Added tests: the "already running" note, the finishing note, the summary's window settings line with values, and the after-window status line.
+  - **Note kept as is:** "stop" in "stop 5 cents" next to Michael's stop flag. These are his own words for the setting.
+- **The purpose end to end (advisor):** a worker-level test runs an afternoon window with stop 5 take 3, fills two entries, and lets the window end. Its own close-out sold both by moved take-profits (`cyrus-m-`), one row each (accepted, no fallback, stop cancelled by Alpaca), with no market sale.
+- **Simulator measurement** (load positions at stop 5 take 3, `scratchpad/movesim/measure-lst.ts`, 3 seeds each, identical results):
+
+| Positions | Moves | Trading requests | Time to flat | Seconds without a stop |
+| :--- | :--- | :--- | :--- | :--- |
+| 19 | off | 31 | 2.0 s | 34.2 |
+| 19 | on | 23 | 2.85 s | 0 |
+| 30 | off | 42 | 2.0 s | 54.0 |
+| 30 | on | 44 | 6.2 to 6.7 s | 7.2 |
+
+  - With 30 positions, 26 moves went out inside the 3 s send limit and 4 fell back to today's path.
+  - Simulated latencies (replace answer 120 ms, fill 0.3 to 1.4 s), not Alpaca's.
+- **Full suite** on `417e704`: 1,016 tests, 0 failing. The earlier "1,018" was a count of the dot reporter's dots; the reviewers counted 1,013 on `71a6d32`, and 3 tests were added since.
+- **Range from round 2:** `main` moved during round 1 (the briefs commit `304fc98`), and `main` is now merged into the branch. Round 2 reviews the code as `f5220a7..HEAD -- stacks/cyrus` and the briefs separately.
