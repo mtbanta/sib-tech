@@ -7375,3 +7375,20 @@ Research input for Michael's decision, never an instruction to act. Paper only. 
 > Build the replace call so the stepped stop raise can use it later in the strategy phase. Group 1 and group 2, up to 8 rounds each. Never print any token or key.
 
 **Builder's notes:** Michael sent `load afternoon` at 11:44 AM, so the stack is trading again. Whether Alpaca accepts the stack's client id on a replaced bracket leg is untested. The builder asked in `commands` (about 11:45) for one 1-share paper test after the afternoon window's close-out, with his stop on. Without it, the replacement's new id is tracked instead.
+
+**Michael's answers in the session (2026-11-18, about 12:05 PM):**
+- **Client-id test:** "Yes: run the 1-share client id test once the 12:14 close-out is flat and my stop is on."
+- **Order:** "Moves first". Send the replaces, wait up to 2 s (ending early when they fill), then today's path unchanged for everything left, including moves that did not fill. Other positions keep their stops during the wait, but their sales start up to about 2 s later, the loss stop's included. When nothing qualifies, there is no delay and no change.
+- **Scope:** "One bracket only". Move only when a single bracket's take-profit covers the symbol's whole holding and no other sell is open on it; anything else takes today's path.
+
+**Builder's design (for the reviews):**
+- **New calls:** a replace call in the broker client (`replaceOrder`, one PATCH, no retry), reachable only through a new sell-gate method (`SellGate.replace`). It is generic (limit or stop price, optional client id), so the stepped stop raise can use it later.
+- **The move phase:** runs at the start of the first round of every sale that is not one entry's own sale.
+- **Price data:** one batch quote read from the market-data feed, with a short timeout. A failed or stale quote means no moves.
+- **Bounds:** the replaces are sent one at a time, inside a fixed cap on count and total time. Anything not moved takes today's path.
+- **The wait:** up to 2 s, ending early when the live updates report every move filled.
+- **Afterwards:** fresh reads and today's round 1, untouched. Its cancel-everything request (or, in a close-out retry of named symbols, the single cancels taken from a fresh open list) cancels whatever is still open, the new take-profit ids included. That is the fallback.
+- **The stop price** for the 3 cent rule comes from the order sync's copy of the entry, or from the stored entry rounded as at submission. If unknown, the position takes today's path.
+- **The client id** on the replacement is `cyrus-m-` (never `cyrus-x-`, which the close-out would treat as its own working sale), set only if the test shows Alpaca keeps it.
+- **One stored row per move** (`take_profit_moved`), built from the live updates only, with no lookups inside the sale.
+- **The switch:** one constant, so the build can ship switched off.
