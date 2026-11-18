@@ -7564,3 +7564,37 @@ Research input for Michael's decision, never an instruction to act. Paper only. 
 - The daily summary posted at 3:06 PM CT. The off-hours deploy checks then passed: Alpaca's clock closed, 0 positions, 0 open orders, the checkout clean at `8a165fa`, Michael's stop flag off (his `resume`).
 - Deployed `8a165fa` by the off-hours route under Michael's decision ("deploy after the close, before 7:30 AM, only if both groups pass"; both passed). Fly release v31; `worker_started` at 3:07:29 PM CT (`deploy: true`, close-out 15 minutes before the close).
 - `moved-tp-2026-11-18` fast-forwarded into `main`. Rollback: v30.
+
+## The load afternoon stop and take-profit setting: build (2026-11-18, evening)
+
+Michael's request and addition are saved verbatim above ("Michael's request for 2026-11-19" and "Michael's addition"). Branch `load-stop-take-2026-11-18` from `main` at v31; build commit `71a6d32`.
+
+**What it does.**
+- `load afternoon` may carry `stop N` and `take M`, in either order, each at most once, in whole cents: stop 2 to 10, take-profit 1 to 10. A value left out is today's default (stop 2, take-profit 1).
+- A bad value (out of range, not a whole number, given twice, other words) is refused with the reason ("Not started: the stop must be a whole number of cents from 2 to 10 (got `12`). Nothing changed."). Nothing is started or written.
+- The values are stored in the day record (`loadAfternoonExits`, "stop 5 take 3") in the same write as the window's start, on every start, the defaults included. So a window starting again after Michael's stop or flatten never keeps the earlier window's values.
+- On a normal morning, the values travel with the screen's state to the window's start. A second `load afternoon` while the screen runs is answered "already running", and says that its values were not used.
+- The strategy prices a load entry's exits with the values in force at the trade's time: the afternoon window's own while it is on, and the defaults everywhere else (the morning load window, normal trading).
+- **Replies show both values.** The screen reply ends "The window will use stop 5 cents and take-profit 3 cents (this window only)." The start reply gives the rules with the values, and ends "In force for this window only: stop 5 cents and take-profit 3 cents; after it, back to the defaults (stop 2 cents and take-profit 1 cent)." `status` shows them during and after the window. The daily summary's window settings line, and its afternoon-on-a-load-day line, read the stored values. `help` names the words and stays one Discord message (1,992 characters).
+- **The moves:** unchanged code; the same rule qualifies load positions once the stop is wider (Michael's confirmation request). Tested on an entry limit of 5.00:
+
+| Window values | Bids that qualify |
+| :--- | :--- |
+| stop 2, take 1 (today) | none |
+| stop 5, take 3 | 4.99 to 5.03 |
+| stop 5, take 1 | 4.99 to 5.01 |
+| stop 2, take 3 | 5.02 and 5.03 |
+
+- **The gate:** it checks only that the exits sit on the right sides of the price and the entry's limit, so the wider values pass it unchanged.
+
+**Tests.**
+- `test/load-stop-take-2026-11-18.test.ts`, 9 tests: the words, the parse, which values apply when, the strategy's prices and its guard for a stop at or below zero, the moves table above, a normal morning end to end (replies, stored phase, the entry's exits, `status`), a load day with take only then a plain restart back to the defaults, a refused value, and `help` under 2000 characters.
+- Two older tests' expected wording changed by design (the parse result carries the values; the summary and status lines name them).
+- Type check clean; full suite 1,018 tests, 0 failing.
+- **Two days in one record:** with two afternoon windows on one day, the stored values are the last window's, so the daily summary shows those (a note for group 2).
+
+Group 1 and group 2, round 1, started on `71a6d32`.
+
+**Other work this evening.**
+- The review briefs (`builds/midday-review-brief.md`, `builds/daily-review-brief.md`) now ask for the per-move rows: one line per move, for every close-out and Michael's afternoon flatten, with accepted, stop cancelled by Alpaca, time to fill and fallback used. Committed on `main` as `304fc98`, from a separate checkout of main. Its secret scan reported "0 local secret values checked": the hook did not find the key file from that checkout, but the pattern scan ran. The two files are brief text only.
+- Thursday 2026-11-19's limits request posted at 3:10 PM CT, pending. Suggested: largest position 250 dollars, daily loss stop 500, 100 orders a minute, borrowing cap 1. Load not on.
