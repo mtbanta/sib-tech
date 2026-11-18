@@ -8087,3 +8087,13 @@ Paper trading only. Research input for a human decision, never an instruction to
 - **Group 2: PASS.** The new "To try again" wording reads correctly on all three branches that use it, and no bare `stop N take M` fragment is left.
   - **Note left as is:** a test comment above `TRY_AGAIN` in `test/release-2026-11-12-c.test.ts` still describes the earlier wording. It is a comment only, and changing it would change the reviewed commit.
 - **The reviewed commit for deploy is `d06921c`.** The plan is the mid-day pause of Thursday 2026-11-19, by the mid-day pause route, only with Michael's written yes for that deploy. Before it, Michael sends `hold`; otherwise the deploy resumes trading on its own, and `load afternoon` needs the account flat and paused. Rollback: v31 (`8a165fa`).
+
+## Michael's ruling of 2026-11-18 (evening), verbatim
+
+> Ruling: in a whole-account close-out, waits in our own one-at-a-time sale queue do not fail the 5-second rule. Report them separately with each position's time without a stop, and compare tomorrow's 10:30 close-out on v31 against today's.
+
+- So Wednesday's 10:30 close-out holds on "no safety sale is delayed". Its 5 sales of 19 that spent 5.0 to 5.8 s waited only in the sale queue (end-of-day review, item 3).
+- Written into both review briefs on `main` (`builds/midday-review-brief.md`, `builds/daily-review-brief.md`, commit after `938aa58`):
+  - the ruling verbatim;
+  - a separate line with each position's queue wait and time without a stop;
+  - Thursday's comparison of the v31 10:30 close-out against Wednesday's v30 one: positions, moves, requests, time to flat, queue waits, and time without a stop, marking which figures are measured and which are taken from the review.
