@@ -15,7 +15,7 @@ import type { Order, Position } from "./alpaca-trading.ts";
 import { AlpacaError } from "./alpaca-trading.ts";
 import type { SellBroker } from "./broker.ts";
 import { MAX_EARLY_WAKES } from "./early-wake.ts";
-import { MOVED_TAKE_PROFIT, MOVE_CLIENT_ID_PREFIX, MOVE_FILL_WAIT_MS, MOVE_MAX_PER_SALE, MOVE_SEND_WINDOW_MS, MOVE_SETS_CLIENT_ID, type MoveRow, type MoveWatch, MOVE_REPLACE_TIMEOUT_MS, MOVE_VIEW_MAX_AGE_MS, pricedMoves, stopVerdict, structuralCandidates, withStops } from "./moved-take-profit.ts";
+import { MOVED_TAKE_PROFIT, MOVE_CLIENT_ID_PREFIX, MOVE_FILL_WAIT_MS, MOVE_MAX_PER_SALE, MOVE_SEND_WINDOW_MS, MOVE_SETS_CLIENT_ID, type MoveRow, type MoveWatch, MOVE_REPLACE_TIMEOUT_MS, MOVE_STOPS_TIMEOUT_MS, MOVE_VIEW_MAX_AGE_MS, pricedMoves, stopVerdict, structuralCandidates, withStops } from "./moved-take-profit.ts";
 
 export type Say = (channel: "commands" | "trading" | "alerts", text: string, opts?: { mentionOwner?: boolean }) => Promise<boolean>;
 
@@ -385,6 +385,8 @@ export interface LiquidatorDeps {
     stopsFor: (legs: Array<{ legId: string; groupId: string; symbol: string }>, tradeDate: string) => Promise<ReadonlyMap<string, number>>;
     watch: MoveWatch;
     room?: () => boolean;
+    // Whether the live order updates are connected (stored on each row, so a reader knows whether "not seen" can mean "did not happen").
+    live?: () => boolean;
   };
 }
 
@@ -585,6 +587,26 @@ export class Liquidator {
     // cancels also cancel a moved take-profit that did not fill (whatever its id), and those shares are sold at market (the fallback).
     let movePhaseDone = !(MOVED_TAKE_PROFIT.on && this.d.moves && !o.ownEntryOnly);
     const moveRows: MoveRow[] = [];
+    let moveCheckPending = false;
+    // The first read of positions after the moves (before today's path cancels anything): a moved symbol no longer held was sold by its
+    // move (or its own exits) within the wait; it is counted as sold by this sale (the close-out's record, the loss stop's message), and
+    // each row's `fallback` says whether today's path still had shares to sell. No request: round 1 makes this read anyway.
+    const checkMovesAgainst = (held: Position[]): void => {
+      if (!moveCheckPending) return;
+      moveCheckPending = false;
+      const still = new Set(held.map((p) => p.symbol));
+      let gone = 0;
+      for (const row of moveRows) {
+        const tried = row.accepted || (row.answer ?? "").startsWith("unclear");
+        row.fallback = !tried ? true : still.has(row.symbol);
+        if (tried && !still.has(row.symbol)) {
+          gone++;
+          result.sold.push({ symbol: row.symbol, qty: row.qty });
+          soldBy.set(row.symbol, (soldBy.get(row.symbol) ?? 0) + row.qty);
+        }
+      }
+      if (result.moved) result.moved.filledInWait = gone;
+    };
     // Returns true when at least one replace was sent (whatever its answer): round 1 then starts again from fresh reads. Never throws: any
     // error here is logged and the sale goes on with today's path (the advisor's point: a throw must not skip round 1's cancels).
     const movePhase = async (held: Position[], open: Order[], readAtMs: number): Promise<boolean> => {
@@ -604,7 +626,16 @@ export class Liquidator {
       if (structural.length === 0) return 0;
       let stops: ReadonlyMap<string, number>;
       try {
-        stops = await mv.stopsFor(structural.map((c) => ({ legId: c.legId, groupId: c.groupId, symbol: c.symbol })), o.tradeDate);
+        // One time limit for the whole lookup (group 1, round 1): a stop not found by then is unknown (today's path). The timer is cleared so
+        // a quick answer leaves nothing running.
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const limit = new Promise<"late">((res) => (timer = setTimeout(() => res("late"), MOVE_STOPS_TIMEOUT_MS)));
+        const got = await Promise.race([mv.stopsFor(structural.map((c) => ({ legId: c.legId, groupId: c.groupId, symbol: c.symbol })), o.tradeDate), limit]).finally(() => clearTimeout(timer));
+        if (got === "late") {
+          this.d.log?.("move_phase_skipped", { reason: o.reason, why: `stop prices not found within ${MOVE_STOPS_TIMEOUT_MS} ms` });
+          return 0;
+        }
+        stops = got;
       } catch (err) {
         this.d.log?.("move_phase_skipped", { reason: o.reason, why: "stop prices not found", error: (err as Error).message.slice(0, 120) });
         return 0;
@@ -626,6 +657,12 @@ export class Liquidator {
       const t0 = this.d.now().getTime();
       let sent = 0;
       const accepted: Array<{ groupId: string; row: MoveRow }> = [];
+      let live: boolean | null = null;
+      try {
+        live = mv.live ? mv.live() : null;
+      } catch {
+        live = null;
+      }
       for (const m of moves.slice(0, MOVE_MAX_PER_SALE)) {
         if (this.d.now().getTime() - t0 > MOVE_SEND_WINDOW_MS || yieldNow()) break;
         if (mv.room && !mv.room()) {
@@ -634,7 +671,7 @@ export class Liquidator {
         }
         const sentAtMs = this.d.now().getTime();
         const cid = MOVE_SETS_CLIENT_ID.on ? `${MOVE_CLIENT_ID_PREFIX}${o.tradeDate.replaceAll("-", "")}-${m.symbol}-${sentAtMs.toString(36)}` : undefined;
-        const row: MoveRow = { reason: o.reason, symbol: m.symbol, qty: m.qty, oldId: m.legId, newId: null, groupId: m.groupId, limit: m.limit, oldLimit: m.oldLimit, stopPrice: m.stopPrice, bid: m.bid, quoteAgeMs: m.quoteAgeMs, sentAtMs, answerMs: 0, accepted: false, answer: null, httpStatus: null, clientId: cid ?? null, filledAtMs: null, timeToFillMs: null, stopCancelledByAlpaca: null, fallback: true };
+        const row: MoveRow = { reason: o.reason, symbol: m.symbol, qty: m.qty, oldId: m.legId, newId: null, groupId: m.groupId, limit: m.limit, oldLimit: m.oldLimit, stopPrice: m.stopPrice, bid: m.bid, quoteAgeMs: m.quoteAgeMs, sentAtMs, answerMs: 0, accepted: false, answer: null, httpStatus: null, clientId: cid ?? null, filledAtMs: null, timeToFillMs: null, filledQtySeen: null, stopCancelledByAlpaca: null, fallback: null, liveUpdates: live };
         moveRows.push(row);
         mv.watch.expect(m.groupId, m.legId, m.qty); // before the send: a fill may come before the answer
         const r = await this.d.gate.replace({ orderId: m.legId, symbol: m.symbol, qty: m.qty, limitPrice: m.limit, ...(cid ? { clientOrderId: cid } : {}), reason: `${o.reason}, moved take-profit`, timeoutMs: MOVE_REPLACE_TIMEOUT_MS }, { positions: held, open, atMs: readAtMs, maxAgeMs: MOVE_VIEW_MAX_AGE_MS });
@@ -671,22 +708,18 @@ export class Liquidator {
           if (this.d.waitEvent) await this.d.waitEvent(syms, left);
           else await this.sleep(left);
         }
-        for (const a of accepted) {
-          a.row.fallback = !mv.watch.filled(a.groupId);
-          if (!a.row.fallback) {
-            // Counted as sold by this sale (the close-out's record, the loss stop's message).
-            result.sold.push({ symbol: a.row.symbol, qty: a.row.qty });
-            soldBy.set(a.row.symbol, (soldBy.get(a.row.symbol) ?? 0) + a.row.qty);
-          }
-        }
       }
-      result.moved = { sent, accepted: accepted.length, filledInWait: accepted.filter((a) => !a.row.fallback).length };
+      // Whether each moved symbol is still held is judged by round 1's fresh read of positions, which comes next (moveCheckPending): the
+      // live updates may not be connected, and an unclear replace may have happened.
+      moveCheckPending = sent > 0;
+      result.moved = { sent, accepted: accepted.length, filledInWait: 0 };
       return sent;
     };
     // One stored row per move (Michael: "accepted or refused with Alpaca's answer, stop cancelled by Alpaca, time to fill, fallback used"),
     // completed from the live updates seen by the end of the sale. Written once.
     const writeMoveRows = (): void => {
       const mv = this.d.moves;
+      const firstCancel = steps.cancelsSentAt[0] ? Date.parse(steps.cancelsSentAt[0]) : null;
       for (const row of moveRows.splice(0)) {
         if (mv) {
           const seen = mv.watch.seen(row.groupId);
@@ -694,7 +727,8 @@ export class Liquidator {
           if (row.newId) {
             row.filledAtMs = seen.filledAtMs;
             row.timeToFillMs = seen.filledAtMs !== null ? Math.max(0, seen.filledAtMs - row.sentAtMs) : null;
-            row.stopCancelledByAlpaca = stopVerdict(seen.filledAtMs !== null, seen.stopCanceledAtMs, row.fallback);
+            row.filledQtySeen = seen.filledQty;
+            row.stopCancelledByAlpaca = stopVerdict(seen, firstCancel);
           }
         }
         this.d.log?.("take_profit_moved", { ...row });
@@ -747,6 +781,7 @@ export class Liquidator {
       try {
         positions = await heldNow();
         if (!result.heldBefore) result.heldBefore = Object.fromEntries(positions.map((p) => [p.symbol, p.qty]));
+        checkMovesAgainst(positions);
       } catch (err) {
         result.errors.push(`round ${round}: could not read positions: ${(err as Error).message.slice(0, 100)}`);
         result.remaining = ["(could not read positions)"];

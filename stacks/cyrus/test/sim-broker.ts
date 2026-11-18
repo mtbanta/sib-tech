@@ -102,8 +102,6 @@ export class SimBroker implements FullBroker {
     for (const c of [...this.cancels]) {
       if (this.simMs >= c.doneAt) {
         this.cancels = this.cancels.filter((x) => x !== c);
-        // In the 2026-11-18 mode, an order that filled while its cancel was pending stays filled (a pending cancel can still fill).
-        if (this.openShape20261118 && this.all().some((o) => o.id === c.id && o.status !== "pending_cancel")) continue;
         this.setStatus(c.id, "canceled");
       }
     }
@@ -163,12 +161,7 @@ export class SimBroker implements FullBroker {
       leg.filledAt = new Date(this.simMs).toISOString();
       this.removeShares(leg.symbol, qty, price);
       this.onOrderEvent?.("fill", structuredClone(leg), this.simMs);
-      for (const other of p.legs) {
-        if (other !== leg && OPEN.has(other.status)) {
-          this.setStatus(other.id, "canceled");
-          this.onOrderEvent?.("canceled", structuredClone(other), this.simMs + 2);
-        }
-      }
+      for (const other of p.legs) if (other !== leg && OPEN.has(other.status)) this.setStatus(other.id, "canceled"); // reported once, by setStatus
       return;
     }
   }
@@ -257,6 +250,9 @@ export class SimBroker implements FullBroker {
   }
   position(symbol: string) {
     return this.positionsMap.get(symbol);
+  }
+  positionsCount(): number {
+    return this.positionsMap.size;
   }
   heldQty(symbol: string): number {
     return this.positionsMap.get(symbol)?.qty ?? 0;

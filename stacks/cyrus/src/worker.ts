@@ -17,7 +17,7 @@ import { COMMAND_READ_LIMIT } from "./discord-bot.ts";
 import { DIGEST_PERIOD_MS, TradeDigest } from "./digest.ts";
 import { addToRunning, CONTROL_FEES, estimateFees, type FeesRunning } from "./fees.ts";
 import type { Governor } from "./governor.ts";
-import { Liquidator, SellGate, flattenLegs } from "./sells.ts";
+import { Liquidator, OPEN_STATUSES, SellGate, flattenLegs } from "./sells.ts";
 import { MoveWatch } from "./moved-take-profit.ts";
 import type { Order } from "./alpaca-trading.ts";
 import { formatLiveList } from "./universe.ts";
@@ -37,7 +37,7 @@ import { ShadowLedger } from "./shadow-ledger.ts";
 import { earlyLookAllowed } from "./early-wake.ts";
 import type { Trade } from "./stream.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
-import { computeDay, formatSummary, isSentEntry, replacedIds, type StopGapDay } from "./summary.ts";
+import { computeDay, formatSummary, isSentEntry, knownOrderIds, type StopGapDay } from "./summary.ts";
 import { listDaySliced, summaryWindows } from "./summary-listing.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
 import { PAPER_ONLY } from "./discord.ts";
@@ -361,7 +361,7 @@ export class Worker {
     const latestQuotes = deps.latestQuotes;
     this.liquidator = new Liquidator({ broker: deps.broker, gate: this.sellGate, now: deps.now, sleep: deps.sleep, log: (e, data) => deps.log?.("info", e, data), waitEvent: (symbols, ms) => this.waitEvent(symbols, ms),
       // The moved take-profit (Michael's decision of 2026-11-18): each replace only with room for one more request above the urgent floor.
-      ...(latestQuotes ? { moves: { quotes: (symbols: string[]) => latestQuotes(symbols), stopsFor: (legs: Array<{ legId: string; groupId: string; symbol: string }>) => this.stopsForMoves(legs), watch: this.moveWatch, room: () => this.budget.urgentRoom(1) } } : {}),
+      ...(latestQuotes ? { moves: { quotes: (symbols: string[]) => latestQuotes(symbols), stopsFor: (legs: Array<{ legId: string; groupId: string; symbol: string }>) => this.stopsForMoves(legs), watch: this.moveWatch, room: () => this.budget.urgentRoom(1), live: () => this.orderStreamLive() } } : {}),
       ownSalesMayRun: () => {
       const s = this.sessionForSync;
       return !s || this.protectNow(s.closeAt);
@@ -415,6 +415,8 @@ export class Worker {
     for (const l of legs) {
       const seen = byGroup.get(l.groupId);
       const stopLeg = seen ? flattenLegs(seen).find((x) => x.side === "sell" && (x.type === "stop" || x.type === "stop_limit") && x.stopPrice !== null && x.stopPrice > 0) : undefined;
+      // Michael's scope, "both legs open" (group 1, round 1): a stop the sync's copy shows ended (cancelled, filled) leaves the leg unknown.
+      if (stopLeg && !OPEN_STATUSES.has(stopLeg.status)) continue;
       if (stopLeg && stopLeg.stopPrice !== null && seen!.symbol === l.symbol) {
         out.set(l.legId, stopLeg.stopPrice);
         continue;
@@ -1915,7 +1917,9 @@ export class Worker {
     else if (o.side === "sell" && o.groupId && (u.event === "fill" || u.event === "partial_fill")) {
       if (o.type === "stop" || o.stopPrice !== null) {
         if (u.event === "fill") this.digest.count("stop");
-      } else if (o.type === "limit" && !this.digestTakeProfits.has(o.id)) {
+      } else if (o.type === "limit" && !o.clientOrderId.startsWith("cyrus-m-") && !this.digestTakeProfits.has(o.id)) {
+        // (A take-profit the stack moved to sell in a close-out, `flatten` or the loss stop, client id cyrus-m-, is that sale, not a
+        // take-profit: like the close-out's own market sales it is not counted here. Group 2, round 1 of 2026-11-18.)
         this.digestTakeProfits.add(o.id);
         if (this.digestTakeProfits.size > 20_000) this.digestTakeProfits.delete(this.digestTakeProfits.values().next().value!);
         this.digest.count("take_profit");
@@ -2230,7 +2234,7 @@ export class Worker {
     try {
       const fills = await this.d.broker.listFillsForDay(date, 400, () => this.summaryPace());
       // The moved take-profit (2026-11-18): an order a listed replacement replaced is known too (its fills are inside the replacement's).
-      const known = new Set([...listed.orders.flatMap((o) => [o.id, ...flattenLegs(o).map((l) => l.id)]), ...replacedIds(listed.orders)]);
+      const known = knownOrderIds(listed.orders);
       const unknown = [...new Set(fills.fills.map((f) => f.orderId).filter((id) => id && !known.has(id)))];
       let found = 0;
       for (const id of unknown) {

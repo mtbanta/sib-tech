@@ -31,6 +31,8 @@ export const STORED_INFO_EVENTS = new Set([
   // shared request budget had no room; a refusal by the sell gate.
   "take_profit_moved",
   "move_phase_skipped",
+  "move_phase_failed",
+  "move_phase_none",
   "move_phase_no_room",
   "replace_refused",
   // Item 3 of 2026-11-16 (group 2, round 1): a missing-exit sale (the fast sale's too) that stood aside for a sale of the whole account or

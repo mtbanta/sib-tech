@@ -133,6 +133,12 @@ export function replacedIds(alpacaOrders: Order[]): Set<string> {
   return out;
 }
 
+// The summary's fills check: the order ids already known from the listing (orders, their legs, and the orders a listed replacement replaced,
+// whose fills are inside the replacement's), so a fill naming one of them is not looked up again.
+export function knownOrderIds(alpacaOrders: Order[]): Set<string> {
+  return new Set([...alpacaOrders.flatMap((o) => [o.id, ...flattenLegs(o).map((l) => l.id)]), ...replacedIds(alpacaOrders)]);
+}
+
 export function computeDay(alpacaOrders: Order[]): DayResult {
   const replaced = replacedIds(alpacaOrders);
   const all = alpacaOrders.flatMap((o) => [o, ...flattenLegs(o)]).filter((o) => !replaced.has(o.id));

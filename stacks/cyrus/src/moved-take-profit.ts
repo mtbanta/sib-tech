@@ -3,8 +3,9 @@
 // In a sale of the whole account (the close-outs, `flatten`, the loss stop's sale, the carried-position sale) and a close-out's retry of
 // named symbols, a position whose bracket still rests at Alpaca is sold by moving its take-profit to a selling price (the bid less 1 cent)
 // instead of cancelling the exits and selling at market. Alpaca then cancels the stop itself when the take-profit fills, so the position
-// keeps its stop until it is sold. Paper tests of 2026-11-17 and 2026-11-18: 11 of 11 such moves sold, 0.27 to 1.41 s after the move, with
-// the stop cancelled by Alpaca about 2 ms after each fill; Alpaca refuses a take-profit at or below the stop (422).
+// keeps its stop until it is sold. Paper tests of 2026-11-17 and 2026-11-18: 11 of 11 such moves sold, 0.27 to 1.41 s after the move; in 10
+// of them Alpaca cancelled the stop about 2 ms after the fill (in the partly filled one it had cancelled the whole stop at the first partial
+// fill, before the move); Alpaca refuses a take-profit at or below the stop (422).
 //
 // A position qualifies only when (Michael's scope):
 //   - a single bracket's take-profit covers the symbol's whole holding and no other sell is open on the symbol (his answer "one bracket only");
@@ -42,6 +43,10 @@ export const MOVE_QUOTE_TIMEOUT_MS = 1_000;
 // The sale's own read of positions and open orders may serve the replaces' check for this long (a replace adds no shares, so a read a few
 // seconds old cannot let it oversell: Alpaca keeps the order's own quantity, already held against the position).
 export const MOVE_VIEW_MAX_AGE_MS = MOVE_SEND_WINDOW_MS + 1_000;
+// The stop prices come from what the worker holds in memory (the order sync's copy, the cached entry); one time limit for the whole lookup
+// (group 1, round 1: a cache miss reaches the database, which can be slow exactly when it is in trouble). What is not found by then is unknown
+// and takes today's path.
+export const MOVE_STOPS_TIMEOUT_MS = 300;
 // The client id a replacement carries. The 1-share paper test of 2026-11-18 (12:17 PM CT, Michael's yes) showed Alpaca keeps the client id
 // asked for on a replaced take-profit (both replaces), finds the order by it, and shows it in the open list and in the entry's legs, in the
 // same group. Never `cyrus-x-`: every whole-account sale treats an open cyrus-x- sell as its own market sale still working (the close-out
@@ -171,12 +176,19 @@ export interface MoveRow {
   answer: string | null;
   httpStatus: number | null;
   clientId: string | null;
-  // From the live updates: the replacement's fill (time from the send), and the stop's cancel.
+  // From the live updates: the replacement's fill (Alpaca's time, less the worker's time at the send: two clocks, so a guide to within
+  // the clocks' difference) and the shares it had filled (a partial fill shows fewer than `qty`), and the stop's cancel.
   filledAtMs: number | null;
   timeToFillMs: number | null;
+  filledQtySeen: number | null;
+  // True only when the live updates showed the moved take-profit filled BEFORE today's path sent any cancel and showed the stop cancelled
+  // (then only Alpaca can have cancelled it); false only when they showed the moved take-profit cancelled with nothing filled (today's path
+  // cancelled the bracket); null otherwise (not known).
   stopCancelledByAlpaca: boolean | null;
-  // True when the shares were still held after MOVE_FILL_WAIT_MS (or the move was refused), so today's path sold them.
-  fallback: boolean;
+  // From the sale's first read of positions after the wait (no extra request): true when the symbol was still held, so today's path had
+  // shares to cancel and sell; false when they were gone; null when that read failed. Whether the live updates were connected at the start.
+  fallback: boolean | null;
+  liveUpdates: boolean | null;
 }
 
 // Told about the live updates for the moves of the running sale (the worker connects it to the order stream). It never sends anything.
@@ -184,7 +196,7 @@ export interface MoveRow {
 // as an answer (fills 0.27 s and more after the send, answers up to 0.24 s), so an update about the replacement may arrive before the answer
 // names it. Until then the replacement is recognised as the bracket's take-profit (a limit sell in that group) that is not the old order.
 export class MoveWatch {
-  private readonly byGroup = new Map<string, { oldId: string; newId: string | null; qty: number; filledAtMs: number | null; filledQty: number; canceledAtMs: number | null; stopCanceledAtMs: number | null }>();
+  private readonly byGroup = new Map<string, { oldId: string; newId: string | null; qty: number; filledAtMs: number | null; filledSeenAtMs: number | null; filledQty: number; canceledAtMs: number | null; stopCanceledAtMs: number | null }>();
   private readonly oldOf = new Map<string, string>();
   private readonly now: () => number;
   constructor(now: () => number) {
@@ -192,7 +204,7 @@ export class MoveWatch {
   }
   // Before a replace is sent: the bracket's group, the old take-profit's id, and its shares.
   expect(groupId: string, oldId: string, qty: number): void {
-    this.byGroup.set(groupId, { oldId, newId: null, qty, filledAtMs: null, filledQty: 0, canceledAtMs: null, stopCanceledAtMs: null });
+    this.byGroup.set(groupId, { oldId, newId: null, qty, filledAtMs: null, filledSeenAtMs: null, filledQty: 0, canceledAtMs: null, stopCanceledAtMs: null });
   }
   // The replace was accepted: the new order's id.
   register(groupId: string, newId: string): void {
@@ -229,7 +241,10 @@ export class MoveWatch {
       }
       if (u.event === "fill" || u.event === "partial_fill") {
         m.filledQty = Math.max(m.filledQty, o.filledQty);
-        if (o.filledQty >= m.qty - EPS && m.filledAtMs === null) m.filledAtMs = at;
+        if (o.filledQty >= m.qty - EPS && m.filledAtMs === null) {
+          m.filledAtMs = at;
+          m.filledSeenAtMs = this.now(); // the worker's own clock, to compare with its own cancels
+        }
       } else if (u.event === "canceled" || u.event === "expired" || u.event === "rejected") m.canceledAtMs ??= at;
       return;
     }
@@ -239,9 +254,9 @@ export class MoveWatch {
     return this.byGroup.get(groupId)?.filledAtMs != null;
   }
   // What the live updates said about one move so far.
-  seen(groupId: string): { newId: string | null; filledAtMs: number | null; stopCanceledAtMs: number | null; canceledAtMs: number | null } {
+  seen(groupId: string): { newId: string | null; filledAtMs: number | null; filledSeenAtMs: number | null; filledQty: number | null; stopCanceledAtMs: number | null; canceledAtMs: number | null } {
     const m = this.byGroup.get(groupId);
-    return { newId: m?.newId ?? null, filledAtMs: m?.filledAtMs ?? null, stopCanceledAtMs: m?.stopCanceledAtMs ?? null, canceledAtMs: m?.canceledAtMs ?? null };
+    return { newId: m?.newId ?? null, filledAtMs: m?.filledAtMs ?? null, filledSeenAtMs: m?.filledSeenAtMs ?? null, filledQty: m ? m.filledQty : null, stopCanceledAtMs: m?.stopCanceledAtMs ?? null, canceledAtMs: m?.canceledAtMs ?? null };
   }
   // Forget the last sale's moves (called at the start of each move phase): bounded memory. The old-to-new map is kept longer (the fill
   // tally may meet a late update), at most 2,000 entries.
@@ -251,10 +266,12 @@ export class MoveWatch {
   }
 }
 
-// The row's verdict on the stop: cancelled by Alpaca when the take-profit filled and the live updates showed the stop cancelled; false when
-// today's path cancelled the exits (fallback) and the take-profit did not fill; null when the updates did not say.
-export function stopVerdict(filled: boolean, stopCanceledAtMs: number | null, fallback: boolean): boolean | null {
-  if (filled && stopCanceledAtMs !== null) return true;
-  if (fallback && !filled) return false;
+// The row's verdict on the stop (group 2, round 1 of 2026-11-18: "unknown" is never stored as "no"). True only when the moved take-profit's
+// fill was seen before today's path sent its first cancel (`firstCancelAtMs`, the worker's clock; null when it sent none) and the stop's
+// cancel was seen: only Alpaca can have cancelled it then. False only when the moved take-profit was seen cancelled with nothing filled.
+// Otherwise null.
+export function stopVerdict(seen: { filledSeenAtMs: number | null; stopCanceledAtMs: number | null; canceledAtMs: number | null; filledAtMs: number | null }, firstCancelAtMs: number | null): boolean | null {
+  if (seen.filledSeenAtMs !== null && seen.stopCanceledAtMs !== null && (firstCancelAtMs === null || seen.filledSeenAtMs < firstCancelAtMs)) return true;
+  if (seen.canceledAtMs !== null && seen.filledAtMs === null) return false;
   return null;
 }

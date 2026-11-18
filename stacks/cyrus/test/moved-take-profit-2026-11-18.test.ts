@@ -107,7 +107,7 @@ test("sell gate: a replace adds no shares (never refused for the exits already o
 });
 
 // ---- the sale ----
-test("nothing qualifies (a load day: price within 3 cents of the stop): the trading requests are exactly today's, no replace, no delay", async () => {
+test("nothing qualifies (a load day: the take-profit within 4 cents of the stop): the trading requests are exactly today's, no replace, no quote read", async () => {
   const run = async (moves: boolean) => {
     const w = world({ moves });
     await loadDay(w, "AAA");
@@ -187,8 +187,9 @@ test("the moved take-profit fills while today's cancel is landing (a pending can
   assert.equal(w.sim.sellLog.length, 0, "the shares were gone by the time today's path looked");
   assert.equal(w.sim.oversellAttempts, 0);
   assert.equal(w.said.length, 0);
-  assert.equal(w.rows()[0]!.fallback, true, "counted as a fallback (not filled within 2 s); its late fill is recorded");
+  assert.equal(w.rows()[0]!.fallback, true, "still held at the first read after the wait: today's path ran; its late fill is recorded");
   assert.equal(w.rows()[0]!.timeToFillMs, 2_100);
+  assert.equal(w.rows()[0]!.stopCancelledByAlpaca, null, "the fill came after today's cancel was sent: who cancelled the stop is not known");
 });
 
 test("a close-out's retry of named symbols moves too; its fallback's single cancels reach the new take-profit (whatever its id) and free the shares", async () => {
@@ -266,7 +267,7 @@ test("the live updates never count a replaced leg twice: the replacement's count
 });
 
 // ---- the summary ----
-test("the summary never counts a replaced leg twice: an order a replacement replaced (looked up from the fills list) is left out", async () => {
+test("the summary never counts a replaced leg twice: an order a replacement replaced (if a listing or lookup returns it) is left out", async () => {
   const { computeDay, partLines, replacedIds } = await import("../src/summary.ts");
   const entry = order({ id: "e1", clientOrderId: "cyrus-20261118-AAA-1", symbol: "AAA", side: "buy", status: "filled", qty: 3, filledQty: 3, filledAvgPrice: 20, filledAt: "2026-11-18T16:00:00Z", orderClass: "bracket", legs: [
     order({ id: "new-tp", clientOrderId: "cyrus-m-20261118-AAA-x", symbol: "AAA", side: "sell", type: "limit", status: "filled", qty: 3, filledQty: 3, filledAvgPrice: 20.1, filledAt: "2026-11-18T16:00:05Z", replaces: "old-tp" }),
@@ -322,7 +323,8 @@ test("in the worker: the 2:55 close-out moves a qualifying take-profit (stop fro
   const id = clientOrderIdFor(D, "AAA", 1);
   await sim.submitEntry({ symbol: "AAA", qty: 10, stopPrice: 19.92, takeProfitPrice: 20.05, referencePrice: 20, clientOrderId: id });
   sim.fillEntry(id, 20);
-  await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "AAA", qty: 10, referencePrice: 20, stopPrice: 19.92, takeProfitPrice: 20.05, status: "filled", alpacaOrderId: sim.orders[0]!.id, filledQty: 10, filledAvgPrice: 20, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+  // The stored row's stop differs on purpose (19.90): the stop must come from the order sync's copy of the bracket (19.92, as Alpaca holds it).
+  await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "AAA", qty: 10, referencePrice: 20, stopPrice: 19.9, takeProfitPrice: 20.05, status: "filled", alpacaOrderId: sim.orders[0]!.id, filledQty: 10, filledAvgPrice: 20, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
   await r.at("20:54:30");
   await r.at("20:55:00");
   for (let i = 0; i < 400 && !(await r.store.getDay(D))!.phases.closeout; i++) await settle();
@@ -330,8 +332,10 @@ test("in the worker: the 2:55 close-out moves a qualifying take-profit (stop fro
   assert.equal(sim.replaceLog.length, 1, "the take-profit was moved");
   assert.equal(sim.sellLog.length, 0, "no market sale");
   assert.equal(quoted.length, 1);
-  const row = events.find((x) => x.e === "take_profit_moved")?.d as unknown as MoveRow | undefined;
-  assert.ok(row, "one row");
+  const rowsLogged = events.filter((x) => x.e === "take_profit_moved");
+  assert.equal(rowsLogged.length, 1, "exactly one row");
+  const row = rowsLogged[0]!.d as unknown as MoveRow;
+  assert.equal(row.liveUpdates, true);
   assert.deepEqual([row.accepted, row.fallback, row.stopCancelledByAlpaca, row.limit, row.stopPrice], [true, false, true, 19.99, 19.92]);
   assert.ok(row.clientId?.startsWith("cyrus-m-"), "the stack's own client id");
   assert.equal(routineSafetyCalls.slice(auditBefore).filter((c) => c.fn === "replaceOrder").length, 0, "no replace sent outside a request scope (the shared budget counts it)");
@@ -388,4 +392,93 @@ test("a burst of live updates during the wait does not end it early: the count b
   assert.equal(sim.sellLog.length, 0, "the move filled at 1.6 s; it was not cancelled by an early end of the wait");
   assert.equal(sim.heldQty("AAA"), 0);
   assert.ok(wakes <= 40 + 20 * 1, `bounded (${wakes} waits)`);
+});
+
+
+// ---- group 2, round 1: the row never stores "no" for "not known"; moved shares are counted as sold whatever the live updates saw ----
+test("live updates not connected: a move that sold the shares is judged by the next read of positions (fallback false, counted as sold), its stop verdict and fill time unknown", async () => {
+  const w = world();
+  w.sim.onOrderEvent = null; // the live updates are not connected
+  await normal(w, "AAA", 10);
+  const r = await w.liquidator.flatten({ reason: "daily loss stop", tradeDate: D, maxRounds: 1, priority: true });
+  assert.equal(w.sim.heldQty("AAA"), 0);
+  assert.equal(w.sim.sellLog.length, 0);
+  assert.deepEqual(r.sold, [{ symbol: "AAA", qty: 10 }], "counted as sold (the loss stop's message then says it sold everything)");
+  const row = w.rows()[0]!;
+  assert.deepEqual([row.accepted, row.fallback, row.stopCancelledByAlpaca, row.timeToFillMs], [true, false, null, null]);
+});
+
+test("an unclear replace that happened and filled within the wait: fallback false, counted as sold, no market sale", async () => {
+  const w = world();
+  await normal(w, "AAA", 10);
+  w.sim.replaceAnswerMs = 2_500; // no answer within the 2 s limit
+  w.sim.replaceFillDelayMs = 300; // but it happened, and filled at 0.3 s
+  const r = await w.liquidator.flatten({ reason: "daily loss stop", tradeDate: D, maxRounds: 1, priority: true });
+  assert.equal(w.sim.heldQty("AAA"), 0);
+  assert.equal(w.sim.sellLog.length, 0);
+  assert.deepEqual(r.sold, [{ symbol: "AAA", qty: 10 }]);
+  const row = w.rows()[0]!;
+  assert.ok(row.answer!.startsWith("unclear"));
+  assert.deepEqual([row.accepted, row.fallback, row.stopCancelledByAlpaca, row.timeToFillMs], [false, false, true, 300]);
+});
+
+test("the stop-price lookup has one time limit: a hung lookup (a slow database) gives today's path at once, no replace", async () => {
+  const w = world();
+  await normal(w, "AAA", 10);
+  (w.liquidator as any).d.moves.stopsFor = () => new Promise(() => undefined); // never answers
+  const realStart = Date.now();
+  await w.liquidator.flatten({ reason: "close-out", tradeDate: D });
+  assert.ok(Date.now() - realStart < 2_000, "the sale did not wait on the hung lookup");
+  assert.equal(w.sim.replaceLog.length, 0);
+  assert.ok(w.logs.some((l) => l.e === "move_phase_skipped" && String(l.d.why).includes("300 ms")));
+  w.sim.advance(3_000);
+  assert.equal(w.sim.heldQty("AAA"), 0, "sold by today's path");
+});
+
+test("bounds: no further replace after a rate-limit answer; at most 30 replaces in one sale; an error inside the phase falls to today's path", async () => {
+  const w = world();
+  await normal(w, "AAA", 10);
+  await hold(w, "BBB", 4, 30, 29.88, 30.08);
+  w.sim.refuseReplaceIf = () => 429;
+  await w.liquidator.flatten({ reason: "close-out", tradeDate: D });
+  w.sim.advance(3_000);
+  assert.equal(w.rows().length, 1, "one replace tried, then none after the 429");
+  assert.equal(w.sim.heldQty("AAA") + w.sim.heldQty("BBB"), 0);
+  const many = world();
+  for (let i = 0; i < 32; i++) await hold(many, `S${String.fromCharCode(65 + Math.floor(i / 26))}${String.fromCharCode(65 + (i % 26))}`, 1, 20, 19.92, 20.05, i + 1);
+  await many.liquidator.flatten({ reason: "close-out", tradeDate: D });
+  assert.equal(many.sim.replaceLog.length, 30, "the cap");
+  many.sim.advance(5_000);
+  assert.equal(many.sim.positionsCount(), 0, "the rest sold by today's path");
+  const boom = world();
+  await normal(boom, "AAA", 10);
+  (boom.liquidator as any).d.moves.watch.expect = () => { throw new Error("test fault"); };
+  await boom.liquidator.flatten({ reason: "close-out", tradeDate: D });
+  boom.sim.advance(3_000);
+  assert.ok(boom.logs.some((l) => l.e === "move_phase_failed"));
+  assert.equal(boom.sim.heldQty("AAA"), 0, "today's path still ran");
+});
+
+test("the trade digest does not count a moved take-profit's fill as a take-profit (it is the close-out's sale)", async () => {
+  const { rig, z } = await import("./rig.ts");
+  const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
+  const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, orderStream: true });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("approve", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:25:00");
+  sim.advanceTo(z("15:00:00").getTime());
+  await r.at("15:00:00");
+  const counts = () => Object.fromEntries((r.worker as any).digest.counts as Map<string, number>) as Record<string, number>;
+  const before = counts();
+  await r.orderUpdate({ event: "fill", order: order({ id: "m-1", clientOrderId: "cyrus-m-20261102-QXO-abc", symbol: "QXO", side: "sell", type: "limit", status: "filled", qty: 10, filledQty: 10, groupId: "g1", replaces: "tp-1" }), positionQty: 0, atMs: null });
+  await r.orderUpdate({ event: "fill", order: order({ id: "tp-9", clientOrderId: "x", symbol: "SOFI", side: "sell", type: "limit", status: "filled", qty: 10, filledQty: 10, groupId: "g9" }), positionQty: 0, atMs: null });
+  const after = counts();
+  assert.equal((after.take_profit ?? 0) - (before.take_profit ?? 0), 1, "only the real take-profit");
+});
+
+test("the summary's fills check knows a replaced order (no lookup for it): its fills are inside the replacement's", async () => {
+  const { knownOrderIds } = await import("../src/summary.ts");
+  const entry = order({ id: "e1", side: "buy", status: "filled", legs: [order({ id: "new-tp", side: "sell", type: "limit", replaces: "old-tp" }), order({ id: "sl", side: "sell", type: "stop" })] });
+  assert.deepEqual([...knownOrderIds([entry])].sort(), ["e1", "new-tp", "old-tp", "sl"]);
 });
