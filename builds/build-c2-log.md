@@ -8080,3 +8080,10 @@ Paper trading only. Research input for a human decision, never an instruction to
   - **Note acted on:** the per-move brief example now says "load brackets at the defaults".
 - **Test count:** the full suite is 1,019 tests, 0 failing. The log's earlier 1,016 was run before group 2's three new tests were added.
 - **Round 3:** both groups, on the wording change only (group 1 because it would be the deployed commit).
+
+### Round 3: both groups PASS on `d06921c` (load afternoon stop and take)
+
+- **Group 1: PASS.** The only change since round 2 is one reply sentence, which builds Discord text only and touches no money. The full piece at `d06921c` still holds what passed in round 2. Full suite 1,019 tests, 0 failing.
+- **Group 2: PASS.** The new "To try again" wording reads correctly on all three branches that use it, and no bare `stop N take M` fragment is left.
+  - **Note left as is:** a test comment above `TRY_AGAIN` in `test/release-2026-11-12-c.test.ts` still describes the earlier wording. It is a comment only, and changing it would change the reviewed commit.
+- **The reviewed commit for deploy is `d06921c`.** The plan is the mid-day pause of Thursday 2026-11-19, by the mid-day pause route, only with Michael's written yes for that deploy. Before it, Michael sends `hold`; otherwise the deploy resumes trading on its own, and `load afternoon` needs the account flat and paused. Rollback: v31 (`8a165fa`).
