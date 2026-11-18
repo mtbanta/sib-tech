@@ -532,3 +532,14 @@ test("an error after a replace went out still judges that move by the next read 
   await g.liquidator.flatten({ reason: "close-out", tradeDate: D });
   assert.equal(g.rows()[0]!.fallback, true, "never sent: today's path sold it");
 });
+
+test("stop verdict: a partial fill whose own update was missed is still known from the cancel update's count (never 'no')", async () => {
+  const { stopVerdict } = await import("../src/moved-take-profit.ts");
+  let now = 0;
+  const watch = new MoveWatch(() => now);
+  watch.expect("g", "old", 10);
+  now = 3_100;
+  watch.onUpdate({ event: "canceled", order: order({ id: "new", symbol: "AAA", groupId: "g", side: "sell", type: "limit", status: "canceled", qty: 10, filledQty: 4 }), positionQty: null, atMs: now });
+  assert.equal(watch.seen("g").filledQty, 4);
+  assert.equal(stopVerdict(watch.seen("g"), 3_000), null, "shares filled, the stop's cancel not heard: not known");
+});

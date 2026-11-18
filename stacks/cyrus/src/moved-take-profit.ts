@@ -247,6 +247,11 @@ export class MoveWatch {
           m.filledSeenAtMs = this.now(); // the worker's own clock, to compare with its own cancels
         }
       } else if (u.event === "canceled" || u.event === "expired" || u.event === "rejected") {
+        // The order's own count of shares filled is taken from its cancel too (group 2, round 3: a partial fill's own update may be missed).
+        if (o.filledQty > EPS) {
+          m.fillHeard = true;
+          m.filledQty = Math.max(m.filledQty, o.filledQty);
+        }
         if (m.canceledAtMs === null) {
           m.canceledAtMs = at;
           m.canceledSeenAtMs = this.now();
