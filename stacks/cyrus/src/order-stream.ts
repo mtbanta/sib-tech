@@ -214,7 +214,7 @@ export interface FreeDeps {
   // sends anything), and the order a replacement replaced is asked for when Alpaca's update does not name it (`replaces`), so a replaced
   // leg's fills are never counted twice (a replacement's filled quantity includes the old order's).
   onAnyUpdate?: (u: TradeUpdate) => void;
-  replacedOf?: (orderId: string) => string | null;
+  replacedOf?: (o: Order) => string | null;
   now: () => number;
   log?: (event: string, data?: Record<string, unknown>) => void;
 }
@@ -341,7 +341,7 @@ export class OrderUpdateHandler {
       if (info && info.filledQty > 0) this.d.onExitEnded?.(info.clientOrderId);
       const ended = this.endedLegs.get(g) ?? new Map<string, number>();
       // The moved take-profit (2026-11-18): a replacement ending stands for the order it replaced (never two legs from one).
-      const replaced = o.replaces ?? this.d.replacedOf?.(o.id) ?? null;
+      const replaced = o.replaces ?? this.d.replacedOf?.(o) ?? null;
       if (replaced) ended.delete(replaced);
       ended.set(o.id, o.filledQty);
       this.endedLegs.set(g, ended);
@@ -362,7 +362,7 @@ export class OrderUpdateHandler {
     if (g) {
       const legs = this.exitLegs.get(g) ?? new Map<string, number>();
       // The moved take-profit (2026-11-18): a replacement's count includes the order it replaced, which is dropped from the tally.
-      const old = o.replaces ?? this.d.replacedOf?.(o.id) ?? null;
+      const old = o.replaces ?? this.d.replacedOf?.(o) ?? null;
       if (old) {
         legs.delete(old);
         this.endedLegs.get(g)?.delete(old);

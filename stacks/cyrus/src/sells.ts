@@ -15,7 +15,7 @@ import type { Order, Position } from "./alpaca-trading.ts";
 import { AlpacaError } from "./alpaca-trading.ts";
 import type { SellBroker } from "./broker.ts";
 import { MAX_EARLY_WAKES } from "./early-wake.ts";
-import { MOVED_TAKE_PROFIT, MOVE_CLIENT_ID_PREFIX, MOVE_FILL_WAIT_MS, MOVE_MAX_PER_SALE, MOVE_SEND_WINDOW_MS, MOVE_SETS_CLIENT_ID, type MoveRow, type MoveWatch, pricedMoves, stopVerdict, structuralCandidates, withStops } from "./moved-take-profit.ts";
+import { MOVED_TAKE_PROFIT, MOVE_CLIENT_ID_PREFIX, MOVE_FILL_WAIT_MS, MOVE_MAX_PER_SALE, MOVE_SEND_WINDOW_MS, MOVE_SETS_CLIENT_ID, type MoveRow, type MoveWatch, MOVE_REPLACE_TIMEOUT_MS, MOVE_VIEW_MAX_AGE_MS, pricedMoves, stopVerdict, structuralCandidates, withStops } from "./moved-take-profit.ts";
 
 export type Say = (channel: "commands" | "trading" | "alerts", text: string, opts?: { mentionOwner?: boolean }) => Promise<boolean>;
 
@@ -122,18 +122,19 @@ export class SellGate {
   // it, is a sell of that symbol for those shares. A stop leg is not shown in Alpaca's open list (2026-11-18), so an order not shown is not
   // refused for that alone. No retry here or in the client (Michael: "no retry").
   // `view` (optional): the caller's own read of the open orders and positions, taken at `atMs` (the earlier of the two reads). Used for the
-  // check only while it is under VIEW_MAX_AGE_MS old (the gate's own freshness rule); else the gate reads as usual. A replace adds no shares,
-  // so a read a moment old cannot let it oversell. It saves the 2 reads of the first replace of a sale.
-  replace(req: { orderId: string; symbol: string; qty: number; limitPrice?: number; stopPrice?: number; clientOrderId?: string; reason: string }, view?: { positions: Position[]; open: Order[]; atMs: number }): Promise<ReplaceResult> {
+  // check only while it is younger than `maxAgeMs` (default VIEW_MAX_AGE_MS, the sells' rule; at most 10 s); else the gate reads as usual. A
+  // replace adds no shares (Alpaca keeps the order's own quantity, already held against the position), so a read a few seconds old cannot let
+  // it oversell. It saves the gate's reads during a sale's moves. `timeoutMs`: the replace's own time limit (unclear after it).
+  replace(req: { orderId: string; symbol: string; qty: number; limitPrice?: number; stopPrice?: number; clientOrderId?: string; reason: string; timeoutMs?: number }, view?: { positions: Position[]; open: Order[]; atMs: number; maxAgeMs?: number }): Promise<ReplaceResult> {
     const run = this.chain.then(() => this.runReplace(req, view));
     this.chain = run.catch(() => undefined);
     return run;
   }
 
-  private async runReplace(req: { orderId: string; symbol: string; qty: number; limitPrice?: number; stopPrice?: number; clientOrderId?: string; reason: string }, given?: { positions: Position[]; open: Order[]; atMs: number }): Promise<ReplaceResult> {
+  private async runReplace(req: { orderId: string; symbol: string; qty: number; limitPrice?: number; stopPrice?: number; clientOrderId?: string; reason: string; timeoutMs?: number }, given?: { positions: Position[]; open: Order[]; atMs: number; maxAgeMs?: number }): Promise<ReplaceResult> {
     let v: { positions: Position[]; open: Order[] };
     try {
-      v = given && this.nowMs() - given.atMs < VIEW_MAX_AGE_MS ? given : await this.read();
+      v = given && this.nowMs() - given.atMs < Math.min(given.maxAgeMs ?? VIEW_MAX_AGE_MS, 10_000) ? given : await this.read();
     } catch (err) {
       this.view = null;
       return { status: "error", reason: `could not read the position to check the replace: ${(err as Error).message.slice(0, 120)}`, unclear: false, notSent: true };
@@ -154,7 +155,7 @@ export class SellGate {
       return { status: "refused", reason: `refused a replace for ${req.symbol} (${req.reason}): ${why}` };
     }
     try {
-      const order = await this.d.broker.replaceOrder(req.orderId, { ...(req.limitPrice !== undefined ? { limitPrice: req.limitPrice } : {}), ...(req.stopPrice !== undefined ? { stopPrice: req.stopPrice } : {}), ...(req.clientOrderId !== undefined ? { clientOrderId: req.clientOrderId } : {}) });
+      const order = await this.d.broker.replaceOrder(req.orderId, { ...(req.limitPrice !== undefined ? { limitPrice: req.limitPrice } : {}), ...(req.stopPrice !== undefined ? { stopPrice: req.stopPrice } : {}), ...(req.clientOrderId !== undefined ? { clientOrderId: req.clientOrderId } : {}) }, req.timeoutMs);
       return { status: "sent", order };
     } catch (err) {
       this.view = null;
@@ -584,35 +585,47 @@ export class Liquidator {
     // cancels also cancel a moved take-profit that did not fill (whatever its id), and those shares are sold at market (the fallback).
     let movePhaseDone = !(MOVED_TAKE_PROFIT.on && this.d.moves && !o.ownEntryOnly);
     const moveRows: MoveRow[] = [];
+    // Returns true when at least one replace was sent (whatever its answer): round 1 then starts again from fresh reads. Never throws: any
+    // error here is logged and the sale goes on with today's path (the advisor's point: a throw must not skip round 1's cancels).
     const movePhase = async (held: Position[], open: Order[], readAtMs: number): Promise<boolean> => {
+      let sent = 0;
+      try {
+        sent = await movePhaseInner(held, open, readAtMs);
+      } catch (err) {
+        this.d.log?.("move_phase_failed", { reason: o.reason, error: (err as Error).message.slice(0, 160), sent });
+        sent = Math.max(sent, moveRows.some((r) => r.accepted || r.httpStatus !== null || (r.answer ?? "").startsWith("unclear")) ? 1 : 0);
+      }
+      return sent > 0;
+    };
+    const movePhaseInner = async (held: Position[], open: Order[], readAtMs: number): Promise<number> => {
       const mv = this.d.moves!;
-      mv.watch.prune(new Set());
+      mv.watch.reset();
       const structural = structuralCandidates(held, open).candidates;
-      if (structural.length === 0) return false;
+      if (structural.length === 0) return 0;
       let stops: ReadonlyMap<string, number>;
       try {
         stops = await mv.stopsFor(structural.map((c) => ({ legId: c.legId, groupId: c.groupId, symbol: c.symbol })), o.tradeDate);
       } catch (err) {
         this.d.log?.("move_phase_skipped", { reason: o.reason, why: "stop prices not found", error: (err as Error).message.slice(0, 120) });
-        return false;
+        return 0;
       }
       const { candidates } = withStops(structural, stops);
-      if (candidates.length === 0) return false;
+      if (candidates.length === 0) return 0; // a load day: no quote read, no wait
       let quotes: ReadonlyMap<string, { bid: number; ask: number; atMs: number }>;
       try {
         quotes = await mv.quotes(candidates.map((c) => c.symbol));
       } catch (err) {
         this.d.log?.("move_phase_skipped", { reason: o.reason, why: "quote read failed", error: (err as Error).message.slice(0, 120) });
-        return false;
+        return 0;
       }
       const { moves, skipped } = pricedMoves(candidates, quotes, this.d.now().getTime());
       if (moves.length === 0) {
         this.d.log?.("move_phase_none", { reason: o.reason, candidates: candidates.length, skipped: skipped.slice(0, 10) });
-        return false;
+        return 0;
       }
       const t0 = this.d.now().getTime();
       let sent = 0;
-      const accepted: Array<{ newId: string; row: MoveRow }> = [];
+      const accepted: Array<{ groupId: string; row: MoveRow }> = [];
       for (const m of moves.slice(0, MOVE_MAX_PER_SALE)) {
         if (this.d.now().getTime() - t0 > MOVE_SEND_WINDOW_MS || yieldNow()) break;
         if (mv.room && !mv.room()) {
@@ -621,48 +634,68 @@ export class Liquidator {
         }
         const sentAtMs = this.d.now().getTime();
         const cid = MOVE_SETS_CLIENT_ID.on ? `${MOVE_CLIENT_ID_PREFIX}${o.tradeDate.replaceAll("-", "")}-${m.symbol}-${sentAtMs.toString(36)}` : undefined;
-        const r = await this.d.gate.replace({ orderId: m.legId, symbol: m.symbol, qty: m.qty, limitPrice: m.limit, ...(cid ? { clientOrderId: cid } : {}), reason: `${o.reason}, moved take-profit` }, { positions: held, open, atMs: readAtMs });
-        const row: MoveRow = { reason: o.reason, symbol: m.symbol, qty: m.qty, oldId: m.legId, newId: null, groupId: m.groupId, limit: m.limit, oldLimit: m.oldLimit, stopPrice: m.stopPrice, bid: m.bid, quoteAgeMs: m.quoteAgeMs, sentAtMs, answerMs: this.d.now().getTime() - sentAtMs, accepted: false, answer: null, httpStatus: null, clientId: cid ?? null, filledAtMs: null, timeToFillMs: null, stopCancelledByAlpaca: null, fallback: true };
+        const row: MoveRow = { reason: o.reason, symbol: m.symbol, qty: m.qty, oldId: m.legId, newId: null, groupId: m.groupId, limit: m.limit, oldLimit: m.oldLimit, stopPrice: m.stopPrice, bid: m.bid, quoteAgeMs: m.quoteAgeMs, sentAtMs, answerMs: 0, accepted: false, answer: null, httpStatus: null, clientId: cid ?? null, filledAtMs: null, timeToFillMs: null, stopCancelledByAlpaca: null, fallback: true };
+        moveRows.push(row);
+        mv.watch.expect(m.groupId, m.legId, m.qty); // before the send: a fill may come before the answer
+        const r = await this.d.gate.replace({ orderId: m.legId, symbol: m.symbol, qty: m.qty, limitPrice: m.limit, ...(cid ? { clientOrderId: cid } : {}), reason: `${o.reason}, moved take-profit`, timeoutMs: MOVE_REPLACE_TIMEOUT_MS }, { positions: held, open, atMs: readAtMs, maxAgeMs: MOVE_VIEW_MAX_AGE_MS });
+        row.answerMs = this.d.now().getTime() - sentAtMs;
         if (r.status === "sent") {
           sent++;
           row.accepted = true;
           row.newId = r.order.id;
           row.clientId = r.order.clientOrderId;
-          mv.watch.register(r.order.id, m.legId, m.groupId, m.qty);
-          accepted.push({ newId: r.order.id, row });
+          mv.watch.register(m.groupId, r.order.id);
+          accepted.push({ groupId: m.groupId, row });
         } else {
           if (r.status === "error" && !r.notSent) sent++; // a request went out (refused by Alpaca, or no clear answer)
           row.answer = r.status === "refused" ? `sell gate: ${r.reason}` : r.unclear ? `unclear: ${r.reason}` : r.reason;
           row.httpStatus = r.status === "error" ? (r.httpStatus ?? null) : null;
+          if (!(r.status === "error" && r.unclear)) mv.watch.drop(m.groupId);
+          // No further replace after a rate-limit answer or an unclear one: the rest take today's path.
+          if (r.status === "error" && (r.unclear || r.httpStatus === 429)) {
+            (steps.replaces ??= []).push({ symbol: m.symbol, at: stamp(), accepted: false });
+            break;
+          }
         }
         (steps.replaces ??= []).push({ symbol: m.symbol, at: stamp(), accepted: row.accepted });
-        moveRows.push(row);
       }
       if (accepted.length > 0) {
-        // Bounded: until every accepted move has filled, or MOVE_FILL_WAIT_MS after the last one was sent; at most 40 waits of at most 0.5 s.
+        // Bounded by time: until every accepted move has filled, or MOVE_FILL_WAIT_MS after the last one was sent. Each wait ends early at a
+        // live update for these symbols; the count is a backstop against a burst of updates (no request is made here).
         const last = Math.max(...accepted.map((a) => a.row.sentAtMs)) + MOVE_FILL_WAIT_MS;
         const syms = new Set(accepted.map((a) => a.row.symbol));
-        for (let i = 0; i < 40 && this.d.now().getTime() < last && !accepted.every((a) => mv.watch.filled(a.newId)); i++) {
+        const maxWaits = 40 + 20 * accepted.length; // a move makes 3 or 4 updates (replaced, new, fill, the stop's cancel)
+        for (let i = 0; i < maxWaits && this.d.now().getTime() < last && !accepted.every((a) => mv.watch.filled(a.groupId)); i++) {
           if (yieldNow()) break;
           const left = Math.max(1, Math.min(500, last - this.d.now().getTime()));
           if (this.d.waitEvent) await this.d.waitEvent(syms, left);
           else await this.sleep(left);
         }
-        for (const a of accepted) a.row.fallback = !mv.watch.filled(a.newId);
+        for (const a of accepted) {
+          a.row.fallback = !mv.watch.filled(a.groupId);
+          if (!a.row.fallback) {
+            // Counted as sold by this sale (the close-out's record, the loss stop's message).
+            result.sold.push({ symbol: a.row.symbol, qty: a.row.qty });
+            soldBy.set(a.row.symbol, (soldBy.get(a.row.symbol) ?? 0) + a.row.qty);
+          }
+        }
       }
       result.moved = { sent, accepted: accepted.length, filledInWait: accepted.filter((a) => !a.row.fallback).length };
-      return sent > 0;
+      return sent;
     };
     // One stored row per move (Michael: "accepted or refused with Alpaca's answer, stop cancelled by Alpaca, time to fill, fallback used"),
     // completed from the live updates seen by the end of the sale. Written once.
     const writeMoveRows = (): void => {
       const mv = this.d.moves;
       for (const row of moveRows.splice(0)) {
-        if (mv && row.accepted && row.newId) {
-          const seen = mv.watch.seen(row.newId, row.groupId);
-          row.filledAtMs = seen.filledAtMs;
-          row.timeToFillMs = seen.filledAtMs !== null ? Math.max(0, seen.filledAtMs - row.sentAtMs) : null;
-          row.stopCancelledByAlpaca = stopVerdict(seen.filledAtMs !== null, seen.stopCanceledAtMs, row.fallback);
+        if (mv) {
+          const seen = mv.watch.seen(row.groupId);
+          if (!row.newId && seen.newId && (row.answer ?? "").startsWith("unclear")) row.newId = seen.newId; // an unclear replace that happened
+          if (row.newId) {
+            row.filledAtMs = seen.filledAtMs;
+            row.timeToFillMs = seen.filledAtMs !== null ? Math.max(0, seen.filledAtMs - row.sentAtMs) : null;
+            row.stopCancelledByAlpaca = stopVerdict(seen.filledAtMs !== null, seen.stopCanceledAtMs, row.fallback);
+          }
         }
         this.d.log?.("take_profit_moved", { ...row });
       }

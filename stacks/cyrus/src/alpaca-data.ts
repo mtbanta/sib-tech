@@ -32,7 +32,7 @@ export class AlpacaData {
 
   // The moved take-profit (Michael's decision of 2026-11-18): the latest bid and ask of several symbols in ONE request (market data, not the
   // trading bucket of 200 a minute), with a short time limit: a sale must not wait on it. A symbol without a usable quote is left out.
-  async latestQuotes(symbols: readonly string[], timeoutMs = 1_500): Promise<Map<string, { bid: number; ask: number; atMs: number }>> {
+  async latestQuotes(symbols: readonly string[], timeoutMs = 1_000): Promise<Map<string, { bid: number; ask: number; atMs: number }>> {
     const out = new Map<string, { bid: number; ask: number; atMs: number }>();
     const list = [...new Set(symbols)].filter((s) => /^[A-Z.]{1,6}$/.test(s));
     if (list.length === 0) return out;

@@ -200,7 +200,7 @@ export class AlpacaTrading {
   }
 
   // One HTTP call. No retry here.
-  private async once(method: string, path: string, query?: Record<string, string>, body?: Json): Promise<unknown> {
+  private async once(method: string, path: string, query?: Record<string, string>, body?: Json, timeoutMs = 10_000): Promise<unknown> {
     if (!path.startsWith("/v2/")) throw new AlpacaError("Refusing a path outside /v2/", 0);
     const url = new URL(PAPER_TRADING_BASE_URL + path);
     assertPaperHost(url.toString());
@@ -221,7 +221,7 @@ export class AlpacaTrading {
         ...(body ? { "Content-Type": "application/json" } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(timeoutMs),
       redirect: "error", // never follow a redirect with the key headers attached
     });
     const text = await res.text();
@@ -571,7 +571,8 @@ export class AlpacaTrading {
   // a new price, by Alpaca's PATCH. Alpaca answers with a NEW order (a new id, its `replaces` naming the old one). Only the sell gate
   // (sells.ts) may call this. One send, never retried here (Michael: "no retry"): a refusal, a 429 or an unclear answer goes back to the
   // caller, whose fallback is today's cancel-and-sell. Sell prices are rounded down to the cent (a sell limit then sells sooner, never later).
-  async replaceOrder(orderId: string, change: ReplaceOrder): Promise<Order> {
+  // `timeoutMs`: the moved take-profit sends 2 s (an answer took at most 0.24 s on paper on 2026-11-18); after it the outcome is unclear.
+  async replaceOrder(orderId: string, change: ReplaceOrder, timeoutMs = 10_000): Promise<Order> {
     if (!/^[0-9a-f-]{36}$/.test(orderId)) throw new AlpacaError("Bad order id", 0);
     const price = (x: number | undefined, what: string): string | undefined => {
       if (x === undefined) return undefined;
@@ -587,7 +588,7 @@ export class AlpacaTrading {
       ...(stop !== undefined ? { stop_price: stop } : {}),
       ...(change.clientOrderId !== undefined ? { client_order_id: change.clientOrderId } : {}),
     };
-    return parseOrder((await this.once("PATCH", `/v2/orders/${orderId}`, undefined, body)) as Json);
+    return parseOrder((await this.once("PATCH", `/v2/orders/${orderId}`, undefined, body, Math.max(500, Math.min(timeoutMs, 10_000)))) as Json);
   }
 
   // Cancels one order. Safe to repeat, so it waits out a 429 and tries again. An order that is already gone (404 or

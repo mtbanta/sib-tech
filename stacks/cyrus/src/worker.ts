@@ -1846,7 +1846,7 @@ export class Worker {
       },
       entryForGroup: (groupId) => [...this.syncMemory.lastSeen.values()].find((o) => o.groupId === groupId) ?? null,
       onAnyUpdate: (u) => this.moveWatch.onUpdate(u),
-      replacedOf: (id) => this.moveWatch.replacedOf(id),
+      replacedOf: (o) => this.moveWatch.replacedOf(o),
       now: () => this.d.now().getTime(),
       log: (e, data) => this.d.log?.("info", e, data),
     });

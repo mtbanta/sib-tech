@@ -35,6 +35,13 @@ export const MOVE_QUOTE_MAX_AGE_MS = 5_000;
 // long has passed since the phase began. What is not moved takes today's path.
 export const MOVE_MAX_PER_SALE = 30;
 export const MOVE_SEND_WINDOW_MS = 3_000;
+// Time limits (measured on paper on 2026-11-18: a replace answered in 50 to 244 ms, median 58; a market-data quote in 46 to 405 ms, median
+// 68). A replace without an answer in this time is unclear (it may have happened); no further replace is sent in that sale.
+export const MOVE_REPLACE_TIMEOUT_MS = 2_000;
+export const MOVE_QUOTE_TIMEOUT_MS = 1_000;
+// The sale's own read of positions and open orders may serve the replaces' check for this long (a replace adds no shares, so a read a few
+// seconds old cannot let it oversell: Alpaca keeps the order's own quantity, already held against the position).
+export const MOVE_VIEW_MAX_AGE_MS = MOVE_SEND_WINDOW_MS + 1_000;
 // The client id a replacement carries. The 1-share paper test of 2026-11-18 (12:17 PM CT, Michael's yes) showed Alpaca keeps the client id
 // asked for on a replaced take-profit (both replaces), finds the order by it, and shows it in the open list and in the entry's legs, in the
 // same group. Never `cyrus-x-`: every whole-account sale treats an open cyrus-x- sell as its own market sale still working (the close-out
@@ -104,8 +111,12 @@ export function withStops(candidates: MoveCandidate[], stops: ReadonlyMap<string
   const skipped: Skip[] = [];
   for (const c of candidates) {
     const s = stops.get(c.legId);
-    if (s !== undefined && s > 0 && Number.isFinite(s)) out.push({ ...c, stopPrice: s });
-    else skipped.push({ symbol: c.symbol, why: "stop price unknown" });
+    if (!(s !== undefined && s > 0 && Number.isFinite(s))) skipped.push({ symbol: c.symbol, why: "stop price unknown" });
+    // No price can qualify unless the take-profit sits at least 4 cents above the stop (the selling limit must be at least 3 cents above
+    // the stop and at least 1 cent below the take-profit). A load day's bracket (1 cent up, 2 cents down) never qualifies, so a sale of
+    // only such positions makes no quote read and does not wait for one.
+    else if (!(c.oldLimit - s >= MOVE_MIN_ABOVE_STOP + 0.01 - EPS)) skipped.push({ symbol: c.symbol, why: "take-profit within 4 cents of the stop" });
+    else out.push({ ...c, stopPrice: s });
   }
   return { candidates: out, skipped };
 }
@@ -169,55 +180,73 @@ export interface MoveRow {
 }
 
 // Told about the live updates for the moves of the running sale (the worker connects it to the order stream). It never sends anything.
+// A move is expected BEFORE its replace is sent (by the bracket's group and the old take-profit's id): on paper a fill can come about as fast
+// as an answer (fills 0.27 s and more after the send, answers up to 0.24 s), so an update about the replacement may arrive before the answer
+// names it. Until then the replacement is recognised as the bracket's take-profit (a limit sell in that group) that is not the old order.
 export class MoveWatch {
-  private readonly byNew = new Map<string, { groupId: string; filledAtMs: number | null; filledQty: number; qty: number; canceledAtMs: number | null }>();
+  private readonly byGroup = new Map<string, { oldId: string; newId: string | null; qty: number; filledAtMs: number | null; filledQty: number; canceledAtMs: number | null; stopCanceledAtMs: number | null }>();
   private readonly oldOf = new Map<string, string>();
-  private readonly stopCancelAt = new Map<string, number>();
   private readonly now: () => number;
   constructor(now: () => number) {
     this.now = now;
   }
-  // A replace was accepted: the new order's id, the old one, the bracket's group, and its shares.
-  register(newId: string, oldId: string, groupId: string, qty: number): void {
-    this.byNew.set(newId, { groupId, filledAtMs: null, filledQty: 0, qty, canceledAtMs: null });
-    this.oldOf.set(newId, oldId);
+  // Before a replace is sent: the bracket's group, the old take-profit's id, and its shares.
+  expect(groupId: string, oldId: string, qty: number): void {
+    this.byGroup.set(groupId, { oldId, newId: null, qty, filledAtMs: null, filledQty: 0, canceledAtMs: null, stopCanceledAtMs: null });
   }
-  // The order this one replaced, when the stack replaced it (the live updates' fill tally uses it so a replaced leg is never counted twice).
-  replacedOf(newId: string): string | null {
-    return this.oldOf.get(newId) ?? null;
+  // The replace was accepted: the new order's id.
+  register(groupId: string, newId: string): void {
+    const m = this.byGroup.get(groupId);
+    if (!m) return;
+    m.newId = newId;
+    this.oldOf.set(newId, m.oldId);
+  }
+  // The replace was refused or unclear: the group is no longer expected to change (an unclear one may still show up; it is kept for the row).
+  drop(groupId: string): void {
+    const m = this.byGroup.get(groupId);
+    if (m && m.newId === null && m.filledAtMs === null) this.byGroup.delete(groupId);
+  }
+  private isReplacement(o: Order, m: { oldId: string; newId: string | null }): boolean {
+    if (m.newId !== null) return o.id === m.newId;
+    return o.id !== m.oldId && o.side === "sell" && (o.type === "limit" || o.limitPrice !== null) && o.stopPrice === null;
+  }
+  // The order this one replaced, when the stack replaced it (the live updates' fill tally drops it, so a replaced leg is never counted twice).
+  replacedOf(o: Order): string | null {
+    const known = this.oldOf.get(o.id);
+    if (known) return known;
+    const m = o.groupId ? this.byGroup.get(o.groupId) : undefined;
+    return m && this.isReplacement(o, m) ? m.oldId : null;
   }
   onUpdate(u: TradeUpdate): void {
     const o = u.order;
+    const m = o.groupId ? this.byGroup.get(o.groupId) : undefined;
+    if (!m) return;
     const at = u.atMs ?? this.now();
-    const m = this.byNew.get(o.id);
-    if (m) {
+    if (this.isReplacement(o, m)) {
+      if (m.newId === null) {
+        m.newId = o.id;
+        this.oldOf.set(o.id, m.oldId);
+      }
       if (u.event === "fill" || u.event === "partial_fill") {
         m.filledQty = Math.max(m.filledQty, o.filledQty);
         if (o.filledQty >= m.qty - EPS && m.filledAtMs === null) m.filledAtMs = at;
       } else if (u.event === "canceled" || u.event === "expired" || u.event === "rejected") m.canceledAtMs ??= at;
       return;
     }
-    if (o.side === "sell" && o.groupId && (o.type === "stop" || o.stopPrice !== null) && u.event === "canceled") {
-      for (const x of this.byNew.values()) if (x.groupId === o.groupId && !this.stopCancelAt.has(o.groupId)) this.stopCancelAt.set(o.groupId, at);
-    }
+    if (o.side === "sell" && (o.type === "stop" || o.stopPrice !== null) && u.event === "canceled") m.stopCanceledAtMs ??= at;
   }
-  filled(newId: string): boolean {
-    return this.byNew.get(newId)?.filledAtMs != null;
+  filled(groupId: string): boolean {
+    return this.byGroup.get(groupId)?.filledAtMs != null;
   }
   // What the live updates said about one move so far.
-  seen(newId: string, groupId: string): { filledAtMs: number | null; stopCanceledAtMs: number | null; canceledAtMs: number | null } {
-    const m = this.byNew.get(newId);
-    return { filledAtMs: m?.filledAtMs ?? null, stopCanceledAtMs: this.stopCancelAt.get(groupId) ?? null, canceledAtMs: m?.canceledAtMs ?? null };
+  seen(groupId: string): { newId: string | null; filledAtMs: number | null; stopCanceledAtMs: number | null; canceledAtMs: number | null } {
+    const m = this.byGroup.get(groupId);
+    return { newId: m?.newId ?? null, filledAtMs: m?.filledAtMs ?? null, stopCanceledAtMs: m?.stopCanceledAtMs ?? null, canceledAtMs: m?.canceledAtMs ?? null };
   }
-  // Forget moves older than the memory (called at the start of each sale): bounded memory.
-  prune(keep: ReadonlySet<string>): void {
-    for (const id of [...this.byNew.keys()]) {
-      if (keep.has(id)) continue;
-      const g = this.byNew.get(id)!.groupId;
-      this.byNew.delete(id);
-      this.stopCancelAt.delete(g);
-    }
-    // The old-to-new map is kept longer (the fill tally may meet a late update): at most 2,000 entries.
+  // Forget the last sale's moves (called at the start of each move phase): bounded memory. The old-to-new map is kept longer (the fill
+  // tally may meet a late update), at most 2,000 entries.
+  reset(): void {
+    this.byGroup.clear();
     while (this.oldOf.size > 2_000) this.oldOf.delete(this.oldOf.keys().next().value!);
   }
 }

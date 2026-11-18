@@ -112,7 +112,7 @@ export class FakeBroker implements FullBroker {
   // A4 of 2026-11-12: a stop sell rests (it does not change the position); `refuseStops` makes Alpaca refuse it.
   refuseStops = false;
   // The moved take-profit (2026-11-18): a replace answers with a new order (new id, `replaces` the old one); the old one is "replaced".
-  async replaceOrder(id: string, change: ReplaceOrder) {
+  async replaceOrder(id: string, change: ReplaceOrder, _timeoutMs?: number) {
     this.rec("replaceOrder", id, change);
     const all = this.orders.flatMap((o) => [o, ...o.legs]);
     const x = all.find((o) => o.id === id);

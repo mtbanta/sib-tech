@@ -488,7 +488,10 @@ export class SimBroker implements FullBroker {
     this.sellFills.push({ id: o.id, at: this.simMs + this.sellFillDelayMs });
     return structuredClone(o);
   }
-  async replaceOrder(id: string, change: ReplaceOrder): Promise<Order> {
+  // How long Alpaca takes to answer a replace (paper, 2026-11-18: 50 to 244 ms). The replace takes effect at once; the answer comes after
+  // this (a fill may come first). Past `timeoutMs` the caller gets no answer (an unclear outcome) although the replace happened.
+  replaceAnswerMs = 0;
+  async replaceOrder(id: string, change: ReplaceOrder, timeoutMs = 10_000): Promise<Order> {
     noteSafetyCall("replaceOrder");
     this.spend("plain");
     const forced = this.refuseReplaceIf?.(id, change) ?? null;
@@ -516,6 +519,13 @@ export class SimBroker implements FullBroker {
     this.replaceLog.push({ id, newId: nu.id, at: this.simMs, change });
     this.onOrderEvent?.("replaced", structuredClone(leg), this.simMs);
     if (nu.type === "limit" && nu.status === "new") this.limitChecks.push({ id: nu.id, at: this.simMs + this.replaceFillDelayMs });
+    if (this.replaceAnswerMs > 0) {
+      if (this.replaceAnswerMs > timeoutMs) {
+        this.advance(timeoutMs);
+        throw new Error("The operation was aborted due to timeout");
+      }
+      this.advance(this.replaceAnswerMs);
+    }
     return structuredClone(nu);
   }
   // The price moves: a resting take-profit at or below the new price fills (test-side).

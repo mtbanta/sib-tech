@@ -235,7 +235,10 @@ export function partLines(label: string, rows: OrderRecord[], alpacaOrders: Orde
     filled++;
     const legs = flattenLegs(o).filter((l) => l.side === "sell" && l.filledQty > 0 && l.filledAvgPrice !== null && !replaced.has(l.id));
     const exitQty = legs.reduce((n, l) => n + l.filledQty, 0);
-    if (exitQty >= o.filledQty - 1e-9) {
+    // The moved take-profit (2026-11-18): a take-profit the stack moved to sell in a close-out, `flatten` or the loss stop (client id
+    // cyrus-m-) is a sale of that kind, counted as closed later (no profit here), like the close-out's own market sales.
+    if (legs.some((l) => l.clientOrderId.startsWith("cyrus-m-"))) other++;
+    else if (exitQty >= o.filledQty - 1e-9) {
       pnl += legs.reduce((n, l) => n + l.filledQty * l.filledAvgPrice!, 0) - o.filledQty * o.filledAvgPrice;
       if (legs.some((l) => l.type === "stop")) stop++;
       else tp++;
