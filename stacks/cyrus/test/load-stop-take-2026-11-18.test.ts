@@ -364,7 +364,8 @@ test("a line with values sent while a cancelled screen is still finishing: the r
   r.ownerSays("stop", "16:40:30");
   await r.at("16:40:35");
   const cancelled = r.said("commands").find((t) => t.includes("To try again, send `load afternoon` again"));
-  assert.ok(cancelled?.includes("with `stop N take M` again if you want other values than the defaults."), r.said("commands").join(" | "));
+  assert.ok(cancelled?.includes("for other values than the defaults, send the whole line, for example `load afternoon stop 5 take 3`."), r.said("commands").join(" | "));
+  assert.ok(!cancelled!.includes(" `stop N take M`"), "never a fragment that reads as the `stop` command");
   r.ownerSays("load afternoon stop 5 take 3", "16:41:00");
   await r.at("16:41:05");
   assert.ok(r.said("commands").includes("The earlier screen is still finishing. Send `load afternoon` again in a minute or two. The stop and take-profit in this line were not kept; include them again (`load afternoon stop 5 take 3`)."), r.said("commands").join(" | "));

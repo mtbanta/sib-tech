@@ -8069,3 +8069,14 @@ Read only, per `builds/daily-review-brief.md`. Run at about 3:10 to 3:30 PM CT, 
 - today's fees, which post in the evening.
 
 Paper trading only. Research input for a human decision, never an instruction to act.
+
+### Round 2 results (load afternoon stop and take), and one wording fix for round 3
+
+- **Group 1: PASS** on `4997e83`. The round 1 gap is closed on both routes. The reviewer checked every writer of `lastDay`: none can put an older copy back. With the hook made a no-op in a scratch copy, both race tests fail.
+  - **Note: a side effect of the fix on a first window.** Before, prints arriving during the start reply (pause already off) were priced as normal entries until the pass read the day again. Now the window's load rules apply from the write. This is the safer direction (the window's own rules from its first moment), recorded here so Michael sees it.
+  - **Note:** the known real-clock flake in `midday.test.ts` failed once in one of the reviewer's two full runs, and passed alone twice.
+- **Group 2: PASS** on `4997e83`.
+  - **Note acted on:** the "To try again" line showed the fragment `stop N take M`, and `stop 5 take 3` sent alone is read as the `stop` command. It now says "for other values than the defaults, send the whole line, for example `load afternoon stop 5 take 3`."
+  - **Note acted on:** the per-move brief example now says "load brackets at the defaults".
+- **Test count:** the full suite is 1,019 tests, 0 failing. The log's earlier 1,016 was run before group 2's three new tests were added.
+- **Round 3:** both groups, on the wording change only (group 1 because it would be the deployed commit).

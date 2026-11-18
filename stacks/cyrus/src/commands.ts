@@ -128,8 +128,9 @@ export function screenCancelledLine(switched: boolean | "switched", after: "go-r
   const base = switched === "switched" ? SCREEN_CANCELLED_SWITCHED : SCREEN_CANCELLED;
   const tooLate = "`load afternoon` is no longer accepted today (its time has passed).";
   const pauseOver = o.tooLate ? `Trading has resumed normally; ${tooLate}` : "Trading has resumed normally. To start the window instead, send `stop` (or `flatten`), then `load afternoon` once flat (accepted until 1:30 PM CT, or the last entry if earlier).";
-  // Group 2, round 1 of 2026-11-18: the stop and take-profit given with the cancelled line are not kept, so the line says to give them again.
-  const tryAgain = o.tooLate ? tooLate : "To try again, send `load afternoon` again once the account is flat (accepted until 1:30 PM CT, or the last entry if earlier), with `stop N take M` again if you want other values than the defaults.";
+  // Group 2, rounds 1 and 2 of 2026-11-18: the stop and take-profit given with the cancelled line are not kept, so the line says how to give
+  // them, as the whole line (`stop 5 take 3` alone would be read as the `stop` command).
+  const tryAgain = o.tooLate ? tooLate : "To try again, send `load afternoon` again once the account is flat (accepted until 1:30 PM CT, or the last entry if earlier); for other values than the defaults, send the whole line, for example `load afternoon stop 5 take 3`.";
   const why = o.why ?? "";
   let next: string;
   if (after === "go-resumed") next = o.lastEntryPassed ? "" : pauseOver;
