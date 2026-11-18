@@ -7326,3 +7326,43 @@ At 3:40 PM: 0 positions, 0 open orders, stop flag on (Michael's `stop` of 2:47 P
   - **What Alpaca allows:** trailing stops "are currently supported only with single orders", not as a bracket's stop leg. Once triggered, one "turns into a market order, and it may fill above or below the stop trigger price"; it can be changed by PATCH of the trail while pending.
   - **Cancel-then-trail:** can be built, at about 2 sent requests a switch, but leaves the position with no stop from Alpaca's cancel to the trailing stop's acceptance. Today's comparable step took 1.6 to 5.2 s. It also drops the take-profit.
   - **Recommendation, for after tomorrow's trial:** prefer raising the bracket's own stop by replace, a stepped trail at 1 request a step with no gap, if the trial holds up. Either is a strategy change for the next phase and money-touching.
+
+## The take-profit and raise-the-stop paper trials (2026-11-18, 10:36 to 10:41 AM CT)
+
+Research input for Michael's decision, never an instruction to act. Paper only. Raw records: scratchpad `papertest/trials.jsonl` (not in the repo).
+
+**Conditions.** Mid-day close-out flat at 10:31:01. Builder asked in `commands` at 10:31:42; Michael's `stop` at 10:36:08 (his first line, "atop", was not understood and did nothing). Every trial checked its own guards (date, start before 10:52, mid-day flat, Michael's own stop on, flat at Alpaca, the symbol traded by the stack today). Stocks: IREN (about 15 dollars), RIOT (about 18), SMCI (about 24), the three the stack traded most that morning (744, 685 and 649 stored orders). 1 share each, 3 for the partial fill. Flat at Alpaca after every trial and at 10:41:39. No rate-limit answers; lowest remaining seen by the trials 188.
+
+**The runner stopped once, falsely.** After the last take-profit trial (trigger, SMCI) the runner's flat check saw 1 open order and stopped as designed. The trial's own clean-up had reported every order final and the share sold, and the account read flat 20 s later (no positions, no open orders). The same lagging read happened once more (raise-the-stop, IREN) and cleared a second later. Builder's reading: Alpaca's open-orders list lagging just after the clean-up's cancels and sale. All three rounds of the take-profit cases had finished; the raise-the-stop trials and the partial fill were then run one at a time by hand, with a flat check after each.
+
+**Winning position, tiers A and B (3 each).**
+- Every lowering was accepted (6 of 6, HTTP 200). Each answer is a new order, its `replaces` field naming the old one.
+- None sold at the lowered price within the 8 s wait: in all six the price did not come back up to fill plus 5 (A) or fill plus 2 (B). So the "winning" part is not really tested: the bid was above the fill at the end in only 1 of 6 (winA SMCI).
+- Each then ended by a marketable replace (bid minus 1 cent): 6 of 6 accepted, filled 0.27, 0.50, 0.57, 0.74, 0.77 and 1.18 s after it was sent (median about 0.66 s).
+- Alpaca cancelled the stop itself every time, about 2 ms after the take-profit fill.
+- Requests per trial: 2 sends (the two replaces); 14 in all with the test's own status polls (12 reads), which the stack would get from the live updates instead.
+
+**Losing position (3).** The take-profit moved to 1 cent below the lower of the bid and the fill: 3 of 3 accepted, filled 0.36, 0.95 and 1.00 s after the replace. Alpaca cancelled the stop itself each time. 1 send each, 4 requests in all.
+
+**Stop triggering at that moment (3).**
+- **RIOT and SMCI (the bid reached the stop price).** The take-profit move to bid minus 1 cent was **refused**, 422 `take_profit.limit_price must be > stop_loss.stop_price`: with the bid at the stop, a marketable take-profit would sit at or below the stop. The stop leg was still `held` (not triggered). The clean-up cancelled the legs and sold.
+- **IREN (the price never reached the stop in 15 s, so forced).** The stop move to the bid (sent alongside the take-profit move) was refused with the same answer, because the take-profit move landed first. The take-profit move was accepted and filled 0.99 s later; Alpaca cancelled the stop itself.
+- **Finding:** Alpaca keeps a bracket's take-profit above its stop. A moved take-profit cannot sell a position whose price is at or below its stop. That case still needs the cancel-and-sell path, or the stop lowered first (a second request, and the position less protected for that moment).
+
+**Partly filled exit (1, SMCI, 3 shares).**
+- The take-profit (fill plus 1 cent) filled 1 share at 24.26.
+- **Alpaca cancelled the whole stop (3 shares) about 2 ms after that first partial fill**, before any replace. So the 2 shares left had no stop until they sold.
+- The replace to 24.23, sent while the order was `partially_filled`, was accepted. The 2 shares filled at 24.25 in two parts, 1.41 s after the replace. 1 send, 6 requests in all.
+- This matches what the stack already handles: a remainder after a partial take-profit gets a fresh stop (A4).
+
+**Raising the stop (Michael's addition).** One trial per stock. RIOT's first try did not fill its entry and was cancelled by the worker (below), then ran again.
+- 6 of 6 raises accepted (HTTP 200), each 10 cents, answered in 106 to 503 ms.
+- Every raise gives a new id; the answer's `replaces` field names the old one. The new stop stays `held`.
+- The take-profit stayed in place every time: same id, status `new`, same price.
+- 1 send per raise. 5 requests per trial from the first raise, with 3 reads by the test.
+- The price rose above the entry only on SMCI. On IREN and RIOT it fell a little, so their raises were tested on a position that did not rise, still at least 2 cents below the bid.
+
+**The worker's reaction.**
+- Its only action: at 10:40:12, "The stop flag is on and 1 unfilled entry reached Alpaca late, so I cancelled it." That was the trial's own 1-share buy for RIOT's first raise-the-stop try, which had not filled in about 2 s.
+- The cause is the stop's sweep (`sweepEntriesWhileStopped` in `src/risk.ts`), which cancels every unfilled buy while the stop flag is on, whatever its client id. That is the stack's design (catching a late entry after `stop`), not a fault; it only matters to a trial whose entry does not fill at once.
+- No carried-position alert, no missing-exit sale, no fast sale. The worker's stored events from 10:36 to 10:43 were the routine per-minute rows, the 2 commands and that sweep.
