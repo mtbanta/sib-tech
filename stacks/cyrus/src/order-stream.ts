@@ -210,6 +210,11 @@ export interface FreeDeps {
   onEntryFill?: (info: { clientOrderId: string; symbol: string; filledQty: number; atMs: number }) => void;
   // The entry (Alpaca's parent order, with its fill) for a group id, from the order sync's latest view, if the stream has not seen it.
   entryForGroup?: (groupId: string) => Order | null;
+  // The moved take-profit (Michael's decision of 2026-11-18): every update is shown to the tracker of the running sale's moves (it never
+  // sends anything), and the order a replacement replaced is asked for when Alpaca's update does not name it (`replaces`), so a replaced
+  // leg's fills are never counted twice (a replacement's filled quantity includes the old order's).
+  onAnyUpdate?: (u: TradeUpdate) => void;
+  replacedOf?: (orderId: string) => string | null;
   now: () => number;
   log?: (event: string, data?: Record<string, unknown>) => void;
 }
@@ -268,6 +273,11 @@ export class OrderUpdateHandler {
     return s[Math.floor(s.length / 2)]!;
   }
 
+  // The moved take-profit (2026-11-18): the client id of the entry of ours a group id belongs to, as the live updates saw it (no request).
+  entryClientIdForGroup(groupId: string): string | null {
+    return this.entries.get(groupId)?.clientOrderId ?? null;
+  }
+
   private entry(groupId: string): EntryInfo | null {
     const known = this.entries.get(groupId);
     if (known) return known;
@@ -291,6 +301,11 @@ export class OrderUpdateHandler {
 
   async handle(u: TradeUpdate): Promise<void> {
     this.counts.events++;
+    try {
+      this.d.onAnyUpdate?.(u);
+    } catch {
+      /* the moves' record must never break the handler */
+    }
     const o = u.order;
     const g = o.groupId ?? null;
     const isFill = u.event === "fill" || u.event === "partial_fill";
@@ -325,6 +340,9 @@ export class OrderUpdateHandler {
       const info = this.entry(g);
       if (info && info.filledQty > 0) this.d.onExitEnded?.(info.clientOrderId);
       const ended = this.endedLegs.get(g) ?? new Map<string, number>();
+      // The moved take-profit (2026-11-18): a replacement ending stands for the order it replaced (never two legs from one).
+      const replaced = o.replaces ?? this.d.replacedOf?.(o.id) ?? null;
+      if (replaced) ended.delete(replaced);
       ended.set(o.id, o.filledQty);
       this.endedLegs.set(g, ended);
       this.checkLostExits(g, o.symbol, u.atMs);
@@ -343,6 +361,12 @@ export class OrderUpdateHandler {
     if (!isFill) return;
     if (g) {
       const legs = this.exitLegs.get(g) ?? new Map<string, number>();
+      // The moved take-profit (2026-11-18): a replacement's count includes the order it replaced, which is dropped from the tally.
+      const old = o.replaces ?? this.d.replacedOf?.(o.id) ?? null;
+      if (old) {
+        legs.delete(old);
+        this.endedLegs.get(g)?.delete(old);
+      }
       legs.set(o.id, o.filledQty);
       this.exitLegs.set(g, legs);
     }

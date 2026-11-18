@@ -18,6 +18,8 @@ import { DIGEST_PERIOD_MS, TradeDigest } from "./digest.ts";
 import { addToRunning, CONTROL_FEES, estimateFees, type FeesRunning } from "./fees.ts";
 import type { Governor } from "./governor.ts";
 import { Liquidator, SellGate, flattenLegs } from "./sells.ts";
+import { MoveWatch } from "./moved-take-profit.ts";
+import type { Order } from "./alpaca-trading.ts";
 import { formatLiveList } from "./universe.ts";
 import type { Settings } from "./config.ts";
 import { closeOut } from "./closeout.ts";
@@ -62,6 +64,9 @@ export interface LiveListResult {
 }
 
 export interface WorkerDeps {
+  // The moved take-profit (Michael's decision of 2026-11-18): the latest bid and ask of some symbols, in one market-data read with a short
+  // time limit. Unset (the tests that do not set it): no take-profit is moved; every sale keeps today's path.
+  latestQuotes?: (symbols: string[]) => Promise<ReadonlyMap<string, { bid: number; ask: number; atMs: number }>>;
   settings: Settings;
   broker: FullBroker;
   governor: Governor;
@@ -352,7 +357,12 @@ export class Worker {
     this.syncMemory.protectFirst = this.protectFirst;
     this.budget.p2GivesWay = () => this.protectFirst.p2GivesWay();
     this.sellGate = new SellGate({ broker: deps.broker, say: (c, t, o) => this.say(c, t, o), log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime() });
-    this.liquidator = new Liquidator({ broker: deps.broker, gate: this.sellGate, now: deps.now, sleep: deps.sleep, log: (e, data) => deps.log?.("info", e, data), waitEvent: (symbols, ms) => this.waitEvent(symbols, ms), ownSalesMayRun: () => {
+    this.moveWatch = new MoveWatch(() => deps.now().getTime());
+    const latestQuotes = deps.latestQuotes;
+    this.liquidator = new Liquidator({ broker: deps.broker, gate: this.sellGate, now: deps.now, sleep: deps.sleep, log: (e, data) => deps.log?.("info", e, data), waitEvent: (symbols, ms) => this.waitEvent(symbols, ms),
+      // The moved take-profit (Michael's decision of 2026-11-18): each replace only with room for one more request above the urgent floor.
+      ...(latestQuotes ? { moves: { quotes: (symbols: string[]) => latestQuotes(symbols), stopsFor: (legs: Array<{ legId: string; groupId: string; symbol: string }>) => this.stopsForMoves(legs), watch: this.moveWatch, room: () => this.budget.urgentRoom(1) } } : {}),
+      ownSalesMayRun: () => {
       const s = this.sessionForSync;
       return !s || this.protectNow(s.closeAt);
     },
@@ -390,6 +400,31 @@ export class Worker {
       protectFirst: this.protectFirst,
       onLimitEntrySent: (e) => this.entryExpiry.schedule(e, LOAD_ENTRY_WAIT_MS),
     });
+  }
+
+  // The moved take-profit (Michael's decision of 2026-11-18): the live updates about the running sale's moves (never sends anything).
+  readonly moveWatch: MoveWatch;
+
+  // The moved take-profit: the stop price of each take-profit leg's bracket, from what the worker already holds (no request). First the order
+  // sync's copy of the entry (its stop leg, exactly as Alpaca holds it); else the entry's stored row, its stop rounded down to the cent as it
+  // was sent (submitEntry). The stack never moves a stop, so the two agree. A leg whose entry is not known is left out (today's path).
+  private async stopsForMoves(legs: Array<{ legId: string; groupId: string; symbol: string }>): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    const byGroup = new Map<string, Order>();
+    for (const o of this.syncMemory.lastSeen.values()) if (o.groupId) byGroup.set(o.groupId, o);
+    for (const l of legs) {
+      const seen = byGroup.get(l.groupId);
+      const stopLeg = seen ? flattenLegs(seen).find((x) => x.side === "sell" && (x.type === "stop" || x.type === "stop_limit") && x.stopPrice !== null && x.stopPrice > 0) : undefined;
+      if (stopLeg && stopLeg.stopPrice !== null && seen!.symbol === l.symbol) {
+        out.set(l.legId, stopLeg.stopPrice);
+        continue;
+      }
+      const cid = seen?.clientOrderId ?? this.orderHandler?.entryClientIdForGroup(l.groupId) ?? null;
+      if (!cid) continue;
+      const row = await this.d.store.getOrder(cid).catch(() => null);
+      if (row && row.symbol === l.symbol && row.stopPrice > 0) out.set(l.legId, Math.floor(row.stopPrice * 100 + 1e-9) / 100);
+    }
+    return out;
   }
 
   // Told by main.ts before start(): whether this start is a new release (a deploy) or the same release again (a plain restart). The
@@ -1810,6 +1845,8 @@ export class Worker {
         this.loop.wake(info.clientOrderId, this.d.now().getTime(), "protect");
       },
       entryForGroup: (groupId) => [...this.syncMemory.lastSeen.values()].find((o) => o.groupId === groupId) ?? null,
+      onAnyUpdate: (u) => this.moveWatch.onUpdate(u),
+      replacedOf: (id) => this.moveWatch.replacedOf(id),
       now: () => this.d.now().getTime(),
       log: (e, data) => this.d.log?.("info", e, data),
     });

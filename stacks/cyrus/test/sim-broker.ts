@@ -7,7 +7,7 @@
 //   - the order list returns at most 500 orders at a time, oldest first
 //   - failures can be injected: a bulk cancel that cancels and then fails, sells that are refused
 // Time here is the simulation's own counter (`simMs`), moved by `sleep()` and `advance()`, not the test's wall clock.
-import { AlpacaError, type Account, type AccountConfig, type CalendarDay, type Clock, type EntryOrder, type Order, type Position, type SellOrder } from "../src/alpaca-trading.ts";
+import { AlpacaError, type Account, type AccountConfig, type CalendarDay, type Clock, type EntryOrder, type Order, type Position, type ReplaceOrder, type SellOrder } from "../src/alpaca-trading.ts";
 import type { FullBroker } from "../src/broker.ts";
 import { chargeFromScope } from "../src/request-scope.ts";
 import { noteSafetyCall } from "./tag-audit.ts";
@@ -64,6 +64,25 @@ export class SimBroker implements FullBroker {
     this.simMs = startMs;
   }
   private cancels: Pending[] = [];
+  // ---- the moved take-profit (Michael's decision of 2026-11-18), as MEASURED on paper on 2026-11-17 and 2026-11-18 ----
+  //   - a replace answers with a NEW order: a new id, `replaces` naming the old one, the same group id; the old one becomes "replaced", and
+  //     the entry's nested legs show the new one (the old one is no longer among them)
+  //   - Alpaca keeps a bracket's take-profit above its stop: a replace that would put the take-profit at or below the stop (or the stop at or
+  //     above the take-profit) is refused, 422 "take_profit.limit_price must be > stop_loss.stop_price"
+  //   - a selling limit (at or below the price) fills about 0.3 to 1.4 s after the replace (`replaceFillDelayMs`), and the stop is cancelled
+  //     by Alpaca at the fill (OCO); a limit above the price waits
+  //   - a replacement's filled quantity includes what the order it replaced had filled (the partial test of 2026-11-18)
+  //   - `openShape20261118`: the open-orders list shows a FILLED bracket as its take-profit leg alone, at the top level with no legs; the
+  //     stop leg (held) is not listed (one read on 2026-11-18, 27 open brackets)
+  replaceFillDelayMs = 600;
+  openShape20261118 = false;
+  refuseReplaceIf: ((id: string, change: ReplaceOrder) => number | null) | null = null; // an HTTP status to answer instead (fault injection)
+  keepsReplaceClientId = true; // whether the replacement carries the client id asked for (else Alpaca's own)
+  readonly replaceLog: Array<{ id: string; newId: string; at: number; change: ReplaceOrder }> = [];
+  // Told about each order event as the live updates would report it (a test connects it to the worker's handlers).
+  onOrderEvent: ((event: string, o: Order, atMs: number) => void) | null = null;
+  private replacedOrders: Order[] = [];
+  private limitChecks: Array<{ id: string; at: number }> = [];
   private sellFills: Array<{ id: string; at: number }> = [];
   // A4: fresh stops placed, and whether Alpaca refuses them.
   readonly stopLog: Array<{ symbol: string; qty: number; stopPrice: number; at: number; clientOrderId: string }> = [];
@@ -77,11 +96,14 @@ export class SimBroker implements FullBroker {
 
   // ---- simulated time ----
   advance(ms: number): void {
+    if (this.openShape20261118) return this.advanceInOrder(ms);
     this.simMs += ms;
     this.refill(ms);
     for (const c of [...this.cancels]) {
       if (this.simMs >= c.doneAt) {
         this.cancels = this.cancels.filter((x) => x !== c);
+        // In the 2026-11-18 mode, an order that filled while its cancel was pending stays filled (a pending cancel can still fill).
+        if (this.openShape20261118 && this.all().some((o) => o.id === c.id && o.status !== "pending_cancel")) continue;
         this.setStatus(c.id, "canceled");
       }
     }
@@ -90,6 +112,64 @@ export class SimBroker implements FullBroker {
         this.sellFills = this.sellFills.filter((x) => x !== f);
         this.fillSell(f.id);
       }
+    }
+    for (const c of [...this.limitChecks]) {
+      if (this.simMs >= c.at) {
+        this.limitChecks = this.limitChecks.filter((x) => x !== c);
+        this.fillLegIfMarketable(c.id);
+      }
+    }
+  }
+  // The 2026-11-18 mode: what falls due inside one step is done in time order (a fill due before a cancel completes happens first), each at
+  // its own time.
+  private advanceInOrder(ms: number): void {
+    const end = this.simMs + ms;
+    this.refill(ms);
+    for (let guard = 0; guard < 10_000; guard++) {
+      const due: Array<{ at: number; run: () => void }> = [
+        ...this.cancels.filter((c) => c.doneAt <= end).map((c) => ({ at: c.doneAt, run: () => {
+          this.cancels = this.cancels.filter((x) => x !== c);
+          if (this.all().some((o) => o.id === c.id && o.status === "pending_cancel")) this.setStatus(c.id, "canceled");
+        } })),
+        ...this.sellFills.filter((f) => f.at <= end).map((f) => ({ at: f.at, run: () => {
+          this.sellFills = this.sellFills.filter((x) => x !== f);
+          this.fillSell(f.id);
+        } })),
+        ...this.limitChecks.filter((c) => c.at <= end).map((c) => ({ at: c.at, run: () => {
+          this.limitChecks = this.limitChecks.filter((x) => x !== c);
+          this.fillLegIfMarketable(c.id);
+        } })),
+      ].sort((a, b) => a.at - b.at);
+      const next = due[0];
+      if (!next) break;
+      this.simMs = Math.max(this.simMs, next.at);
+      next.run();
+    }
+    this.simMs = end;
+  }
+  // A resting take-profit leg whose limit is at or below the price fills now; its sibling is cancelled (OCO).
+  private fillLegIfMarketable(id: string): void {
+    for (const p of this.orders) {
+      const leg = p.legs.find((l) => l.id === id);
+      if (!leg) continue;
+      // A pending cancel can still fill (2026-11-18 mode); otherwise only a working leg.
+      if (!(leg.status === "new" || leg.status === "accepted" || (this.openShape20261118 && leg.status === "pending_cancel")) || leg.limitPrice === null) return;
+      const price = this.prices.get(leg.symbol) ?? 0;
+      if (!(leg.limitPrice <= price + 1e-9)) return;
+      const qty = leg.qty - leg.filledQty;
+      leg.status = "filled";
+      leg.filledQty = leg.qty;
+      leg.filledAvgPrice = price;
+      leg.filledAt = new Date(this.simMs).toISOString();
+      this.removeShares(leg.symbol, qty, price);
+      this.onOrderEvent?.("fill", structuredClone(leg), this.simMs);
+      for (const other of p.legs) {
+        if (other !== leg && OPEN.has(other.status)) {
+          this.setStatus(other.id, "canceled");
+          this.onOrderEvent?.("canceled", structuredClone(other), this.simMs + 2);
+        }
+      }
+      return;
     }
   }
   advanceTo(ms: number): void {
@@ -138,6 +218,7 @@ export class SimBroker implements FullBroker {
       o.updatedAt = new Date(this.simMs).toISOString();
       if (status === "canceled") o.canceledAt = o.updatedAt;
     }
+    if (status === "canceled" && this.onOrderEvent) for (const o of this.all()) if (o.id === id) this.onOrderEvent("canceled", structuredClone(o), this.simMs);
   }
   // What Alpaca paper did 655 times on 2026-11-04: the take-profit fills part of the shares and, 2 ms later, the stop is
   // cancelled (Alpaca's documentation says it should be resized instead). The rest stays on the take-profit alone.
@@ -277,6 +358,14 @@ export class SimBroker implements FullBroker {
   async listOrders(status: "open" | "closed" | "all", afterIso?: string): Promise<Order[]> {
     this.spend();
     let rows = this.orders.filter((o) => (status === "all" ? true : status === "open" ? OPEN.has(o.status) || (!this.hideFilledParents && o.legs.some((l) => OPEN.has(l.status))) : !OPEN.has(o.status)));
+    if (status === "open" && this.openShape20261118) {
+      // 2026-11-18: a filled bracket shows as its open take-profit leg alone (top level, no legs); the held stop is not listed.
+      rows = this.orders.flatMap((o) => {
+        if (OPEN.has(o.status)) return [o];
+        if (o.side !== "buy") return [];
+        return o.legs.filter((l) => OPEN.has(l.status) && l.type === "limit").map((l) => ({ ...l, legs: [] }));
+      });
+    }
     if (afterIso) rows = rows.filter((o) => (o.createdAt ?? "") > afterIso);
     rows = rows.filter((o) => !this.hiddenFromListing.has(o.clientOrderId));
     return rows.slice(0, 500).map((o) => structuredClone(o)); // oldest first, at most 500
@@ -340,6 +429,8 @@ export class SimBroker implements FullBroker {
       const leg = o.legs.find((l) => l.id === id);
       if (leg) return structuredClone(leg);
     }
+    const old = this.replacedOrders.find((o) => o.id === id);
+    if (old) return structuredClone(old);
     return null;
   }
   // About one read per 100 fills, as Alpaca pages them (each page waits for `beforePage`, the summary's pacing).
@@ -361,8 +452,8 @@ export class SimBroker implements FullBroker {
     const groupId = `group-${this.n + 1}`; // release B: Alpaca gives a bracket's entry and its legs one group id
     const parent = order({ id: this.id(), clientOrderId: e.clientOrderId, symbol: e.symbol, qty: e.qty, status: "accepted", orderClass: e.takeProfitPrice !== undefined ? "bracket" : "oto", createdAt: created, groupId });
     parent.legs = [
-      ...(e.takeProfitPrice !== undefined ? [order({ id: this.id(), clientOrderId: `${e.clientOrderId}-tp`, symbol: e.symbol, side: "sell", qty: e.qty, status: "held", type: "limit", limitPrice: e.takeProfitPrice, createdAt: created, groupId })] : []),
-      order({ id: this.id(), clientOrderId: `${e.clientOrderId}-sl`, symbol: e.symbol, side: "sell", qty: e.qty, status: "held", type: "stop", stopPrice: e.stopPrice, createdAt: created, groupId }),
+      ...(e.takeProfitPrice !== undefined ? [order({ id: this.id(), clientOrderId: `${e.clientOrderId}-tp`, symbol: e.symbol, side: "sell", qty: e.qty, status: "held", type: "limit", limitPrice: e.takeProfitPrice, createdAt: created, groupId, ...(this.openShape20261118 ? { orderClass: "bracket" } : {}) })] : []),
+      order({ id: this.id(), clientOrderId: `${e.clientOrderId}-sl`, symbol: e.symbol, side: "sell", qty: e.qty, status: "held", type: "stop", stopPrice: e.stopPrice, createdAt: created, groupId, ...(this.openShape20261118 ? { orderClass: e.takeProfitPrice !== undefined ? "bracket" : "oto" } : {}) }),
     ];
     this.prices.set(e.symbol, e.referencePrice);
     this.orders.push(parent);
@@ -397,11 +488,54 @@ export class SimBroker implements FullBroker {
     this.sellFills.push({ id: o.id, at: this.simMs + this.sellFillDelayMs });
     return structuredClone(o);
   }
+  async replaceOrder(id: string, change: ReplaceOrder): Promise<Order> {
+    noteSafetyCall("replaceOrder");
+    this.spend("plain");
+    const forced = this.refuseReplaceIf?.(id, change) ?? null;
+    if (forced !== null) throw new AlpacaError(`replace refused (test ${forced})`, forced);
+    const parent = this.orders.find((o) => o.legs.some((l) => l.id === id));
+    const leg = parent?.legs.find((l) => l.id === id);
+    if (!parent || !leg) throw new AlpacaError("order not found", 404);
+    if (!OPEN.has(leg.status) || leg.status === "pending_cancel") throw new AlpacaError(`order is not open (${leg.status})`, 422);
+    const tp = leg.type === "limit" ? leg : parent.legs.find((l) => l.type === "limit");
+    const sl = leg.type === "stop" ? leg : parent.legs.find((l) => l.type === "stop");
+    const newLimit = leg.type === "limit" ? (change.limitPrice ?? leg.limitPrice) : (tp?.limitPrice ?? null);
+    const newStop = leg.type === "stop" ? (change.stopPrice ?? leg.stopPrice) : (sl?.stopPrice ?? null);
+    if (newLimit !== null && newStop !== null && tp && sl && OPEN.has(tp.status) && OPEN.has(sl.status) && !(newLimit > newStop + 1e-9)) throw new AlpacaError("take_profit.limit_price must be > stop_loss.stop_price", 422);
+    const nu: Order = structuredClone(leg);
+    nu.id = this.id();
+    nu.clientOrderId = change.clientOrderId && this.keepsReplaceClientId ? change.clientOrderId : `alpaca-${this.n}`;
+    if (change.limitPrice !== undefined) nu.limitPrice = Math.floor(change.limitPrice * 100 + 1e-9) / 100;
+    if (change.stopPrice !== undefined) nu.stopPrice = Math.floor(change.stopPrice * 100 + 1e-9) / 100;
+    nu.replaces = leg.id;
+    nu.status = leg.status === "held" ? "held" : "new";
+    nu.createdAt = new Date(this.simMs).toISOString();
+    leg.status = "replaced";
+    this.replacedOrders.push(leg);
+    parent.legs = parent.legs.map((l) => (l.id === id ? nu : l));
+    this.replaceLog.push({ id, newId: nu.id, at: this.simMs, change });
+    this.onOrderEvent?.("replaced", structuredClone(leg), this.simMs);
+    if (nu.type === "limit" && nu.status === "new") this.limitChecks.push({ id: nu.id, at: this.simMs + this.replaceFillDelayMs });
+    return structuredClone(nu);
+  }
+  // The price moves: a resting take-profit at or below the new price fills (test-side).
+  setPrice(symbol: string, price: number): void {
+    this.prices.set(symbol, price);
+  }
   private startCancel(id: string) {
     const o = this.all().find((x) => x.id === id);
     if (!o || !OPEN.has(o.status) || o.status === "pending_cancel") return;
     o.status = "pending_cancel";
     this.cancels.push({ id, doneAt: this.simMs + this.cancelMs });
+    // In the 2026-11-18 mode, cancelling one leg of a filled bracket cancels its sibling too (one-cancels-other; paper test A of 2026-11-17:
+    // the stop's own cancel was answered "already cancelling with its sibling").
+    if (this.openShape20261118) {
+      const parent = this.orders.find((p) => p.legs.some((l) => l.id === id));
+      for (const sib of parent?.legs ?? []) if (sib.id !== id && OPEN.has(sib.status) && sib.status !== "pending_cancel") {
+        sib.status = "pending_cancel";
+        this.cancels.push({ id: sib.id, doneAt: this.simMs + this.cancelMs });
+      }
+    }
   }
   async cancelOrder(id: string): Promise<void> {
     noteSafetyCall("cancelOrder");

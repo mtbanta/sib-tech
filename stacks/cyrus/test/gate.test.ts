@@ -283,6 +283,7 @@ test("structure: only the gate sends entries, only the sell gate sends sells, an
   const callers = (fn: string) => files(src).filter((f) => new RegExp(`\\.${fn}\\(`).test(readFileSync(f, "utf8"))).map((f) => f.slice(src.length + 1)).sort();
   assert.deepEqual(callers("submitEntry"), ["gate.ts", "tools/paper-check.ts"]);
   assert.deepEqual(callers("submitSell"), ["sells.ts"]);
+  assert.deepEqual(callers("replaceOrder"), ["sells.ts"], "the moved take-profit (2026-11-18): only the sell gate replaces an order");
   assert.deepEqual(callers("setAccountConfig"), ["closeout.ts", "gate.ts", "morning.ts", "tools/paper-check.ts", "worker.ts"]);
   assert.deepEqual(callers("closeAllPositions"), []);
   assert.deepEqual(callers("closePosition"), []);

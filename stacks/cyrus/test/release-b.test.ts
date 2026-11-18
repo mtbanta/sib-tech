@@ -142,15 +142,18 @@ test("without position_qty, a symbol is freed only when that group's exit fills 
   assert.equal((await w2.store.getOrder("cyrus-20261105-F-1"))!.closedAt ?? null, null);
 });
 
-test("structure: the order stream never sends anything; nothing changes a take-profit's price any more (the time limit is gone); the entry wait only cancels", async () => {
+test("structure: the order stream never sends anything; only the Alpaca client holds the replace call (the moved take-profit of 2026-11-18) and only the sell gate calls it; the entry wait only cancels", async () => {
   const { readdirSync, readFileSync, existsSync } = await import("node:fs");
   const { join } = await import("node:path");
   const src = join(import.meta.dirname, "../src");
   const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(dir, e.name)) : e.name.endsWith(".ts") ? [join(dir, e.name)] : []));
   assert.ok(!existsSync(join(src, "time-limit.ts")), "the time limit's module is gone");
-  assert.deepEqual(files(src).filter((f) => /replaceOrderLimit|lowerTakeProfit|PATCH", `\/v2\/orders/.test(readFileSync(f, "utf8"))), [], "no code can change an order's price");
+  // Michael's decision of 2026-11-18 (the moved take-profit): the Alpaca client alone sends a PATCH of an order (`replaceOrder`), and only the
+  // sell gate (sells.ts) calls it. Nothing else can change an order's price.
+  assert.deepEqual(files(src).filter((f) => /replaceOrderLimit|lowerTakeProfit|PATCH", `\/v2\/orders/.test(readFileSync(f, "utf8"))).map((f) => f.slice(src.length + 1)), ["alpaca-trading.ts"], "only the Alpaca client can change an order's price");
+  assert.deepEqual(files(src).filter((f) => /\.replaceOrder\(/.test(readFileSync(f, "utf8"))).map((f) => f.slice(src.length + 1)), ["sells.ts"], "only the sell gate replaces an order");
   const stream = readFileSync(join(src, "order-stream.ts"), "utf8");
-  assert.ok(!/fetch\(|submitEntry|submitSell|replaceOrderLimit|cancelOrder|from "\.\/broker/.test(stream), "the order stream has no way to reach Alpaca's REST interface");
+  assert.ok(!/fetch\(|submitEntry|submitSell|replaceOrder|cancelOrder|from "\.\/broker/.test(stream), "the order stream has no way to reach Alpaca's REST interface");
   const expiry = readFileSync(join(src, "entry-expiry.ts"), "utf8");
   assert.ok(!/submitSell|submitEntry|flatten\(|cancelAllOrders|fetch\(/.test(expiry), "the entry wait can only cancel one order");
 });

@@ -89,6 +89,9 @@ export interface Order {
   // When Alpaca submitted the order (its order listing's `after` and `until` filter on this). Optional so older test doubles need
   // not set it.
   submittedAt?: string | null;
+  // The moved take-profit (Michael's decision of 2026-11-18): the id of the order this one replaced (Alpaca's `replaces`), when it is a
+  // replacement. Optional so older test doubles need not set it.
+  replaces?: string | null;
   legs: Order[];
 }
 
@@ -105,6 +108,15 @@ export interface EntryOrder {
   // 2026-11-16; before: at or below it), instead of a market buy.
   // Alpaca then checks the exits against this limit price.
   limitPrice?: number;
+}
+
+// The moved take-profit (Michael's decision of 2026-11-18): what a replace of a resting sell may change. Never the quantity (a replace
+// keeps the order's shares, so it can never sell more than the order already could). Built to serve the stepped stop raise later
+// (`stopPrice`), as Michael asked.
+export interface ReplaceOrder {
+  limitPrice?: number;
+  stopPrice?: number;
+  clientOrderId?: string;
 }
 
 export interface SellOrder {
@@ -151,6 +163,7 @@ export function parseOrder(raw: Json): Order {
     updatedAt: raw.updated_at ? String(raw.updated_at) : null,
     groupId: raw.group_id ? String(raw.group_id) : null,
     submittedAt: raw.submitted_at ? String(raw.submitted_at) : null,
+    replaces: raw.replaces ? String(raw.replaces) : null,
     legs,
   };
 }
@@ -552,6 +565,29 @@ export class AlpacaTrading {
       ...(sell.stopPrice !== undefined ? { stop_price: this.cents(sell.stopPrice) } : {}),
     };
     return this.postOrder(body, sell.clientOrderId, true);
+  }
+
+  // The moved take-profit (Michael's decision of 2026-11-18): replaces a resting sell (a bracket's take-profit leg, later its stop leg) with
+  // a new price, by Alpaca's PATCH. Alpaca answers with a NEW order (a new id, its `replaces` naming the old one). Only the sell gate
+  // (sells.ts) may call this. One send, never retried here (Michael: "no retry"): a refusal, a 429 or an unclear answer goes back to the
+  // caller, whose fallback is today's cancel-and-sell. Sell prices are rounded down to the cent (a sell limit then sells sooner, never later).
+  async replaceOrder(orderId: string, change: ReplaceOrder): Promise<Order> {
+    if (!/^[0-9a-f-]{36}$/.test(orderId)) throw new AlpacaError("Bad order id", 0);
+    const price = (x: number | undefined, what: string): string | undefined => {
+      if (x === undefined) return undefined;
+      if (!(x >= 0.01) || !Number.isFinite(x)) throw new AlpacaError(`${what} must be at least 1 cent`, 0);
+      return this.cents(x);
+    };
+    const limit = price(change.limitPrice, "Limit price");
+    const stop = price(change.stopPrice, "Stop price");
+    if (limit === undefined && stop === undefined) throw new AlpacaError("A replace must change a price", 0);
+    if (change.clientOrderId !== undefined && !/^[\w.-]{8,128}$/.test(change.clientOrderId)) throw new AlpacaError("Bad client order id", 0);
+    const body: Json = {
+      ...(limit !== undefined ? { limit_price: limit } : {}),
+      ...(stop !== undefined ? { stop_price: stop } : {}),
+      ...(change.clientOrderId !== undefined ? { client_order_id: change.clientOrderId } : {}),
+    };
+    return parseOrder((await this.once("PATCH", `/v2/orders/${orderId}`, undefined, body)) as Json);
   }
 
   // Cancels one order. Safe to repeat, so it waits out a 429 and tries again. An order that is already gone (404 or

@@ -321,3 +321,29 @@ test("item 2 and the redesign: every attempt is charged to the scope's reservati
   assert.equal(counted.calls.length, 3, "a first try: retried as before, and counted");
   assert.equal(first.used, 3);
 });
+
+// ---- the moved take-profit (Michael's decision of 2026-11-18) ----
+test("a replace is one PATCH of the order with the new price (rounded down to the cent) and the client id; never retried, not even on a 429", async () => {
+  const id = "11111111-2222-3333-4444-555555555555";
+  const ok = fake([json(orderJson({ id: "99999999-2222-3333-4444-555555555555", side: "sell", type: "limit", limit_price: "19.99", replaces: id, legs: [] }))]);
+  const o = await ok.client.replaceOrder(id, { limitPrice: 19.9999, clientOrderId: "cyrus-m-20261118-AAA-x1" });
+  assert.equal(ok.calls.length, 1);
+  assert.equal(ok.calls[0]!.method, "PATCH");
+  assert.equal(ok.calls[0]!.url.pathname, `/v2/orders/${id}`);
+  assert.deepEqual(ok.calls[0]!.body, { limit_price: "19.99", client_order_id: "cyrus-m-20261118-AAA-x1" });
+  assert.equal(o.replaces, id, "the answer names the order it replaced");
+  const limited = fake([json({ message: "rate limit exceeded" }, 429)]);
+  await assert.rejects(limited.client.replaceOrder(id, { limitPrice: 19.99 }), (e: AlpacaError) => e.status === 429);
+  assert.equal(limited.calls.length, 1, "no retry");
+  const refused = fake([json({ code: 42210000, message: "take_profit.limit_price must be > stop_loss.stop_price" }, 422)]);
+  await assert.rejects(refused.client.replaceOrder(id, { limitPrice: 19.9 }), (e: AlpacaError) => e.status === 422);
+  assert.equal(refused.calls.length, 1);
+});
+
+test("a replace that changes no price, a bad id or a price under a cent is refused before anything is sent", async () => {
+  const none = fake([]);
+  await assert.rejects(none.client.replaceOrder("11111111-2222-3333-4444-555555555555", {}), (e: AlpacaError) => e.status === 0);
+  await assert.rejects(none.client.replaceOrder("not-an-id", { limitPrice: 1 }), (e: AlpacaError) => e.status === 0);
+  await assert.rejects(none.client.replaceOrder("11111111-2222-3333-4444-555555555555", { stopPrice: 0.004 }), (e: AlpacaError) => e.status === 0);
+  assert.equal(none.calls.length, 0);
+});

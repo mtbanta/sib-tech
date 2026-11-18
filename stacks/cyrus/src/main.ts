@@ -72,6 +72,8 @@ logSettingWarnings(logAndStore, settings.warnings);
 
 const worker = new Worker({
   settings,
+  // The moved take-profit (Michael's decision of 2026-11-18): one market-data read of the latest bid and ask (1.5 s limit).
+  latestQuotes: (symbols) => data.latestQuotes(symbols),
   broker,
   governor,
   store,

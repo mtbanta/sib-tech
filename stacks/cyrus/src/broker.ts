@@ -25,5 +25,6 @@ export type Broker = Pick<
 >;
 
 export type GateBroker = Broker & Pick<AlpacaTrading, "submitEntry">;
-export type SellBroker = Broker & Pick<AlpacaTrading, "submitSell">;
-export type FullBroker = Broker & Pick<AlpacaTrading, "submitEntry" | "submitSell">;
+// The moved take-profit (2026-11-18): `replaceOrder` is handed to the sell gate only, like `submitSell`.
+export type SellBroker = Broker & Pick<AlpacaTrading, "submitSell" | "replaceOrder">;
+export type FullBroker = Broker & Pick<AlpacaTrading, "submitEntry" | "submitSell" | "replaceOrder">;

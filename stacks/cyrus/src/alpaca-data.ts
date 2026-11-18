@@ -30,6 +30,20 @@ export class AlpacaData {
     return res.json();
   }
 
+  // The moved take-profit (Michael's decision of 2026-11-18): the latest bid and ask of several symbols in ONE request (market data, not the
+  // trading bucket of 200 a minute), with a short time limit: a sale must not wait on it. A symbol without a usable quote is left out.
+  async latestQuotes(symbols: readonly string[], timeoutMs = 1_500): Promise<Map<string, { bid: number; ask: number; atMs: number }>> {
+    const out = new Map<string, { bid: number; ask: number; atMs: number }>();
+    const list = [...new Set(symbols)].filter((s) => /^[A-Z.]{1,6}$/.test(s));
+    if (list.length === 0) return out;
+    const body = (await this.get("/v2/stocks/quotes/latest", { symbols: list.join(",") }, this.feed, timeoutMs)) as { quotes?: Record<string, { bp?: number; ap?: number; t?: string }> };
+    for (const [sym, q] of Object.entries(body.quotes ?? {})) {
+      const atMs = q.t ? Date.parse(q.t) : NaN;
+      if (typeof q.bp === "number" && typeof q.ap === "number" && q.bp > 0 && q.ap >= q.bp && Number.isFinite(atMs)) out.set(sym, { bid: q.bp, ask: q.ap, atMs });
+    }
+    return out;
+  }
+
   async latestTrade(symbol: string): Promise<{ price: number; time: string }> {
     const body = (await this.get(`/v2/stocks/${encodeURIComponent(symbol)}/trades/latest`)) as { trade?: { p?: number; t?: string } };
     if (!body.trade || typeof body.trade.p !== "number") throw new Error(`No latest trade for ${symbol}`);

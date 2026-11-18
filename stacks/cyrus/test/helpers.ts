@@ -1,7 +1,7 @@
 // Test doubles for the broker and Discord, shared by the command, gate and day tests.
 import { chargeFromScope } from "../src/request-scope.ts";
 import { noteSafetyCall } from "./tag-audit.ts";
-import type { Account, AccountConfig, CalendarDay, Clock, EntryOrder, Order, Position, SellOrder } from "../src/alpaca-trading.ts";
+import type { Account, AccountConfig, CalendarDay, Clock, EntryOrder, Order, Position, ReplaceOrder, SellOrder } from "../src/alpaca-trading.ts";
 import { AlpacaError } from "../src/alpaca-trading.ts";
 import type { FullBroker } from "../src/broker.ts";
 import { messagesFor } from "../src/discord.ts";
@@ -40,7 +40,7 @@ export class FakeBroker implements FullBroker {
     const path = fn === "getClock" ? "/v2/clock" : fn === "getCalendar" ? "/v2/calendar" : `/v2/${fn}`;
     chargeFromScope(path);
     this.onSend?.(path);
-    if (fn === "submitEntry" || fn === "submitSell" || fn === "cancelOrder" || fn === "cancelAllOrders") noteSafetyCall(fn);
+    if (fn === "submitEntry" || fn === "submitSell" || fn === "replaceOrder" || fn === "cancelOrder" || fn === "cancelAllOrders") noteSafetyCall(fn);
     this.calls.push({ fn, args });
     if (this.failOn.has(fn)) throw new Error(`${fn} failed (test)`);
   }
@@ -111,6 +111,18 @@ export class FakeBroker implements FullBroker {
   }
   // A4 of 2026-11-12: a stop sell rests (it does not change the position); `refuseStops` makes Alpaca refuse it.
   refuseStops = false;
+  // The moved take-profit (2026-11-18): a replace answers with a new order (new id, `replaces` the old one); the old one is "replaced".
+  async replaceOrder(id: string, change: ReplaceOrder) {
+    this.rec("replaceOrder", id, change);
+    const all = this.orders.flatMap((o) => [o, ...o.legs]);
+    const x = all.find((o) => o.id === id);
+    if (!x) throw new AlpacaError("order not found", 404);
+    const nu = order({ ...x, id: `00000000-0000-0000-0000-${String(++this.n).padStart(12, "0")}`, clientOrderId: change.clientOrderId ?? `alpaca-${this.n}`, ...(change.limitPrice !== undefined ? { limitPrice: change.limitPrice } : {}), ...(change.stopPrice !== undefined ? { stopPrice: change.stopPrice } : {}), replaces: x.id, legs: [] });
+    x.status = "replaced";
+    for (const o of this.orders) o.legs = o.legs.map((l) => (l.id === id ? nu : l));
+    if (this.orders.some((o) => o.id === id)) this.orders.push(nu);
+    return nu;
+  }
   async submitSell(s: SellOrder) {
     this.rec("submitSell", s);
     await this.onSell?.(s);
