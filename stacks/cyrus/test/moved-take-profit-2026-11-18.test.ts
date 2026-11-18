@@ -194,7 +194,7 @@ test("the moved take-profit fills while today's cancel is landing (a pending can
 test("a close-out's retry of named symbols moves too; its fallback's single cancels reach the new take-profit (whatever its id) and free the shares", async () => {
   const w = world();
   await normal(w, "AAA", 10);
-  await normal(w, "ZZZ", 5, 30);
+  await hold(w, "ZZZ", 5, 30, 29.88, 30.08);
   w.sim.setPrice("AAA", 19.97);
   w.bids.set("AAA", 20);
   await w.liquidator.flatten({ reason: "mid-day close-out", tradeDate: D, only: ["AAA"], maxRounds: 1 });
@@ -281,4 +281,22 @@ test("the summary never counts a replaced leg twice: an order a replacement repl
   assert.equal(day.unmatchedSellShares, 0);
   const rows = [{ clientOrderId: "cyrus-20261118-AAA-1", tradeDate: "2026-11-18", symbol: "AAA", qty: 3, referencePrice: 20, stopPrice: 19.92, status: "filled" as const, alpacaOrderId: "e1", filledQty: 3, filledAvgPrice: 20, note: null, createdAt: "2026-11-18T15:59:59Z", acceptMs: 50 }];
   assert.ok(partLines("Day", rows as never, [entry, old])[0]!.includes("Closed by take-profit 1"), "one take-profit close");
+});
+
+test("the request math: a sale with moves costs today's trading requests plus 2 (round 1's fresh reads after the moves); each replace stands in for a sale", async () => {
+  const run = async (moves: boolean) => {
+    const w = world({ moves });
+    await normal(w, "AAA", 10);
+    await hold(w, "BBB", 4, 30, 29.88, 30.08);
+    await loadDay(w, "CCC");
+    const b0 = w.sim.bucketTimes.length;
+    await w.liquidator.flatten({ reason: "close-out", tradeDate: D, returnWhenOnlyOwnSells: true });
+    w.sim.advance(3_000);
+    return { trading: w.sim.bucketTimes.length - b0, replaces: w.sim.replaceLog.length, sells: w.sim.sellLog.length, flat: w.sim.heldQty("AAA") + w.sim.heldQty("BBB") + w.sim.heldQty("CCC") === 0 };
+  };
+  const off = await run(false);
+  const on = await run(true);
+  assert.deepEqual([off.replaces, off.sells, off.flat], [0, 3, true]);
+  assert.deepEqual([on.replaces, on.sells, on.flat], [2, 1, true]);
+  assert.equal(on.trading, off.trading + 2, `with moves ${on.trading}, today ${off.trading}`);
 });

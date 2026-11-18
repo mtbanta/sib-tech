@@ -121,16 +121,19 @@ export class SellGate {
   // it (read again when more than a second old): the shares named are no more than the shares held, and the order, when the open list shows
   // it, is a sell of that symbol for those shares. A stop leg is not shown in Alpaca's open list (2026-11-18), so an order not shown is not
   // refused for that alone. No retry here or in the client (Michael: "no retry").
-  replace(req: { orderId: string; symbol: string; qty: number; limitPrice?: number; stopPrice?: number; clientOrderId?: string; reason: string }): Promise<ReplaceResult> {
-    const run = this.chain.then(() => this.runReplace(req));
+  // `view` (optional): the caller's own read of the open orders and positions, taken at `atMs` (the earlier of the two reads). Used for the
+  // check only while it is under VIEW_MAX_AGE_MS old (the gate's own freshness rule); else the gate reads as usual. A replace adds no shares,
+  // so a read a moment old cannot let it oversell. It saves the 2 reads of the first replace of a sale.
+  replace(req: { orderId: string; symbol: string; qty: number; limitPrice?: number; stopPrice?: number; clientOrderId?: string; reason: string }, view?: { positions: Position[]; open: Order[]; atMs: number }): Promise<ReplaceResult> {
+    const run = this.chain.then(() => this.runReplace(req, view));
     this.chain = run.catch(() => undefined);
     return run;
   }
 
-  private async runReplace(req: { orderId: string; symbol: string; qty: number; limitPrice?: number; stopPrice?: number; clientOrderId?: string; reason: string }): Promise<ReplaceResult> {
+  private async runReplace(req: { orderId: string; symbol: string; qty: number; limitPrice?: number; stopPrice?: number; clientOrderId?: string; reason: string }, given?: { positions: Position[]; open: Order[]; atMs: number }): Promise<ReplaceResult> {
     let v: { positions: Position[]; open: Order[] };
     try {
-      v = await this.read();
+      v = given && this.nowMs() - given.atMs < VIEW_MAX_AGE_MS ? given : await this.read();
     } catch (err) {
       this.view = null;
       return { status: "error", reason: `could not read the position to check the replace: ${(err as Error).message.slice(0, 120)}`, unclear: false, notSent: true };
@@ -581,7 +584,7 @@ export class Liquidator {
     // cancels also cancel a moved take-profit that did not fill (whatever its id), and those shares are sold at market (the fallback).
     let movePhaseDone = !(MOVED_TAKE_PROFIT.on && this.d.moves && !o.ownEntryOnly);
     const moveRows: MoveRow[] = [];
-    const movePhase = async (held: Position[], open: Order[]): Promise<boolean> => {
+    const movePhase = async (held: Position[], open: Order[], readAtMs: number): Promise<boolean> => {
       const mv = this.d.moves!;
       mv.watch.prune(new Set());
       const structural = structuralCandidates(held, open).candidates;
@@ -618,7 +621,7 @@ export class Liquidator {
         }
         const sentAtMs = this.d.now().getTime();
         const cid = MOVE_SETS_CLIENT_ID.on ? `${MOVE_CLIENT_ID_PREFIX}${o.tradeDate.replaceAll("-", "")}-${m.symbol}-${sentAtMs.toString(36)}` : undefined;
-        const r = await this.d.gate.replace({ orderId: m.legId, symbol: m.symbol, qty: m.qty, limitPrice: m.limit, ...(cid ? { clientOrderId: cid } : {}), reason: `${o.reason}, moved take-profit` });
+        const r = await this.d.gate.replace({ orderId: m.legId, symbol: m.symbol, qty: m.qty, limitPrice: m.limit, ...(cid ? { clientOrderId: cid } : {}), reason: `${o.reason}, moved take-profit` }, { positions: held, open, atMs: readAtMs });
         const row: MoveRow = { reason: o.reason, symbol: m.symbol, qty: m.qty, oldId: m.legId, newId: null, groupId: m.groupId, limit: m.limit, oldLimit: m.oldLimit, stopPrice: m.stopPrice, bid: m.bid, quoteAgeMs: m.quoteAgeMs, sentAtMs, answerMs: this.d.now().getTime() - sentAtMs, accepted: false, answer: null, httpStatus: null, clientId: cid ?? null, filledAtMs: null, timeToFillMs: null, stopCancelledByAlpaca: null, fallback: true };
         if (r.status === "sent") {
           sent++;
@@ -707,6 +710,7 @@ export class Liquidator {
         return done();
       }
       let positions: Position[];
+      const positionsReadAt = this.d.now().getTime(); // the moved take-profit: the replaces' check may use this round's reads
       try {
         positions = await heldNow();
         if (!result.heldBefore) result.heldBefore = Object.fromEntries(positions.map((p) => [p.symbol, p.qty]));
@@ -757,7 +761,7 @@ export class Liquidator {
         // fresh reads (today's path, unchanged), with the gate's view cleared so no sell is checked against a list from before the moves.
         if (!movePhaseDone) {
           movePhaseDone = true;
-          if (await movePhase(positions, open)) {
+          if (await movePhase(positions, open, positionsReadAt)) {
             this.d.gate.invalidate();
             round--;
             continue;
