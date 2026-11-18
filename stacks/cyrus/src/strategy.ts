@@ -12,8 +12,10 @@
 // has passed since that name's last signal. The entry is a limit buy at the print rounded down to the cent plus 1 cent (Michael's ruling
 // 3 of 2026-11-16, `limitEntryPrice`; before: at or below the price seen), with the take-profit LOAD_TAKE_PROFIT_CENTS above and the stop
 // LOAD_STOP_CENTS below that limit price, so positions turn over fast. Outside the window, and on every normal day, the rule above is unchanged.
+// Michael's request of 2026-11-18: an afternoon load window may carry its own stop and take-profit distances (`load afternoon stop 5 take 3`);
+// `loadExits` gives the values in force at a trade's time (the defaults, 2 and 1 cents, everywhere else).
 import type { Trade } from "./stream.ts";
-import { LOAD_COOLDOWN_SECONDS, LOAD_STOP_CENTS, LOAD_TAKE_PROFIT_CENTS, limitEntryPrice } from "./load-mode.ts";
+import { DEFAULT_LOAD_EXITS, LOAD_COOLDOWN_SECONDS, limitEntryPrice, type LoadExits } from "./load-mode.ts";
 
 export const WINDOW = 12;
 export const COOLDOWN_SECONDS = 15;
@@ -39,11 +41,14 @@ export class BusyPlaceholder {
   private readonly prices = new Map<string, number[]>();
   private readonly lastSignal = new Map<string, number>();
   private readonly loadActive: (t: Date) => boolean;
+  private readonly loadExits: (t: Date) => LoadExits;
 
-  // `loadActive` says whether the load window is on at a trade's time (the worker passes it on a load day only).
-  constructor(symbols: readonly string[], opts: { loadActive?: (t: Date) => boolean } = {}) {
+  // `loadActive` says whether the load window is on at a trade's time (the worker passes it on a load day only). `loadExits` gives that
+  // window's stop and take-profit distances at the trade's time (the defaults when not given).
+  constructor(symbols: readonly string[], opts: { loadActive?: (t: Date) => boolean; loadExits?: (t: Date) => LoadExits } = {}) {
     this.watch = new Set(symbols);
     this.loadActive = opts.loadActive ?? (() => false);
+    this.loadExits = opts.loadExits ?? (() => DEFAULT_LOAD_EXITS);
   }
 
   onTrade(t: Trade): Signal | null {
@@ -66,11 +71,12 @@ export class BusyPlaceholder {
     const last = this.lastSignal.get(t.symbol);
     if (last !== undefined && time.getTime() - last < cooldown * 1000) return null;
     const limit = load ? limitEntryPrice(t.price) : null;
-    if (load && (limit === null || limit - LOAD_STOP_CENTS / 100 <= 0)) return null;
+    const exits = load ? this.loadExits(time) : DEFAULT_LOAD_EXITS;
+    if (load && (limit === null || limit - exits.stopCents / 100 <= 0)) return null;
     this.lastSignal.set(t.symbol, time.getTime());
     if (load) {
-      const stopPrice = cents(limit! - LOAD_STOP_CENTS / 100);
-      const takeProfitPrice = cents(limit! + LOAD_TAKE_PROFIT_CENTS / 100);
+      const stopPrice = cents(limit! - exits.stopCents / 100);
+      const takeProfitPrice = cents(limit! + exits.takeProfitCents / 100);
       return { symbol: t.symbol, price: t.price, tradeTime: time, stopPrice, takeProfitPrice, load: true, limitPrice: limit! };
     }
     const stopPrice = Math.min(cents(t.price * (1 - STOP_FRACTION)), cents(t.price - 0.02));

@@ -28,7 +28,7 @@ import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessi
 import { ProgressGap, RetryBackoff } from "./retry-backoff.ts";
 import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, noteTimedOutStopEnded, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import type { SelfMonitor } from "./self-monitor.ts";
-import { SCREEN_MINUTES_BEFORE_OPEN, AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, inLoadWindow, isLoadDay, loadLine, loadWindow } from "./load-mode.ts";
+import { SCREEN_MINUTES_BEFORE_OPEN, AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, inLoadWindow, isLoadDay, loadExitsAt, loadLine, loadWindow, type LoadExits } from "./load-mode.ts";
 import { BusyPlaceholder } from "./strategy.ts";
 import { OrderUpdateHandler, type TradeUpdate } from "./order-stream.ts";
 import { EntryExpiry } from "./entry-expiry.ts";
@@ -382,7 +382,7 @@ export class Worker {
       bot: deps.bot,
       now: deps.now,
       extraStatus: async () => this.statusLines(),
-      afternoonScreen: (date, route) => this.startAfternoonScreen(date, route),
+      afternoonScreen: (date, route, exits) => this.startAfternoonScreen(date, route, exits),
       cancelAfternoonScreen: (date) => this.cancelAfternoonScreen(date),
       loadAfternoonEnabled: deps.loadAfternoon === true,
       log: (e, data) => deps.log?.("info", e, data),
@@ -1637,20 +1637,23 @@ export class Worker {
   // read from the latest copy of the day, so `load off` and `load afternoon` take effect. On a normal day without `load afternoon`,
   // inLoadWindow is always false, so the placeholder behaves exactly as before.
   private makeStrategy(day: DayRecord, symbols: string[]): BusyPlaceholder {
-    return new BusyPlaceholder(symbols, { loadActive: (t) => inLoadWindow(this.lastDay?.tradeDate === day.tradeDate ? this.lastDay : day, t) });
+    // Michael's request of 2026-11-18: the afternoon load window's own stop and take-profit, read from the same latest copy of the day.
+    const latest = () => (this.lastDay?.tradeDate === day.tradeDate ? this.lastDay : day);
+    return new BusyPlaceholder(symbols, { loadActive: (t) => inLoadWindow(latest(), t), loadExits: (t) => loadExitsAt(latest(), t) });
   }
 
   // `load afternoon` on a normal morning (Michael's standing requirement of 2026-11-11): the command has checked every condition and
   // starts this. The screen runs in the background (it can take minutes); the window itself is decided later (see pass). False if one
   // is already running for today.
-  private afternoonScreenState: { date: string; route: "pause" | "stop"; state: "running" | "ready" | "cancelled"; readyAt: number; switched?: boolean; result?: { switched: boolean; list: string[]; route: "pause" | "stop" } } | null = null;
+  // `exits`: the stop and take-profit given with this `load afternoon` (Michael's request of 2026-11-18), carried to the window's start.
+  private afternoonScreenState: { date: string; route: "pause" | "stop"; exits?: LoadExits; state: "running" | "ready" | "cancelled"; readyAt: number; switched?: boolean; result?: { switched: boolean; list: string[]; route: "pause" | "stop"; exits?: LoadExits } } | null = null;
   private lastPollStartedAt = -Infinity;
-  private startAfternoonScreen(date: string, route: "pause" | "stop" = "pause"): boolean | "finishing" {
+  private startAfternoonScreen(date: string, route: "pause" | "stop" = "pause", exits?: LoadExits): boolean | "finishing" {
     // Fix of 2026-11-12 (round 3, group 2): a cancelled screen still running is told apart from one that is live, so the reply can ask
     // Michael to send the command again instead of saying "already running" with nothing to follow.
     if (this.inflight.has("afternoon-screen")) return this.afternoonScreenState === null || this.afternoonScreenState.state === "cancelled" ? "finishing" : false;
     if (this.afternoonScreenState?.date === date && this.afternoonScreenState.state !== "cancelled") return false;
-    const mine = { date, route, state: "running" as "running" | "ready" | "cancelled", readyAt: 0 } as NonNullable<Worker["afternoonScreenState"]>;
+    const mine = { date, route, ...(exits ? { exits: { ...exits } } : {}), state: "running" as "running" | "ready" | "cancelled", readyAt: 0 } as NonNullable<Worker["afternoonScreenState"]>;
     this.afternoonScreenState = mine;
     this.background("afternoon-screen", async () => {
       try {
@@ -1658,7 +1661,7 @@ export class Worker {
         if (result === null || mine.state === "cancelled") return; // cancelled by a command: it said so
         mine.state = "ready";
         mine.readyAt = this.d.now().getTime();
-        mine.result = { ...result, route };
+        mine.result = { ...result, route, ...(mine.exits ? { exits: mine.exits } : {}) };
       } catch (err) {
         if (this.afternoonScreenState === mine) this.afternoonScreenState = null;
         if (mine.state === "cancelled") return;

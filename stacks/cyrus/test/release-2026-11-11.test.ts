@@ -86,9 +86,12 @@ test("the afternoon window's rules: from `load afternoon` to the last entry, the
 });
 
 test("`load afternoon` is parsed as exactly those two words; `load on` and `load off` are unchanged", () => {
-  assert.deepEqual(parseCommand("load afternoon"), { kind: "loadAfternoon" });
-  assert.deepEqual(parseCommand("Load Afternoon"), { kind: "loadAfternoon" });
-  assert.equal(parseCommand("load afternoon now").kind, "unknown");
+  // Since Michael's request of 2026-11-18 the command carries the window's exits (the defaults when none are given), and other words
+  // after it are refused with the reason (not taken as another command).
+  const defaults = { kind: "loadAfternoon", exits: { stopCents: 2, takeProfitCents: 1 }, given: false };
+  assert.deepEqual(parseCommand("load afternoon"), defaults);
+  assert.deepEqual(parseCommand("Load Afternoon"), defaults);
+  assert.equal(parseCommand("load afternoon now").kind, "loadAfternoonInvalid");
   assert.equal(parseCommand("load morning").kind, "unknown");
   assert.deepEqual(parseCommand("load on"), { kind: "load", on: true });
   assert.deepEqual(parseCommand("load off"), { kind: "load", on: false });
@@ -715,7 +718,7 @@ test("round 3: on a load day with `load afternoon`, the summary keeps its mornin
   await until(async () => Boolean((await r.store.getDay(D))!.phases.summary));
   const summary = r.said("trading").find((t) => t.includes("**Load day**"));
   assert.ok(summary);
-  assert.ok(summary!.includes("- afternoon load window 10:40 AM CT to 11:10 AM CT (by `load afternoon`): its entries are counted in the rest of the day"), summary);
+  assert.ok(summary!.includes("- afternoon load window 10:40 AM CT to 11:10 AM CT (by `load afternoon`, stop 2 cents and take-profit 1 cent): its entries are counted in the rest of the day"), summary);
 });
 
 // ---------------- option B (Michael's fallback after group 1's round 3) ----------------
