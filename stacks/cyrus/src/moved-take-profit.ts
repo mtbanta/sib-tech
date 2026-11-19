@@ -118,8 +118,9 @@ export function withStops(candidates: MoveCandidate[], stops: ReadonlyMap<string
     const s = stops.get(c.legId);
     if (!(s !== undefined && s > 0 && Number.isFinite(s))) skipped.push({ symbol: c.symbol, why: "stop price unknown" });
     // No price can qualify unless the take-profit sits at least 4 cents above the stop (the selling limit must be at least 3 cents above
-    // the stop and at least 1 cent below the take-profit). A load day's bracket (1 cent up, 2 cents down) never qualifies, so a sale of
-    // only such positions makes no quote read and does not wait for one.
+    // the stop and at least 1 cent below the take-profit). A load bracket at the defaults (1 cent up, 2 cents down) never qualifies, so a
+    // sale of only such positions makes no quote read and does not wait for one. An afternoon load window given a wider stop or
+    // take-profit (Michael's request of 2026-11-18) can qualify, by this same rule.
     else if (!(c.oldLimit - s >= MOVE_MIN_ABOVE_STOP + 0.01 - EPS)) skipped.push({ symbol: c.symbol, why: "take-profit within 4 cents of the stop" });
     else out.push({ ...c, stopPrice: s });
   }

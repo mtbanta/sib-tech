@@ -9,7 +9,7 @@ import type { Broker } from "./broker.ts";
 import { LIMIT_NAMES, MAX_TRADES_PER_MINUTE, MAX_TRADES_PER_MINUTE_LOAD_DAY, SUGGESTED_LIMITS, applyOverride, describeLimits, loosened, type LimitName, type Limits } from "./limits.ts";
 import { CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
 import { NOT_ADVICE, PAPER_ONLY } from "./discord.ts";
-import { LOAD_MAX_POSITION_USD, LOAD_NOTE_PHASE, LOAD_PHASE, LOAD_SWITCH_DEADLINE_MIN, isLoadDay, loadLine, loadState, loadWindow, loadWindowRules } from "./load-mode.ts";
+import { LOAD_MAX_POSITION_USD, LOAD_NOTE_PHASE, LOAD_PHASE, LOAD_SWITCH_DEADLINE_MIN, isLoadDay, loadLine, loadState, loadWindow, loadWindowRules, parseLoadExits, type LoadExits } from "./load-mode.ts";
 import type { Say } from "./sells.ts";
 import { addMinutes, centralClock, dayWord, etDate, etInstant, sessionPhase } from "./time.ts";
 
@@ -210,7 +210,10 @@ export type Command =
   | { kind: "approve"; name: LimitName | "all" }
   | { kind: "set"; name: LimitName; value: string }
   | { kind: "load"; on: boolean }
-  | { kind: "loadAfternoon" }
+  // Michael's request of 2026-11-18: `exits` are the window's stop and take-profit in force (defaults filled in); `invalid` says why the
+  // words after `load afternoon` were not accepted (the window then does not start and nothing changes).
+  | { kind: "loadAfternoon"; exits: LoadExits; given: boolean }
+  | { kind: "loadAfternoonInvalid"; why: string }
   | { kind: "go" }
   | { kind: "hold" }
   | { kind: "deployApproval"; commit: string }
@@ -249,8 +252,13 @@ export function parseCommand(content: string): Command {
       return (LIMIT_NAMES as readonly string[]).includes(arg1) ? { kind: "approve", name: arg1 as LimitName } : { kind: "unknown", text: content.slice(0, 40) };
     }
     case "load":
-      // `load afternoon` (Michael, 2026-11-11): today's afternoon load window, during the mid-day pause.
-      if (arg1 === "afternoon" && arg2 === undefined) return { kind: "loadAfternoon" };
+      // `load afternoon` (Michael, 2026-11-11): today's afternoon load window, during the mid-day pause. Since Michael's request of
+      // 2026-11-18 it may carry `stop N` and `take M` (parseLoadExits); a malformed or out-of-range value is refused with the reason.
+      if (arg1 === "afternoon") {
+        const rest = text.split(/\s+/).slice(2);
+        const p = parseLoadExits(rest);
+        return "exits" in p ? { kind: "loadAfternoon", exits: p.exits, given: rest.length > 0 } : { kind: "loadAfternoonInvalid", why: p.error };
+      }
       return arg2 === undefined && (arg1 === "on" || arg1 === "off") ? { kind: "load", on: arg1 === "on" } : { kind: "unknown", text: content.slice(0, 40) };
     case "position":
     case "loss":

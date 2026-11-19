@@ -125,7 +125,7 @@ test("after 30 minutes the window ends: entries pause, the close-out sells to fl
   r.ownerSays("status", "17:13:00");
   await r.at("17:13:05");
   const st = r.said("commands").filter((t) => t.startsWith("**Status**")).at(-1)!;
-  assert.match(st, /Afternoon load window: ran from 10:40 AM CT to 11:10 AM CT; its close-out finished flat, entries paused/);
+  assert.match(st, /Afternoon load window: ran from 10:40 AM CT to 11:10 AM CT \(stop 2 cents and take-profit 1 cent\); its close-out finished flat, entries paused/);
   assert.match(st, /Mid-day cycle: entries paused again at 11:10 AM CT, when the afternoon load window ended \(flat\)/);
   assert.equal((await readPause(r.store, D))!.on, true, "no automatic return to normal trading");
   // A `go` after the close-out is flat resumes a normal afternoon, and `status` then says so.

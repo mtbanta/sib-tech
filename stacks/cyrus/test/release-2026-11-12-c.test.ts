@@ -231,7 +231,8 @@ test("group 2 round 1: the refusal does not say 'trading has already resumed' tw
 test("group 2 rounds 1 and 2: every branch of the cancel line's next step, chosen by the command and its result", async () => {
   // Night release (ruling E): `load afternoon` is accepted with Michael's own stop on, so the advice changed.
   const PAUSE_OVER = "Trading has resumed normally. To start the window instead, send `stop` (or `flatten`), then `load afternoon` once flat (accepted until 1:30 PM CT, or the last entry if earlier).";
-  const TRY_AGAIN = "To try again, send `load afternoon` again once the account is flat (accepted until 1:30 PM CT, or the last entry if earlier).";
+  // Since group 2, round 1 of 2026-11-18: the line also says to give `stop N take M` again (the cancelled line's values are not kept).
+  const TRY_AGAIN = "To try again, send `load afternoon` again once the account is flat (accepted until 1:30 PM CT, or the last entry if earlier); for other values than the defaults, send the whole line, for example `load afternoon stop 5 take 3`.";
   const TOO_LATE = "`load afternoon` is no longer accepted today (its time has passed).";
   const LOSS = "The daily loss stop is in force, so there is no more trading today.";
   // `go` that resumed (also after the last entry: still true).

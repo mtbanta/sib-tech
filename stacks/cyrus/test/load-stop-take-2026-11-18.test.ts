@@ -1,0 +1,385 @@
+// Michael's request of 2026-11-18 with his addition: "the load window's stop distance becomes a setting (default 2 cents as today), which I
+// can set for an afternoon load window, for example 5 cents, so load positions qualify for the moves" and "Add the take-profit to the same
+// setting: "load afternoon stop 5 take 3" (stop 2 to 10 cents, take-profit 1 to 10 cents; each defaults to today's value if left out; that
+// window only, then back to the defaults). The bot's reply shows both values in force."
+// The simulated day is 2026-11-02: open 14:30 UTC (8:30 CT), pause 16:30 UTC, 1:30 PM CT is 19:30 UTC, last entry 20:00 UTC.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { SimBroker } from "./sim-broker.ts";
+import { rig, settle, z, D } from "./rig.ts";
+import {
+  DEFAULT_LOAD_EXITS,
+  LOAD_AFTERNOON_EXITS_PHASE,
+  LOAD_AFTERNOON_PHASE,
+  LOAD_PHASE,
+  LOAD_STOP_CENTS,
+  LOAD_TAKE_PROFIT_CENTS,
+  afternoonLoadExits,
+  exitsInWords,
+  loadExitsAt,
+  loadWindowRules,
+  parseLoadExits,
+} from "../src/load-mode.ts";
+import { parseCommand } from "../src/morning.ts";
+import { BusyPlaceholder } from "../src/strategy.ts";
+import { MIDDAY_PHASE } from "../src/midday.ts";
+import { pricedMoves, withStops, type MoveCandidate } from "../src/moved-take-profit.ts";
+import type { DayRecord } from "../src/store.ts";
+
+const until = async (cond: () => boolean | Promise<boolean>, n = 400) => {
+  for (let i = 0; i < n && !(await cond()); i++) await settle();
+};
+
+async function flatAtMidday(opts: { load?: boolean } = {}) {
+  const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
+  const events: Array<{ e: string; d: any }> = [];
+  const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, log: (_l, e, d) => void events.push({ e, d }), loadAfternoon: true });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays(`${opts.load ? "load on\n" : ""}trades 20\nposition 300\napprove`, "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:15:00");
+  await r.at("14:25:00");
+  await r.at("14:30:05");
+  await r.at("16:30:00");
+  await until(async () => Boolean((await r.store.getDay(D))!.phases[MIDDAY_PHASE]));
+  const sent: any[] = [];
+  const orig = sim.submitEntry.bind(sim);
+  sim.submitEntry = async (e: any) => (sent.push(e), orig(e));
+  return { sim, r, events, sent };
+}
+
+// ---------------- the words ----------------
+
+test("the words after `load afternoon`: stop and take in either order, each optional, whole cents in range; anything else refused with the reason", () => {
+  const ok = (w: string) => {
+    const p = parseLoadExits(w ? w.split(" ") : []);
+    assert.ok("exits" in p, `${w}: ${JSON.stringify(p)}`);
+    return (p as { exits: { stopCents: number; takeProfitCents: number } }).exits;
+  };
+  const bad = (w: string) => {
+    const p = parseLoadExits(w.split(" "));
+    assert.ok("error" in p, w);
+    return (p as { error: string }).error;
+  };
+  assert.deepEqual(ok(""), { stopCents: 2, takeProfitCents: 1 }, "nothing given: today's values");
+  assert.deepEqual(DEFAULT_LOAD_EXITS, { stopCents: LOAD_STOP_CENTS, takeProfitCents: LOAD_TAKE_PROFIT_CENTS });
+  assert.deepEqual(ok("stop 5 take 3"), { stopCents: 5, takeProfitCents: 3 });
+  assert.deepEqual(ok("take 3 stop 5"), { stopCents: 5, takeProfitCents: 3 }, "either order");
+  assert.deepEqual(ok("stop 5"), { stopCents: 5, takeProfitCents: 1 }, "take-profit left out: its default");
+  assert.deepEqual(ok("take 3"), { stopCents: 2, takeProfitCents: 3 }, "stop left out: its default");
+  // The ranges, at their edges.
+  assert.deepEqual(ok("stop 2 take 1"), { stopCents: 2, takeProfitCents: 1 });
+  assert.deepEqual(ok("stop 10 take 10"), { stopCents: 10, takeProfitCents: 10 });
+  assert.match(bad("stop 1"), /the stop must be a whole number of cents from 2 to 10 \(got `1`\)/);
+  assert.match(bad("stop 11"), /the stop must be a whole number of cents from 2 to 10/);
+  assert.match(bad("take 0"), /the take-profit must be a whole number of cents from 1 to 10 \(got `0`\)/);
+  assert.match(bad("take 11"), /the take-profit must be a whole number of cents from 1 to 10/);
+  // Not whole cents, or not numbers.
+  for (const w of ["stop 5.5", "stop 0.05", "stop -5", "stop five", "take 3c", "stop 100"]) assert.match(bad(w), /must be a whole number of cents/, w);
+  // The shape.
+  for (const w of ["stop", "stop 5 take", "now", "stop 5 5", "stop 5 take 3 stop 4", "loss 5"]) assert.match(bad(w), /write it as `load afternoon`/, w);
+  assert.match(bad("stop 5 stop 6"), /`stop` is given twice/);
+});
+
+test("parseCommand: `load afternoon` with or without the values; a bad value is its own kind with the reason; other load commands unchanged", () => {
+  assert.deepEqual(parseCommand("load afternoon"), { kind: "loadAfternoon", exits: { stopCents: 2, takeProfitCents: 1 }, given: false });
+  assert.deepEqual(parseCommand("Load Afternoon Stop 5 Take 3"), { kind: "loadAfternoon", exits: { stopCents: 5, takeProfitCents: 3 }, given: true });
+  assert.deepEqual(parseCommand("  load   afternoon  take 4 "), { kind: "loadAfternoon", exits: { stopCents: 2, takeProfitCents: 4 }, given: true });
+  const badCmd = parseCommand("load afternoon stop 12");
+  assert.equal(badCmd.kind, "loadAfternoonInvalid");
+  assert.match((badCmd as { why: string }).why, /from 2 to 10/);
+  assert.deepEqual(parseCommand("load on"), { kind: "load", on: true });
+  assert.deepEqual(parseCommand("load off"), { kind: "load", on: false });
+  assert.equal(parseCommand("load morning").kind, "unknown");
+});
+
+// ---------------- the rule for which values apply ----------------
+
+const base = { tradeDate: D, isTradingDay: true, openAt: z("14:30:00"), closeAt: z("21:00:00"), dayStartEquity: 20000, status: "approved", limits: { maxPositionUsd: 300, dailyLossStopUsd: 500, maxTradesPerMinute: 20, borrowingCap: 1 } } as unknown as DayRecord;
+const dayWith = (phases: Record<string, string>): DayRecord => ({ ...base, phases } as DayRecord);
+
+test("which values apply: the afternoon window's own while it is on; the morning load window and every other time the defaults", () => {
+  const both = dayWith({ [LOAD_PHASE]: "on", [LOAD_AFTERNOON_PHASE]: z("16:40:00").toISOString(), [LOAD_AFTERNOON_EXITS_PHASE]: "stop 5 take 3" });
+  assert.deepEqual(loadExitsAt(both, z("15:00:00")), DEFAULT_LOAD_EXITS, "the morning load window keeps the defaults");
+  assert.deepEqual(loadExitsAt(both, z("16:39:59")), DEFAULT_LOAD_EXITS, "before the afternoon window");
+  assert.deepEqual(loadExitsAt(both, z("16:40:00")), { stopCents: 5, takeProfitCents: 3 }, "at its start");
+  assert.deepEqual(loadExitsAt(both, z("17:09:59")), { stopCents: 5, takeProfitCents: 3 }, "just before its end");
+  assert.deepEqual(loadExitsAt(both, z("17:10:00")), DEFAULT_LOAD_EXITS, "at its end (30 minutes): back to the defaults");
+  // A day record without the values (written before this release), or with one that does not read back in range: the defaults.
+  assert.deepEqual(afternoonLoadExits(dayWith({ [LOAD_AFTERNOON_PHASE]: z("16:40:00").toISOString() })), DEFAULT_LOAD_EXITS);
+  for (const v of ["stop 1 take 3", "stop 5 take 0", "stop 5 take 11", "stop 5", "", "stop 5.5 take 3", "STOP 5 TAKE 3"]) assert.deepEqual(afternoonLoadExits(dayWith({ [LOAD_AFTERNOON_EXITS_PHASE]: v })), DEFAULT_LOAD_EXITS, v);
+  assert.deepEqual(loadExitsAt(null, z("16:45:00")), DEFAULT_LOAD_EXITS);
+  // The words in replies and the rules phrase.
+  assert.equal(exitsInWords({ stopCents: 5, takeProfitCents: 3 }), "stop 5 cents and take-profit 3 cents");
+  assert.equal(exitsInWords(DEFAULT_LOAD_EXITS), "stop 2 cents and take-profit 1 cent");
+  assert.match(loadWindowRules({ stopCents: 5, takeProfitCents: 3 }), /take-profit 3 cents up and stop 5 cents down from the limit price$/);
+  assert.match(loadWindowRules(), /take-profit 1 cent up and stop 2 cents down from the limit price$/, "the default phrase is unchanged");
+});
+
+test("the strategy prices a load entry's exits with the values in force at the trade's time; a normal entry is unchanged", () => {
+  const exitsAt = (t: Date) => (t >= z("16:40:00") ? { stopCents: 5, takeProfitCents: 3 } : DEFAULT_LOAD_EXITS);
+  const s = new BusyPlaceholder(["AAA", "CHP"], { loadActive: () => true, loadExits: exitsAt });
+  const before = s.onTrade({ symbol: "AAA", price: 20.004, time: z("16:39:00").toISOString() } as any)!;
+  assert.deepEqual([before.limitPrice, before.stopPrice, before.takeProfitPrice], [20.01, 19.99, 20.02], "defaults: 2 down, 1 up");
+  const after = s.onTrade({ symbol: "AAA", price: 20.004, time: z("16:41:00").toISOString() } as any)!;
+  assert.deepEqual([after.limitPrice, after.stopPrice, after.takeProfitPrice], [20.01, 19.96, 20.04], "stop 5 take 3");
+  // A price whose stop would be at or below zero gives no signal (the guard uses the stop in force).
+  assert.equal(s.onTrade({ symbol: "CHP", price: 0.04, time: z("16:42:00").toISOString() } as any), null, "limit 0.05, stop 5 cents: no signal");
+  const d = new BusyPlaceholder(["CHP"], { loadActive: () => true });
+  assert.ok(d.onTrade({ symbol: "CHP", price: 0.04, time: z("16:42:00").toISOString() } as any), "limit 0.05 with the default stop of 2 cents still signals");
+  // Without loadExits (every caller before this release): the defaults.
+  const plain = new BusyPlaceholder(["AAA"], { loadActive: () => true });
+  const p = plain.onTrade({ symbol: "AAA", price: 20.004, time: z("16:41:00").toISOString() } as any)!;
+  assert.deepEqual([p.stopPrice, p.takeProfitPrice], [19.99, 20.02]);
+});
+
+// ---------------- the moves: the same rule, no separate change (Michael's confirmation of 2026-11-18) ----------------
+
+test("the moves qualify load positions by the same rule once the stop is wider: stop 5 take 3 qualifies at bids from 1 cent below to 3 cents above the entry", () => {
+  const L = 5.0;
+  const cand = (stopCents: number, takeCents: number): MoveCandidate => ({ symbol: "AAA", qty: 1, legId: "tp", groupId: "g", oldLimit: Math.round((L + takeCents / 100) * 100) / 100, stopPrice: 0 });
+  const qualifies = (stopCents: number, takeCents: number, bid: number): boolean => {
+    const stop = Math.round((L - stopCents / 100) * 100) / 100;
+    const s = withStops([cand(stopCents, takeCents)], new Map([["tp", stop]]));
+    if (s.candidates.length === 0) return false;
+    return pricedMoves(s.candidates, new Map([["AAA", { bid, ask: bid + 0.01, atMs: 1000 }]]), 1000).moves.length === 1;
+  };
+  const bids = [4.97, 4.98, 4.99, 5.0, 5.01, 5.02, 5.03, 5.04, 5.05];
+  const which = (s: number, t: number) => bids.filter((b) => qualifies(s, t, b));
+  assert.deepEqual(which(2, 1), [], "today's load bracket (2 down, 1 up) never qualifies");
+  assert.deepEqual(which(5, 3), [4.99, 5.0, 5.01, 5.02, 5.03], "stop 5 take 3: bids 4.99 to 5.03");
+  assert.deepEqual(which(5, 1), [4.99, 5.0, 5.01], "stop 5 take 1: bids 4.99 to 5.01");
+  assert.deepEqual(which(2, 3), [5.02, 5.03], "stop 2 take 3: bids 5.02 and 5.03");
+});
+
+// ---------------- through the worker ----------------
+
+test("a normal morning: `load afternoon stop 5 take 3` names both values in the screen reply and the start reply; the window's entries use them", async () => {
+  const { r, sent, events } = await flatAtMidday();
+  r.ownerSays("load afternoon stop 5 take 3", "16:40:00");
+  await r.at("16:40:05");
+  await r.at("16:40:10");
+  const screenLine = r.said("commands").find((t) => t.startsWith("Running the cheap-symbol screen"));
+  assert.ok(screenLine, r.said("commands").join(" | "));
+  assert.match(screenLine!, /The window will use stop 5 cents and take-profit 3 cents \(this window only\)\.$/);
+  const reply = r.said("commands").find((t) => t.startsWith("Afternoon load window on until"));
+  assert.ok(reply, r.said("commands").join(" | "));
+  assert.match(reply!, /take-profit 3 cents up and stop 5 cents down from the limit price/);
+  assert.match(reply!, /In force for this window only: stop 5 cents and take-profit 3 cents; after it, back to the defaults \(stop 2 cents and take-profit 1 cent\)\.$/);
+  const day = (await r.store.getDay(D))!;
+  assert.equal(day.phases[LOAD_AFTERNOON_EXITS_PHASE], "stop 5 take 3", "stored with the window's start");
+  assert.ok(events.some((e) => e.e === "load_afternoon" && e.d.stopCents === 5 && e.d.takeProfitCents === 3));
+  await r.trade("AAA", 20.004, "16:40:20");
+  await until(() => sent.length > 0);
+  assert.equal(sent.length, 1);
+  assert.deepEqual([sent[0].qty, sent[0].limitPrice, sent[0].stopPrice, sent[0].takeProfitPrice], [1, 20.01, 19.96, 20.04]);
+  // `status` shows both values while the window is on.
+  r.ownerSays("status", "16:45:00");
+  await r.at("16:45:05");
+  const st = r.said("commands").filter((t) => t.startsWith("**Status**")).at(-1)!;
+  assert.match(st, /Afternoon load window: on since 10:40 AM CT, until 11:10 AM CT \(then a close-out to flat, entries paused\): 1 share churn, stop 5 cents and take-profit 3 cents,/);
+});
+
+test("a load day: `load afternoon take 3` (stop left out) starts at once with stop 2 and take-profit 3; after a flatten, a plain `load afternoon` is back to the defaults", async () => {
+  const { r, sent } = await flatAtMidday({ load: true });
+  r.ownerSays("load afternoon take 3", "16:40:00");
+  await r.at("16:40:05");
+  const first = r.said("commands").find((t) => t.startsWith("Afternoon load window on until"));
+  assert.ok(first, r.said("commands").join(" | "));
+  assert.match(first!, /In force for this window only: stop 2 cents and take-profit 3 cents; after it, back to the defaults/);
+  assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_EXITS_PHASE], "stop 2 take 3");
+  await r.trade("AAA", 20.004, "16:40:20");
+  await until(() => sent.length > 0);
+  assert.deepEqual([sent[0].stopPrice, sent[0].takeProfitPrice], [19.99, 20.04]);
+  r.ownerSays("flatten", "16:50:00");
+  await r.at("16:50:05");
+  await r.at("16:50:30");
+  r.ownerSays("load afternoon", "16:55:00");
+  await r.at("16:55:05");
+  const again = r.said("commands").find((t) => t.startsWith("Afternoon load window on again"));
+  assert.ok(again, r.said("commands").join(" | "));
+  assert.match(again!, /take-profit 1 cent up and stop 2 cents down from the limit price/);
+  assert.match(again!, /In force for this window only: stop 2 cents and take-profit 1 cent \(the defaults\)\.$/);
+  assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_EXITS_PHASE], "stop 2 take 1", "the earlier window's values are not kept");
+  const n = sent.length;
+  await r.trade("BBB", 10.004, "16:55:20");
+  await until(() => sent.length > n);
+  assert.deepEqual([sent.at(-1).stopPrice, sent.at(-1).takeProfitPrice], [9.99, 10.02]);
+});
+
+test("a value out of range starts nothing and changes nothing; the reply says why", async () => {
+  const { r, sent } = await flatAtMidday({ load: true });
+  r.ownerSays("load afternoon stop 12 take 3", "16:40:00");
+  await r.at("16:40:05");
+  assert.ok(r.said("commands").includes("Not started: the stop must be a whole number of cents from 2 to 10 (got `12`). Nothing changed."), r.said("commands").join(" | "));
+  const day = (await r.store.getDay(D))!;
+  assert.equal(day.phases[LOAD_AFTERNOON_PHASE], undefined);
+  assert.equal(day.phases[LOAD_AFTERNOON_EXITS_PHASE], undefined);
+  await r.trade("AAA", 20.004, "16:40:20");
+  for (let i = 0; i < 50; i++) await settle();
+  assert.equal(sent.length, 0, "still paused");
+});
+
+test("`help` stays one Discord message (under 2000 characters) and names the new words", async () => {
+  const { r } = await flatAtMidday();
+  r.ownerSays("help", "16:41:00");
+  await r.at("16:41:05");
+  const help = r.said("commands").find((t) => t.startsWith("**Commands**"))!;
+  assert.ok(help.length < 2000, String(help.length));
+  assert.ok(help.includes("`load afternoon stop 5 take 3`: that window only (stop 2 to 10 cents, take 1 to 10; default 2, 1)."));
+  // The example is the whole line: `stop 5 take 3` alone would be read as the `stop` command.
+  assert.ok(!help.includes(" Add `stop 5 take 3`"));
+});
+
+test("a window starting again with other values: a print in the moment after the command (before the pass reads the day again) already uses the new values", async () => {
+  const { r, sent } = await flatAtMidday({ load: true });
+  r.ownerSays("load afternoon stop 5 take 3", "16:40:00");
+  await r.at("16:40:05");
+  r.ownerSays("flatten", "16:50:00");
+  await r.at("16:50:05");
+  await r.at("16:50:30");
+  for (const t of ["16:52:00", "16:53:30", "16:54:50"]) await r.at(t); // passes keep reading commands (no 2 minute gap)
+  const n = sent.length;
+  // The print arrives while the start reply is being posted: after the window's start, the pause and the stop are written, before the
+  // pass goes on to read the day record again.
+  const bot = r.bot as any;
+  const post = bot.post.bind(bot);
+  let fed = false;
+  bot.post = async (channel: string, text: string) => {
+    if (!fed && text.startsWith("Afternoon load window on again")) {
+      fed = true;
+      await r.trade("BBB", 10.004, "16:55:00");
+    }
+    return post(channel, text);
+  };
+  r.ownerSays("load afternoon", "16:55:00");
+  await r.at("16:55:00");
+  assert.ok(fed, r.said("commands").join(" | "));
+  await until(() => sent.length > n);
+  assert.equal(sent.length, n + 1);
+  assert.deepEqual([sent.at(-1).symbol, sent.at(-1).stopPrice, sent.at(-1).takeProfitPrice], ["BBB", 9.99, 10.02], "the defaults, not the earlier window's stop 5 take 3");
+});
+
+test("the same on a normal morning (the screen route): the window starting again prices its first print with its own values", async () => {
+  const { r, sent } = await flatAtMidday();
+  r.ownerSays("load afternoon stop 5 take 3", "16:40:00");
+  await r.at("16:40:05");
+  await r.at("16:40:10");
+  assert.ok(r.said("commands").some((t) => t.startsWith("Afternoon load window on until")), r.said("commands").join(" | "));
+  r.ownerSays("flatten", "16:50:00");
+  await r.at("16:50:05");
+  await r.at("16:50:30");
+  for (const t of ["16:52:00", "16:53:30", "16:54:50"]) await r.at(t);
+  const n = sent.length;
+  const bot = r.bot as any;
+  const post = bot.post.bind(bot);
+  let fed = false;
+  bot.post = async (channel: string, text: string) => {
+    if (!fed && text.startsWith("Afternoon load window on again")) {
+      fed = true;
+      await r.trade("BBB", 10.004, "16:55:06");
+    }
+    return post(channel, text);
+  };
+  r.ownerSays("load afternoon take 4", "16:55:00");
+  await r.at("16:55:00");
+  await r.at("16:55:05");
+  await r.at("16:55:06");
+  assert.ok(fed, r.said("commands").join(" | "));
+  await until(() => sent.length > n);
+  assert.deepEqual([sent.at(-1).symbol, sent.at(-1).stopPrice, sent.at(-1).takeProfitPrice], ["BBB", 9.99, 10.05], "stop 2 (default) and take 4, not the earlier stop 5 take 3");
+});
+
+test("the purpose end to end: an afternoon window with stop 5 take 3 ends, and its own close-out sells by moving each take-profit (cyrus-m-), one row per move, no market sale", async () => {
+  const { MOVE_CLIENT_ID_PREFIX } = await import("../src/moved-take-profit.ts");
+  const { AFTERNOON_FLAT_PHASE } = await import("../src/load-mode.ts");
+  const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
+  sim.openShape20261118 = true;
+  sim.replaceAnswerMs = 60;
+  const events: Array<{ e: string; d: any }> = [];
+  const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, orderStream: true, loadAfternoon: true, log: (_l, e, d) => void events.push({ e, d: d ?? {} }), latestQuotes: async (symbols) => new Map(symbols.map((s) => [s, { bid: sim.prices.get(s)!, ask: sim.prices.get(s)! + 0.01, atMs: sim.simMs }])) });
+  sim.onOrderEvent = (event, o, atMs) => void r.orderUpdate({ event, order: o, positionQty: null, atMs });
+  await r.at("2026-11-01T22:10:00Z");
+  r.ownerSays("trades 20\nposition 300\napprove", "2026-11-01T22:20:00Z");
+  await r.at("2026-11-01T22:20:10Z");
+  for (const t of ["14:15:00", "14:25:00", "14:30:05", "16:30:00"]) await r.at(t);
+  await until(async () => Boolean((await r.store.getDay(D))!.phases[MIDDAY_PHASE]));
+  const sent: any[] = [];
+  const orig = sim.submitEntry.bind(sim);
+  sim.submitEntry = async (e: any) => (sent.push(e), orig(e));
+  r.ownerSays("load afternoon stop 5 take 3", "16:40:00");
+  await r.at("16:40:05");
+  await r.at("16:40:10");
+  // Two 1-share entries, filled at their limits; the price then sits at the limit (bid 20.01 and 10.01).
+  for (const [sym, print, t] of [["AAA", 20.004, "16:40:20"], ["BBB", 10.004, "16:40:30"]] as const) {
+    sim.setPrice(sym, print);
+    await r.trade(sym, print, t);
+    await until(() => sent.some((e) => e.symbol === sym));
+    const e = sent.find((x) => x.symbol === sym)!;
+    sim.fillEntry(e.clientOrderId, e.limitPrice);
+    sim.setPrice(sym, e.limitPrice);
+  }
+  assert.deepEqual(sent.map((e) => [e.symbol, e.limitPrice, e.stopPrice, e.takeProfitPrice]), [["AAA", 20.01, 19.96, 20.04], ["BBB", 10.01, 9.96, 10.04]]);
+  for (const t of ["16:42:00", "16:44:00", "16:46:00", "16:48:00", "16:50:00", "16:52:00", "16:54:00", "16:56:00", "16:58:00", "17:00:00", "17:02:00", "17:04:00", "17:06:00", "17:08:00", "17:10:00"]) await r.at(t);
+  assert.equal(sim.heldQty("AAA") + sim.heldQty("BBB"), 2, "both held at the window's end");
+  // The window started at 16:40:10 (the screen route starts it in the pass after the screen), so it ends at 17:10:10.
+  await r.at("17:10:15");
+  await until(async () => Boolean((await r.store.getDay(D))!.phases[AFTERNOON_FLAT_PHASE]));
+  assert.equal(sim.heldQty("AAA") + sim.heldQty("BBB"), 0, "flat");
+  assert.equal(sim.replaceLog.length, 2, "both take-profits moved");
+  assert.equal(sim.sellLog.length, 0, "no market sale");
+  const rows = events.filter((x) => x.e === "take_profit_moved").map((x) => x.d);
+  assert.equal(rows.length, 2, "one row per move");
+  for (const row of rows) {
+    assert.ok(String(row.clientId).startsWith(MOVE_CLIENT_ID_PREFIX), row.clientId);
+    assert.deepEqual([row.accepted, row.fallback, row.stopCancelledByAlpaca], [true, false, true], JSON.stringify(row));
+  }
+  assert.deepEqual(rows.map((x) => [x.symbol, x.limit, x.stopPrice]).sort(), [["AAA", 20, 19.96], ["BBB", 10, 9.96]]);
+});
+
+// ---------------- group 2, round 1: the replies that answer a line carrying values ----------------
+
+test("the screen reply with no values names the defaults as such; a second line with values while the screen runs says they were not used", async () => {
+  const { r } = await flatAtMidday();
+  let release: ((v: unknown) => void) | undefined;
+  const real = (r.worker as any).d.buildLiveList;
+  (r.worker as any).d.buildLiveList = (o: unknown) => new Promise((res) => (release = () => res(real(o))));
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  assert.ok(r.said("commands").some((t) => t.startsWith("Running the cheap-symbol screen") && t.endsWith("The window will use the defaults, stop 2 cents and take-profit 1 cent.")), r.said("commands").join(" | "));
+  r.ownerSays("load afternoon stop 5 take 3", "16:40:30");
+  await r.at("16:40:35");
+  assert.ok(r.said("commands").includes("Not started yet: the cheap-symbol screen for the afternoon load window is already running. The stop and take-profit in this line were not used; the window keeps the values sent with the earlier `load afternoon`."), r.said("commands").join(" | "));
+  release?.(undefined);
+  await r.at("16:40:40");
+  await r.at("16:40:45");
+  assert.equal((await r.store.getDay(D))!.phases[LOAD_AFTERNOON_EXITS_PHASE], "stop 2 take 1", "the first line's values (the defaults)");
+});
+
+test("a line with values sent while a cancelled screen is still finishing: the reply says the values were not kept and gives the line to send again", async () => {
+  const { r } = await flatAtMidday();
+  (r.worker as any).d.buildLiveList = () => new Promise(() => undefined); // a screen that never finishes
+  r.ownerSays("load afternoon stop 5 take 3", "16:40:00");
+  await r.at("16:40:05");
+  r.ownerSays("stop", "16:40:30");
+  await r.at("16:40:35");
+  const cancelled = r.said("commands").find((t) => t.includes("To try again, send `load afternoon` again"));
+  assert.ok(cancelled?.includes("for other values than the defaults, send the whole line, for example `load afternoon stop 5 take 3`."), r.said("commands").join(" | "));
+  assert.ok(!cancelled!.includes(" `stop N take M`"), "never a fragment that reads as the `stop` command");
+  r.ownerSays("load afternoon stop 5 take 3", "16:41:00");
+  await r.at("16:41:05");
+  assert.ok(r.said("commands").includes("The earlier screen is still finishing. Send `load afternoon` again in a minute or two. The stop and take-profit in this line were not kept; include them again (`load afternoon stop 5 take 3`)."), r.said("commands").join(" | "));
+  r.ownerSays("load afternoon", "16:42:00");
+  await r.at("16:42:05");
+  assert.ok(r.said("commands").at(-1) === "The earlier screen is still finishing. Send `load afternoon` again in a minute or two.", "no note when the line carried no values");
+});
+
+test("the summary's window settings line and the after-window status line give the window's own values", async () => {
+  const { loadExtraLines } = await import("../src/summary.ts");
+  const { afternoonStatusLine } = await import("../src/commands.ts");
+  const x = { orderStream: null, entryExpiry: null } as any;
+  assert.match(loadExtraLines(x, undefined, { stopCents: 5, takeProfitCents: 3 })[0]!, /^- window settings: .*take-profit 3 cents up and stop 5 cents down from the limit price$/);
+  assert.match(loadExtraLines(x)[0]!, /take-profit 1 cent up and stop 2 cents down from the limit price$/, "the morning window: the defaults");
+  const day = dayWith({ [LOAD_AFTERNOON_PHASE]: z("16:40:00").toISOString(), [LOAD_AFTERNOON_EXITS_PHASE]: "stop 5 take 3", afternoonFlat: z("17:10:20").toISOString() });
+  assert.match(afternoonStatusLine(day, z("17:15:00"), { on: true } as any, 15), /^Afternoon load window: ran from 10:40 AM CT to 11:10 AM CT \(stop 5 cents and take-profit 3 cents\); its close-out finished flat, entries paused$/);
+});

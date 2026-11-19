@@ -6,7 +6,7 @@ import { describeLimits } from "./limits.ts";
 import type { DayRecord, OrderRecord, RefusalRecord, StopFlag } from "./store.ts";
 import { flattenLegs } from "./sells.ts";
 import { centralClock } from "./time.ts";
-import { loadWindowRules } from "./load-mode.ts";
+import { afternoonLoadExits, exitsInWords, loadWindowRules, type LoadExits } from "./load-mode.ts";
 import { NOT_ADVICE } from "./discord.ts";
 
 export interface SummaryInput {
@@ -49,12 +49,13 @@ export interface SummaryInput {
 // A load day: one line with the window's settings and one with what the live order updates did. Since decision 2 of 2026-11-06 the
 // window's entries are counted from Alpaca's records (`window`: filled, and cancelled with nothing filled), not from the cancel
 // requests (on 2026-11-06, 23 of the 728 cancel requests met an entry that had just filled).
-export function loadExtraLines(x: NonNullable<SummaryInput["loadExtras"]>, window?: { sent: number; filled: number; cancelledUnfilled: number }): string[] {
+// `exits`: an afternoon load window's own stop and take-profit (Michael's request of 2026-11-18); the defaults when left out.
+export function loadExtraLines(x: NonNullable<SummaryInput["loadExtras"]>, window?: { sent: number; filled: number; cancelledUnfilled: number }, exits?: LoadExits): string[] {
   const s = x.orderStream;
   const e = x.entryExpiry;
   const counts = window ? `. Of ${window.sent} limit buys: ${window.filled} filled, ${window.cancelledUnfilled} cancelled unfilled${e?.failed ? `, ${e.failed} cancels failed` : ""}` : e ? `. Unfilled and cancelled: ${e.cancelled} of ${e.scheduled} (${e.filledFirst} filled before the cancel${e.failed ? `, ${e.failed} cancels failed` : ""})` : "";
   return [
-    `- window settings: ${loadWindowRules()}${counts}`,
+    `- window settings: ${loadWindowRules(exits)}${counts}`,
     s ? `- live order updates: ${s.events} received, ${s.freed} symbols freed${s.medianFreeMs !== null ? `, typically ${s.medianFreeMs} ms after the exit filled` : ""}, ${s.reconnects} reconnects` : "- live order updates: not connected",
   ];
 }
@@ -316,9 +317,9 @@ export function formatSummary(i: SummaryInput): string {
       ? [
           i.loadWindowKind === "afternoon" ? "**Afternoon load window**" : "**Load day**",
           ...partLines(`${i.loadWindowKind === "afternoon" ? "Afternoon load window" : "Load window"} (${centralClock(i.loadWindow.start)} to ${centralClock(i.loadWindow.end)})`, i.stored.filter((r) => r.createdAt && Date.parse(r.createdAt) >= i.loadWindow!.start.getTime() && Date.parse(r.createdAt) < i.loadWindow!.end.getTime()), i.alpacaOrders),
-          ...(i.loadExtras ? loadExtraLines(i.loadExtras, windowLimitCounts(i.stored.filter((r) => r.createdAt && Date.parse(r.createdAt) >= i.loadWindow!.start.getTime() && Date.parse(r.createdAt) < i.loadWindow!.end.getTime()), i.alpacaOrders)) : []),
+          ...(i.loadExtras ? loadExtraLines(i.loadExtras, windowLimitCounts(i.stored.filter((r) => r.createdAt && Date.parse(r.createdAt) >= i.loadWindow!.start.getTime() && Date.parse(r.createdAt) < i.loadWindow!.end.getTime()), i.alpacaOrders), i.loadWindowKind === "afternoon" ? afternoonLoadExits(i.day) : undefined) : []),
           ...partLines("Rest of the day", i.stored.filter((r) => !(r.createdAt && Date.parse(r.createdAt) >= i.loadWindow!.start.getTime() && Date.parse(r.createdAt) < i.loadWindow!.end.getTime())), i.alpacaOrders),
-          ...(i.afternoonOnLoadDay ? [`- afternoon load window ${centralClock(i.afternoonOnLoadDay.start)} to ${centralClock(i.afternoonOnLoadDay.end)} (by \`load afternoon\`): its entries are counted in the rest of the day`] : []),
+          ...(i.afternoonOnLoadDay ? [`- afternoon load window ${centralClock(i.afternoonOnLoadDay.start)} to ${centralClock(i.afternoonOnLoadDay.end)} (by \`load afternoon\`, ${exitsInWords(afternoonLoadExits(i.day))}): its entries are counted in the rest of the day`] : []),
         ]
       : []),
     `Refused entries: ${refusedTotal}${refusedTotal ? ` (${[...reasons].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([r, n]) => `${r.slice(0, 70)}: ${n}`).join("; ")})` : ""}`,

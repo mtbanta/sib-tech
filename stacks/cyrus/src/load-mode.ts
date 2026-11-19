@@ -49,6 +49,72 @@ export const LOAD_TAKE_PROFIT_CENTS = 1;
 // A window entry (a limit buy) not filled this long after Alpaca accepted it is cancelled.
 export const LOAD_ENTRY_WAIT_MS = 5_000;
 export const LOAD_STOP_CENTS = 2;
+
+// MICHAEL'S REQUEST OF 2026-11-18 (with his addition): "the load window's stop distance becomes a setting (default 2 cents as today), which I
+// can set for an afternoon load window, for example 5 cents, so load positions qualify for the moves" and "Add the take-profit to the same
+// setting: "load afternoon stop 5 take 3" (stop 2 to 10 cents, take-profit 1 to 10 cents; each defaults to today's value if left out; that
+// window only, then back to the defaults). The bot's reply shows both values in force."
+// So `load afternoon` may carry `stop N` and `take M` (whole cents, either order, each at most once). The values apply to that afternoon
+// window's entries only; the morning load window always uses the defaults above, and every new `load afternoon` (a window starting again
+// included) writes its own values, the defaults when left out. They are stored in the day record with the window's start, in one write.
+export interface LoadExits {
+  stopCents: number;
+  takeProfitCents: number;
+}
+export const DEFAULT_LOAD_EXITS: Readonly<LoadExits> = Object.freeze({ stopCents: LOAD_STOP_CENTS, takeProfitCents: LOAD_TAKE_PROFIT_CENTS });
+export const LOAD_AFTERNOON_STOP_MIN_CENTS = 2;
+export const LOAD_AFTERNOON_STOP_MAX_CENTS = 10;
+export const LOAD_AFTERNOON_TAKE_MIN_CENTS = 1;
+export const LOAD_AFTERNOON_TAKE_MAX_CENTS = 10;
+// Day phase: the afternoon window's exits, written with LOAD_AFTERNOON_PHASE ("stop 5 take 3").
+export const LOAD_AFTERNOON_EXITS_PHASE = "loadAfternoonExits";
+
+const STOP_RANGE_TEXT = `a whole number of cents from ${LOAD_AFTERNOON_STOP_MIN_CENTS} to ${LOAD_AFTERNOON_STOP_MAX_CENTS}`;
+const TAKE_RANGE_TEXT = `a whole number of cents from ${LOAD_AFTERNOON_TAKE_MIN_CENTS} to ${LOAD_AFTERNOON_TAKE_MAX_CENTS}`;
+
+// The words after `load afternoon` (already lower case, split on spaces): nothing, or `stop N` and/or `take M` in either order. Returns
+// the exits in force (a value left out is its default) or why the words were not accepted (nothing then changes).
+export function parseLoadExits(words: readonly string[]): { exits: LoadExits } | { error: string } {
+  const exits: LoadExits = { ...DEFAULT_LOAD_EXITS };
+  const seen = new Set<string>();
+  const usage = "write it as `load afternoon`, `load afternoon stop 5`, `load afternoon take 3` or `load afternoon stop 5 take 3`";
+  if (words.length % 2 !== 0 || words.length > 4) return { error: usage };
+  for (let i = 0; i < words.length; i += 2) {
+    const name = words[i]!;
+    const value = words[i + 1]!;
+    if (name !== "stop" && name !== "take") return { error: usage };
+    if (seen.has(name)) return { error: `\`${name}\` is given twice; ${usage}` };
+    seen.add(name);
+    const n = /^\d{1,2}$/.test(value) ? Number(value) : NaN;
+    if (name === "stop") {
+      if (!(n >= LOAD_AFTERNOON_STOP_MIN_CENTS && n <= LOAD_AFTERNOON_STOP_MAX_CENTS)) return { error: `the stop must be ${STOP_RANGE_TEXT} (got \`${value.slice(0, 10)}\`)` };
+      exits.stopCents = n;
+    } else {
+      if (!(n >= LOAD_AFTERNOON_TAKE_MIN_CENTS && n <= LOAD_AFTERNOON_TAKE_MAX_CENTS)) return { error: `the take-profit must be ${TAKE_RANGE_TEXT} (got \`${value.slice(0, 10)}\`)` };
+      exits.takeProfitCents = n;
+    }
+  }
+  return { exits };
+}
+
+export const formatLoadExits = (e: LoadExits): string => `stop ${e.stopCents} take ${e.takeProfitCents}`;
+
+const validExits = (e: LoadExits): boolean =>
+  Number.isInteger(e.stopCents) && e.stopCents >= LOAD_AFTERNOON_STOP_MIN_CENTS && e.stopCents <= LOAD_AFTERNOON_STOP_MAX_CENTS &&
+  Number.isInteger(e.takeProfitCents) && e.takeProfitCents >= LOAD_AFTERNOON_TAKE_MIN_CENTS && e.takeProfitCents <= LOAD_AFTERNOON_TAKE_MAX_CENTS;
+
+// The afternoon window's exits as stored with its start. A day record without them (written before this release), or with a value that
+// does not read back as one in range, gives the defaults (today's behaviour).
+export function afternoonLoadExits(day: Pick<DayRecord, "phases"> | null | undefined): LoadExits {
+  const v = day?.phases?.[LOAD_AFTERNOON_EXITS_PHASE];
+  const m = typeof v === "string" ? /^stop (\d{1,2}) take (\d{1,2})$/.exec(v) : null;
+  if (!m) return { ...DEFAULT_LOAD_EXITS };
+  const e = { stopCents: Number(m[1]), takeProfitCents: Number(m[2]) };
+  return validExits(e) ? e : { ...DEFAULT_LOAD_EXITS };
+}
+
+// The two values in words, for Michael's replies: "stop 5 cents and take-profit 3 cents".
+export const exitsInWords = (e: LoadExits): string => `stop ${e.stopCents} cent${e.stopCents === 1 ? "" : "s"} and take-profit ${e.takeProfitCents} cent${e.takeProfitCents === 1 ? "" : "s"}`;
 // Release B: shares per entry in the window. A 1-share order cannot partly fill, so no remainder is ever left without its stop,
 // and an unfilled entry that is cancelled leaves nothing behind.
 export const LOAD_WINDOW_SHARES = 1;
@@ -159,6 +225,12 @@ export function loadCeilingOn(day: (Pick<DayRecord, "phases"> & WindowDay) | nul
   return !!day && loadState(day) === "on" && loadRulesApply(day, t); // by the clock alone: 100 from 10:30:00 (the tighter direction)
 }
 
+// The exits for a load entry signalled at time t: the afternoon window's own values while it is on (Michael's request of 2026-11-18),
+// otherwise (the morning load window) the defaults.
+export function loadExitsAt(day: (Pick<DayRecord, "phases"> & WindowDay) | null | undefined, t: Date): LoadExits {
+  return inAfternoonLoad(day, t) ? afternoonLoadExits(day) : { ...DEFAULT_LOAD_EXITS };
+}
+
 // The churn is on: a load day still switched on, inside its window.
 export function inLoadWindow(day: (Pick<DayRecord, "phases"> & WindowDay) | null | undefined, t: Date): boolean {
   if (inAfternoonLoad(day, t)) return true; // the afternoon load window (Michael, 2026-11-11)
@@ -187,8 +259,9 @@ export function limitEntryPrice(print: number): number | null {
 }
 
 // The window's rules in one phrase, for the Armed message, the mode line and the summary.
-export function loadWindowRules(): string {
-  return `1 share a trade on any new print, a limit buy at the price seen plus ${LOAD_ENTRY_ABOVE_CENTS} cent, cancelled if not filled in ${LOAD_ENTRY_WAIT_MS / 1000} seconds, take-profit ${LOAD_TAKE_PROFIT_CENTS} cent${LOAD_TAKE_PROFIT_CENTS === 1 ? "" : "s"} up and stop ${LOAD_STOP_CENTS} cents down from the limit price`;
+// Michael's request of 2026-11-18: an afternoon window shows its own exits (the defaults otherwise).
+export function loadWindowRules(exits: LoadExits = DEFAULT_LOAD_EXITS): string {
+  return `1 share a trade on any new print, a limit buy at the price seen plus ${LOAD_ENTRY_ABOVE_CENTS} cent, cancelled if not filled in ${LOAD_ENTRY_WAIT_MS / 1000} seconds, take-profit ${exits.takeProfitCents} cent${exits.takeProfitCents === 1 ? "" : "s"} up and stop ${exits.stopCents} cent${exits.stopCents === 1 ? "" : "s"} down from the limit price`;
 }
 
 // The fifth line of the limits request, the morning review and every limits reply.
