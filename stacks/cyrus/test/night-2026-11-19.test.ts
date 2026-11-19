@@ -135,15 +135,15 @@ test("B, through the worker: the mid-day close-out's first try is due at 10:30 a
   sim.advanceTo(z("16:00:00").getTime());
   await rigHold(sim, r, "AAA", 1);
   sim.refuseSellsTimes = 100_000; // the first try cannot sell, so a retry follows
-  await r.at("16:30:00");
+  await r.at("16:30:02"); // the first tick at or after 10:30 lands 2 s late, so the trigger time differs from the due time
   await until(() => results(r, "midday").length >= 1 && !r.worker["inflight"].has("midday"));
   const first = results(r, "midday")[0]!;
   assert.equal(first.flat, false, "the first try ended not flat");
   assert.equal(first.timing.dueAt, z("16:30:00").toISOString(), "the mid-day pause time");
-  assert.ok(iso(first.timing.triggeredAt) >= iso(first.timing.dueAt));
+  assert.ok(iso(first.timing.triggeredAt) >= z("16:30:02").getTime(), "the trigger is the tick's own time, not the due time (group 2, round 2, B12)");
   assert.ok(iso(first.timing.startedAt) >= iso(first.timing.triggeredAt));
   sim.refuseSellsTimes = 0;
-  await r.at("16:30:25");
+  await r.at("16:30:27");
   await until(() => results(r, "midday").length >= 2 && !r.worker["inflight"].has("midday"));
   const retry = results(r, "midday")[1]!;
   assert.equal(retry.timing.dueAt, null, "a retry: its time is its retry gap");
@@ -153,12 +153,12 @@ test("B, through the worker: the mid-day close-out's first try is due at 10:30 a
   sim.advanceTo(z("20:50:00").getTime());
   await rigHold(sim, r, "BBB", 1);
   sim.refuseSellsTimes = 100_000;
-  await r.at("20:55:00");
+  await r.at("20:55:03");
   await until(() => results(r, "close-out").length >= 1 && !r.worker["inflight"].has("closeout"));
   const reg = results(r, "close-out")[0]!;
   assert.equal(reg.flat, false);
   assert.equal(reg.timing.dueAt, z("20:55:00").toISOString(), "the regular close-out's set time");
-  assert.ok(iso(reg.timing.triggeredAt) >= iso(reg.timing.dueAt));
+  assert.ok(iso(reg.timing.triggeredAt) >= z("20:55:03").getTime(), "the tick's own time");
   sim.refuseSellsTimes = 0;
   const after = sim.simMs;
   await r.at(new Date(after + 25_000).toISOString());

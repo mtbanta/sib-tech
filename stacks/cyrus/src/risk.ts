@@ -84,11 +84,12 @@ export const LATE_NOTICE_MS = 6_000;
 //     `lagMs` is the gap.
 //   - Still covering and ended another way (cancelled, expired): the gap began at the fresh stop's end, not at the bracket stop's cancel.
 //   - No longer covering the holding (more shares held than it protects; its status is the last one known and it may still be working):
-//     the shares beyond it are the ones without a stop.
+//     the stack has no stop of its own on the rest (group 2, round 2: they may carry a stop the stack did not place, or a stale positions
+//     read may show shares that are gone, so the label does not say they are without a stop).
 export const FRESH_NEVER_HELD = new Set(["rejected", "unknown_at_alpaca"]);
 export function freshEndedLabel(f: { status: string; stopClientOrderId: string; msFromSent: number; covering: boolean }): Record<string, unknown> {
   const freshStop = { status: f.status, stopClientOrderId: f.stopClientOrderId, msFromSent: f.msFromSent, covering: f.covering };
-  if (!f.covering) return { label: `fresh stop no longer covers the holding (last seen ${f.status}): the shares beyond it are without a stop; lagMs counts from the bracket stop's cancel`, notAGap: false, freshStop };
+  if (!f.covering) return { label: `fresh stop no longer covers the holding (last seen ${f.status}): more shares held than it protects, and the stack has no stop of its own on the rest; lagMs counts from the bracket stop's cancel`, notAGap: false, freshStop };
   if (f.status === "filled") return { label: "fresh stop filled: not a gap (lagMs counts from the bracket stop's cancel; the fresh stop sold the shares)", notAGap: true, freshStop };
   if (FRESH_NEVER_HELD.has(f.status)) return { label: `fresh stop never held at Alpaca (${f.status}): lagMs, from the bracket stop's cancel, is the gap`, notAGap: false, freshStop };
   return { label: `fresh stop ended (${f.status}): the gap began at its end, not at the bracket stop's cancel that lagMs counts from`, notAGap: false, freshStop };
