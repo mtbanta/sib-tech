@@ -66,7 +66,7 @@ export interface LiveListResult {
 export interface WorkerDeps {
   // The moved take-profit (Michael's decision of 2026-11-18): the latest bid and ask of some symbols, in one market-data read with a short
   // time limit. Unset (the tests that do not set it): no take-profit is moved; every sale keeps today's path.
-  latestQuotes?: (symbols: string[]) => Promise<ReadonlyMap<string, { bid: number; ask: number; atMs: number }>>;
+  latestQuotes?: (symbols: string[]) => Promise<ReadonlyMap<string, { bid: number; ask: number; atMs: number; tradePrice?: number; tradeAtMs?: number }>>;
   settings: Settings;
   broker: FullBroker;
   governor: Governor;

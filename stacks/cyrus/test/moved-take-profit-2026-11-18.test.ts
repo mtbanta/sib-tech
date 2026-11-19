@@ -71,13 +71,13 @@ test("rules: one bracket's take-profit covering the whole holding qualifies; two
   assert.equal(withStops(c, new Map([["tp-1", 19.92]])).candidates[0]!.stopPrice, 19.92);
 });
 
-test("rules: the selling limit is the bid less 1 cent, at least 3 cents above the stop, below the take-profit, from a quote at most 5 s old", () => {
+test("rules: the selling limit is the bid less 1 cent, at least 3 cents above the stop, below the take-profit, from a quote at most 30 s old (5 s until Michael's decision of 2026-11-19)", () => {
   const c = [{ symbol: "AAA", qty: 1, legId: "tp", groupId: "g", oldLimit: 20.05, stopPrice: 19.95 }];
   const q = (bid: number, ageMs = 0) => new Map([["AAA", { bid, ask: bid + 0.01, atMs: 1_000_000 - ageMs }]]);
   assert.equal(pricedMoves(c, q(19.99), 1_000_000).moves[0]!.limit, 19.98, "19.98 is exactly 3 cents above 19.95: allowed");
   assert.equal(pricedMoves(c, q(19.98), 1_000_000).moves.length, 0, "19.97 is 2 cents above the stop: today's path");
   assert.equal(pricedMoves(c, q(20.06), 1_000_000).moves.length, 0, "the take-profit is already at or below the price");
-  assert.equal(pricedMoves(c, q(19.99, 6_000), 1_000_000).moves.length, 0, "a stale quote");
+  assert.equal(pricedMoves(c, q(19.99, 31_000), 1_000_000).moves.length, 0, "a stale quote");
   assert.equal(pricedMoves(c, new Map(), 1_000_000).skipped[0]!.why, "no quote");
   assert.equal(pricedMoves([{ ...c[0]!, stopPrice: 19.5 }], q(20.0049), 1_000_000).moves[0]!.limit, 19.99, "rounded down to the cent");
 });
