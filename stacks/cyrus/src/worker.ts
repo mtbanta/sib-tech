@@ -22,7 +22,7 @@ import { MoveWatch } from "./moved-take-profit.ts";
 import type { Order } from "./alpaca-trading.ts";
 import { formatLiveList } from "./universe.ts";
 import type { Settings } from "./config.ts";
-import { closeOut } from "./closeout.ts";
+import { closeOut, type CloseoutOptions } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
 import { ProgressGap, RetryBackoff } from "./retry-backoff.ts";
@@ -1249,7 +1249,9 @@ export class Worker {
         const only = retry ? retrySymbols(this.middayLastRemaining, this.middayAttempts - 1) : null;
         this.middayProgress.started(retry ? this.middayLastRemaining.length : Infinity);
         this.middayAttempts++;
-        if (!this.background("midday", () => withReservation(res, () => this.middayPhase(date, current, mt.pauseAt, retry, only, res), retry ? undefined : "first"))) res.end();
+        // Decision B of 2026-11-19 (logging only): when it was due and when this tick decided to start it.
+        const timing = { dueAt: retry ? null : mt.pauseAt.toISOString(), triggeredAt: this.d.now().toISOString() };
+        if (!this.background("midday", () => withReservation(res, () => this.middayPhase(date, current, mt.pauseAt, retry, only, res, timing), retry ? undefined : "first"))) res.end();
       }
     }
     // The close-out after the afternoon load window (Michael, 2026-11-12): when the window's 30 minutes are up (or the last entry comes
@@ -1277,7 +1279,8 @@ export class Worker {
         this.afternoonAttempts++;
         // The same background name as the mid-day close-out, so every guard that stands aside for it stands aside for this too.
         const windowStart = afternoonLoadStart(current)?.toISOString() ?? null;
-        if (!this.background("midday", () => withReservation(res, () => this.afternoonCloseoutPhase(date, retry, only, res, windowStart), retry ? undefined : "first"))) res.end();
+        const timing = { dueAt: retry ? null : (afternoonLoadWindow(current)?.end.toISOString() ?? null), triggeredAt: this.d.now().toISOString() }; // decision B (logging only)
+        if (!this.background("midday", () => withReservation(res, () => this.afternoonCloseoutPhase(date, retry, only, res, windowStart, timing), retry ? undefined : "first"))) res.end();
       }
     }
     // The second alert: still not flat 5 minutes after a try first ended not flat (once a day).
@@ -1323,10 +1326,11 @@ export class Worker {
         this.closeoutAttempts++;
         if (now >= day.closeAt) this.closeoutAttemptsAfterClose++;
         const closeAt = day.closeAt;
+        const timing = { dueAt: path === "close-out" ? this.closeoutAt(closeAt).toISOString() : null, triggeredAt: this.d.now().toISOString() }; // decision B (logging only)
         const started = this.background("closeout", () =>
           withReservation(res, async () => {
             try {
-              await this.closeoutPhase(date, now >= addMinutes(closeAt, 30), closeAt, path);
+              await this.closeoutPhase(date, now >= addMinutes(closeAt, 30), closeAt, path, timing);
             } finally {
               this.closeoutLastCost = res.used;
             }
@@ -1971,11 +1975,11 @@ export class Worker {
     this.gate.enter(signal).catch((err) => this.d.log?.("error", "gate_failed", { error: (err as Error).message.slice(0, 200) }));
   }
 
-  private async closeoutPhase(date: string, lastTry: boolean, closeAt: Date | null = null, path: "close-out" | "retry" = "close-out"): Promise<void> {
+  private async closeoutPhase(date: string, lastTry: boolean, closeAt: Date | null = null, path: "close-out" | "retry" = "close-out", timing?: CloseoutOptions["timing"]): Promise<void> {
     this.endStream();
     this.closingOut = true;
     try {
-      const result = await closeOut(this.closeoutDeps(), date, { alert: this.notFlatAlertDate !== date, closeAt: closeAt ?? undefined, path });
+      const result = await closeOut(this.closeoutDeps(), date, { alert: this.notFlatAlertDate !== date, closeAt: closeAt ?? undefined, path, ...(timing ? { timing } : {}) });
       await this.setNotFlat(!result.flat, result.remaining, date);
       // Recorded as done only when flat (or when this was the last try), so otherwise the next tick tries again.
       if (result.flat || lastTry) await setPhase(this.d.store, date, "closeout", this.d.now().toISOString(), { flat: result.flat ? "yes" : "no" });
@@ -1991,13 +1995,13 @@ export class Worker {
   // alone (closeOut skips that for this path). The missing-exit check is off while it runs (protectNow). The first try is the full
   // close-out; a retry is ONE round of it without the wait for its own sells (the next retry looks again), which is how retries stay
   // inside 60 requests a minute. Since the redesign of 2026-11-14 each retry reserves its estimate in the shared request budget first, and its requests are counted as they are sent.
-  private async middayPhase(date: string, day: DayRecord, pauseAt: Date, retry = false, only: string[] | null = null, res: Reservation | null = null): Promise<void> {
+  private async middayPhase(date: string, day: DayRecord, pauseAt: Date, retry = false, only: string[] | null = null, res: Reservation | null = null, timing?: CloseoutOptions["timing"]): Promise<void> {
     const pause = await readPause(this.d.store, date);
     if (pause?.resumedAt) return; // already resumed today
     if (!pause?.on) await updatePause(this.d.store, date, { on: true, since: this.d.now().toISOString(), reason: "mid-day cycle" });
     let result;
     try {
-      result = await closeOut(this.closeoutDeps(), date, retry ? { alert: false, path: "midday", maxRounds: 1, waitForOwnSells: false, ...(only ? { onlySymbols: only } : {}) } : { alert: false, path: "midday" });
+      result = await closeOut(this.closeoutDeps(), date, { ...(retry ? { alert: false, path: "midday", maxRounds: 1, waitForOwnSells: false, ...(only ? { onlySymbols: only } : {}) } : { alert: false, path: "midday" }), ...(timing ? { timing } : {}) });
     } finally {
       // What this try sent (counted as it was sent, in its reservation): the next retry's estimate.
       if (res) this.middayLastCost = res.used;
@@ -2020,7 +2024,7 @@ export class Worker {
   // then on), then the mid-day close-out code (path "midday": no `closeout` phase, no not-flat flag, the borrowing cap untouched, the
   // price stream kept). A retry is one round without the wait for its own sells, as for the mid-day close-out. When flat it writes its
   // own phase and says so; entries stay paused (no automatic return to normal trading).
-  private async afternoonCloseoutPhase(date: string, retry: boolean, only: string[] | null, res: Reservation | null = null, windowStart: string | null = null): Promise<void> {
+  private async afternoonCloseoutPhase(date: string, retry: boolean, only: string[] | null, res: Reservation | null = null, windowStart: string | null = null, timing?: CloseoutOptions["timing"]): Promise<void> {
     const pause = await readPause(this.d.store, date);
     if (!pause?.on) {
       // The pause's start time stays the mid-day one (the summary and `status` name it); only the flag and the reason change.
@@ -2029,7 +2033,7 @@ export class Worker {
     }
     let result;
     try {
-      result = await closeOut(this.closeoutDeps(), date, retry ? { alert: false, path: "midday", maxRounds: 1, waitForOwnSells: false, ...(only ? { onlySymbols: only } : {}) } : { alert: false, path: "midday" });
+      result = await closeOut(this.closeoutDeps(), date, { ...(retry ? { alert: false, path: "midday", maxRounds: 1, waitForOwnSells: false, ...(only ? { onlySymbols: only } : {}) } : { alert: false, path: "midday" }), ...(timing ? { timing } : {}) });
     } finally {
       if (res) this.afternoonLastCost = res.used;
     }

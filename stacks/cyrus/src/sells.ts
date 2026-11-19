@@ -302,6 +302,10 @@ export interface LiquidateResult {
   // Only with returnWhenOnlyOwnSells: the symbols still held whose every share is covered by a working sell of ours.
   working?: string[];
   steps?: LiquidateSteps;
+  // Michael's decision B of 2026-11-19 (logging only): when this sale began (its turn in the one-at-a-time sale queue came, before its
+  // first read) and when its move step began (the moved take-profit's phase; absent when no move phase ran). Read by the close-out's record.
+  startedAt?: string;
+  movePhaseStartedAt?: string;
   // Only with yieldToPriority: the sale stopped early because the daily loss stop's sale goes first, or (with `ownEntryOnly`) it stood
   // aside at its turn, before any request (`stoodAside`): a sale of the whole account was asked for ("whole account"), or a close-out step
   // owns selling or the close-out time has come ("close-out").
@@ -509,6 +513,7 @@ export class Liquidator {
     const result: LiquidateResult = { flat: false, remaining: [], sold: [], errors: [] };
     const steps: LiquidateSteps = { cancelsSentAt: [], cancelsAnsweredAt: [], sells: [] };
     const stamp = () => this.d.now().toISOString();
+    result.startedAt = stamp(); // decision B of 2026-11-19 (logging only)
     const cancelIds = [...new Set(o.cancelIds ?? [])];
     // Group 1, round 1 (2026-11-17): honoured only for the one caller's shape (one symbol, one round, its own entry's shares, nothing to
     // cancel, no stop to place, no wait on Alpaca's cancel), so no other sale can take it by mistake.
@@ -622,6 +627,7 @@ export class Liquidator {
     let triedSoFar = 0;
     let unsentListed = false;
     const movePhase = async (held: Position[], open: Order[], readAtMs: number): Promise<boolean> => {
+      result.movePhaseStartedAt = stamp(); // decision B of 2026-11-19 (logging only); the phase runs at most once a sale
       let sent = 0;
       phaseSkips = [];
       sendList = [];

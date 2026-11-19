@@ -75,6 +75,18 @@ function budgetOf(d: Pick<RiskDeps, "budget" | "now" | "governor">, holder: { bu
 // about 3 seconds before); on 2026-11-10
 // HIMS-38 was noticed 14.7 seconds after, with no cause in the records.
 export const LATE_NOTICE_MS = 6_000;
+
+// Michael's decision D of 2026-11-19 (logging only): the label on a `late_notice` for an entry whose fresh stop ended in the same look.
+// A fresh stop that filled sold the shares itself (the positions read had not caught up), so the record is not a gap; one that ended any
+// other way left the shares without it from its end, not from the bracket stop's cancel that `lagMs` counts from.
+export function freshEndedLabel(f: { status: string; stopClientOrderId: string; msFromSent: number }): Record<string, unknown> {
+  const filled = f.status === "filled";
+  return {
+    label: filled ? "fresh stop filled: not a gap (lagMs counts from the bracket stop's cancel; the fresh stop sold the shares)" : `fresh stop ended (${f.status}): lagMs counts from the bracket stop's cancel, not from the fresh stop's end`,
+    notAGap: filled,
+    freshStop: { status: f.status, stopClientOrderId: f.stopClientOrderId, msFromSent: f.msFromSent },
+  };
+}
 // Fix C (Michael's approval of 2026-11-10): a sale reported as "not filled yet" gets its closing line when it fills; after this long
 // without a fill seen, it is dropped without a line (the order sync deals with the shares again if they are still held).
 export const AWAITING_FILL_MAX_MS = 2 * 60_000;
@@ -895,6 +907,11 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
   // A4: a remainder protected by its fresh stop is left alone while that stop can still execute. Once the stop is gone (cancelled,
   // expired or rejected by anyone but our own sale) and the shares are still held, the missing-exit check below sells them, as before.
   const fresh = mem.freshStops.get(s.clientOrderId);
+  // Michael's decision D of 2026-11-19 (logging only): this entry's fresh stop ended in this look while the shares still showed as held. Its
+  // `late_notice` below then carries a label, since its lag counts from the bracket stop's cancel, not from the fresh stop's end (on
+  // 2026-11-19 RIOT-19's 1-share fresh stop filled at 1:53:49.360 while the sync's positions read, 540 ms old, still showed the share, and
+  // the record read as a gap of 800 s although the share was under its fresh stop all along).
+  let freshEnded: { status: string; stopClientOrderId: string; msFromSent: number } | null = null;
   if (fresh) {
     // Only while it covers the whole holding (group 1 review, round 2).
     const covering = held.has(s.symbol) && fresh.qty >= (heldQty.get(s.symbol) ?? 0) - 1e-9;
@@ -924,7 +941,10 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
       return;
     }
     dropFreshStop(d, mem, s.clientOrderId, held.has(s.symbol) ? "it no longer covers the holding" : "the shares are no longer held", nowMs);
-    if (held.has(s.symbol)) d.log?.("fresh_stop_gone", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: fresh.stopClientOrderId, status: fresh.status, msFromSent: nowMs - fresh.placedAt });
+    if (held.has(s.symbol)) {
+      d.log?.("fresh_stop_gone", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: fresh.stopClientOrderId, status: fresh.status, msFromSent: nowMs - fresh.placedAt });
+      freshEnded = { status: fresh.status, stopClientOrderId: fresh.stopClientOrderId, msFromSent: nowMs - fresh.placedAt };
+    }
   }
   if (!hasLiveExit(o)) {
     // Item 2 of 2026-11-13: an entry whose timed-out stop is known open with its cancel accepted or pending waits for that stop to end
@@ -954,7 +974,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
     mem.protectFirst?.mark(s.clientOrderId, s.symbol, "no live exit");
     d.log?.("unprotected_position", { symbol: s.symbol, clientOrderId: s.clientOrderId, listAgeMs: listAgeMs(), ...(remainderStop !== null ? { asRemainder: true } : {}) });
     const endedAt = flattenLegs(o).filter((l) => l.side === "sell" && !OPEN_STATUSES.has(l.status)).map((l) => l.canceledAt ?? l.updatedAt ?? "").filter((x) => Number.isFinite(Date.parse(x))).sort().at(-1) ?? null;
-    lateNotice(s, "missing", endedAt);
+    lateNotice(s, "missing", endedAt, freshEnded ? freshEndedLabel(freshEnded) : {});
     // Ruling B: a timed-out fresh stop of this entry still shown working is cancelled by this sale (which waits for Alpaca's cancel).
     const timedOutShown = listed.orders.filter((x) => mem.timedOutStops.get(x.clientOrderId) === s.clientOrderId && OPEN_STATUSES.has(x.status));
     const timedOutIds = timedOutShown.map((x) => x.id);

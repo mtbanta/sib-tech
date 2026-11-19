@@ -75,7 +75,7 @@ test("the stale limit is 30 s: a quote 29 s old moves, one 31 s old is skipped w
   assert.equal(s.moves.length, 0);
   assert.deepEqual(s.skipped[0], { symbol: "AAA", why: "quote 31 s old", stopPrice: 19.95, oldLimit: 20.05, bid: 19.99, quoteAgeMs: 31_000, tradePrice: 19.995, tradeAgeMs: 4_000 });
   const noTrade = pricedMoves(c, new Map([["AAA", { bid: 19.9, ask: 20, atMs: now }]]), now).skipped[0]!;
-  assert.deepEqual([noTrade.why, noTrade.tradePrice, noTrade.tradeAgeMs], ["price within 3 cents of the stop", null, null]);
+  assert.deepEqual([noTrade.why, noTrade.tradePrice, noTrade.tradeAgeMs], ["price within 2 cents of the stop", null, null]);
 });
 
 test("the quote read is ONE multi-symbol snapshot request on the configured feed; a symbol without a usable quote is left out; the trade is kept", async () => {
@@ -111,8 +111,8 @@ test("a sale with moves stores why every other position was skipped (one row, th
   const w = world();
   await normal(w, "AAA", 10); // quote 6 s old: moves under 30 s
   await normal(w, "BBB", 10); // quote 40 s old: skipped
-  await normal(w, "CCC", 10); // bid within 3 cents of the stop: skipped
-  await loadDay(w, "DDD"); // a load bracket: take-profit within 4 cents of the stop
+  await normal(w, "CCC", 10); // bid 19.94: limit 19.93, 1 cent above the stop: skipped
+  await loadDay(w, "DDD"); // a load bracket at bid 5.00: limit 4.99, 1 cent above its stop (since decision A of 2026-11-19 it reaches the price step)
   w.ages.set("AAA", 6_000);
   w.ages.set("BBB", 40_000);
   w.trades.set("BBB", { price: 20.01, ageMs: 50_000 });
@@ -127,24 +127,33 @@ test("a sale with moves stores why every other position was skipped (one row, th
   const by = Object.fromEntries(sk[0]!.skipped.map((s) => [s.symbol, s]));
   assert.equal(by.BBB!.why, "quote 40 s old");
   assert.deepEqual([by.BBB!.bid, by.BBB!.quoteAgeMs, by.BBB!.tradePrice, by.BBB!.tradeAgeMs, by.BBB!.stopPrice, by.BBB!.oldLimit], [20, 40_000, 20.01, 50_000, 19.92, 20.05]);
-  assert.equal(by.CCC!.why, "price within 3 cents of the stop");
-  assert.equal(by.DDD!.why, "take-profit within 4 cents of the stop");
+  assert.equal(by.CCC!.why, "price within 2 cents of the stop");
+  assert.deepEqual([by.DDD!.why, by.DDD!.bid, by.DDD!.stopPrice, by.DDD!.oldLimit], ["price within 2 cents of the stop", 5, 4.98, 5.01]);
   assert.deepEqual(Object.keys(by).sort(), ["BBB", "CCC", "DDD"]);
   assert.equal(w.sim.heldQty("BBB") + w.sim.heldQty("CCC") + w.sim.heldQty("DDD") + w.sim.heldQty("AAA"), 0, "all sold");
   assert.ok(STORED_INFO_EVENTS.has("move_phase_skips"), "stored in the run log, not only Fly's log");
 });
 
-test("a sale with no move still stores its skips, before any quote read when nothing could qualify (a load day), and with no read at all when nothing is held", async () => {
+test("a sale with no move still stores its skips: before any quote read when nothing could qualify (take-profits 2 cents above their stops), after one read for a load day's brackets (since decision A of 2026-11-19), and with no read at all when nothing is held", async () => {
   const w = world();
-  await loadDay(w, "AAA");
-  await loadDay(w, "BBB", 7);
+  await hold(w, "AAA", 1, 5, 4.99, 5.01); // take-profit 2 cents above the stop: no selling limit can be 2 cents above the stop and below it
+  await hold(w, "BBB", 1, 7, 6.99, 7.01);
   await w.liquidator.flatten({ reason: "close-out", tradeDate: D });
   w.sim.advance(3_000);
-  assert.equal(w.quoteCalls.length, 0, "no quote read, as before");
+  assert.equal(w.quoteCalls.length, 0, "no quote read");
   const sk = w.skips();
   assert.equal(sk.length, 1);
-  assert.deepEqual(sk[0]!.skipped.map((s) => [s.symbol, s.why]), [["AAA", "take-profit within 4 cents of the stop"], ["BBB", "take-profit within 4 cents of the stop"]]);
+  assert.deepEqual(sk[0]!.skipped.map((s) => [s.symbol, s.why]), [["AAA", "take-profit within 3 cents of the stop"], ["BBB", "take-profit within 3 cents of the stop"]]);
   assert.equal(sk[0]!.moved, 0);
+  const ld = world();
+  await loadDay(ld, "AAA");
+  await loadDay(ld, "BBB", 7);
+  await ld.liquidator.flatten({ reason: "close-out", tradeDate: D });
+  ld.sim.advance(3_000);
+  assert.equal(ld.quoteCalls.length, 1, "a load day's brackets (1 cent up, 2 down): one quote read since decision A (none before)");
+  assert.equal(ld.sim.replaceLog.length, 0, "bids at the entry price: no move");
+  assert.deepEqual(ld.skips()[0]!.skipped.map((s) => [s.symbol, s.why]), [["AAA", "price within 2 cents of the stop"], ["BBB", "price within 2 cents of the stop"]]);
+  assert.equal(ld.sim.heldQty("AAA") + ld.sim.heldQty("BBB"), 0, "both sold by today's path");
   const empty = world();
   await empty.liquidator.flatten({ reason: "close-out", tradeDate: D });
   assert.equal(empty.skips().length, 0, "nothing held: nothing to say");
