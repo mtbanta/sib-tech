@@ -15,7 +15,7 @@ import type { Order, Position } from "./alpaca-trading.ts";
 import { AlpacaError } from "./alpaca-trading.ts";
 import type { SellBroker } from "./broker.ts";
 import { MAX_EARLY_WAKES } from "./early-wake.ts";
-import { MOVED_TAKE_PROFIT, MOVE_CLIENT_ID_PREFIX, MOVE_FILL_WAIT_MS, MOVE_MAX_PER_SALE, MOVE_SEND_WINDOW_MS, MOVE_SETS_CLIENT_ID, type MoveRow, type MoveWatch, MOVE_REPLACE_TIMEOUT_MS, MOVE_STOPS_TIMEOUT_MS, MOVE_VIEW_MAX_AGE_MS, pricedMoves, stopVerdict, structuralCandidates, withStops } from "./moved-take-profit.ts";
+import { MOVED_TAKE_PROFIT, MOVE_CLIENT_ID_PREFIX, MOVE_FILL_WAIT_MS, MOVE_MAX_PER_SALE, MOVE_SEND_WINDOW_MS, MOVE_SETS_CLIENT_ID, type MoveRow, type MoveWatch, MOVE_REPLACE_TIMEOUT_MS, MOVE_STOPS_TIMEOUT_MS, MOVE_VIEW_MAX_AGE_MS, pricedMoves, type QuoteIn, type Skip, stopVerdict, structuralCandidates, withStops } from "./moved-take-profit.ts";
 
 export type Say = (channel: "commands" | "trading" | "alerts", text: string, opts?: { mentionOwner?: boolean }) => Promise<boolean>;
 
@@ -381,7 +381,7 @@ export interface LiquidatorDeps {
   // request); a leg left out has an unknown stop. `watch`: the live updates about the moves.
   // `room`: whether the shared request budget has room for one more request above the urgent floor (a replace is sent only then).
   moves?: {
-    quotes: (symbols: string[]) => Promise<ReadonlyMap<string, { bid: number; ask: number; atMs: number }>>;
+    quotes: (symbols: string[]) => Promise<ReadonlyMap<string, QuoteIn>>;
     stopsFor: (legs: Array<{ legId: string; groupId: string; symbol: string }>, tradeDate: string) => Promise<ReadonlyMap<string, number>>;
     watch: MoveWatch;
     room?: () => boolean;
@@ -588,6 +588,9 @@ export class Liquidator {
     let movePhaseDone = !(MOVED_TAKE_PROFIT.on && this.d.moves && !o.ownEntryOnly);
     const moveRows: MoveRow[] = [];
     let moveCheckPending = false;
+    // Michael's request of 2026-11-19: the shares of each symbol that today's path's market sales (cyrus-x-) were sent to sell in this sale,
+    // for each move row's `fallbackSoldQty` (whether the backup step actually sold). Only market sales count, never a fresh stop.
+    const marketSentBy = new Map<string, number>();
     // The first read of positions after the moves (before today's path cancels anything): a moved symbol no longer held was sold by its
     // move (or its own exits) within the wait; it is counted as sold by this sale (the close-out's record, the loss stop's message), and
     // each row's `fallback` says whether today's path still had shares to sell. No request: round 1 makes this read anyway.
@@ -609,11 +612,25 @@ export class Liquidator {
     };
     // Returns true when at least one replace was sent (whatever its answer): round 1 then starts again from fresh reads. Never throws: any
     // error here is logged and the sale goes on with today's path (the advisor's point: a throw must not skip round 1's cancels).
+    // Michael's request of 2026-11-19: why each position was not moved, stored once per move phase (`move_phase_skips`), whether or not any
+    // move went out (before, only a phase with no move logged its skips). At most MOVE_SKIPS_STORED positions are listed; `more` counts the rest.
+    let phaseSkips: Skip[] = [];
+    const MOVE_SKIPS_STORED = 40;
+    // The moves this phase planned to send, how many it tried, and whether the ones not sent are already listed: if the phase throws
+    // part way (group 1 and group 2, round 1 notes), the moves never tried are listed as "move phase failed".
+    let sendList: Array<{ symbol: string }> = [];
+    let triedSoFar = 0;
+    let unsentListed = false;
     const movePhase = async (held: Position[], open: Order[], readAtMs: number): Promise<boolean> => {
       let sent = 0;
+      phaseSkips = [];
+      sendList = [];
+      triedSoFar = 0;
+      unsentListed = false;
       try {
         sent = await movePhaseInner(held, open, readAtMs);
       } catch (err) {
+        if (!unsentListed) phaseSkips.push(...sendList.slice(triedSoFar).map((m) => ({ symbol: m.symbol, why: "move phase failed" })));
         this.d.log?.("move_phase_failed", { reason: o.reason, error: (err as Error).message.slice(0, 160), sent });
         // A replace may have gone out before the error (group 1 and group 2, round 2): round 1 then starts again and judges the moves as usual.
         sent = Math.max(sent, moveRows.some((r) => r.accepted || r.httpStatus !== null || r.answer === null || (r.answer ?? "").startsWith("unclear")) ? 1 : 0);
@@ -621,13 +638,26 @@ export class Liquidator {
       }
       // Moves that were never sent (refused by the sell gate, or stopped before the send): today's path sells those shares.
       if (sent === 0) for (const row of moveRows) row.fallback ??= true;
+      if (phaseSkips.length > 0) {
+        // Group 1, round 1 note: this log is outside the try above, so it gets its own catch (the phase never throws into the sale, which
+        // would skip round 1's cancels).
+        try {
+          const positions = held.filter((p) => p.qty > EPS).length;
+          this.d.log?.("move_phase_skips", { reason: o.reason, positions, moved: moveRows.length, skipped: phaseSkips.slice(0, MOVE_SKIPS_STORED), ...(phaseSkips.length > MOVE_SKIPS_STORED ? { more: phaseSkips.length - MOVE_SKIPS_STORED } : {}) });
+        } catch {
+          /* a record must never break a sale */
+        }
+      }
       return sent > 0;
     };
     const movePhaseInner = async (held: Position[], open: Order[], readAtMs: number): Promise<number> => {
       const mv = this.d.moves!;
       mv.watch.reset();
-      const structural = structuralCandidates(held, open).candidates;
+      const structuralR = structuralCandidates(held, open);
+      phaseSkips.push(...structuralR.skipped);
+      const structural = structuralR.candidates;
       if (structural.length === 0) return 0;
+      const skipAll = (list: Array<{ symbol: string; oldLimit: number }>, why: string) => phaseSkips.push(...list.map((c) => ({ symbol: c.symbol, why, oldLimit: c.oldLimit })));
       let stops: ReadonlyMap<string, number>;
       try {
         // One time limit for the whole lookup (group 1, round 1): a stop not found by then is unknown (today's path). The timer is cleared so
@@ -637,23 +667,29 @@ export class Liquidator {
         const got = await Promise.race([mv.stopsFor(structural.map((c) => ({ legId: c.legId, groupId: c.groupId, symbol: c.symbol })), o.tradeDate), limit]).finally(() => clearTimeout(timer));
         if (got === "late") {
           this.d.log?.("move_phase_skipped", { reason: o.reason, why: `stop prices not found within ${MOVE_STOPS_TIMEOUT_MS} ms` });
+          skipAll(structural, `stop prices not found within ${MOVE_STOPS_TIMEOUT_MS} ms`);
           return 0;
         }
         stops = got;
       } catch (err) {
         this.d.log?.("move_phase_skipped", { reason: o.reason, why: "stop prices not found", error: (err as Error).message.slice(0, 120) });
+        skipAll(structural, "stop prices not found");
         return 0;
       }
-      const { candidates } = withStops(structural, stops);
+      const stopped = withStops(structural, stops);
+      phaseSkips.push(...stopped.skipped);
+      const { candidates } = stopped;
       if (candidates.length === 0) return 0; // a load day: no quote read, no wait
-      let quotes: ReadonlyMap<string, { bid: number; ask: number; atMs: number }>;
+      let quotes: ReadonlyMap<string, QuoteIn>;
       try {
         quotes = await mv.quotes(candidates.map((c) => c.symbol));
       } catch (err) {
         this.d.log?.("move_phase_skipped", { reason: o.reason, why: "quote read failed", error: (err as Error).message.slice(0, 120) });
+        skipAll(candidates, "quote read failed");
         return 0;
       }
       const { moves, skipped } = pricedMoves(candidates, quotes, this.d.now().getTime());
+      phaseSkips.push(...skipped);
       if (moves.length === 0) {
         this.d.log?.("move_phase_none", { reason: o.reason, candidates: candidates.length, skipped: skipped.slice(0, 10) });
         return 0;
@@ -667,15 +703,30 @@ export class Liquidator {
       } catch {
         live = null;
       }
+      // Why the moves after a stop were not sent (stored with the skips).
+      let notSentWhy: string | null = null;
+      let tried = 0;
+      sendList = moves.slice(0, MOVE_MAX_PER_SALE);
+      if (moves.length > MOVE_MAX_PER_SALE) phaseSkips.push(...moves.slice(MOVE_MAX_PER_SALE).map((m) => ({ symbol: m.symbol, why: `more than ${MOVE_MAX_PER_SALE} moves in one sale` })));
       for (const m of moves.slice(0, MOVE_MAX_PER_SALE)) {
-        if (this.d.now().getTime() - t0 > MOVE_SEND_WINDOW_MS || yieldNow()) break;
-        if (mv.room && !mv.room()) {
-          this.d.log?.("move_phase_no_room", { reason: o.reason, sent, left: moves.length - sent });
+        if (this.d.now().getTime() - t0 > MOVE_SEND_WINDOW_MS) {
+          notSentWhy = `send window of ${MOVE_SEND_WINDOW_MS} ms over`;
           break;
         }
+        if (yieldNow()) {
+          notSentWhy = "a sale that goes first was asked for";
+          break;
+        }
+        if (mv.room && !mv.room()) {
+          this.d.log?.("move_phase_no_room", { reason: o.reason, sent, left: moves.length - sent });
+          notSentWhy = "no room in the request budget";
+          break;
+        }
+        tried++;
+        triedSoFar = tried;
         const sentAtMs = this.d.now().getTime();
         const cid = MOVE_SETS_CLIENT_ID.on ? `${MOVE_CLIENT_ID_PREFIX}${o.tradeDate.replaceAll("-", "")}-${m.symbol}-${sentAtMs.toString(36)}` : undefined;
-        const row: MoveRow = { reason: o.reason, symbol: m.symbol, qty: m.qty, oldId: m.legId, newId: null, groupId: m.groupId, limit: m.limit, oldLimit: m.oldLimit, stopPrice: m.stopPrice, bid: m.bid, quoteAgeMs: m.quoteAgeMs, sentAtMs, answerMs: 0, accepted: false, answer: null, httpStatus: null, clientId: cid ?? null, filledAtMs: null, timeToFillMs: null, filledQtySeen: null, stopCancelledByAlpaca: null, fallback: null, liveUpdates: live };
+        const row: MoveRow = { reason: o.reason, symbol: m.symbol, qty: m.qty, oldId: m.legId, newId: null, groupId: m.groupId, limit: m.limit, oldLimit: m.oldLimit, stopPrice: m.stopPrice, bid: m.bid, quoteAgeMs: m.quoteAgeMs, tradePrice: m.tradePrice, tradeAgeMs: m.tradeAgeMs, sentAtMs, answerMs: 0, accepted: false, answer: null, httpStatus: null, clientId: cid ?? null, filledAtMs: null, timeToFillMs: null, filledQtySeen: null, stopCancelledByAlpaca: null, fallback: null, fallbackSoldQty: 0, liveUpdates: live };
         moveRows.push(row);
         mv.watch.expect(m.groupId, m.legId, m.qty); // before the send: a fill may come before the answer
         const r = await this.d.gate.replace({ orderId: m.legId, symbol: m.symbol, qty: m.qty, limitPrice: m.limit, ...(cid ? { clientOrderId: cid } : {}), reason: `${o.reason}, moved take-profit`, timeoutMs: MOVE_REPLACE_TIMEOUT_MS }, { positions: held, open, atMs: readAtMs, maxAgeMs: MOVE_VIEW_MAX_AGE_MS });
@@ -695,11 +746,14 @@ export class Liquidator {
           // No further replace after a rate-limit answer or an unclear one: the rest take today's path.
           if (r.status === "error" && (r.unclear || r.httpStatus === 429)) {
             (steps.replaces ??= []).push({ symbol: m.symbol, at: stamp(), accepted: false });
+            notSentWhy = r.httpStatus === 429 ? "no further move after a rate-limit answer" : "no further move after an unclear answer";
             break;
           }
         }
         (steps.replaces ??= []).push({ symbol: m.symbol, at: stamp(), accepted: row.accepted });
       }
+      if (notSentWhy) phaseSkips.push(...moves.slice(tried, MOVE_MAX_PER_SALE).map((m) => ({ symbol: m.symbol, why: notSentWhy! })));
+      unsentListed = true;
       if (accepted.length > 0) {
         // Bounded by time: until every accepted move has filled, or MOVE_FILL_WAIT_MS after the last one was sent. Each wait ends early at a
         // live update for these symbols; the count is a backstop against a burst of updates (no request is made here).
@@ -725,6 +779,7 @@ export class Liquidator {
       const mv = this.d.moves;
       const firstCancel = steps.cancelsSentAt[0] ? Date.parse(steps.cancelsSentAt[0]) : null;
       for (const row of moveRows.splice(0)) {
+        row.fallbackSoldQty = marketSentBy.get(row.symbol) ?? 0;
         if (mv) {
           const seen = mv.watch.seen(row.groupId);
           if (!row.newId && seen.newId && (row.answer ?? "").startsWith("unclear")) row.newId = seen.newId; // an unclear replace that happened
@@ -1147,6 +1202,7 @@ export class Liquidator {
           if (r.status === "sent") {
             if (own) (result.ownTarget ??= {})[p.symbol] = (soldBy.get(p.symbol) ?? 0) + cap; // fix A: the recount at this sale
             soldBy.set(p.symbol, (soldBy.get(p.symbol) ?? 0) + free);
+            marketSentBy.set(p.symbol, (marketSentBy.get(p.symbol) ?? 0) + free);
             soldThisRound++;
             result.sold.push({ symbol: p.symbol, qty: free });
             steps.sells.push({ symbol: p.symbol, qty: free, at: stamp() });

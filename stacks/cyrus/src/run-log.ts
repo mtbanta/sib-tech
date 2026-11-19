@@ -34,6 +34,7 @@ export const STORED_INFO_EVENTS = new Set([
   "move_phase_failed",
   "move_phase_none",
   "move_phase_no_room",
+  "move_phase_skips",
   "replace_refused",
   // Item 3 of 2026-11-16 (group 2, round 1): a missing-exit sale (the fast sale's too) that stood aside for a sale of the whole account or
   // the close-out, with its symbol (the stored `liquidation_result` row has none).

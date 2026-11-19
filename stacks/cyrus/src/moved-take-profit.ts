@@ -11,7 +11,8 @@
 //   - a single bracket's take-profit covers the symbol's whole holding and no other sell is open on the symbol (his answer "one bracket only");
 //   - the take-profit has filled nothing (partly filled legs keep today's path) and is plainly working (new or accepted);
 //   - its stop price is known (the order sync's copy of the entry, or the stored entry rounded as it was sent);
-//   - a fresh quote gives a selling limit (bid less 1 cent) at least 3 cents above the stop, and below the take-profit's own limit.
+//   - a quote read at the move (one snapshot request) gives a selling limit (bid less 1 cent) at least 3 cents above the stop, and below the
+//     take-profit's own limit; the quote may be up to MOVE_QUOTE_MAX_AGE_MS old (30 s, Michael's decision of 2026-11-19).
 // Everything else keeps today's path. The order of a sale with moves (his answer "moves first"): the replaces are sent, the sale waits up to
 // MOVE_FILL_WAIT_MS for them (ending early when the live updates report every one filled), then today's path runs unchanged for whatever is
 // still held: its cancel of every order (or, in a close-out's retry of named symbols, the single cancels from a fresh open list) also
@@ -30,8 +31,12 @@ export const MOVE_BELOW_BID = 0.01;
 export const MOVE_MIN_ABOVE_STOP = 0.03;
 // How long a move may take to fill before today's path takes over (Michael: "no fill within 2 s falls back").
 export const MOVE_FILL_WAIT_MS = 2_000;
-// A quote older than this is not used (the position takes today's path).
-export const MOVE_QUOTE_MAX_AGE_MS = 5_000;
+// A quote older than this is not used (the position takes today's path). Michael's decision of 2026-11-19 (about 11:20 AM CT): 30 s, was 5 s.
+// The age is that of the feed's own last quote change, not of the read: on the free IEX feed, at the 10:30 close-out of 2026-11-19, 6 of 10
+// brackets had quotes 5.5 to 94 s old in a read made at the move. Relying on the fallback: the stop stays live while the move waits, a limit
+// at or below the real bid fills at the real bid, a limit above it rests and falls back after MOVE_FILL_WAIT_MS, and a stray low bid fails
+// the 3 cent rule.
+export const MOVE_QUOTE_MAX_AGE_MS = 30_000;
 // Bounds on the phase (the advisor's point: one hung replace is 10 s): at most this many replaces in one sale, and none sent once this
 // long has passed since the phase began. What is not moved takes today's path.
 export const MOVE_MAX_PER_SALE = 30;
@@ -70,8 +75,15 @@ export interface MovePlan extends MoveCandidate {
   bid: number;
   ask: number;
   quoteAgeMs: number;
+  // The snapshot's latest trade, for the record only (null when it carried none).
+  tradePrice: number | null;
+  tradeAgeMs: number | null;
 }
-export type Skip = { symbol: string; why: string };
+// Why a position was not moved (Michael's request of 2026-11-19: stored for every position skipped, in every move phase). The prices are
+// given where the step that skipped it knew them.
+export type Skip = { symbol: string; why: string; stopPrice?: number; oldLimit?: number; bid?: number; quoteAgeMs?: number; tradePrice?: number | null; tradeAgeMs?: number | null };
+// A quote as the move reads it (the latest trade only when the snapshot carried one).
+export type QuoteIn = { bid: number; ask: number; atMs: number; tradePrice?: number; tradeAtMs?: number };
 
 // Step 1, from the reads the sale already makes (no request): the positions whose one bracket could be moved, before any price is known.
 // Without `stopFor` the stop is not checked here (`stopPrice` is NaN): the sale then looks the stops up for these candidates (withStops).
@@ -116,42 +128,46 @@ export function withStops(candidates: MoveCandidate[], stops: ReadonlyMap<string
   const skipped: Skip[] = [];
   for (const c of candidates) {
     const s = stops.get(c.legId);
-    if (!(s !== undefined && s > 0 && Number.isFinite(s))) skipped.push({ symbol: c.symbol, why: "stop price unknown" });
+    if (!(s !== undefined && s > 0 && Number.isFinite(s))) skipped.push({ symbol: c.symbol, why: "stop price unknown", oldLimit: c.oldLimit });
     // No price can qualify unless the take-profit sits at least 4 cents above the stop (the selling limit must be at least 3 cents above
     // the stop and at least 1 cent below the take-profit). A load bracket at the defaults (1 cent up, 2 cents down) never qualifies, so a
     // sale of only such positions makes no quote read and does not wait for one. An afternoon load window given a wider stop or
     // take-profit (Michael's request of 2026-11-18) can qualify, by this same rule.
-    else if (!(c.oldLimit - s >= MOVE_MIN_ABOVE_STOP + 0.01 - EPS)) skipped.push({ symbol: c.symbol, why: "take-profit within 4 cents of the stop" });
+    else if (!(c.oldLimit - s >= MOVE_MIN_ABOVE_STOP + 0.01 - EPS)) skipped.push({ symbol: c.symbol, why: "take-profit within 4 cents of the stop", stopPrice: s, oldLimit: c.oldLimit });
     else out.push({ ...c, stopPrice: s });
   }
   return { candidates: out, skipped };
 }
 
 // Step 2, with the quote: the selling limit and the 3 cent rule.
-export function pricedMoves(candidates: MoveCandidate[], quotes: ReadonlyMap<string, { bid: number; ask: number; atMs: number }>, nowMs: number): { moves: MovePlan[]; skipped: Skip[] } {
+export function pricedMoves(candidates: MoveCandidate[], quotes: ReadonlyMap<string, QuoteIn>, nowMs: number): { moves: MovePlan[]; skipped: Skip[] } {
   const moves: MovePlan[] = [];
   const skipped: Skip[] = [];
   for (const c of candidates) {
     const q = quotes.get(c.symbol);
+    const known = { stopPrice: c.stopPrice, oldLimit: c.oldLimit };
     if (!q) {
-      skipped.push({ symbol: c.symbol, why: "no quote" });
+      skipped.push({ symbol: c.symbol, why: "no quote", ...known });
       continue;
     }
     const age = nowMs - q.atMs;
+    const tradePrice = typeof q.tradePrice === "number" ? q.tradePrice : null;
+    const tradeAgeMs = tradePrice !== null && typeof q.tradeAtMs === "number" ? Math.max(0, nowMs - q.tradeAtMs) : null;
+    const seen = { ...known, bid: q.bid, quoteAgeMs: Math.max(0, age), tradePrice, tradeAgeMs };
     if (age > MOVE_QUOTE_MAX_AGE_MS) {
-      skipped.push({ symbol: c.symbol, why: `quote ${Math.round(age / 1000)} s old` });
+      skipped.push({ symbol: c.symbol, why: `quote ${Math.round(age / 1000)} s old`, ...seen });
       continue;
     }
     const limit = floorCents(q.bid - MOVE_BELOW_BID);
     if (!(limit >= c.stopPrice + MOVE_MIN_ABOVE_STOP - EPS)) {
-      skipped.push({ symbol: c.symbol, why: "price within 3 cents of the stop" });
+      skipped.push({ symbol: c.symbol, why: "price within 3 cents of the stop", ...seen });
       continue;
     }
     if (!(limit < c.oldLimit - EPS)) {
-      skipped.push({ symbol: c.symbol, why: "take-profit already at or below the price" });
+      skipped.push({ symbol: c.symbol, why: "take-profit already at or below the price", ...seen });
       continue;
     }
-    moves.push({ ...c, limit, bid: q.bid, ask: q.ask, quoteAgeMs: Math.max(0, age) });
+    moves.push({ ...c, limit, bid: q.bid, ask: q.ask, quoteAgeMs: Math.max(0, age), tradePrice, tradeAgeMs });
   }
   return { moves, skipped };
 }
@@ -170,6 +186,9 @@ export interface MoveRow {
   stopPrice: number;
   bid: number;
   quoteAgeMs: number;
+  // The snapshot's latest trade at the move, for the record (Michael's request of 2026-11-19); null when it carried none.
+  tradePrice: number | null;
+  tradeAgeMs: number | null;
   sentAtMs: number;
   answerMs: number;
   accepted: boolean;
@@ -189,6 +208,11 @@ export interface MoveRow {
   // From the sale's first read of positions after the wait (no extra request): true when the symbol was still held, so today's path had
   // shares to cancel and sell; false when they were gone; null when that read failed. Whether the live updates were connected at the start.
   fallback: boolean | null;
+  // Michael's request of 2026-11-19: whether the backup step actually sold. The shares of this symbol that today's path (the fallback's
+  // market sales, `cyrus-x-`) was sent to sell in this sale after the move; 0 when it sent none (for example the move filled after the read
+  // above but before the fallback's cancel, as three moves did on 2026-11-19). Sent, not filled: the close-out's own wait and the order
+  // records say when it filled.
+  fallbackSoldQty: number;
   liveUpdates: boolean | null;
 }
 

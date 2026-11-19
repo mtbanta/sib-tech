@@ -3,6 +3,15 @@
 import type { Settings } from "./config.ts";
 import type { Bar } from "./screen.ts";
 
+// A quote for the moved take-profit; the latest trade (price and time) only when the snapshot carried one, for the record.
+export interface MoveQuote {
+  bid: number;
+  ask: number;
+  atMs: number;
+  tradePrice?: number;
+  tradeAtMs?: number;
+}
+
 const DAILY_BARS_MAX_PAGES = 50;
 export class AlpacaData {
   private readonly settings: Settings;
@@ -32,14 +41,26 @@ export class AlpacaData {
 
   // The moved take-profit (Michael's decision of 2026-11-18): the latest bid and ask of several symbols in ONE request (market data, not the
   // trading bucket of 200 a minute), with a short time limit: a sale must not wait on it. A symbol without a usable quote is left out.
-  async latestQuotes(symbols: readonly string[], timeoutMs = 1_000): Promise<Map<string, { bid: number; ask: number; atMs: number }>> {
-    const out = new Map<string, { bid: number; ask: number; atMs: number }>();
+  // Michael's request of 2026-11-19: one multi-symbol snapshot request (`/v2/stocks/snapshots`), which also carries each symbol's latest
+  // trade; the trade is kept for the record only (the stored skip reasons and move rows), never for the price. Measured on paper on
+  // 2026-11-19 with 20 symbols: 54 to 82 ms, 316 ms on the first call, against 49 to 60 ms for the latest-quotes request.
+  async latestQuotes(symbols: readonly string[], timeoutMs = 1_000): Promise<Map<string, MoveQuote>> {
+    const out = new Map<string, MoveQuote>();
     const list = [...new Set(symbols)].filter((s) => /^[A-Z.]{1,6}$/.test(s));
     if (list.length === 0) return out;
-    const body = (await this.get("/v2/stocks/quotes/latest", { symbols: list.join(",") }, this.feed, timeoutMs)) as { quotes?: Record<string, { bp?: number; ap?: number; t?: string }> };
-    for (const [sym, q] of Object.entries(body.quotes ?? {})) {
+    type Snap = { latestQuote?: { bp?: number; ap?: number; t?: string } | null; latestTrade?: { p?: number; t?: string } | null };
+    const raw = (await this.get("/v2/stocks/snapshots", { symbols: list.join(",") }, this.feed, timeoutMs)) as Record<string, Snap | null> & { snapshots?: Record<string, Snap | null> };
+    const body: Record<string, Snap | null> = raw.snapshots && typeof raw.snapshots === "object" ? raw.snapshots : raw;
+    for (const sym of list) {
+      const snap = body[sym];
+      const q = snap?.latestQuote;
+      if (!q) continue;
       const atMs = q.t ? Date.parse(q.t) : NaN;
-      if (typeof q.bp === "number" && typeof q.ap === "number" && q.bp > 0 && q.ap >= q.bp && Number.isFinite(atMs)) out.set(sym, { bid: q.bp, ask: q.ap, atMs });
+      if (!(typeof q.bp === "number" && typeof q.ap === "number" && q.bp > 0 && q.ap >= q.bp && Number.isFinite(atMs))) continue;
+      const t = snap?.latestTrade;
+      const tradeAtMs = t?.t ? Date.parse(t.t) : NaN;
+      const trade = t && typeof t.p === "number" && t.p > 0 && Number.isFinite(tradeAtMs) ? { tradePrice: t.p, tradeAtMs } : {};
+      out.set(sym, { bid: q.bp, ask: q.ap, atMs, ...trade });
     }
     return out;
   }
