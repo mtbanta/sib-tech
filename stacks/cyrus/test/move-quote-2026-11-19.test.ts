@@ -200,3 +200,22 @@ test("the move row carries the snapshot's last trade for the record; the selling
   const r = w.rows()[0]!;
   assert.deepEqual([r.limit, r.bid, r.tradePrice, r.tradeAgeMs], [19.99, 20, 20.03, 1_500]);
 });
+
+test("group 2, round 1 note: the skip row lists at most 40 positions and counts the rest; with 35 qualifying, 30 move and the other 5 are listed once (more than 30), nothing moved is listed", async () => {
+  const w = world();
+  for (let i = 0; i < 45; i++) await loadDay(w, `L${String.fromCharCode(65 + Math.floor(i / 26))}${String.fromCharCode(65 + (i % 26))}`, 5 + i * 0.1);
+  await w.liquidator.flatten({ reason: "close-out", tradeDate: D });
+  w.sim.advance(5_000);
+  const sk = w.skips()[0]!;
+  assert.deepEqual([sk.positions, sk.skipped.length, sk.more], [45, 40, 5]);
+  const v = world();
+  for (let i = 0; i < 35; i++) await hold(v, `Q${String.fromCharCode(65 + Math.floor(i / 26))}${String.fromCharCode(65 + (i % 26))}`, 1, 20, 19.92, 20.05);
+  await v.liquidator.flatten({ reason: "close-out", tradeDate: D });
+  v.sim.advance(5_000);
+  const moved = new Set(v.rows().map((r) => r.symbol));
+  const listed = v.skips()[0]!.skipped;
+  assert.equal(moved.size, 30);
+  assert.equal(listed.length, 5);
+  assert.ok(listed.every((s) => s.why === "more than 30 moves in one sale" && !moved.has(String(s.symbol))));
+  assert.equal(new Set(listed.map((s) => s.symbol)).size, 5, "each listed once");
+});
