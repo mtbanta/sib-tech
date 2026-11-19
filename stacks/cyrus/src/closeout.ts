@@ -50,6 +50,10 @@ export interface CloseoutOptions {
   // inside 60 requests a minute even with many positions). The account counts as flat only when Alpaca shows no position at all, so
   // the result is read from the whole account afterwards (one request).
   onlySymbols?: string[];
+  // Michael's decision B of 2026-11-19 (logging only): when this close-out was due (its scheduled time: the mid-day pause, the afternoon
+  // window's end, the regular close-out time; null for a retry, whose time is its retry gap) and when the worker's tick (every 5 s) decided
+  // to start it. Stored in `closeout_result.timing` with the close-out's own start, its sale's start and its move step's start.
+  timing?: { dueAt: string | null; triggeredAt: string };
 }
 
 // "midday": the mid-day cycle (Michael, 2026-11-09). It sells the same way, but leaves the borrowing cap alone (the account stays
@@ -199,7 +203,10 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
     waitedMs = d.now().getTime() - t0;
   }
   const errors = res.errors.filter((e) => !benignError(e));
-  await d.store.addEvent(flat ? "info" : "error", "closeout_result", { path, flat, remaining: flat ? [] : remaining, sold: res.sold, errors: res.errors.slice(0, 8), waitedMs, steps: res.steps ?? null }).catch(() => undefined);
+  // Decision B of 2026-11-19 (logging only): when the close-out was due, triggered, started (this call, before its clock read), its sale's
+  // start (its turn in the sale queue) and its move step's start (null when no move phase ran). Always stored, even when nothing was sent.
+  const timing = { dueAt: options.timing?.dueAt ?? null, triggeredAt: options.timing?.triggeredAt ?? null, startedAt: new Date(startedAt).toISOString(), saleStartedAt: res.startedAt ?? null, movePhaseStartedAt: res.movePhaseStartedAt ?? null };
+  await d.store.addEvent(flat ? "info" : "error", "closeout_result", { path, flat, remaining: flat ? [] : remaining, sold: res.sold, errors: res.errors.slice(0, 8), waitedMs, steps: res.steps ?? null, timing }).catch(() => undefined);
   if (flat) {
     // Flat, but something went wrong on the way (a sell was refused and had to be repeated): say so. Waiting for Alpaca to fill
     // our own sells, or Alpaca saying a cancel was already under way, is not a problem.

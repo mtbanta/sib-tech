@@ -135,7 +135,7 @@ test("the strategy prices a load entry's exits with the values in force at the t
 
 // ---------------- the moves: the same rule, no separate change (Michael's confirmation of 2026-11-18) ----------------
 
-test("the moves qualify load positions by the same rule once the stop is wider: stop 5 take 3 qualifies at bids from 1 cent below to 3 cents above the entry", () => {
+test("the moves qualify load positions by the same rule (the 2 cent margin since Michael's decision A of 2026-11-19): stop 5 take 3 qualifies at bids from 2 cents below to 3 cents above the entry; the default bracket only at a bid at its take-profit", () => {
   const L = 5.0;
   const cand = (stopCents: number, takeCents: number): MoveCandidate => ({ symbol: "AAA", qty: 1, legId: "tp", groupId: "g", oldLimit: Math.round((L + takeCents / 100) * 100) / 100, stopPrice: 0 });
   const qualifies = (stopCents: number, takeCents: number, bid: number): boolean => {
@@ -146,10 +146,11 @@ test("the moves qualify load positions by the same rule once the stop is wider: 
   };
   const bids = [4.97, 4.98, 4.99, 5.0, 5.01, 5.02, 5.03, 5.04, 5.05];
   const which = (s: number, t: number) => bids.filter((b) => qualifies(s, t, b));
-  assert.deepEqual(which(2, 1), [], "today's load bracket (2 down, 1 up) never qualifies");
-  assert.deepEqual(which(5, 3), [4.99, 5.0, 5.01, 5.02, 5.03], "stop 5 take 3: bids 4.99 to 5.03");
-  assert.deepEqual(which(5, 1), [4.99, 5.0, 5.01], "stop 5 take 1: bids 4.99 to 5.01");
-  assert.deepEqual(which(2, 3), [5.02, 5.03], "stop 2 take 3: bids 5.02 and 5.03");
+  // The selling limit (bid less 1 cent) at least 2 cents above the stop and below the take-profit (3 cents with the 3 cent margin before).
+  assert.deepEqual(which(2, 1), [5.01], "the default load bracket (2 down, 1 up): only at a bid at its take-profit (limit 5.00, the stop plus 2 cents); never with 3 cents");
+  assert.deepEqual(which(5, 3), [4.98, 4.99, 5.0, 5.01, 5.02, 5.03], "stop 5 take 3: bids 4.98 to 5.03 (4.99 to 5.03 with 3 cents)");
+  assert.deepEqual(which(5, 1), [4.98, 4.99, 5.0, 5.01], "stop 5 take 1: bids 4.98 to 5.01");
+  assert.deepEqual(which(2, 3), [5.01, 5.02, 5.03], "stop 2 take 3: bids 5.01 to 5.03");
 });
 
 // ---------------- through the worker ----------------

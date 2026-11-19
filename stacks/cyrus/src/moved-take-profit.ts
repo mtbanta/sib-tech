@@ -11,7 +11,8 @@
 //   - a single bracket's take-profit covers the symbol's whole holding and no other sell is open on the symbol (his answer "one bracket only");
 //   - the take-profit has filled nothing (partly filled legs keep today's path) and is plainly working (new or accepted);
 //   - its stop price is known (the order sync's copy of the entry, or the stored entry rounded as it was sent);
-//   - a quote read at the move (one snapshot request) gives a selling limit (bid less 1 cent) at least 3 cents above the stop, and below the
+//   - a quote read at the move (one snapshot request) gives a selling limit (bid less 1 cent) at least 2 cents above the stop (3 cents until
+//     Michael's decision A of 2026-11-19), and below the
 //     take-profit's own limit; the quote may be up to MOVE_QUOTE_MAX_AGE_MS old (30 s, Michael's decision of 2026-11-19).
 // Everything else keeps today's path. The order of a sale with moves (his answer "moves first"): the replaces are sent, the sale waits up to
 // MOVE_FILL_WAIT_MS for them (ending early when the live updates report every one filled), then today's path runs unchanged for whatever is
@@ -27,15 +28,21 @@ import { OPEN_STATUSES, flattenLegs } from "./sells.ts";
 export const MOVED_TAKE_PROFIT = { on: true };
 // The selling limit: the bid less this, in dollars.
 export const MOVE_BELOW_BID = 0.01;
-// The smallest gap between the selling limit and the stop (Michael's scope; the smallest gap Alpaca accepted on 2026-11-18 was 3 cents).
-export const MOVE_MIN_ABOVE_STOP = 0.03;
+// The smallest gap between the selling limit and the stop. Michael's decision A of 2026-11-19 (evening): "lower the move's margin from 3
+// cents to 2 cents above the stop" (it was 3, the smallest gap Alpaca had accepted on paper on 2026-11-18; 1 or 2 cents was not tested).
+// Inferred, not measured: Alpaca's refusal text ("take_profit.limit_price must be > stop_loss.stop_price") suggests any gap above the stop
+// is accepted; a refused replace is stored with Alpaca's answer and the shares are sold by today's path, so a refusal costs one request.
+// At the flatten of 2026-11-19 every skip was this rule: with 2 cents, 8 more of its 14 skipped positions would have qualified.
+export const MOVE_MIN_ABOVE_STOP = 0.02;
+// The margin in whole cents, for the skip reasons' wording.
+export const MOVE_MIN_ABOVE_STOP_CENTS = Math.round(MOVE_MIN_ABOVE_STOP * 100);
 // How long a move may take to fill before today's path takes over (Michael: "no fill within 2 s falls back").
 export const MOVE_FILL_WAIT_MS = 2_000;
 // A quote older than this is not used (the position takes today's path). Michael's decision of 2026-11-19 (about 11:20 AM CT): 30 s, was 5 s.
 // The age is that of the feed's own last quote change, not of the read: on the free IEX feed, at the 10:30 close-out of 2026-11-19, 6 of 10
 // brackets had quotes 5.5 to 94 s old in a read made at the move. Relying on the fallback: the stop stays live while the move waits, a limit
 // at or below the real bid fills at the real bid, a limit above it rests and falls back after MOVE_FILL_WAIT_MS, and a stray low bid fails
-// the 3 cent rule.
+// the margin rule (MOVE_MIN_ABOVE_STOP).
 export const MOVE_QUOTE_MAX_AGE_MS = 30_000;
 // Bounds on the phase (the advisor's point: one hung replace is 10 s): at most this many replaces in one sale, and none sent once this
 // long has passed since the phase began. What is not moved takes today's path.
@@ -129,17 +136,22 @@ export function withStops(candidates: MoveCandidate[], stops: ReadonlyMap<string
   for (const c of candidates) {
     const s = stops.get(c.legId);
     if (!(s !== undefined && s > 0 && Number.isFinite(s))) skipped.push({ symbol: c.symbol, why: "stop price unknown", oldLimit: c.oldLimit });
-    // No price can qualify unless the take-profit sits at least 4 cents above the stop (the selling limit must be at least 3 cents above
-    // the stop and at least 1 cent below the take-profit). A load bracket at the defaults (1 cent up, 2 cents down) never qualifies, so a
-    // sale of only such positions makes no quote read and does not wait for one. An afternoon load window given a wider stop or
-    // take-profit (Michael's request of 2026-11-18) can qualify, by this same rule.
-    else if (!(c.oldLimit - s >= MOVE_MIN_ABOVE_STOP + 0.01 - EPS)) skipped.push({ symbol: c.symbol, why: "take-profit within 4 cents of the stop", stopPrice: s, oldLimit: c.oldLimit });
+    // No price can qualify unless the take-profit sits at least the margin plus 1 cent above the stop (the selling limit must be at least
+    // MOVE_MIN_ABOVE_STOP above the stop, 2 cents since Michael's decision A of 2026-11-19, and at least 1 cent below the take-profit: so 3
+    // cents in all, 4 before). Since decision A a load bracket at the defaults (1 cent up, 2 cents down: exactly 3 cents apart) passes this
+    // step, so a sale holding load positions makes the quote read (one market-data request, outside the trading budget, limit 1 s), and such
+    // a position moves only at a bid exactly at its take-profit (limit = take-profit less 1 cent = stop plus 2 cents; a higher bid gives a
+    // limit at or above the take-profit, which pricedMoves skips); a sale with any move
+    // then waits for it (up to MOVE_FILL_WAIT_MS) before today's path. Before decision A such a bracket never qualified and a sale of only
+    // such positions made no quote read. An afternoon load window given a wider stop or take-profit (Michael's request of 2026-11-18) can
+    // qualify, by this same rule.
+    else if (!(c.oldLimit - s >= MOVE_MIN_ABOVE_STOP + 0.01 - EPS)) skipped.push({ symbol: c.symbol, why: `take-profit within ${MOVE_MIN_ABOVE_STOP_CENTS + 1} cents of the stop`, stopPrice: s, oldLimit: c.oldLimit });
     else out.push({ ...c, stopPrice: s });
   }
   return { candidates: out, skipped };
 }
 
-// Step 2, with the quote: the selling limit and the 3 cent rule.
+// Step 2, with the quote: the selling limit and the margin rule (MOVE_MIN_ABOVE_STOP, 2 cents since Michael's decision A of 2026-11-19).
 export function pricedMoves(candidates: MoveCandidate[], quotes: ReadonlyMap<string, QuoteIn>, nowMs: number): { moves: MovePlan[]; skipped: Skip[] } {
   const moves: MovePlan[] = [];
   const skipped: Skip[] = [];
@@ -160,7 +172,7 @@ export function pricedMoves(candidates: MoveCandidate[], quotes: ReadonlyMap<str
     }
     const limit = floorCents(q.bid - MOVE_BELOW_BID);
     if (!(limit >= c.stopPrice + MOVE_MIN_ABOVE_STOP - EPS)) {
-      skipped.push({ symbol: c.symbol, why: "price within 3 cents of the stop", ...seen });
+      skipped.push({ symbol: c.symbol, why: `price within ${MOVE_MIN_ABOVE_STOP_CENTS} cents of the stop`, ...seen });
       continue;
     }
     if (!(limit < c.oldLimit - EPS)) {

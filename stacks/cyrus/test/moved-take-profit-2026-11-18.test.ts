@@ -71,15 +71,35 @@ test("rules: one bracket's take-profit covering the whole holding qualifies; two
   assert.equal(withStops(c, new Map([["tp-1", 19.92]])).candidates[0]!.stopPrice, 19.92);
 });
 
-test("rules: the selling limit is the bid less 1 cent, at least 3 cents above the stop, below the take-profit, from a quote at most 30 s old (5 s until Michael's decision of 2026-11-19)", () => {
+test("rules: the selling limit is the bid less 1 cent, at least 2 cents above the stop (3 until Michael's decision A of 2026-11-19), below the take-profit, from a quote at most 30 s old (5 s until Michael's decision of 2026-11-19)", () => {
   const c = [{ symbol: "AAA", qty: 1, legId: "tp", groupId: "g", oldLimit: 20.05, stopPrice: 19.95 }];
   const q = (bid: number, ageMs = 0) => new Map([["AAA", { bid, ask: bid + 0.01, atMs: 1_000_000 - ageMs }]]);
-  assert.equal(pricedMoves(c, q(19.99), 1_000_000).moves[0]!.limit, 19.98, "19.98 is exactly 3 cents above 19.95: allowed");
-  assert.equal(pricedMoves(c, q(19.98), 1_000_000).moves.length, 0, "19.97 is 2 cents above the stop: today's path");
+  assert.equal(pricedMoves(c, q(19.99), 1_000_000).moves[0]!.limit, 19.98, "19.98 is 3 cents above 19.95: allowed");
+  assert.equal(pricedMoves(c, q(19.98), 1_000_000).moves[0]!.limit, 19.97, "19.97 is exactly 2 cents above the stop: allowed since decision A");
+  assert.equal(pricedMoves(c, q(19.97), 1_000_000).moves.length, 0, "19.96 is 1 cent above the stop: today's path");
+  assert.equal(pricedMoves(c, q(19.97), 1_000_000).skipped[0]!.why, "price within 2 cents of the stop");
   assert.equal(pricedMoves(c, q(20.06), 1_000_000).moves.length, 0, "the take-profit is already at or below the price");
   assert.equal(pricedMoves(c, q(19.99, 31_000), 1_000_000).moves.length, 0, "a stale quote");
   assert.equal(pricedMoves(c, new Map(), 1_000_000).skipped[0]!.why, "no quote");
   assert.equal(pricedMoves([{ ...c[0]!, stopPrice: 19.5 }], q(20.0049), 1_000_000).moves[0]!.limit, 19.99, "rounded down to the cent");
+});
+
+test("decision A of 2026-11-19, boundaries at real prices: exactly 2 cents above the stop qualifies and 1 cent does not; a take-profit exactly 3 cents above the stop passes the first step and 2 cents does not (no float noise either side)", () => {
+  // Prices from the stack's own brackets of 2026-11-18 and 2026-11-19 (stop, then the selling limit 2 and 1 cents above it).
+  for (const stop of [5.23, 6.62, 7.81, 11.25, 12.78, 13.34, 24.71, 34.39, 117.55, 159.19]) {
+    const two = Math.round((stop + 0.02) * 100) / 100;
+    const one = Math.round((stop + 0.01) * 100) / 100;
+    const c = [{ symbol: "AAA", qty: 1, legId: "tp", groupId: "g", oldLimit: Math.round((stop + 0.08) * 100) / 100, stopPrice: stop }];
+    const at = (bid: number) => pricedMoves(c, new Map([["AAA", { bid, ask: bid + 0.01, atMs: 5_000 }]]), 5_000);
+    assert.equal(at(Math.round((two + 0.01) * 100) / 100).moves[0]?.limit, two, `stop ${stop}: a limit of ${two} qualifies`);
+    assert.equal(at(Math.round((one + 0.01) * 100) / 100).moves.length, 0, `stop ${stop}: a limit of ${one} does not`);
+    const tp3 = Math.round((stop + 0.03) * 100) / 100;
+    const tp2 = Math.round((stop + 0.02) * 100) / 100;
+    const cand = (oldLimit: number) => [{ symbol: "AAA", qty: 1, legId: "tp", groupId: "g", oldLimit, stopPrice: NaN }];
+    assert.equal(withStops(cand(tp3), new Map([["tp", stop]])).candidates.length, 1, `stop ${stop}: a take-profit at ${tp3} (3 cents) passes the first step`);
+    const sk = withStops(cand(tp2), new Map([["tp", stop]])).skipped;
+    assert.deepEqual(sk.map((x) => x.why), ["take-profit within 3 cents of the stop"], `stop ${stop}: a take-profit at ${tp2} (2 cents) cannot qualify`);
+  }
 });
 
 // ---- the sell gate ----
@@ -107,7 +127,7 @@ test("sell gate: a replace adds no shares (never refused for the exits already o
 });
 
 // ---- the sale ----
-test("nothing qualifies (a load day: the take-profit within 4 cents of the stop): the trading requests are exactly today's, no replace, no quote read", async () => {
+test("a load day's brackets (1 cent up, 2 down) at a bid below the take-profit: since decision A of 2026-11-19 one quote read (market data), but the trading requests and the sells are exactly today's, no replace", async () => {
   const run = async (moves: boolean) => {
     const w = world({ moves });
     await loadDay(w, "AAA");
@@ -120,7 +140,48 @@ test("nothing qualifies (a load day: the take-profit within 4 cents of the stop)
   const on = await run(true);
   assert.deepEqual({ ...on, quotes: 0 }, { ...off, quotes: 0 }, "same trading requests, same sells at the same simulated times");
   assert.equal(on.replaces, 0);
-  assert.equal(on.quotes, 0, "no quote read either: a load day's bracket (1 cent up, 2 down) cannot qualify at any price, so the sale does not wait for one");
+  assert.equal(on.quotes, 1, "one quote read for both (decision A: a 3 cent bracket passes the first step); before it, none");
+  assert.equal(off.quotes, 0);
+});
+
+test("decision A of 2026-11-19: a load bracket (1 cent up, 2 down) whose bid is at its take-profit moves to the take-profit less 1 cent (the stop plus 2 cents), and fills", async () => {
+  const w = world();
+  await loadDay(w, "AAA"); // entry 5.00, take-profit 5.01, stop 4.98
+  w.bids.set("AAA", 5.01);
+  const r = await w.liquidator.flatten({ reason: "mid-day close-out", tradeDate: D });
+  w.sim.advance(3_000);
+  assert.deepEqual(w.sim.replaceLog.map((x) => x.change.limitPrice), [5]);
+  assert.equal(w.sim.heldQty("AAA"), 0);
+  assert.equal(w.sim.sellLog.length, 0, "sold by its move, no market sale");
+  assert.equal(w.sim.oversellAttempts, 0);
+  assert.equal(r.flat, true);
+  assert.equal(w.rows()[0]!.limit, 5);
+});
+
+test("decision A of 2026-11-19: a replace Alpaca refuses at exactly 2 cents above the stop is stored with its answer, the shares are sold by today's path, and the next move still goes out", async () => {
+  const w = world();
+  await normal(w, "AAA", 10); // stop 19.92, take-profit 20.05
+  await normal(w, "BBB", 10, 20);
+  w.bids.set("AAA", 19.95); // limit 19.94: exactly 2 cents above the stop
+  w.bids.set("BBB", 20.0);
+  const aaaTp = w.sim.orders.find((o) => o.symbol === "AAA")!.legs.find((l) => l.type === "limit")!.id;
+  w.sim.refuseReplaceIf = (id) => (id === aaaTp ? 422 : null);
+  const r = await w.liquidator.flatten({ reason: "close-out", tradeDate: D });
+  w.sim.advance(5_000);
+  const rows = w.rows();
+  const a = rows.find((x) => x.symbol === "AAA")!;
+  const b = rows.find((x) => x.symbol === "BBB")!;
+  assert.equal(a.limit, 19.94);
+  assert.equal(a.accepted, false);
+  assert.equal(a.httpStatus, 422);
+  assert.ok(a.answer && a.answer.length > 0, "Alpaca's answer stored");
+  assert.equal(b.accepted, true, "a definite refusal does not stop the next move");
+  assert.equal(w.sim.heldQty("AAA"), 0, "AAA sold by today's path");
+  assert.equal(w.sim.heldQty("BBB"), 0);
+  assert.deepEqual(w.sim.sellLog.map((x) => x.symbol), ["AAA"], "only the refused one sold at market");
+  assert.equal(a.fallbackSoldQty, 10);
+  assert.equal(w.sim.oversellAttempts, 0);
+  assert.equal(r.flat, true);
 });
 
 test("one qualifying position is sold by its moved take-profit (Alpaca cancels the stop); the others take today's path after the wait; one row stored", async () => {
