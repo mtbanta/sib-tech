@@ -12,11 +12,14 @@ import { SimBroker } from "./sim-broker.ts";
 
 const D = "2026-11-02";
 
-function world(opts: { room?: () => boolean } = {}) {
+function world(opts: { room?: () => boolean; logThrowsOn?: string; quotesFail?: boolean } = {}) {
   const sim = new SimBroker(Date.UTC(2026, 10, 2, 20, 50));
   sim.openShape20261118 = true;
   const logs: Array<{ e: string; d: Record<string, unknown> }> = [];
-  const log = (e: string, d?: Record<string, unknown>) => void logs.push({ e, d: d ?? {} });
+  const log = (e: string, d?: Record<string, unknown>) => {
+    if (e === opts.logThrowsOn) throw new Error("log boom");
+    logs.push({ e, d: d ?? {} });
+  };
   const gate = new SellGate({ broker: sim, say: async () => true, nowMs: () => sim.simMs, log });
   const watch = new MoveWatch(() => sim.simMs);
   sim.onOrderEvent = (event, o, atMs) => watch.onUpdate({ event, order: o, positionQty: null, atMs });
@@ -27,6 +30,7 @@ function world(opts: { room?: () => boolean } = {}) {
   const moves = {
     quotes: async (symbols: string[]) => {
       quoteCalls.push(symbols);
+      if (opts.quotesFail) throw new Error("market data down");
       return new Map(symbols.map((s) => {
         const bid = bids.get(s) ?? sim.prices.get(s)!;
         const t = trades.get(s);
@@ -47,7 +51,7 @@ function world(opts: { room?: () => boolean } = {}) {
   const liquidator = new Liquidator({ broker: sim, gate, now: () => new Date(sim.simMs), sleep: sim.sleep, log, moves });
   const rows = () => logs.filter((l) => l.e === "take_profit_moved").map((l) => l.d as unknown as MoveRow);
   const skips = () => logs.filter((l) => l.e === "move_phase_skips").map((l) => l.d as { reason: string; positions: number; moved: number; skipped: Array<Record<string, unknown>>; more?: number });
-  return { sim, logs, bids, ages, trades, quoteCalls, liquidator, rows, skips };
+  return { sim, logs, bids, ages, trades, quoteCalls, liquidator, rows, skips, gate };
 }
 
 async function hold(w: ReturnType<typeof world>, symbol: string, qty: number, price: number, stop: number, tp: number, n = 1) {
@@ -218,4 +222,41 @@ test("group 2, round 1 note: the skip row lists at most 40 positions and counts 
   assert.equal(listed.length, 5);
   assert.ok(listed.every((s) => s.why === "more than 30 moves in one sale" && !moved.has(String(s.symbol))));
   assert.equal(new Set(listed.map((s) => s.symbol)).size, 5, "each listed once");
+});
+
+test("group 1, round 1 note: a skip log that throws cannot reach the sale (round 1's cancels and sales go ahead, nothing reports a cancel failure)", async () => {
+  const w = world({ logThrowsOn: "move_phase_skips" });
+  await normal(w, "AAA", 10);
+  await loadDay(w, "BBB");
+  const r = await w.liquidator.flatten({ reason: "close-out", tradeDate: D });
+  w.sim.advance(3_000);
+  assert.equal(w.sim.heldQty("AAA") + w.sim.heldQty("BBB"), 0);
+  assert.ok(!r.errors.some((e) => /log boom/.test(e)), r.errors.join("; "));
+  assert.deepEqual(w.sim.sellLog.map((x) => x.symbol), ["BBB"], "the load position sold in round 1 after the moves, as without the throw");
+});
+
+test("group 1 and group 2, round 1 notes: a move phase that throws part way lists the moves it never tried as \"move phase failed\"; lookups that fail keep the old take-profit", async () => {
+  const w = world();
+  await normal(w, "AAA", 10);
+  await normal(w, "BBB", 10);
+  await normal(w, "CCC", 10);
+  const real = w.gate.replace.bind(w.gate);
+  let n = 0;
+  w.gate.replace = (async (...a: Parameters<typeof real>) => {
+    if (++n === 2) throw new Error("replace threw");
+    return real(...a);
+  }) as typeof w.gate.replace;
+  await w.liquidator.flatten({ reason: "close-out", tradeDate: D });
+  w.sim.advance(3_000);
+  assert.equal(w.sim.heldQty("AAA") + w.sim.heldQty("BBB") + w.sim.heldQty("CCC"), 0, "sold anyway");
+  assert.ok(w.logs.some((l) => l.e === "move_phase_failed"));
+  const rows = w.rows().map((r) => r.symbol);
+  const listed = w.skips()[0]!.skipped;
+  assert.deepEqual(rows.sort(), ["AAA", "BBB"], "a row for the one that went out and for the one whose send threw");
+  assert.deepEqual(listed.map((s) => [s.symbol, s.why]), [["CCC", "move phase failed"]]);
+  const q = world({ quotesFail: true });
+  await normal(q, "AAA", 10);
+  await q.liquidator.flatten({ reason: "close-out", tradeDate: D });
+  q.sim.advance(3_000);
+  assert.deepEqual(q.skips()[0]!.skipped, [{ symbol: "AAA", why: "quote read failed", oldLimit: 20.05 }]);
 });

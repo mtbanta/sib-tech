@@ -616,12 +616,21 @@ export class Liquidator {
     // move went out (before, only a phase with no move logged its skips). At most MOVE_SKIPS_STORED positions are listed; `more` counts the rest.
     let phaseSkips: Skip[] = [];
     const MOVE_SKIPS_STORED = 40;
+    // The moves this phase planned to send, how many it tried, and whether the ones not sent are already listed: if the phase throws
+    // part way (group 1 and group 2, round 1 notes), the moves never tried are listed as "move phase failed".
+    let sendList: Array<{ symbol: string }> = [];
+    let triedSoFar = 0;
+    let unsentListed = false;
     const movePhase = async (held: Position[], open: Order[], readAtMs: number): Promise<boolean> => {
       let sent = 0;
       phaseSkips = [];
+      sendList = [];
+      triedSoFar = 0;
+      unsentListed = false;
       try {
         sent = await movePhaseInner(held, open, readAtMs);
       } catch (err) {
+        if (!unsentListed) phaseSkips.push(...sendList.slice(triedSoFar).map((m) => ({ symbol: m.symbol, why: "move phase failed" })));
         this.d.log?.("move_phase_failed", { reason: o.reason, error: (err as Error).message.slice(0, 160), sent });
         // A replace may have gone out before the error (group 1 and group 2, round 2): round 1 then starts again and judges the moves as usual.
         sent = Math.max(sent, moveRows.some((r) => r.accepted || r.httpStatus !== null || r.answer === null || (r.answer ?? "").startsWith("unclear")) ? 1 : 0);
@@ -630,8 +639,14 @@ export class Liquidator {
       // Moves that were never sent (refused by the sell gate, or stopped before the send): today's path sells those shares.
       if (sent === 0) for (const row of moveRows) row.fallback ??= true;
       if (phaseSkips.length > 0) {
-        const positions = held.filter((p) => p.qty > EPS).length;
-        this.d.log?.("move_phase_skips", { reason: o.reason, positions, moved: moveRows.length, skipped: phaseSkips.slice(0, MOVE_SKIPS_STORED), ...(phaseSkips.length > MOVE_SKIPS_STORED ? { more: phaseSkips.length - MOVE_SKIPS_STORED } : {}) });
+        // Group 1, round 1 note: this log is outside the try above, so it gets its own catch (the phase never throws into the sale, which
+        // would skip round 1's cancels).
+        try {
+          const positions = held.filter((p) => p.qty > EPS).length;
+          this.d.log?.("move_phase_skips", { reason: o.reason, positions, moved: moveRows.length, skipped: phaseSkips.slice(0, MOVE_SKIPS_STORED), ...(phaseSkips.length > MOVE_SKIPS_STORED ? { more: phaseSkips.length - MOVE_SKIPS_STORED } : {}) });
+        } catch {
+          /* a record must never break a sale */
+        }
       }
       return sent > 0;
     };
@@ -642,7 +657,7 @@ export class Liquidator {
       phaseSkips.push(...structuralR.skipped);
       const structural = structuralR.candidates;
       if (structural.length === 0) return 0;
-      const skipAll = (list: Array<{ symbol: string }>, why: string) => phaseSkips.push(...list.map((c) => ({ symbol: c.symbol, why })));
+      const skipAll = (list: Array<{ symbol: string; oldLimit: number }>, why: string) => phaseSkips.push(...list.map((c) => ({ symbol: c.symbol, why, oldLimit: c.oldLimit })));
       let stops: ReadonlyMap<string, number>;
       try {
         // One time limit for the whole lookup (group 1, round 1): a stop not found by then is unknown (today's path). The timer is cleared so
@@ -691,6 +706,7 @@ export class Liquidator {
       // Why the moves after a stop were not sent (stored with the skips).
       let notSentWhy: string | null = null;
       let tried = 0;
+      sendList = moves.slice(0, MOVE_MAX_PER_SALE);
       if (moves.length > MOVE_MAX_PER_SALE) phaseSkips.push(...moves.slice(MOVE_MAX_PER_SALE).map((m) => ({ symbol: m.symbol, why: `more than ${MOVE_MAX_PER_SALE} moves in one sale` })));
       for (const m of moves.slice(0, MOVE_MAX_PER_SALE)) {
         if (this.d.now().getTime() - t0 > MOVE_SEND_WINDOW_MS) {
@@ -707,6 +723,7 @@ export class Liquidator {
           break;
         }
         tried++;
+        triedSoFar = tried;
         const sentAtMs = this.d.now().getTime();
         const cid = MOVE_SETS_CLIENT_ID.on ? `${MOVE_CLIENT_ID_PREFIX}${o.tradeDate.replaceAll("-", "")}-${m.symbol}-${sentAtMs.toString(36)}` : undefined;
         const row: MoveRow = { reason: o.reason, symbol: m.symbol, qty: m.qty, oldId: m.legId, newId: null, groupId: m.groupId, limit: m.limit, oldLimit: m.oldLimit, stopPrice: m.stopPrice, bid: m.bid, quoteAgeMs: m.quoteAgeMs, tradePrice: m.tradePrice, tradeAgeMs: m.tradeAgeMs, sentAtMs, answerMs: 0, accepted: false, answer: null, httpStatus: null, clientId: cid ?? null, filledAtMs: null, timeToFillMs: null, filledQtySeen: null, stopCancelledByAlpaca: null, fallback: null, fallbackSoldQty: 0, liveUpdates: live };
@@ -736,6 +753,7 @@ export class Liquidator {
         (steps.replaces ??= []).push({ symbol: m.symbol, at: stamp(), accepted: row.accepted });
       }
       if (notSentWhy) phaseSkips.push(...moves.slice(tried, MOVE_MAX_PER_SALE).map((m) => ({ symbol: m.symbol, why: notSentWhy! })));
+      unsentListed = true;
       if (accepted.length > 0) {
         // Bounded by time: until every accepted move has filled, or MOVE_FILL_WAIT_MS after the last one was sent. Each wait ends early at a
         // live update for these symbols; the count is a backstop against a burst of updates (no request is made here).
