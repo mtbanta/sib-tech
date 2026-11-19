@@ -16,6 +16,7 @@ import { MemoryStore } from "../src/store.ts";
 import { ensureDay } from "../src/morning.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
 import { MIDDAY_PHASE } from "../src/midday.ts";
+import { afternoonLoadWindow } from "../src/load-mode.ts";
 import { SimBroker } from "./sim-broker.ts";
 import { rig, settle, z, D } from "./rig.ts";
 
@@ -108,49 +109,118 @@ test("B: without the moved take-profit the move step is null; an already-flat cl
   assert.ok(Number.isFinite(iso(r2.timing.startedAt)) && Number.isFinite(iso(r2.timing.triggeredAt)));
 });
 
-test("B, through the worker: the mid-day close-out's first try is due at 10:30 and its retry has no due time; the regular close-out is due at its set time; triggered at or after it", async () => {
+// The rig's day in the session with one held bracket (AAA, 10 shares), stored as the gate would have.
+async function rigDay(opts: { loadAfternoon?: boolean } = {}) {
   const sim = new SimBroker(Date.UTC(2026, 10, 1, 22, 0));
-  const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim });
+  const r = rig<SimBroker>({ broker: sim, sleep: sim.sleep, simClock: sim, ...(opts.loadAfternoon ? { loadAfternoon: true } : {}) });
   await r.at("2026-11-01T22:10:00Z");
-  r.ownerSays("approve", "2026-11-01T22:20:00Z");
+  r.ownerSays("trades 20\nposition 300\napprove", "2026-11-01T22:20:00Z");
   await r.at("2026-11-01T22:20:10Z");
+  await r.at("14:15:00");
   await r.at("14:25:00");
   await r.at("14:30:05");
-  sim.advanceTo(z("16:00:00").getTime());
-  const id = clientOrderIdFor(D, "AAA", 1);
-  await sim.submitEntry({ symbol: "AAA", qty: 10, stopPrice: 45, takeProfitPrice: 55, referencePrice: 50, clientOrderId: id });
+  return { sim, r };
+}
+async function rigHold(sim: SimBroker, r: ReturnType<typeof rig<SimBroker>>, symbol: string, n: number) {
+  const id = clientOrderIdFor(D, symbol, n);
+  await sim.submitEntry({ symbol, qty: 10, stopPrice: 45, takeProfitPrice: 55, referencePrice: 50, clientOrderId: id });
   sim.fillEntry(id, 50);
-  await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "AAA", qty: 10, referencePrice: 50, stopPrice: 45, takeProfitPrice: 55, status: "filled", alpacaOrderId: null, filledQty: 10, filledAvgPrice: 50, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
-  sim.refuseSellsTimes = 1; // the first try's sale is refused once, so a retry follows
-  const tries = () => r.store.events.filter((e) => e.event === "closeout_result" && e.data!.path === "midday");
+  await r.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol, qty: 10, referencePrice: 50, stopPrice: 45, takeProfitPrice: 55, status: "filled", alpacaOrderId: null, filledQty: 10, filledAvgPrice: 50, note: null, createdAt: new Date(sim.simMs - 1000).toISOString() });
+}
+// The stored close-out results of one path, from the event at index `fromIdx` on (the memory store keeps no time on its events).
+const results = (r: ReturnType<typeof rig<SimBroker>>, path: string, fromIdx = 0) => r.store.events.slice(fromIdx).filter((e) => e.event === "closeout_result" && e.data!.path === path).map((e) => e.data as any);
+
+test("B, through the worker: the mid-day close-out's first try is due at 10:30 and its retry has no due time; the regular close-out is due at its set time and its retry has none; each triggered at or after it is due and started after it is triggered", async () => {
+  const { sim, r } = await rigDay();
+  sim.advanceTo(z("16:00:00").getTime());
+  await rigHold(sim, r, "AAA", 1);
+  sim.refuseSellsTimes = 100_000; // the first try cannot sell, so a retry follows
   await r.at("16:30:00");
-  await until(() => tries().length >= 1 && !r.worker["inflight"].has("midday"));
-  const first = tries()[0]!.data as any;
+  await until(() => results(r, "midday").length >= 1 && !r.worker["inflight"].has("midday"));
+  const first = results(r, "midday")[0]!;
+  assert.equal(first.flat, false, "the first try ended not flat");
   assert.equal(first.timing.dueAt, z("16:30:00").toISOString(), "the mid-day pause time");
   assert.ok(iso(first.timing.triggeredAt) >= iso(first.timing.dueAt));
   assert.ok(iso(first.timing.startedAt) >= iso(first.timing.triggeredAt));
-  if (!(await r.store.getDay(D))!.phases[MIDDAY_PHASE]) {
-    await r.at("16:30:25");
-    await until(() => tries().length >= 2 && !r.worker["inflight"].has("midday"));
-    assert.equal((tries()[1]!.data as any).timing.dueAt, null, "a retry: its time is its retry gap");
-  }
+  sim.refuseSellsTimes = 0;
+  await r.at("16:30:25");
+  await until(() => results(r, "midday").length >= 2 && !r.worker["inflight"].has("midday"));
+  const retry = results(r, "midday")[1]!;
+  assert.equal(retry.timing.dueAt, null, "a retry: its time is its retry gap");
+  assert.ok(Number.isFinite(iso(retry.timing.triggeredAt)));
+  await until(async () => Boolean((await r.store.getDay(D))!.phases[MIDDAY_PHASE]));
+  // The regular close-out (5 minutes before the close in the rig), its first try not flat, then a retry.
+  sim.advanceTo(z("20:50:00").getTime());
+  await rigHold(sim, r, "BBB", 1);
+  sim.refuseSellsTimes = 100_000;
   await r.at("20:55:00");
-  await until(() => r.store.events.some((e) => e.event === "closeout_result" && e.data!.path === "close-out") && !r.worker["inflight"].has("closeout"));
-  const reg = r.store.events.find((e) => e.event === "closeout_result" && e.data!.path === "close-out")!.data as any;
-  assert.equal(reg.timing.dueAt, z("20:55:00").toISOString(), "the regular close-out's set time (5 minutes before the close in the rig)");
+  await until(() => results(r, "close-out").length >= 1 && !r.worker["inflight"].has("closeout"));
+  const reg = results(r, "close-out")[0]!;
+  assert.equal(reg.flat, false);
+  assert.equal(reg.timing.dueAt, z("20:55:00").toISOString(), "the regular close-out's set time");
   assert.ok(iso(reg.timing.triggeredAt) >= iso(reg.timing.dueAt));
+  sim.refuseSellsTimes = 0;
+  const after = sim.simMs;
+  await r.at(new Date(after + 25_000).toISOString());
+  await until(() => results(r, "retry").length >= 1 && !r.worker["inflight"].has("closeout"));
+  assert.equal(results(r, "retry")[0]!.timing.dueAt, null, "the regular close-out's retry: no due time");
+});
+
+test("B, through the worker: the afternoon window's close-out is due at the window's end on its first try, and its retry has no due time", async () => {
+  const { sim, r } = await rigDay({ loadAfternoon: true });
+  await r.at("16:30:00");
+  await until(async () => Boolean((await r.store.getDay(D))!.phases[MIDDAY_PHASE]));
+  r.ownerSays("load afternoon", "16:40:00");
+  await r.at("16:40:05");
+  await r.at("16:40:10");
+  const end = afternoonLoadWindow((await r.store.getDay(D))!)!.end;
+  assert.ok(end.getTime() > sim.simMs, "the window is on");
+  await rigHold(sim, r, "AAA", 7);
+  sim.refuseSellsTimes = 100_000;
+  const from = r.store.events.length;
+  await r.at(end.toISOString());
+  await r.at(new Date(end.getTime() + 5_000).toISOString());
+  await until(() => results(r, "midday", from).length >= 1 && !r.worker["inflight"].has("midday"));
+  const first = results(r, "midday", from)[0]!;
+  assert.equal(first.flat, false);
+  assert.equal(first.timing.dueAt, end.toISOString(), "the window's end");
+  assert.ok(iso(first.timing.triggeredAt) >= end.getTime());
+  sim.refuseSellsTimes = 0;
+  await r.at(new Date(sim.simMs + 25_000).toISOString());
+  await until(() => results(r, "midday", from).length >= 2 && !r.worker["inflight"].has("midday"));
+  assert.equal(results(r, "midday", from)[1]!.timing.dueAt, null, "its retry");
+});
+
+test("B: the close-out's start is taken before its clock read (a slow clock read shows between the start and the sale's start)", async () => {
+  const w = world(CLOSE.getTime() - 15 * 60_000, false);
+  await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
+  await hold(w, "AAA", 10, 20, 1);
+  const clock = w.sim.getClock.bind(w.sim);
+  w.sim.getClock = async () => (w.sim.advance(700), clock());
+  await closeOut({ broker: w.sim, liquidator: w.liquidator, store: w.store, now: w.now, say: w.say as any, sleep: w.sim.sleep }, D, { closeAt: CLOSE, path: "midday", alert: false });
+  const t = result(w).timing;
+  assert.ok(iso(t.saleStartedAt) - iso(t.startedAt) >= 700, `${iso(t.saleStartedAt) - iso(t.startedAt)} ms from the start to the sale's start`);
 });
 
 // ---------------------------------------------------------------- D ----------------------------------------------------------------
 
 test("D: the label itself: a filled fresh stop is not a gap; any other end says where the lag is counted from", () => {
-  const f = freshEndedLabel({ status: "filled", stopClientOrderId: "cyrus-p-x", msFromSent: 799_342 });
+  const f = freshEndedLabel({ status: "filled", stopClientOrderId: "cyrus-p-x", msFromSent: 799_342, covering: true });
   assert.equal(f.notAGap, true);
   assert.match(String(f.label), /^fresh stop filled: not a gap/);
-  assert.deepEqual(f.freshStop, { status: "filled", stopClientOrderId: "cyrus-p-x", msFromSent: 799_342 });
-  const c = freshEndedLabel({ status: "canceled", stopClientOrderId: "cyrus-p-y", msFromSent: 1_000 });
+  assert.deepEqual(f.freshStop, { status: "filled", stopClientOrderId: "cyrus-p-x", msFromSent: 799_342, covering: true });
+  const c = freshEndedLabel({ status: "canceled", stopClientOrderId: "cyrus-p-y", msFromSent: 1_000, covering: true });
   assert.equal(c.notAGap, false);
-  assert.match(String(c.label), /^fresh stop ended \(canceled\): lagMs counts from the bracket stop's cancel/);
+  assert.match(String(c.label), /^fresh stop ended \(canceled\): the gap began at its end/);
+  for (const st of ["rejected", "unknown_at_alpaca"]) {
+    const n = freshEndedLabel({ status: st, stopClientOrderId: "cyrus-p-z", msFromSent: 500, covering: true });
+    assert.equal(n.notAGap, false);
+    assert.match(String(n.label), new RegExp(`^fresh stop never held at Alpaca \\(${st}\\): lagMs, from the bracket stop's cancel, is the gap`));
+  }
+  const u = freshEndedLabel({ status: "accepted", stopClientOrderId: "cyrus-p-w", msFromSent: 500, covering: false });
+  assert.equal(u.notAGap, false);
+  assert.match(String(u.label), /^fresh stop no longer covers the holding \(last seen accepted\)/);
+  assert.equal(freshEndedLabel({ status: "filled", stopClientOrderId: "cyrus-p-v", msFromSent: 5, covering: false }).notAGap, false, "not covering wins over filled");
 });
 
 test("D, RIOT's shape of 2026-11-19: the fresh stop fills while the sync's positions read still shows the share: the late record is labelled not a gap, nothing is sold, no alert", async () => {
@@ -196,7 +266,7 @@ test("D: a fresh stop cancelled by someone else more than 6 s after the bracket'
   await syncOrders(w.risk, dd, { protect: true, streamLive: true });
   const ln = w.events.find((e) => e.event === "late_notice")!;
   assert.equal(ln.data.notAGap, false);
-  assert.match(ln.data.label, /^fresh stop ended \(canceled\)/);
+  assert.match(ln.data.label, /^fresh stop ended \(canceled\): the gap began at its end/);
   assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["MARA", 3]], "sold as before");
 });
 
@@ -212,4 +282,25 @@ test("D: a late record without a fresh stop carries no label (unchanged)", async
   assert.ok(ln, "a late record");
   assert.equal("label" in ln.data, false);
   assert.equal("notAGap" in ln.data, false);
+});
+
+test("D, group 2's case: the fresh stop no longer covers the holding (shares added by an order the stack did not send): the label says so and does not claim the stop ended", async () => {
+  const w = world(MID, false);
+  const dd = (await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D), (await w.store.getDay(D))!);
+  const id = await hold(w, "RIOT", 13, 18, 19);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 12, 18.08);
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.ok(w.memory.freshStops.has(id));
+  w.sim.advance(30_000);
+  await w.sim.submitEntry({ symbol: "RIOT", qty: 2, stopPrice: 17.5, takeProfitPrice: 18.5, referencePrice: 18, clientOrderId: "by-hand-1" });
+  w.sim.fillEntry("by-hand-1", 18);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  const ln = w.events.find((e) => e.event === "late_notice")!;
+  assert.ok(ln, "a late record");
+  assert.equal(ln.data.notAGap, false);
+  assert.equal(ln.data.freshStop.covering, false);
+  assert.match(ln.data.label, /^fresh stop no longer covers the holding \(last seen /);
+  assert.doesNotMatch(ln.data.label, /ended|filled/);
 });

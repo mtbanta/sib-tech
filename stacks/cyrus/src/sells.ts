@@ -685,7 +685,7 @@ export class Liquidator {
       const stopped = withStops(structural, stops);
       phaseSkips.push(...stopped.skipped);
       const { candidates } = stopped;
-      if (candidates.length === 0) return 0; // a load day: no quote read, no wait
+      if (candidates.length === 0) return 0; // nothing could qualify (every take-profit within 3 cents of its stop, or no stop known): no quote read, no wait
       let quotes: ReadonlyMap<string, QuoteIn>;
       try {
         quotes = await mv.quotes(candidates.map((c) => c.symbol));

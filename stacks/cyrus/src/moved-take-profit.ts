@@ -140,7 +140,8 @@ export function withStops(candidates: MoveCandidate[], stops: ReadonlyMap<string
     // MOVE_MIN_ABOVE_STOP above the stop, 2 cents since Michael's decision A of 2026-11-19, and at least 1 cent below the take-profit: so 3
     // cents in all, 4 before). Since decision A a load bracket at the defaults (1 cent up, 2 cents down: exactly 3 cents apart) passes this
     // step, so a sale holding load positions makes the quote read (one market-data request, outside the trading budget, limit 1 s), and such
-    // a position moves only at a bid at or above its take-profit (limit = take-profit less 1 cent = stop plus 2 cents); a sale with any move
+    // a position moves only at a bid exactly at its take-profit (limit = take-profit less 1 cent = stop plus 2 cents; a higher bid gives a
+    // limit at or above the take-profit, which pricedMoves skips); a sale with any move
     // then waits for it (up to MOVE_FILL_WAIT_MS) before today's path. Before decision A such a bracket never qualified and a sale of only
     // such positions made no quote read. An afternoon load window given a wider stop or take-profit (Michael's request of 2026-11-18) can
     // qualify, by this same rule.
