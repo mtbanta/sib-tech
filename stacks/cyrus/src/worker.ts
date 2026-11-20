@@ -1375,7 +1375,7 @@ export class Worker {
         const only = retry ? retrySymbols(this.middayLastRemaining, this.middayAttempts - 1) : null;
         this.middayProgress.started(retry ? this.middayLastRemaining.length : Infinity);
         this.middayAttempts++;
-        // Decision B of 2026-11-19 (logging only): when it was due and when this tick decided to start it.
+        // Decision B of 2026-11-19 (logging only): when it was due and when it was decided to start it (by the pass, or since 2026-11-20 its timer).
         const timing = { dueAt: retry ? null : mt.pauseAt.toISOString(), triggeredAt: this.d.now().toISOString(), triggeredBy: by };
         if (!this.background("midday", () => withReservation(res, () => this.middayPhase(date, current, mt.pauseAt, retry, only, res, timing), retry ? undefined : "first"))) res.end();
       }

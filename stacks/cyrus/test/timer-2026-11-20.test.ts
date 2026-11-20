@@ -9,6 +9,7 @@ import { clientOrderIdFor } from "../src/gate.ts";
 import { MIDDAY_PHASE } from "../src/midday.ts";
 import { afternoonLoadWindow } from "../src/load-mode.ts";
 import { CLOSEOUT_TIMER_AHEAD_MS, CLOSEOUT_TIMER_REARMS } from "../src/worker.ts";
+import { shouldStoreEvent } from "../src/run-log.ts";
 import { SimBroker } from "./sim-broker.ts";
 import { rig, settle, z, D } from "./rig.ts";
 
@@ -216,7 +217,7 @@ test("no record of today in memory when the timer fires: nothing starts, it is l
   r.worker["lastDay"] = null;
   r.setNow("16:30:00");
   assert.equal(r.worker["inflight"].has("midday"), false);
-  assert.ok(logs.some((l) => l.event === "closeout_timer_no_day"));
+  assert.ok(logs.some((l) => l.event === "closeout_timer_no_day" && l.level === "warn"), "a warning, so it is stored in the run log");
   await r.at("16:30:04");
   await until(() => results(r, "midday").length >= 1 && !r.worker["inflight"].has("midday"));
   assert.equal(results(r, "midday")[0].timing.triggeredBy, "pass");
@@ -246,5 +247,29 @@ test("a record of another day in memory when the timer fires counts as none: not
   r.worker["lastDay"] = { ...r.worker["lastDay"]!, tradeDate: "2026-10-30" };
   r.setNow("16:30:00");
   assert.equal(r.worker["inflight"].has("midday"), false);
-  assert.ok(logs.some((l) => l.event === "closeout_timer_no_day"));
+  assert.ok(logs.some((l) => l.event === "closeout_timer_no_day" && l.level === "warn"), "a warning, so it is stored in the run log");
+});
+
+test("the timer's three give-way events are logged at levels the run log stores (warnings and an error)", () => {
+  for (const [level, name] of [["warn", "closeout_timer_early"], ["warn", "closeout_timer_no_day"], ["error", "closeout_timer_failed"]] as const) assert.equal(shouldStoreEvent(level, name), true, name);
+});
+
+test("start code that throws inside the timer: logged as closeout_timer_failed (an error), nothing thrown out of the timer, and the next pass starts the close-out (triggeredBy pass)", async () => {
+  const { sim, r, logs } = await rigDay();
+  sim.advanceTo(z("16:00:00").getTime());
+  await rigHold(sim, r, "AAA", 1);
+  await r.at("16:29:50");
+  const orig = r.worker["startMiddayCloseouts"].bind(r.worker);
+  r.worker["startMiddayCloseouts"] = (...a: Parameters<typeof orig>) => {
+    if (a[3] === "timer") throw new Error("boom in the start code");
+    return orig(...a);
+  };
+  assert.doesNotThrow(() => r.setNow("16:30:00"));
+  const failed = logs.find((l) => l.event === "closeout_timer_failed");
+  assert.equal(failed?.level, "error");
+  assert.equal(failed?.data?.kind, "midday");
+  assert.equal(r.worker["inflight"].has("midday"), false);
+  await r.at("16:30:04");
+  await until(() => results(r, "midday").length >= 1 && !r.worker["inflight"].has("midday"));
+  assert.equal(results(r, "midday")[0].timing.triggeredBy, "pass");
 });
