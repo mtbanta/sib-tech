@@ -273,3 +273,29 @@ test("start code that throws inside the timer: logged as closeout_timer_failed (
   await until(() => results(r, "midday").length >= 1 && !r.worker["inflight"].has("midday"));
   assert.equal(results(r, "midday")[0].timing.triggeredBy, "pass");
 });
+
+test("a guard refuses the timer as it fires (another sale of the whole account running: closingOut): nothing starts, and the next pass after it ends starts the close-out", async () => {
+  const { sim, r } = await rigDay();
+  sim.advanceTo(z("16:00:00").getTime());
+  await rigHold(sim, r, "AAA", 1);
+  await r.at("16:29:50");
+  r.worker["closingOut"] = true;
+  r.setNow("16:30:00");
+  assert.equal(r.worker["inflight"].has("midday"), false, "refused by the same guard the pass uses");
+  r.worker["closingOut"] = false;
+  await r.at("16:30:04");
+  await until(() => results(r, "midday").length >= 1 && !r.worker["inflight"].has("midday"));
+  assert.equal(results(r, "midday").length, 1);
+  assert.equal(results(r, "midday")[0].timing.triggeredBy, "pass");
+});
+
+test("the mid-day close-out already finished in the record in memory: the timer starts nothing and does not claim selling", async () => {
+  const { sim, r } = await rigDay();
+  sim.advanceTo(z("16:00:00").getTime());
+  await r.at("16:29:50");
+  const day = r.worker["lastDay"]!;
+  r.worker["lastDay"] = { ...day, phases: { ...day.phases, [MIDDAY_PHASE]: z("16:29:55").toISOString() } };
+  r.setNow("16:30:00");
+  assert.equal(r.worker["inflight"].has("midday"), false);
+  assert.equal(r.worker["middayOwnsSelling"], false);
+});
