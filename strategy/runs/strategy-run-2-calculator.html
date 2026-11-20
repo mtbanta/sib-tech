@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trading Cost Calculator</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg: #f7f7f5; --surface: #ffffff; --ink: #1b1d21; --ink-2: #4a4f57; --ink-3: #6b717b;
+  --line: #dcdfe3; --accent: #2a62c9; --accent-soft: #e6eefb; --warn-bg: #fff6e0; --warn-ink: #6b4a00;
+  --neg: #b42318; --series: #2a62c9; --grid: #e7e9ec; --zero: #9aa1ab; --input-bg: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141518; --surface: #1d1f23; --ink: #eceef1; --ink-2: #b7bcc4; --ink-3: #8d939c;
+    --line: #33363c; --accent: #7fa7ee; --accent-soft: #23314a; --warn-bg: #3a2f12; --warn-ink: #f3d58a;
+    --neg: #ff8a80; --series: #7fa7ee; --grid: #2c2f35; --zero: #6b717b; --input-bg: #15171a;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141518; --surface: #1d1f23; --ink: #eceef1; --ink-2: #b7bcc4; --ink-3: #8d939c;
+  --line: #33363c; --accent: #7fa7ee; --accent-soft: #23314a; --warn-bg: #3a2f12; --warn-ink: #f3d58a;
+  --neg: #ff8a80; --series: #7fa7ee; --grid: #2c2f35; --zero: #6b717b; --input-bg: #15171a;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 20px 16px 60px; }
+h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -0.01em; }
+h2 { font-size: 18px; margin: 0 0 10px; }
+h3 { font-size: 15px; margin: 14px 0 6px; color: var(--ink-2); }
+p { margin: 6px 0; }
+a { color: var(--accent); }
+.sub { color: var(--ink-2); margin-bottom: 12px; }
+.notice { background: var(--warn-bg); color: var(--warn-ink); border-radius: 8px; padding: 10px 12px; margin: 10px 0 18px; }
+.grid { display: grid; grid-template-columns: minmax(0, 420px) minmax(0, 1fr); gap: 18px; align-items: start; }
+@media (max-width: 860px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 14px 16px; margin-bottom: 18px; min-width: 0; }
+.field { display: grid; grid-template-columns: minmax(0, 1fr) 132px; gap: 4px 10px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
+.field:first-of-type { border-top: none; }
+.field label { font-weight: 600; font-size: 14px; }
+.field .help { grid-column: 1 / -1; font-size: 12.5px; color: var(--ink-3); }
+.field input[type=number], .field select { width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--input-bg); color: var(--ink); font: inherit; font-size: 14px; }
+.field.wide { grid-template-columns: minmax(0, 1fr); }
+.field.wide select { width: 100%; }
+.check { display: flex; gap: 8px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); font-weight: 600; font-size: 14px; }
+.tag { display: inline-block; font-size: 11.5px; font-weight: 600; padding: 1px 6px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); margin-left: 4px; }
+.tag.own { background: var(--warn-bg); color: var(--warn-ink); }
+.tag.nf { background: var(--warn-bg); color: var(--warn-ink); }
+button { font: inherit; font-size: 13px; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; }
+button:hover { border-color: var(--accent); }
+.reset { font-size: 12px; padding: 2px 8px; }
+.row-btns { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 2px; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; white-space: normal; }
+thead th { color: var(--ink-2); font-weight: 600; }
+tr.total td { font-weight: 700; }
+td.neg { color: var(--neg); }
+.kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+@media (max-width: 560px) { .kpis { grid-template-columns: minmax(0, 1fr); } }
+.kpi { border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+.kpi .k { font-size: 12.5px; color: var(--ink-3); }
+.kpi .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.chartbox { position: relative; height: 300px; }
+.muted { color: var(--ink-3); font-size: 13px; }
+.src { font-size: 11.5px; overflow-wrap: anywhere; }
+.field .help, .muted, li { overflow-wrap: anywhere; }
+#out td:first-child { min-width: 96px; }
+@media (max-width: 560px) { th, td { padding: 6px 4px; font-size: 13px; } .card { padding: 12px 10px 14px; } }
+ul { margin: 6px 0; padding-left: 20px; }
+.ph { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+@media (max-width: 560px) { .ph { grid-template-columns: minmax(0, 1fr); } }
+.ph div { border: 1px dashed var(--line); border-radius: 8px; padding: 8px 10px; }
+.ph b { display: block; }
+.brk input { width: 100px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 5px; background: var(--input-bg); color: var(--ink); font: inherit; font-size: 13px; text-align: right; }
+ol.sources { font-size: 13px; padding-left: 24px; }
+ol.sources li { margin: 3px 0; word-break: break-word; }
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Trading cost calculator</h1>
+  <p class="sub">Strategy run 2, sib-tech. Every cost of trading at the volume you type in, each with its source, and what is left after costs and federal tax. Sources accessed 2026-11-20.</p>
+  <div class="notice"><b>Research input for a human decision, never an instruction to act. Not financial or tax advice.</b> Figures are what the cited pages said on 2026-11-20 and can change without notice. This page sends nothing anywhere and stores nothing. The source of record is <code>strategy-run-2-deliverable.md</code>.</div>
+
+  <div class="grid">
+    <!-- INPUTS -->
+    <div>
+      <div class="card">
+        <h2>How you expect to trade</h2>
+        <div class="field"><label for="R">Round trips per day</label><input id="R" type="number" min="0" step="1" value="9089">
+          <div class="help">A round trip is one buy and the sell that closes it.</div></div>
+        <div class="field"><label for="G">Gain per round trip, in dollars, before any costs</label><input id="G" type="number" step="0.0001" value="0.01">
+          <div class="help">You called this "net gain per round trip"; please confirm you meant before costs.</div></div>
+        <div class="field"><label for="S">Average shares per trade</label><input id="S" type="number" min="0" step="0.01" value="1.45">
+          <div class="help">The same share count is bought and then sold.</div></div>
+        <div class="field"><label for="P">Average share price, in dollars</label><input id="P" type="number" min="0" step="0.01" value="15.40">
+          <div class="help">Used for both legs.</div></div>
+        <div class="field"><label for="SS">Spread and slippage per round trip, in dollars <span class="tag own">your input, not sourced</span></label><input id="SS" type="number" step="0.0001" value="0"></div>
+        <div class="field"><label for="Dy">Trading days per year <span class="tag">sourced</span></label><input id="Dy" type="number" min="1" step="1" value="251">
+          <div class="help">251 in 2026 and in 2027: weekdays less the 10 weekday NYSE holidays each year <a class="src" href="https://www.nyse.com/markets/hours-calendars" target="_blank" rel="noopener">[39] NYSE, 2026-11-20</a>. <button class="reset" data-reset="Dy">Reset</button></div></div>
+        <div class="field"><label for="Dm">Trading days per month</label><input id="Dm" type="number" min="0" step="0.0001" value="20.9167">
+          <div class="help">Default is trading days per year divided by 12 (follows the field above until you change it). <button class="reset" data-reset="Dm">Reset</button></div></div>
+      </div>
+
+      <div class="card">
+        <h2>Account and plans</h2>
+        <div class="field wide"><label for="rules">Rules year (ties the FINRA fee period to the tax year)</label>
+          <select id="rules"><option value="2026">Rates in force today (tax year 2026): FINRA TAF paused at 0</option><option value="2027">Rates from 2027-01-01 (tax year 2027): FINRA TAF resumes</option></select></div>
+        <div class="field wide"><label for="acct">Commission category (order flow)</label>
+          <select id="acct">
+            <option value="retail">Retail order flow: commission-free</option>
+            <option value="elite_allin">Alpaca Elite Smart Router, All-in (fixed)</option>
+            <option value="elite_costplus">Alpaca Elite Smart Router, Cost Plus (tiered)</option>
+            <option value="nonretail">Moved to the non-retail line after review</option>
+          </select>
+          <div class="help" id="acctHelp"></div></div>
+        <div id="cpBox" class="hidden">
+          <div class="field"><label for="cpRate">Cost Plus commission per share <span class="tag">sourced</span></label><input id="cpRate" type="number" step="0.0001" value="0.0025">
+            <div class="help">Tiers by monthly shares: 0.0025 up to 200,000; 0.0020; 0.0015; 0.0010; 0.0005 over 50 million. Whether tiers apply share by share or to the whole month is not stated, so pick the rate. <a class="src" href="https://files.alpaca.markets/disclosures/library/BrokFeeSched.pdf" target="_blank" rel="noopener">[1] Alpaca fee schedule, 2026-11-20</a> <button class="reset" data-reset="cpRate">Reset</button></div></div>
+          <div class="field"><label for="cpExch">Exchange fees or rebates per share <span class="tag own">your input, not sourced</span></label><input id="cpExch" type="number" step="0.0001" value="0">
+            <div class="help">Not found as a fixed rate: they depend on where each order executes. A rebate is a negative number.</div></div>
+        </div>
+        <div id="allinBox" class="hidden">
+          <div class="field"><label for="allinRate">All-in commission per share <span class="tag">sourced</span></label><input id="allinRate" type="number" step="0.0001" value="0.0040">
+            <div class="help">Regulatory fees extra. Charged here on both legs (the run's reading of "per share traded"). <a class="src" href="https://alpaca.markets/elite" target="_blank" rel="noopener">[16] Alpaca Elite page, 2026-11-20</a> <button class="reset" data-reset="allinRate">Reset</button></div></div>
+        </div>
+        <div id="nrBox" class="hidden">
+          <div class="field"><label for="nrRate">Non-retail commission per share <span class="tag nf">not found</span> <span class="tag own">your input, not sourced</span></label><input id="nrRate" type="number" step="0.0001" value="0">
+            <div class="help">Alpaca says commissions apply to "order flow determined to be non-retail in nature" but publishes no rate. <a class="src" href="https://files.alpaca.markets/disclosures/library/BrokFeeSched.pdf" target="_blank" rel="noopener">[1]</a> <a class="src" href="https://alpaca.markets/support/what-flags-an-account-as-non-retail-and-what-are-the-implications-of-being-flagged" target="_blank" rel="noopener">[13]</a></div></div>
+        </div>
+        <div class="field wide"><label for="datastat">Market data subscriber status</label>
+          <select id="datastat"><option value="nonpro">Non-professional (personal, non-business use)</option><option value="pro">Professional (for example a business account)</option></select></div>
+        <label class="check" id="atpRow"><input id="atp" type="checkbox" checked> Include Alpaca Algo Trader Plus data plan</label>
+        <div id="proBox" class="hidden">
+          <div class="field"><label for="proData">Professional data cost per month <span class="tag nf">not found</span> <span class="tag own">your input, not sourced</span></label><input id="proData" type="number" step="0.01" value="0">
+            <div class="help">Alpaca's professional price is not published. For context only: the UTP plan charges data vendors 24 dollars a month per professional subscriber <a class="src" href="https://utpplan.com/DOC/Datapolicies.pdf" target="_blank" rel="noopener">[21]</a>. Business accounts "are considered professional data subscribers" (Alpaca, December 2022) <a class="src" href="https://alpaca.markets/support/alpaca-business-accounts" target="_blank" rel="noopener">[14]</a>.</div></div>
+        </div>
+        <div class="field"><label for="stacks">Number of stacks</label><select id="stacks"><option value="1">1</option><option value="2">2</option></select>
+          <div class="help">Multiplies Fly.io and Supabase only. One Algo Trader Plus plan covers all paper accounts under one login.</div></div>
+        <label class="check"><input id="max" type="checkbox"> Include Claude Max (you also use it for other work)</label>
+        <div class="field wide"><label for="status">Federal filing status</label>
+          <select id="status"><option value="single">Single</option><option value="mfj">Married filing jointly</option><option value="mfs">Married filing separately</option><option value="hoh">Head of household</option><option value="qss">Qualifying surviving spouse</option></select></div>
+      </div>
+
+      <div class="card">
+        <h2>Sourced rates (editable)</h2>
+        <p class="muted">Prefilled with the sourced value. Change any of them; Reset restores the source.</p>
+        <h3>Regulatory fees per trade</h3>
+        <div class="field"><label for="secRate">SEC fee (Securities and Exchange Commission), times dollars sold</label><input id="secRate" type="number" step="0.0000001" value="0.0000206">
+          <div class="help">Sells only. 20.60 dollars per million since 2026-04-04 <a class="src" href="https://www.sec.gov/rules-regulations/fee-rate-advisories/2026-2" target="_blank" rel="noopener">[2] SEC, 2026-11-20</a> <a class="src" href="https://files.alpaca.markets/disclosures/library/BrokFeeSched.pdf" target="_blank" rel="noopener">[1]</a> <button class="reset" data-reset="secRate">Reset</button></div></div>
+        <div class="field"><label for="tafRate">FINRA (Financial Industry Regulatory Authority) trading activity fee (TAF) per share sold</label><input id="tafRate" type="number" step="0.000001" value="0">
+          <div class="help" id="tafHelp"></div></div>
+        <div class="field"><label for="tafCap">FINRA TAF maximum per trade</label><input id="tafCap" type="number" step="0.01" value="0">
+          <div class="help"><span id="tafCapHelp"></span> <button class="reset" data-reset="tafCap">Reset</button></div></div>
+        <div class="field"><label for="catRate">CAT fee per share, buys and sells</label><input id="catRate" type="number" step="0.0000001" value="0.000003">
+          <div class="help">Consolidated Audit Trail. <a class="src" href="https://files.alpaca.markets/disclosures/library/BrokFeeSched.pdf" target="_blank" rel="noopener">[1] Alpaca fee schedule, revised 2026-11-17, read 2026-11-20</a> <button class="reset" data-reset="catRate">Reset</button></div></div>
+        <p class="muted">Each fee type is totaled per day, then rounded up to the next cent, as Alpaca's fee schedule says <a class="src" href="https://files.alpaca.markets/disclosures/library/BrokFeeSched.pdf" target="_blank" rel="noopener">[1]</a>.</p>
+        <h3>Fixed monthly costs</h3>
+        <div class="field"><label for="flyM">Fly.io, shared-cpu-1x 512 MB, San Jose, per stack</label><input id="flyM" type="number" step="0.01" value="4.41">
+          <div class="help">Published <a class="src" href="https://fly.io/docs/about/pricing/" target="_blank" rel="noopener">[25] Fly.io, 2026-11-20</a>. A personal organization's bill under 5 dollars is waived; not applied here. <button class="reset" data-reset="flyM">Reset</button></div></div>
+        <div class="field"><label for="supaM">Supabase, extra project at Micro, per stack</label><input id="supaM" type="number" step="0.01" value="10.00">
+          <div class="help">Published <a class="src" href="https://supabase.com/pricing" target="_blank" rel="noopener">[26] Supabase, 2026-11-20</a>; the brief's case is an additional project in an existing Pro organization, whose one included 10 dollar credit already covers another project. <button class="reset" data-reset="supaM">Reset</button></div></div>
+        <div class="field"><label for="atpM">Alpaca Algo Trader Plus</label><input id="atpM" type="number" step="0.01" value="99.00">
+          <div class="help">Published <a class="src" href="https://alpaca.markets/data" target="_blank" rel="noopener">[23] Alpaca, 2026-11-20</a> <a class="src" href="https://docs.alpaca.markets/us/docs/about-market-data-api" target="_blank" rel="noopener">[24]</a>. Free with Elite and a 100,000 dollar deposit, "only for personal use" <a class="src" href="https://alpaca.markets/elite" target="_blank" rel="noopener">[16]</a>. <button class="reset" data-reset="atpM">Reset</button></div></div>
+        <div class="field"><label for="maxM">Claude Max, 100 dollar tier</label><input id="maxM" type="number" step="0.01" value="100.00">
+          <div class="help">Published, tax not included <a class="src" href="https://claude.com/pricing" target="_blank" rel="noopener">[28] Anthropic, 2026-11-20</a> <button class="reset" data-reset="maxM">Reset</button></div></div>
+        <h3>Federal tax</h3>
+        <div class="field"><label for="stdDed">Standard deduction</label><input id="stdDed" type="number" step="1" value="16100">
+          <div class="help"><span id="stdHelp"></span> <button class="reset" data-reset="stdDed">Reset</button></div></div>
+        <div class="field"><label for="niitRate">Net investment income tax rate</label><input id="niitRate" type="number" step="0.001" value="0.038">
+          <div class="help"><a class="src" href="https://www.irs.gov/individuals/net-investment-income-tax" target="_blank" rel="noopener">[33] IRS, 2026-11-20</a> <button class="reset" data-reset="niitRate">Reset</button></div></div>
+        <div class="field"><label for="niitT">Net investment income tax threshold</label><input id="niitT" type="number" step="1" value="200000">
+          <div class="help">Statutory, by filing status <a class="src" href="https://www.irs.gov/individuals/net-investment-income-tax" target="_blank" rel="noopener">[33]</a> <button class="reset" data-reset="niitT">Reset</button></div></div>
+        <h3>Brackets for the chosen status and year</h3>
+        <div class="tablewrap brk"><table id="brkTable"><thead><tr><th>Rate</th><th>Taxable income up to</th></tr></thead><tbody></tbody></table></div>
+        <div class="row-btns"><button id="brkReset" class="reset">Reset brackets</button></div>
+        <p class="muted" id="brkHelp"></p>
+      </div>
+    </div>
+
+    <!-- OUTPUTS -->
+    <div>
+      <div class="card">
+        <h2>Result</h2>
+        <div class="kpis">
+          <div class="kpi"><div class="k">Net after tax, per year</div><div class="v" id="kNat">0</div></div>
+          <div class="kpi"><div class="k">Break even gain per round trip</div><div class="v" id="kBe">0</div></div>
+          <div class="kpi"><div class="k">Fixed costs per month</div><div class="v" id="kFix">0</div></div>
+        </div>
+        <div class="tablewrap"><table id="out"><thead><tr><th>Line</th><th>Per day</th><th>Per month</th><th>Per year</th></tr></thead><tbody></tbody></table></div>
+        <p class="muted">Each line is rounded to the cent on its own, so a total can differ from its rounded parts by 1 cent. Month = day times trading days a month, plus the monthly fixed costs. Day fixed cost = monthly fixed times 12, divided by trading days a year. The break even is the gain per round trip at which net before tax is zero.</p>
+        <h3>How the federal tax is computed</h3>
+        <div id="taxText"></div>
+      </div>
+
+      <div class="card">
+        <h2>Net after tax against gain per round trip</h2>
+        <p class="muted">Per year, at the current inputs. The dot is your current gain per round trip; the gray line is zero.</p>
+        <div class="chartbox"><canvas id="chart" aria-label="Line chart of net after tax per year against gain per round trip"></canvas></div>
+        <p class="muted" id="chartMsg"></p>
+        <details><summary class="muted">Table view of the chart</summary><div class="tablewrap"><table id="chartTable"><thead><tr><th>Gain per round trip</th><th>Net after tax per year</th></tr></thead><tbody></tbody></table></div></details>
+      </div>
+
+      <div class="card">
+        <h2>Worked examples from the deliverable</h2>
+        <p class="muted">Loads each example's inputs (section 7 of the deliverable) and resets every sourced rate. The results should match the deliverable's tables to the cent.</p>
+        <div class="row-btns" id="exBtns"></div>
+      </div>
+
+      <div class="card">
+        <h2>Not yet evaluated</h2>
+        <div class="ph">
+          <div><b>Wash sale rule</b>not yet evaluated</div>
+          <div><b>Mark to market election (trader tax status)</b>not yet evaluated. Traders report expenses on Schedule C <a class="src" href="https://www.irs.gov/taxtopics/tc429" target="_blank" rel="noopener">[35]</a></div>
+          <div><b>Other income</b>not yet evaluated. The tax here treats trading profit as your only income.</div>
+          <div><b>State tax</b>not yet evaluated</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Reference: your two reported paper days</h2>
+        <div class="tablewrap"><table>
+          <thead><tr><th>Day</th><th>Filled trades (your report)</th><th>Fees (your report)</th><th>From the build log</th></tr></thead>
+          <tbody>
+            <tr><td>2026-11-17</td><td>16,204</td><td>3.88</td><td>Alpaca posted SEC 3.80 plus CAT 0.08</td></tr>
+            <tr><td>2026-11-18</td><td>18,256</td><td>4.26</td><td>SEC: 202,780.64 dollars sold x 0.0000206 = 4.177, up to 4.18. CAT: 26,324 shares x 0.000003 = 0.079, up to 0.08</td></tr>
+          </tbody></table></div>
+        <p class="muted">Paper may not charge everything a live account would. On these two days paper charged the SEC and CAT fees exactly as Alpaca's schedule lists them. FINRA's TAF was 0, which is also the published rate during FINRA's pause from 2026-10-01 to 2026-12-31, so these days cannot show whether paper would charge a non-zero TAF <a class="src" href="https://www.federalregister.gov/documents/2026/09/23/2026-19392/self-regulatory-organizations-financial-industry-regulatory-authority-inc-notice-of-filing-and" target="_blank" rel="noopener">[4]</a>. Filled trades count pieces of orders, not round trips (the log shows 9,089 filled entries on 2026-11-18).</p>
+      </div>
+
+      <div class="card">
+        <h2>Sources</h2>
+        <p class="muted">All accessed 2026-11-20. Numbers match the deliverable's footnotes. Every price used is published on the vendor's own page; none is gated.</p>
+        <ol class="sources" id="srcList"></ol>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var SRC = {
+    1: ['Alpaca Brokerage Fee Schedule, revised Nov. 17, 2026', 'https://files.alpaca.markets/disclosures/library/BrokFeeSched.pdf'],
+    2: ['SEC, Section 31 Fee Rate Advisory for FY2026', 'https://www.sec.gov/rules-regulations/fee-rate-advisories/2026-2'],
+    4: ['Federal Register 91 FR 60435, SR-FINRA-2026-021 (TAF pause)', 'https://www.federalregister.gov/documents/2026/09/23/2026-19392/self-regulatory-organizations-financial-industry-regulatory-authority-inc-notice-of-filing-and'],
+    5: ['Federal Register 91 FR 60427, SR-FINRA-2026-020 (TAF 2026 to 2028)', 'https://www.federalregister.gov/documents/2026/09/23/2026-19393/self-regulatory-organizations-financial-industry-regulatory-authority-inc-notice-of-filing-and'],
+    13: ['Alpaca support, What flags an account as non-retail (Nov. 2022)', 'https://alpaca.markets/support/what-flags-an-account-as-non-retail-and-what-are-the-implications-of-being-flagged'],
+    14: ['Alpaca support, Does Alpaca offer business accounts? (Dec. 2022)', 'https://alpaca.markets/support/alpaca-business-accounts'],
+    16: ['Alpaca, Elite page', 'https://alpaca.markets/elite'],
+    21: ['UTP Plan Data Policies (Oct. 2026)', 'https://utpplan.com/DOC/Datapolicies.pdf'],
+    23: ['Alpaca, Market Data plans', 'https://alpaca.markets/data'],
+    24: ['Alpaca docs, About Market Data API', 'https://docs.alpaca.markets/us/docs/about-market-data-api'],
+    25: ['Fly.io, Resource Pricing (San Jose selected)', 'https://fly.io/docs/about/pricing/'],
+    26: ['Supabase, Pricing', 'https://supabase.com/pricing'],
+    28: ['Anthropic, Claude pricing', 'https://claude.com/pricing'],
+    30: ['IRS, Revenue Procedure 2025-32 (tax year 2026)', 'https://www.irs.gov/pub/irs-drop/rp-25-32.pdf'],
+    32: ['IRS, Revenue Procedure 2026-35 (tax year 2027)', 'https://www.irs.gov/pub/irs-drop/rp-26-35.pdf'],
+    33: ['IRS, Net Investment Income Tax', 'https://www.irs.gov/individuals/net-investment-income-tax'],
+    34: ['IRS, Topic 409, Capital gains and losses', 'https://www.irs.gov/taxtopics/tc409'],
+    35: ['IRS, Topic 429, Traders in securities', 'https://www.irs.gov/taxtopics/tc429'],
+    36: ['IRS, Publication 550 (2025)', 'https://www.irs.gov/publications/p550'],
+    37: ['IRS, Publication 529 (12/2020)', 'https://www.irs.gov/publications/p529'],
+    38: ['Public Law 119-21, section 70110', 'https://www.govinfo.gov/content/pkg/PLAW-119publ21/html/PLAW-119publ21.htm'],
+    39: ['NYSE, Holidays and Trading Hours', 'https://www.nyse.com/markets/hours-calendars']
+  };
+  var DEF = { secRate: 0.0000206, catRate: 0.000003, cpRate: 0.0025, allinRate: 0.0040,
+              flyM: 4.41, supaM: 10, atpM: 99, maxM: 100, niitRate: 0.038, Dy: 251 };
+  var TAF = { '2026': [0, 0], '2027': [0.000195, 9.79] };
+  var STD = { '2026': { single: 16100, mfj: 32200, mfs: 16100, hoh: 24150, qss: 32200 },
+              '2027': { single: 16600, mfj: 33200, mfs: 16600, hoh: 24925, qss: 33200 } };
+  var BR = {
+    '2026': { single: [12400, 50400, 105700, 201775, 256225, 640600], mfj: [24800, 100800, 211400, 403550, 512450, 768700],
+              mfs: [12400, 50400, 105700, 201775, 256225, 384350], hoh: [17700, 67450, 105700, 201750, 256200, 640600] },
+    '2027': { single: [12800, 52025, 109125, 208325, 264550, 661375], mfj: [25600, 104050, 218250, 416650, 529100, 793650],
+              mfs: [12800, 52025, 109125, 208325, 264550, 396825], hoh: [18250, 69650, 109100, 208300, 264550, 661350] }
+  };
+  var RATES = [0.10, 0.12, 0.22, 0.24, 0.32, 0.35, 0.37];
+  var NIIT_T = { single: 200000, mfj: 250000, mfs: 125000, hoh: 200000, qss: 250000 };
+  var STATUS_NAME = { single: 'single', mfj: 'married filing jointly', mfs: 'married filing separately', hoh: 'head of household', qss: 'qualifying surviving spouse' };
+  var EX = {
+    A: { R: 9089, G: 0.01, S: 1.45, P: 15.40, SS: 0, acct: 'retail', stacks: 1, atp: true, max: false, rules: '2026', status: 'single' },
+    B: { R: 500, G: 0.50, S: 10, P: 20, SS: 0.05, acct: 'retail', stacks: 2, atp: true, max: true, rules: '2027', status: 'mfj' },
+    C: { R: 2000, G: 1.00, S: 100, P: 50, SS: 0.10, acct: 'elite_allin', stacks: 1, atp: true, max: false, rules: '2027', status: 'hoh' },
+    D: { R: 1000, G: 0, S: 5, P: 10, SS: 0, acct: 'retail', stacks: 2, atp: true, max: true, rules: '2027', status: 'single' },
+    E: { R: 1000, G: 1.00, S: 10, P: 20, SS: 0.02, acct: 'retail', stacks: 1, atp: true, max: true, rules: '2027', status: 'single' }
+  };
+
+  function $(id) { return document.getElementById(id); }
+  function num(id) { var v = parseFloat($(id).value); return isFinite(v) ? v : 0; }
+  // daily fee total rounded UP to the cent, guarded against floating point error
+  function centsUp(x) { if (x <= 0) return 0; return Math.ceil(Math.round(x * 1e8) / 1e6) / 100; }
+  // display rounding, half away from zero, matching the deliverable's script
+  function r2(x) { var s = x < 0 ? -1 : 1; return s * Math.round(Math.abs(x) * 100 + 1e-7) / 100; }
+  function fmt(x) { var v = r2(x); if (v === 0) v = 0; return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+  function src(n, withDate) { var s = SRC[n]; return '<a class="src" href="' + s[1] + '" target="_blank" rel="noopener">[' + n + ']' + (withDate ? ' ' + s[0] + ', 2026-11-20' : '') + '</a>'; }
+
+  var dmTouched = false;
+  var brk = null; // current editable bracket thresholds
+
+  function loadBrackets() {
+    var y = $('rules').value, st = $('status').value;
+    brk = BR[y][st === 'qss' ? 'mfj' : st].slice();
+    var tb = $('brkTable').querySelector('tbody'); tb.innerHTML = '';
+    for (var i = 0; i < 7; i++) {
+      var tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + Math.round(RATES[i] * 100) + '%</td><td>' + (i < 6 ? '<input type="number" step="1" data-b="' + i + '" value="' + brk[i] + '" aria-label="Top of the ' + Math.round(RATES[i] * 100) + ' percent band">' : 'above') + '</td>';
+      tb.appendChild(tr);
+    }
+    tb.querySelectorAll('input').forEach(function (inp) {
+      inp.addEventListener('input', function () { brk[+inp.dataset.b] = parseFloat(inp.value) || 0; compute(); });
+    });
+    $('brkHelp').innerHTML = 'Tax year ' + y + ', ' + STATUS_NAME[st] + (st === 'qss' ? ' (uses the joint table)' : '') + '. ' + (y === '2026' ? src(30, true) : src(32, true));
+  }
+
+  function statusChanged() {
+    var y = $('rules').value, st = $('status').value;
+    $('stdDed').value = STD[y][st];
+    $('stdHelp').innerHTML = 'Tax year ' + y + ', ' + STATUS_NAME[st] + ' ' + (y === '2026' ? src(30, true) : src(32, true));
+    $('niitT').value = NIIT_T[st];
+    loadBrackets();
+  }
+  function rulesChanged() {
+    var y = $('rules').value;
+    $('tafRate').value = TAF[y][0]; $('tafCap').value = TAF[y][1];
+    $('tafHelp').innerHTML = (y === '2026'
+      ? 'Sells only. 0 for trades from 2026-10-01 to 2026-12-31 (FINRA pause) ' + src(4, true) + ' ' + src(1)
+      : 'Sells only. 0.000195 per share from 2027-01-01 through 2028 ' + src(5, true) + ' ' + src(4)) + ' <button class="reset" data-reset="tafRate">Reset</button>';
+    $('tafCapHelp').innerHTML = (y === '2026' ? 'No fee during the pause.' : 'Per trade, applied before the daily total.') + ' ' + src(y === '2026' ? 4 : 5);
+    statusChanged();
+    wireResets();
+  }
+
+  function acctChanged() {
+    var a = $('acct').value;
+    $('cpBox').classList.toggle('hidden', a !== 'elite_costplus');
+    $('allinBox').classList.toggle('hidden', a !== 'elite_allin');
+    $('nrBox').classList.toggle('hidden', a !== 'nonretail');
+    var h = {
+      retail: 'Commission 0: "Alpaca Securities does not charge commissions, except as described below" ' + src(1) + '.',
+      elite_allin: 'Needs a 30,000 dollar deposit; Elite users "can stay commission-free as long as the order flows remain retail in nature" ' + src(16) + '.',
+      elite_costplus: 'Commission per share plus exchange fees or rebates, plus regulatory fees ' + src(1) + ' ' + src(16) + '.',
+      nonretail: 'Flags include a fill rate under 1 percent, rapid creating and canceling of orders, and trading as your primary income ' + src(13) + '.'
+    };
+    $('acctHelp').innerHTML = h[a];
+  }
+
+  function dataChanged() {
+    var pro = $('datastat').value === 'pro';
+    $('proBox').classList.toggle('hidden', !pro);
+    $('atpRow').classList.toggle('hidden', pro);
+  }
+
+  function model(G) {
+    var R = num('R'), S = num('S'), P = num('P'), SS = num('SS');
+    var Dy = num('Dy') || 1, Dm = num('Dm');
+    var tafRate = num('tafRate'), tafCap = num('tafCap');
+    var gross = R * G;
+    var sec = centsUp(R * S * P * num('secRate'));
+    var tafTrade = (P >= tafRate) ? Math.min(S * tafRate, tafCap) : 0;
+    var taf = centsUp(R * tafTrade);
+    var cat = centsUp(2 * R * S * num('catRate'));
+    var a = $('acct').value, cr = 0;
+    if (a === 'elite_allin') cr = num('allinRate');
+    else if (a === 'elite_costplus') cr = num('cpRate') + num('cpExch');
+    else if (a === 'nonretail') cr = num('nrRate');
+    var comm = 2 * R * S * cr;
+    var spread = R * SS;
+    var stacks = parseInt($('stacks').value, 10);
+    var data = $('datastat').value === 'pro' ? num('proData') : ($('atp').checked ? num('atpM') : 0);
+    var fixedM = (num('flyM') + num('supaM')) * stacks + data + ($('max').checked ? num('maxM') : 0);
+    var fixedD = fixedM * 12 / Dy;
+    var varD = sec + taf + cat + comm + spread;
+    var T = Dy * (gross - varD);
+    var st = $('status').value, ti = 0, itax = 0, niit = 0;
+    if (T > 0) {
+      ti = Math.max(0, T - num('stdDed'));
+      var lo = 0;
+      for (var i = 0; i < 7; i++) {
+        var hi = i < 6 ? brk[i] : Infinity;
+        if (ti <= hi) { itax += (ti - lo) * RATES[i]; break; }
+        itax += (hi - lo) * RATES[i]; lo = hi;
+      }
+      niit = num('niitRate') * Math.max(0, T - num('niitT'));
+    }
+    var taxY = itax + niit;
+    var nbt = [gross - varD - fixedD, gross * Dm - varD * Dm - fixedM, gross * Dy - varD * Dy - fixedM * 12];
+    var tax = [taxY / Dy, taxY / 12, taxY];
+    return {
+      rows: [
+        ['Gross gain', [gross, gross * Dm, gross * Dy]],
+        ['SEC fee', [sec, sec * Dm, sec * Dy]],
+        ['FINRA trading activity fee', [taf, taf * Dm, taf * Dy]],
+        ['CAT fee', [cat, cat * Dm, cat * Dy]],
+        ['Commissions', [comm, comm * Dm, comm * Dy]],
+        ['Spread and slippage (your input)', [spread, spread * Dm, spread * Dy]],
+        ['Fixed costs', [fixedD, fixedM, fixedM * 12]],
+        ['Net before tax', nbt, true],
+        ['Federal tax', tax],
+        ['Net after tax', [nbt[0] - tax[0], nbt[1] - tax[1], nbt[2] - tax[2]], true]
+      ],
+      T: T, ti: ti, itax: itax, niit: niit, taxY: taxY, fixedM: fixedM, R: R, Dy: Dy, varD: varD,
+      nat: nbt[2] - taxY, st: st
+    };
+  }
+
+  var chart = null;
+  function compute() {
+    if (!dmTouched) $('Dm').value = +(num('Dy') / 12).toFixed(10);
+    var G = num('G'), m = model(G);
+    var tb = $('out').querySelector('tbody'); tb.innerHTML = '';
+    m.rows.forEach(function (r) {
+      var tr = document.createElement('tr'); if (r[2]) tr.className = 'total';
+      tr.innerHTML = '<td>' + r[0] + '</td>' + r[1].map(function (v) { return '<td' + (r2(v) < 0 ? ' class="neg"' : '') + '>' + fmt(v) + '</td>'; }).join('');
+      tb.appendChild(tr);
+    });
+    var be = m.R > 0 ? (m.Dy * m.varD + 12 * m.fixedM) / (m.Dy * m.R) : NaN;
+    $('kNat').textContent = fmt(m.nat);
+    $('kNat').style.color = r2(m.nat) < 0 ? 'var(--neg)' : '';
+    $('kBe').textContent = isFinite(be) ? (Math.round(be * 10000 + 1e-7) / 10000).toFixed(4) : 'n/a';
+    $('kFix').textContent = fmt(m.fixedM);
+    var y = $('rules').value, st = m.st;
+    $('taxText').innerHTML =
+      '<p><b>Applied as if trading profit were your only income, because no other income was given.</b> Short-term gains are taxed as ordinary income ' + src(34) + '.</p>' +
+      '<ul><li>Trading profit for tax (year): gross gain less fees, commissions and spread, times trading days = <b>' + fmt(m.T) + '</b>. Fees and commissions come off because they are part of basis and of the amount realized ' + src(36) + '.</li>' +
+      '<li>Fixed monthly costs are <b>not</b> deducted: for an investor they are miscellaneous itemized deductions that can no longer be claimed ' + src(37) + ', made permanent by ' + src(38) + '. This is the run\'s reading of those texts, not a ruling.</li>' +
+      (m.T <= 0 ? '<li>The year is a loss, so federal tax is 0. Up to 3,000 dollars (1,500 married filing separately) of net capital loss can offset other income ' + src(34) + '; with no other income given, that is not counted.</li>' :
+      '<li>Less the ' + fmt(num('stdDed')) + ' standard deduction (' + STATUS_NAME[st] + ', tax year ' + y + ') = taxable income <b>' + fmt(m.ti) + '</b>; brackets give income tax <b>' + fmt(m.itax) + '</b> ' + src(y === '2026' ? 30 : 32) + '.</li>' +
+      '<li>Net investment income tax: ' + (num('niitRate') * 100).toFixed(1) + ' percent of trading profit above ' + fmt(num('niitT')) + ' = <b>' + fmt(m.niit) + '</b> ' + src(33) + '.</li>') +
+      '<li>Federal tax for the year = <b>' + fmt(m.taxY) + '</b>. Shown per day as the year divided by trading days a year, and per month as the year divided by 12.</li></ul>';
+    drawChart(G, be);
+  }
+
+  function drawChart(G, be) {
+    var hi = Math.max(Math.abs(G) * 2, isFinite(be) ? Math.abs(be) * 2 : 0, 0.02);
+    var lo = Math.min(0, G * 1.5);
+    var n = 40, pts = [];
+    for (var i = 0; i <= n; i++) { var g = lo + (hi - lo) * i / n; pts.push({ x: g, y: r2(model(g).nat) }); }
+    var cur = { x: G, y: r2(model(G).nat) };
+    var tb = $('chartTable').querySelector('tbody'); tb.innerHTML = '';
+    pts.filter(function (p, i) { return i % 4 === 0; }).concat([cur]).sort(function (a, b) { return a.x - b.x; }).forEach(function (p) {
+      var tr = document.createElement('tr'); tr.innerHTML = '<td>' + p.x.toFixed(4) + '</td><td>' + fmt(p.y) + '</td>'; tb.appendChild(tr);
+    });
+    if (typeof Chart === 'undefined') { $('chartMsg').textContent = 'The charting library did not load (no internet?). The table view below has the same numbers.'; return; }
+    var css = getComputedStyle(document.documentElement);
+    var col = css.getPropertyValue('--series').trim(), grid = css.getPropertyValue('--grid').trim(), ink = css.getPropertyValue('--ink-2').trim(), zero = css.getPropertyValue('--zero').trim(), surf = css.getPropertyValue('--surface').trim();
+    var ds = [
+      { data: pts, borderColor: col, borderWidth: 2, pointRadius: 0, pointHoverRadius: 5, tension: 0, label: 'Net after tax per year' },
+      { data: [cur], borderColor: surf, backgroundColor: col, pointRadius: 6, pointHoverRadius: 7, borderWidth: 2, showLine: false, label: 'Your current gain' },
+      { data: [{ x: lo, y: 0 }, { x: hi, y: 0 }], borderColor: zero, borderWidth: 1, borderDash: [4, 4], pointRadius: 0, pointHoverRadius: 0, label: 'zero' }
+    ];
+    var opts = {
+      responsive: true, maintainAspectRatio: false, animation: false, parsing: false,
+      interaction: { mode: 'nearest', intersect: false, axis: 'x' },
+      plugins: { legend: { display: false }, tooltip: {
+        filter: function (it) { return it.datasetIndex !== 2; },
+        callbacks: { title: function (it) { return 'Gain per round trip ' + it[0].parsed.x.toFixed(4); },
+                     label: function (it) { return (it.datasetIndex === 1 ? 'Current: ' : '') + 'net after tax ' + fmt(it.parsed.y); } } } },
+      scales: {
+        x: { type: 'linear', min: lo, max: hi, title: { display: true, text: 'Gain per round trip, dollars', color: ink }, ticks: { color: ink, maxTicksLimit: 6 }, grid: { color: grid } },
+        y: { title: { display: true, text: 'Net after tax per year, dollars', color: ink }, ticks: { color: ink, maxTicksLimit: 6, callback: function (v) { return Number(v).toLocaleString('en-US'); } }, grid: { color: grid } }
+      }
+    };
+    if (chart) { chart.data.datasets = ds; chart.options = opts; chart.update(); }
+    else { chart = new Chart($('chart'), { type: 'line', data: { datasets: ds }, options: opts }); }
+    $('chartMsg').textContent = '';
+  }
+
+  function resetField(id) {
+    var y = $('rules').value, st = $('status').value;
+    if (id === 'tafRate') $('tafRate').value = TAF[y][0];
+    else if (id === 'tafCap') $('tafCap').value = TAF[y][1];
+    else if (id === 'stdDed') $('stdDed').value = STD[y][st];
+    else if (id === 'niitT') $('niitT').value = NIIT_T[st];
+    else if (id === 'Dm') { dmTouched = false; }
+    else if (id in DEF) $(id).value = DEF[id];
+    compute();
+  }
+  function wireResets() {
+    document.querySelectorAll('button[data-reset]').forEach(function (b) {
+      if (b.dataset.wired) return; b.dataset.wired = '1';
+      b.addEventListener('click', function () { resetField(b.dataset.reset); });
+    });
+  }
+  function resetAllRates() {
+    Object.keys(DEF).forEach(function (k) { $(k).value = DEF[k]; });
+    $('cpExch').value = 0; $('nrRate').value = 0; $('proData').value = 0; dmTouched = false;
+  }
+  function loadExample(k) {
+    var e = EX[k];
+    resetAllRates();
+    ['R', 'G', 'S', 'P', 'SS'].forEach(function (f) { $(f).value = e[f]; });
+    $('acct').value = e.acct; $('stacks').value = String(e.stacks); $('atp').checked = e.atp; $('max').checked = e.max;
+    $('datastat').value = 'nonpro'; $('rules').value = e.rules; $('status').value = e.status;
+    acctChanged(); dataChanged(); rulesChanged(); compute();
+  }
+
+  // sources list
+  var ol = $('srcList');
+  Object.keys(SRC).map(Number).sort(function (a, b) { return a - b; }).forEach(function (n) {
+    var li = document.createElement('li'); li.value = n;
+    li.innerHTML = SRC[n][0] + '. <a href="' + SRC[n][1] + '" target="_blank" rel="noopener">' + SRC[n][1] + '</a>. Accessed 2026-11-20.';
+    ol.appendChild(li);
+  });
+  Object.keys(EX).forEach(function (k) {
+    var b = document.createElement('button'); b.textContent = 'Example ' + k; b.id = 'ex' + k;
+    b.addEventListener('click', function () { loadExample(k); }); $('exBtns').appendChild(b);
+  });
+
+  document.querySelectorAll('input').forEach(function (inp) {
+    if (inp.closest('#brkTable')) return;
+    inp.addEventListener('input', function () { if (inp.id === 'Dm') dmTouched = true; compute(); });
+    inp.addEventListener('change', compute);
+  });
+  $('rules').addEventListener('change', function () { rulesChanged(); compute(); });
+  $('status').addEventListener('change', function () { statusChanged(); compute(); });
+  $('acct').addEventListener('change', function () { acctChanged(); compute(); });
+  $('datastat').addEventListener('change', function () { dataChanged(); compute(); });
+  $('stacks').addEventListener('change', compute);
+  $('brkReset').addEventListener('click', function () { loadBrackets(); compute(); });
+  if (window.matchMedia) { var mq = window.matchMedia('(prefers-color-scheme: dark)'); if (mq.addEventListener) mq.addEventListener('change', function () { if (chart) { chart.destroy(); chart = null; } compute(); }); }
+
+  acctChanged(); dataChanged(); rulesChanged(); wireResets(); compute();
+  window.__calc = { model: model, loadExample: loadExample, fmt: fmt };
+})();
+</script>
+</body>
+</html>
