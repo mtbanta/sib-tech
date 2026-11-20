@@ -8426,7 +8426,7 @@ Read only, per `builds/midday-review-brief.md`. Started at 10:30:41 AM CT by Mic
 | SCI | fresh stop | 09.144 | 11.455 | 13.840 | 2.31 | 4.70 |
 | VVV | fresh stop | 09.188 | 11.546 | 15.688 | 2.36 | 6.50 |
 
-(MFC's stop ended at 06.501 and its move filled at 07.566: Alpaca's records show the stop cancelled before the fill, read as by the move, since a moved take-profit's fill is what cancels it; counted 0 as the brief directs for a position sold by its move.)
+(Measured from Alpaca's fills: MFC's move filled 4 of 5 shares at 06.500 and BMRN's 3 of 4 at 06.719; each first fill cancelled the stop (Alpaca's one-cancels-the-other), and the last share filled at 07.566 and 07.027. So MFC's last share had no stop for 1.07 s and BMRN's for 0.31 s, while the moved sell limit at the bid was working and filling. Counted 0 in the totals, as the brief directs for a position sold by its move; the brief's "never without a stop" holds only for a move filled in one piece. JAZZ and WSM filled above their moved limits, at 230.51 and 218.08.)
 - Queue wait (10 sales): lowest 1.25, median about 1.9, highest 3.27 s; **none over 5 s.**
 - Time without a stop (14 positions): lowest 0, median about 4.2, highest 6.50 s (VVV), total 48.1 s; 4 at 0. The 10 sold at market: 3.24 to 6.50 s; each includes Alpaca's 1.2 to 1.5 s hold before submitting the sale (Alpaca's part, not the stack's).
 - Thursday beside it: 16 positions, 4 moved, queue 2.09 / 2.36 / 3.29 s, time without a stop 0 / 3.27 / 5.67 s, total 49.2 s.
