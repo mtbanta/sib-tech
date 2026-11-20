@@ -8470,3 +8470,8 @@ Prometheus 8:30 to 10:45: CPU burst balance full all morning (50,000), no thrott
 ### 8. Anything that did not behave as designed
 
 Nothing found. Two notes: Alpaca held the close-out's market sales 1.2 to 1.5 s before submitting them (Alpaca's wait, reported apart, not a fail; larger than Wednesday's or Thursday's); and today gave no test of A's 2 cent gap. **Next steps (for Michael):** keep watching for a move exactly 2 cents above its stop (accepted or refused); B's first figures put 3.4 s of the start in the 5 s tick, so if a faster start matters, a close-out timer at the due time (not built, a proposal) would save up to 5 s; Alpaca's sale hold is worth one more look at today's 2:45 close-out. Paper only; research input for a human decision, never an instruction to act.
+
+## Michael's decision after the Friday 2026-11-20 mid-day review, saved verbatim
+
+"Approved for tonight: start every close-out on a timer at its due time, instead of on the next 5-second pass. Group 1 and group 2; deploy after the close, before 7:30 AM Monday, only if both pass. Keep watching for a move exactly 2 cents above its stop in this afternoon's load window and my flatten. Item C (a 2:30 close-out to test Alpaca's hold) stays for a later day.
+Never print any token or key."
