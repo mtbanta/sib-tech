@@ -155,6 +155,11 @@ export const COMMANDS_UNREAD_BLOCK_MS = 120_000;
 // A pass that has run this long is stuck (review round 5, finding 1). Every call in a pass has its own time limit now, so this
 // should never happen; if it does, the watchdog takes over the safety work that needs only the broker (see watchdog()).
 export const PASS_WATCHDOG_MS = 60_000;
+// The close-out timer (Michael's decision of 2026-11-20): a pass sets a close-out's timer once its first try is due within this time (three
+// passes), and a timer that fires early is set again for the rest at most this many times.
+export const CLOSEOUT_TIMER_AHEAD_MS = 15_000;
+export const CLOSEOUT_TIMER_REARMS = 3;
+type CloseoutTimerKind = "midday" | "afternoon" | "regular";
 
 // The afternoon screen switches the live list only while nothing trades, by the route its command came in: the mid-day pause on with
 // no stop (as before), or (Michael's ruling E of 2026-11-12) Michael's own stop still on (`stop` or `flatten`, never the daily loss
@@ -328,6 +333,8 @@ export class Worker {
   private middayFiveMinAlertDate: string | null = null;
   // True from 10:30 until the mid-day close-out has finished flat (set on every pass): the mid-day close-out alone sells then.
   private middayOwnsSelling = false;
+  // The close-out timers (Michael's decision of 2026-11-20): at most one per kind, with its due time and how often it was set again.
+  private readonly closeoutTimers = new Map<CloseoutTimerKind, { dueMs: number; handle: unknown; rearms: number }>();
   // The close-out after the afternoon load window (Michael, 2026-11-12). Since Michael's request of 2026-11-17 the "date" fields hold the
   // window's key (the date and the window's start), as the window may start again the same day.
   private lastAfternoonAttempt = 0;
@@ -613,6 +620,7 @@ export class Worker {
 
   stop(): void {
     if (this.timer) clearInterval(this.timer);
+    for (const kind of [...this.closeoutTimers.keys()]) this.clearCloseoutTimer(kind);
     this.loop.stop();
     this.stream?.stop();
     this.orderStream?.stop();
@@ -1159,10 +1167,10 @@ export class Worker {
     // The mid-day cycle: from 10:30 until the mid-day close-out has finished flat, it alone sells (as the regular close-out, at the set time, does from its
     // time on), so the order sync's missing-exit check stands aside and its sales cannot spend Alpaca's requests outside the mid-day
     // close-out's 60 a minute (CLOSEOUT_MINUTE_CAP; the shared minute is 75 since Michael's decision 2 of 2026-11-17) (group 1 review, round 1: 40 positions with refused sales made 80 such sales in 10 minutes).
-    const middayToday = this.d.middayCycle === false ? null : middayTimes(current);
     // The close-out after the afternoon load window (Michael, 2026-11-12) owns selling the same way until it has finished flat.
-    const afternoonCloseoutDue = Boolean(inSession && current.phases.armed && afternoonCloseoutPending(current, now) && now < this.closeoutAt(day.closeAt));
-    this.middayOwnsSelling = Boolean(inSession && middayToday && current.phases.armed && now >= middayToday.pauseAt && !current.phases[MIDDAY_PHASE] && now < this.closeoutAt(day.closeAt)) || afternoonCloseoutDue;
+    // Michael's decision of 2026-11-20 (the close-out timer): judged at this moment's time, not the pass's start, so a pass that began just
+    // before 10:30 and gets here after the timer has started the mid-day close-out cannot set it back to false (middayOwnsSellingAt).
+    this.middayOwnsSelling = this.middayOwnsSellingAt(current, this.d.now());
     // The loss stop is scheduled first, before anything else in the session that waits on the broker.
     if (inSession) this.scheduleLossStop(current, now);
     // Closes the live updates wrote to memory but could not write to the database yet are tried again (item 1). Never waited on.
@@ -1226,10 +1234,128 @@ export class Worker {
       }
     }
 
+    // The mid-day cycle (Michael, 2026-11-09) and the afternoon window's close-out: their tries (startMiddayCloseouts). Michael's decision of
+    // 2026-11-20: a first try is started by a timer at its due time (closeoutTimers), so this pass starts it only if that timer did not.
+    const mt = this.d.middayCycle === false ? null : middayTimes(current);
+    this.startMiddayCloseouts(current, now, date, "pass");
+    // The second alert: still not flat 5 minutes after a try first ended not flat (once a day).
+    if (inSession && mt && this.middayAttemptDate === date && this.middayNotFlatSince !== null && !current.phases[MIDDAY_PHASE] && this.middayFiveMinAlertDate !== date && now.getTime() - this.middayNotFlatSince >= MIDDAY_NOT_FLAT_ALERT_AFTER_MS) {
+      this.middayFiveMinAlertDate = date;
+      void this.say("alerts", `**Michael: the mid-day close-out is still NOT FLAT after 5 minutes: ${this.middayLastRemaining.length > 0 ? this.middayLastRemaining.join(", ") : "the positions could not be listed"}.** Entries stay paused and I keep trying within 60 Alpaca requests a minute. You can also close them by hand in Alpaca. No deploy until the account is flat.`, { mentionOwner: true }).catch(() => undefined);
+    }
+    if (inSession && mt && current.phases.armed) {
+      try {
+        await this.middayFollowUps(date, current, mt, now);
+      } catch (err) {
+        this.lastTickError = `mid-day cycle: ${(err as Error).message.slice(0, 120)}`;
+        this.d.log?.("error", "midday_followup_failed", { error: (err as Error).message.slice(0, 200) });
+      }
+    }
+
+    // The regular close-out and its retries (startRegularCloseout); its first try's timer is set below.
+    this.startRegularCloseout(current, now, date, "pass");
+    // Michael's decision of 2026-11-20: the timers for the close-outs due within the next few passes.
+    this.armCloseoutTimers(current, now);
+    if (now >= addMinutes(day.closeAt, 5) && current.phases.closeout && !current.phases.summary) {
+      this.background("summary", () => this.summaryPhase(date));
+    }
+  }
+
+  // Whether the mid-day close-out (from the pause until it has finished flat) or the afternoon window's close-out (from the window's end
+  // until it has finished flat) owns selling at time `t`: the order sync's missing-exit check and stuck retries stand aside. The rule is
+  // v34's, moved here from the pass so the close-out timer sets it the same way before it starts a try (Michael's decision of 2026-11-20).
+  private middayOwnsSellingAt(current: DayRecord, t: Date): boolean {
+    if (!current.isTradingDay || !current.openAt || !current.closeAt) return false;
+    const inSession = t >= current.openAt && t < current.closeAt && current.status === "approved";
+    const mt = this.d.middayCycle === false ? null : middayTimes(current);
+    const afternoonCloseoutDue = Boolean(inSession && current.phases.armed && afternoonCloseoutPending(current, t) && t < this.closeoutAt(current.closeAt));
+    return Boolean(inSession && mt && current.phases.armed && t >= mt.pauseAt && !current.phases[MIDDAY_PHASE] && t < this.closeoutAt(current.closeAt)) || afternoonCloseoutDue;
+  }
+
+  // MICHAEL'S DECISION OF 2026-11-20, word for word: "start every close-out on a timer at its due time, instead of on the next 5-second
+  // pass". Each pass sets a one-shot timer for each close-out whose first try is due within CLOSEOUT_TIMER_AHEAD_MS: the mid-day close-out
+  // at the pause (10:30 AM Central), the afternoon window's close-out at the window's end, the regular close-out at its set time. When it
+  // fires it runs the pass's own start code (startMiddayCloseouts, startRegularCloseout) on today's day record held in memory (as the
+  // daily loss stop does when a pass is slow), after setting who owns selling as the pass does; every condition and guard is judged
+  // again then, so a timer whose due time has moved, or whose close-out has already started, starts nothing. Unchanged and still on the
+  // pass: every retry, the carried sale and the emergency close-out (none has a due time). If the timer does not start a first try (no
+  // record of today in memory, a condition not met), the next pass starts it, as in v34. Bounds: at most one timer per kind; a timer that
+  // fires before its due time (the wall clock and the timer's clock may differ by a few milliseconds) is set again for the rest, at most
+  // CLOSEOUT_TIMER_REARMS times; it sends nothing itself and is not a retry loop.
+  private armCloseoutTimers(current: DayRecord, now: Date): void {
+    const t = now.getTime();
+    const due = new Map<CloseoutTimerKind, number>();
+    if (current.isTradingDay && current.openAt && current.closeAt) {
+      const mt = this.d.middayCycle === false ? null : middayTimes(current);
+      if (mt) due.set("midday", mt.pauseAt.getTime());
+      const w = afternoonLoadWindow(current);
+      if (w) due.set("afternoon", w.end.getTime());
+      due.set("regular", this.closeoutAt(current.closeAt).getTime());
+    }
+    for (const [kind, set] of [...this.closeoutTimers]) if (due.get(kind) !== set.dueMs) this.clearCloseoutTimer(kind);
+    for (const [kind, dueMs] of due) {
+      if (this.closeoutTimers.has(kind)) continue;
+      if (dueMs > t && dueMs - t <= CLOSEOUT_TIMER_AHEAD_MS) this.setCloseoutTimer(kind, dueMs, 0);
+    }
+  }
+
+  private setCloseoutTimer(kind: CloseoutTimerKind, dueMs: number, rearms: number): void {
+    const set = this.d.setTimer ?? ((fn: () => void, ms: number) => {
+      const h = setTimeout(fn, ms);
+      h.unref?.();
+      return h;
+    });
+    const handle = set(() => this.closeoutTimerFired(kind, dueMs), Math.max(0, dueMs - this.d.now().getTime()));
+    this.closeoutTimers.set(kind, { dueMs, handle, rearms });
+  }
+
+  private clearCloseoutTimer(kind: CloseoutTimerKind): void {
+    const set = this.closeoutTimers.get(kind);
+    if (!set) return;
+    (this.d.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>)))(set.handle);
+    this.closeoutTimers.delete(kind);
+  }
+
+  private closeoutTimerFired(kind: CloseoutTimerKind, dueMs: number): void {
+    const set = this.closeoutTimers.get(kind);
+    if (!set || set.dueMs !== dueMs) return; // cleared or replaced meanwhile
+    this.closeoutTimers.delete(kind);
+    const now = this.d.now();
+    if (now.getTime() < dueMs) {
+      if (set.rearms < CLOSEOUT_TIMER_REARMS) this.setCloseoutTimer(kind, dueMs, set.rearms + 1);
+      else this.d.log?.("warn", "closeout_timer_early", { kind, dueAt: new Date(dueMs).toISOString(), rearms: set.rearms });
+      return;
+    }
+    const date = etDate(now);
+    const current = this.lastDay;
+    if (!current || current.tradeDate !== date) {
+      this.d.log?.("warn", "closeout_timer_no_day", { kind, dueAt: new Date(dueMs).toISOString() });
+      return; // the next pass starts it
+    }
+    try {
+      if (kind === "regular") this.startRegularCloseout(current, now, date, "timer");
+      else {
+        this.middayOwnsSelling = this.middayOwnsSellingAt(current, now);
+        this.startMiddayCloseouts(current, now, date, "timer");
+      }
+    } catch (err) {
+      // Never thrown into the timer: the next pass starts the close-out as before.
+      this.d.log?.("error", "closeout_timer_failed", { kind, error: (err as Error).message.slice(0, 200) });
+    }
+  }
+
+  // The mid-day close-out's and the afternoon window's close-out's tries: unchanged conditions, guards and budget (moved here from the pass
+  // by Michael's decision of 2026-11-20 so the close-out timer starts a first try through the same code). Synchronous up to `background`,
+  // which marks the step in flight at once, so a pass and the timer can never both start the same try. `by` is stored in `timing`.
+  private startMiddayCloseouts(current: DayRecord, now: Date, date: string, by: "timer" | "pass"): void {
+    if (!current.isTradingDay || !current.openAt || !current.closeAt) return;
+    const closeAt = current.closeAt;
+    const inSession = now >= current.openAt && now < closeAt && current.status === "approved";
+    const afternoonCloseoutDue = Boolean(inSession && current.phases.armed && afternoonCloseoutPending(current, now) && now < this.closeoutAt(closeAt));
+    const mt = this.d.middayCycle === false ? null : middayTimes(current);
     // The mid-day cycle (Michael, 2026-11-09): at 10:30 AM Central the pause goes on and the mid-day close-out sells everything, retried
     // every 20 seconds until flat, never from the regular close-out time on (that close-out takes over). Its own phase, never `closeout`.
-    const mt = this.d.middayCycle === false ? null : middayTimes(current);
-    if (inSession && mt && current.phases.armed && now >= mt.pauseAt && !current.phases[MIDDAY_PHASE] && now < this.closeoutAt(day.closeAt) && !this.closingOut && !this.inflight.has("carried") && !this.inflight.has("midday") && now.getTime() - this.lastMiddayAttempt >= (this.middayAttemptDate === date ? this.middayProgress.gapMs(MIDDAY_RETRY_MS, 60_000, this.middayLastRemaining.length) : 0)) {
+    if (inSession && mt && current.phases.armed && now >= mt.pauseAt && !current.phases[MIDDAY_PHASE] && now < this.closeoutAt(closeAt) && !this.closingOut && !this.inflight.has("carried") && !this.inflight.has("midday") && now.getTime() - this.lastMiddayAttempt >= (this.middayAttemptDate === date ? this.middayProgress.gapMs(MIDDAY_RETRY_MS, 60_000, this.middayLastRemaining.length) : 0)) {
       if (this.middayAttemptDate !== date) {
         this.middayAttemptDate = date;
         this.middayAttempts = 0;
@@ -1250,7 +1376,7 @@ export class Worker {
         this.middayProgress.started(retry ? this.middayLastRemaining.length : Infinity);
         this.middayAttempts++;
         // Decision B of 2026-11-19 (logging only): when it was due and when this tick decided to start it.
-        const timing = { dueAt: retry ? null : mt.pauseAt.toISOString(), triggeredAt: this.d.now().toISOString() };
+        const timing = { dueAt: retry ? null : mt.pauseAt.toISOString(), triggeredAt: this.d.now().toISOString(), triggeredBy: by };
         if (!this.background("midday", () => withReservation(res, () => this.middayPhase(date, current, mt.pauseAt, retry, only, res, timing), retry ? undefined : "first"))) res.end();
       }
     }
@@ -1279,24 +1405,16 @@ export class Worker {
         this.afternoonAttempts++;
         // The same background name as the mid-day close-out, so every guard that stands aside for it stands aside for this too.
         const windowStart = afternoonLoadStart(current)?.toISOString() ?? null;
-        const timing = { dueAt: retry ? null : (afternoonLoadWindow(current)?.end.toISOString() ?? null), triggeredAt: this.d.now().toISOString() }; // decision B (logging only)
+        const timing = { dueAt: retry ? null : (afternoonLoadWindow(current)?.end.toISOString() ?? null), triggeredAt: this.d.now().toISOString(), triggeredBy: by }; // decision B (logging only)
         if (!this.background("midday", () => withReservation(res, () => this.afternoonCloseoutPhase(date, retry, only, res, windowStart, timing), retry ? undefined : "first"))) res.end();
       }
     }
-    // The second alert: still not flat 5 minutes after a try first ended not flat (once a day).
-    if (inSession && mt && this.middayAttemptDate === date && this.middayNotFlatSince !== null && !current.phases[MIDDAY_PHASE] && this.middayFiveMinAlertDate !== date && now.getTime() - this.middayNotFlatSince >= MIDDAY_NOT_FLAT_ALERT_AFTER_MS) {
-      this.middayFiveMinAlertDate = date;
-      void this.say("alerts", `**Michael: the mid-day close-out is still NOT FLAT after 5 minutes: ${this.middayLastRemaining.length > 0 ? this.middayLastRemaining.join(", ") : "the positions could not be listed"}.** Entries stay paused and I keep trying within 60 Alpaca requests a minute. You can also close them by hand in Alpaca. No deploy until the account is flat.`, { mentionOwner: true }).catch(() => undefined);
-    }
-    if (inSession && mt && current.phases.armed) {
-      try {
-        await this.middayFollowUps(date, current, mt, now);
-      } catch (err) {
-        this.lastTickError = `mid-day cycle: ${(err as Error).message.slice(0, 120)}`;
-        this.d.log?.("error", "midday_followup_failed", { error: (err as Error).message.slice(0, 200) });
-      }
-    }
+  }
 
+  // The regular close-out's tries (moved here from the pass by Michael's decision of 2026-11-20, unchanged; see startMiddayCloseouts).
+  private startRegularCloseout(current: DayRecord, now: Date, date: string, by: "timer" | "pass"): void {
+    if (!current.isTradingDay || !current.closeAt) return;
+    const closeAt = current.closeAt;
     // Close-out runs until the account is flat (after the close it only reports, it sends nothing; a try from 30 minutes after the close
     // writes the phase), and the heartbeat says "fail" for as long as positions remain.
     // Item 3 of 2026-11-13: before the close the retries come 20 s apart, then 40, then every 60; after the close (it only reports then, and
@@ -1305,9 +1423,9 @@ export class Worker {
     // Group 1, round 2 of the weekend build: in the last minute before the close the tries come every 20 seconds again (the last chances to
     // get flat before the shares, already without their stops, are held overnight); after the close the waits count the tries since the close.
     const attemptsToday = this.closeoutAttemptDate === date ? this.closeoutAttempts : 0;
-    const lastMinute = now >= addMinutes(day.closeAt, -1);
-    const retryMs = now < day.closeAt ? (lastMinute ? CLOSEOUT_RETRY_MS : retryGapMs(CLOSEOUT_RETRY_MS, attemptsToday, 60_000)) : retryGapMs(5 * 60_000, Math.max(1, this.closeoutAttemptsAfterClose), 15 * 60_000);
-    if (now >= this.closeoutAt(day.closeAt) && !current.phases.closeout && !this.closingOut && now.getTime() - this.lastCloseoutAttempt >= retryMs && this.backgroundReady("closeout")) {
+    const lastMinute = now >= addMinutes(closeAt, -1);
+    const retryMs = now < closeAt ? (lastMinute ? CLOSEOUT_RETRY_MS : retryGapMs(CLOSEOUT_RETRY_MS, attemptsToday, 60_000)) : retryGapMs(5 * 60_000, Math.max(1, this.closeoutAttemptsAfterClose), 15 * 60_000);
+    if (now >= this.closeoutAt(closeAt) && !current.phases.closeout && !this.closingOut && now.getTime() - this.lastCloseoutAttempt >= retryMs && this.backgroundReady("closeout")) {
       if (this.closeoutAttemptDate !== date) {
         this.closeoutAttemptDate = date;
         this.closeoutAttempts = 0;
@@ -1319,14 +1437,13 @@ export class Worker {
       // estimated cost (the last try's measured cost, at most CLOSEOUT_RETRY_MOST) against the minute, down to 20 of Alpaca's remaining;
       // from CLOSEOUT_NEVER_REFUSED_MS before the close (2:58 PM Central) it is counted but never refused. Refused, it is not an attempt:
       // the next pass asks again. The first try is a first try (never refused, counted).
-      const force = now.getTime() >= day.closeAt.getTime() - CLOSEOUT_NEVER_REFUSED_MS;
+      const force = now.getTime() >= closeAt.getTime() - CLOSEOUT_NEVER_REFUSED_MS;
       const res = path === "retry" ? this.budget.tryReserve("P1", Math.min(CLOSEOUT_RETRY_MOST, this.closeoutLastCost ?? CLOSEOUT_RETRY_MOST), { fiveSec: false, force, closeOut: true, label: "close-out retry" }) : this.budget.first("close-out");
       if (res instanceof Reservation) {
         this.lastCloseoutAttempt = now.getTime();
         this.closeoutAttempts++;
-        if (now >= day.closeAt) this.closeoutAttemptsAfterClose++;
-        const closeAt = day.closeAt;
-        const timing = { dueAt: path === "close-out" ? this.closeoutAt(closeAt).toISOString() : null, triggeredAt: this.d.now().toISOString() }; // decision B (logging only)
+        if (now >= closeAt) this.closeoutAttemptsAfterClose++;
+        const timing = { dueAt: path === "close-out" ? this.closeoutAt(closeAt).toISOString() : null, triggeredAt: this.d.now().toISOString(), triggeredBy: by }; // decision B (logging only)
         const started = this.background("closeout", () =>
           withReservation(res, async () => {
             try {
@@ -1338,9 +1455,6 @@ export class Worker {
         );
         if (!started) res.end();
       }
-    }
-    if (now >= addMinutes(day.closeAt, 5) && current.phases.closeout && !current.phases.summary) {
-      this.background("summary", () => this.summaryPhase(date));
     }
   }
 

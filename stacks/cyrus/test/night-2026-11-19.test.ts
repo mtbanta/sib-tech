@@ -80,7 +80,8 @@ test("B: closeout_result.timing holds the due and trigger times passed in, the c
   assert.equal(res.flat, true);
   const r = result(w);
   const t = r.timing;
-  assert.deepEqual(Object.keys(t), ["dueAt", "triggeredAt", "startedAt", "saleStartedAt", "movePhaseStartedAt"]);
+  assert.deepEqual(Object.keys(t), ["dueAt", "triggeredAt", "triggeredBy", "startedAt", "saleStartedAt", "movePhaseStartedAt"]); // triggeredBy: the timer of 2026-11-20
+  assert.equal(t.triggeredBy, null, "not passed in");
   assert.equal(t.dueAt, due);
   assert.equal(t.triggeredAt, trig);
   assert.ok(iso(t.triggeredAt) <= iso(t.startedAt), "started after it was triggered");
@@ -141,6 +142,7 @@ test("B, through the worker: the mid-day close-out's first try is due at 10:30 a
   assert.equal(first.flat, false, "the first try ended not flat");
   assert.equal(first.timing.dueAt, z("16:30:00").toISOString(), "the mid-day pause time");
   assert.ok(iso(first.timing.triggeredAt) >= z("16:30:02").getTime(), "the trigger is the tick's own time, not the due time (group 2, round 2, B12)");
+  assert.equal(first.timing.triggeredBy, "pass", "no pass in the 15 s before 10:30, so no timer was set (the close-out timer of 2026-11-20)");
   assert.ok(iso(first.timing.startedAt) >= iso(first.timing.triggeredAt));
   sim.refuseSellsTimes = 0;
   await r.at("16:30:27");
@@ -159,6 +161,7 @@ test("B, through the worker: the mid-day close-out's first try is due at 10:30 a
   assert.equal(reg.flat, false);
   assert.equal(reg.timing.dueAt, z("20:55:00").toISOString(), "the regular close-out's set time");
   assert.ok(iso(reg.timing.triggeredAt) >= z("20:55:03").getTime(), "the tick's own time");
+  assert.equal(reg.timing.triggeredBy, "pass");
   sim.refuseSellsTimes = 0;
   const after = sim.simMs;
   await r.at(new Date(after + 25_000).toISOString());
