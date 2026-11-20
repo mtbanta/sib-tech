@@ -497,6 +497,11 @@ The full record of each run lives in `runs/`. This table is the index you read f
 
 ## Next Steps
 
+**Near-term list (Michael, 2026-11-20, not built yet):**
+- **The carried-position sale gives way to any running close-out**, so only one sale path runs at a time (Michael's words: "the carried-position sale gives way to any running close-out, so only one sale path runs at a time"). Today the carried sale's start checks `closingOut`, which the mid-day and afternoon close-outs never set, so it can run beside them (true on v34 too; group 1's note on the close-out timer, round 2). Money-touching: built and reviewed (group 1 and group 2) when Michael schedules it, not tonight.
+- C: a close-out at 2:30 PM one day to see whether Alpaca's hold follows the clock (later, low priority).
+- The OCO replacement protection for remainders (proposal of 2026-11-19, for Michael's decision).
+
 As of 2026-11-12 (5 AM Central): v19 runs. **Tonight's list (Michael, 2026-11-12, 5 AM):** a time limit on the held-back 5 minute "no protective stop" alert (group 2 round 3's suggestion), proposed before any code (see the C2 log, "Michael's requests of 2026-11-12"). The mid-day review reports the fast sale's count, request cost and effect on remaining requests (`builds/midday-review-brief.md`).
 
 As of 2026-11-06 (11:45 PM Central): v11 runs.

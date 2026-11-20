@@ -8511,3 +8511,12 @@ What it does: each pass of the worker (every 5 s) sets a one-shot timer for any 
 - **Group 2, round 3 (`b5f8613`): PASS**; its three round 2 notes fixed and true to the code; the two briefs' bullets byte-identical; no dashes; its round 2 suite (1,057 of 1,057) stands, no code or test changed.
 - Both groups' one non-blocking note ("another close-out running, which sets `closingOut`" reads as if every close-out sets it; the mid-day and afternoon close-outs hold each other back by their shared step) is taken in both briefs after round 3, wording only, no further round (both said none was needed).
 - **`b5f8613` is the deploy commit**, to deploy after the close under Michael's "deploy after the close, before 7:30 AM Monday, only if both pass", once the account is flat, the stop flag is off and the daily summary has posted.
+
+## Michael's message of 2026-11-20 (afternoon), saved verbatim
+
+"No deliberate flatten today: the 12:28 window close-out already covered it, including all 6 moves at exactly 2 cents. Stop the flatten watch. Deploy b5f8613 after the close as planned.
+Carried-position overlap: add to the near-term list, not tonight: the carried-position sale gives way to any running close-out, so only one sale path runs at a time.
+After the deploy, run the end-of-day review (include the 2:45 close-out's moves and the timing records).
+Never print any token or key."
+
+- The flatten watch was stopped (no process left). The carried-position change is on `PROJECT_STATE.md`'s near-term list, not built. The deploy waits for the daily summary (a wait from 3:06 PM, ending by 3:50 PM), then `b5f8613` through the off-hours deploy tool; the end-of-day review follows it.
