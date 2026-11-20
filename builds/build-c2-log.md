@@ -8381,3 +8381,92 @@ Michael's instruction, word for word: "Build A, B and D tonight with group 1 and
 - **Builder's finding, before any change (not built):** v34 already does the rule as worded. `withStops` in `src/moved-take-profit.ts` skips, before the quote read, every bracket whose take-profit is less than the margin plus 1 cent (now 3 cents) above its stop, with the skip reason "take-profit within 3 cents of the stop". A default load bracket (1 cent up, 2 down) is exactly 3 cents apart, not less, so it passes and reaches the quote read: it can qualify, but only at a bid exactly at its take-profit. Before decision A the threshold was 4 cents, so such a bracket was skipped; that is the "as before".
 - **Question for Michael:** either (1) no change, the rule as worded is in place; or (2) skip the quote read for a bracket less than the margin plus 2 cents (4 cents) apart, so default load brackets skip it as before decision A, giving up their one qualifying case (a bid exactly at the take-profit, where the take-profit is likely filling already; a guess, not measured; 0 of 19 at Wednesday's 10:30 load close-out). Either way the moves' 2 cent margin is unchanged. Money-touching (the move step), so a group 1 review once decided. Paper only; research input for a human decision, never an instruction to act.
 - **Michael's answer, verbatim:** "Option 1: no change." So nothing is built; the rule as worded stays as it is in v34 (skip before the quote read when the take-profit is less than the margin plus 1 cent, now 3 cents, above the stop), and default load brackets keep reaching the quote read.
+
+## Friday 2026-11-20 mid-day session review (v34, normal morning; the first session on the night build of 2026-11-19)
+
+Read only, per `builds/midday-review-brief.md`. Started at 10:30:41 AM CT by Michael's wait (flat seen at 10:30:33); written by about 10:40. Read only on Alpaca (paper), Supabase (read-only transaction), Discord and Fly's metrics; nothing changed, deployed, sent or posted. Times are Central. "Measured" means read from a timestamp or counter; "inferred" means worked out from the code and those times. Release: Fly v34 (`aaf91f1`) all morning (no `worker_started` row today; the latest is Thursday's 4:12 PM). Limits (normal day): largest position 250 dollars, daily loss stop 500, 100 orders a minute, cap 1. Day start 17,153.14. Scripts and data: scratchpad `mid-1120/`.
+
+### The night build's first live data (A, B, D)
+
+- **A, the 2 cent margin:** 14 positions at the pause; **4 moved** (BMRN, JAZZ, MFC, WSM), all accepted, all filled at their moved limit. Their new limits sat 10 to 73 cents above their stops, so **no move was exactly 2 cents above its stop, and the margin change decided no position today**; Alpaca's acceptance of a 2 cent gap is still unmeasured. Skipped (the stored `move_phase_skips` row): 8 remainders under fresh stops ("the open sell is not a bracket's take-profit": BBWI, BIPC, CG, GAP, GME, PNR, SCI, VVV) and 2 brackets on "price within 2 cents of the stop": ESTC (IEX bid 71.72 against a stop of 74.94 while the last trade was 75.02, quote 2.5 s old) and INSM (bid 144.00 against 144.95, trade 145.17, 1.8 s): stray IEX bids below the stop, which would have been skipped under the 3 cent rule too. Qualified: 4 of the 6 brackets.
+- **B, close-out timing (the first `timing` row, measured):** due 10:30:00.000; **triggered 10:30:03.398 (3.40 s, the worker's 5 s tick)**; started 03.449 (+0.05 s); sale's turn 03.663 (+0.21); move step 04.137 (+0.47, the sale's reads); first replace sent 04.428 (+0.29, the stop lookup and quote read); cancel-all sent 07.727 (after the moves' 2 s wait), answered 07.823. So of the 4.4 s from the due time to the first move, 3.4 s was waiting for the tick: this measures the night build's guess (inferred then) for Thursday's 6.0 s.
+- **D, the late record's label:** no `late_notice` this morning, so nothing to label.
+
+### The 10:30 mid-day close-out
+
+**Per-move rows** (stored `take_profit_moved`, reason "mid-day close-out"):
+
+| Sent | Symbol | Shares | Old take-profit | New limit | Stop | Bid (quote age) | Accepted | Stop cancelled by Alpaca | Time to fill | Fallback (stored) | Backup sold | Shares seen filled | Live updates |
+| :--- | :--- | ---: | ---: | ---: | ---: | :--- | :--- | :--- | ---: | :--- | ---: | ---: | :--- |
+| 10:30:04.428 | BMRN | 4 | 61.27 | 61.03 | 60.88 | 61.04 (2,420 ms) | yes, 269 ms | yes | 2,599 ms | no | 0 | 4 | yes |
+| 10:30:04.697 | JAZZ | 1 | 231.33 | 230.43 | 229.83 | 230.44 (1,363 ms) | yes, 178 ms | yes | 1,944 ms | no | 0 | 1 | yes |
+| 10:30:04.875 | MFC | 5 | 41.79 | 41.62 | 41.52 | 41.63 (184 ms) | yes, 311 ms | yes | 2,691 ms | yes | 0 | 5 | yes |
+| 10:30:05.186 | WSM | 1 | 218.50 | 217.82 | 217.09 | 217.83 (9,254 ms) | yes, 175 ms | yes | 2,265 ms | yes | 0 | 1 | yes |
+
+- Moves tried 4, accepted 4, refused 0. Filled within the 2 s wait: 1 (JAZZ); all 4 filled by 2.7 s (median about 2.4 s). Stops cancelled by Alpaca: 4 yes. "Fallback" yes for MFC and WSM means only that they were still held at the read after the wait; both filled before the cancel-all (07.566 and 07.451) and the backup sold 0 of them (measured from Alpaca's orders: no market sale for a moved symbol). WSM moved on a 9.3 s old quote (under the 30 s limit since v33).
+
+**Time to flat:** first replace 04.43; cancel-all 07.73, answered 07.82; fresh stops' cancels landed 09.13 to 09.20; first of 10 market sales 10.406, last 11.546; **Alpaca held each sale 1.18 to 1.53 s from created to submitted** (all submitted 11.93 to 12.72; Thursday 0.01 to 0.06 s, Wednesday 0.1 to 0.4 s); last fill 15.688 (VVV); `closeout_result` flat at 10:30:17.277 (`waitedMs` 5,071); day phase `midday` 17.291; "Mid-day close-out done" posted 10:30:17. **About 17.3 s from the pause to flat** (Thursday about 15 s, Wednesday about 10.4 s); of the difference with Thursday, Alpaca's hold of the sales accounts for about 1.2 to 1.5 s (measured), and the moves came 1.6 s earlier than Thursday's.
+
+**Queue wait and time without a stop (Michael's ruling of 2026-11-18):**
+
+| Symbol | Kind | Stop ended | Sale sent | Sold | Queue wait | Time without a stop |
+| :--- | :--- | :--- | :--- | :--- | ---: | ---: |
+| BMRN | bracket, moved | 06.721 (by the move's fill) | (move) | 07.027 | n/a | 0 |
+| JAZZ | bracket, moved | 06.644 | (move) | 06.641 | n/a | 0 |
+| MFC | bracket, moved | 06.501 | (move) | 07.566 | n/a | 0 |
+| WSM | bracket, moved | 07.454 | (move) | 07.451 | n/a | 0 |
+| BBWI | fresh stop | 09.153 | 10.406 | 13.474 | 1.25 | 4.32 |
+| BIPC | fresh stop | 09.197 | 10.603 | 12.527 | 1.41 | 3.33 |
+| CG | fresh stop | 09.131 | 10.748 | 13.486 | 1.62 | 4.36 |
+| ESTC | bracket | 07.778 | 10.865 | 14.226 | 3.04 | 6.45 |
+| GAP | fresh stop | 09.182 | 10.940 | 13.248 | 1.76 | 4.07 |
+| GME | fresh stop | 09.170 | 11.015 | 12.409 | 1.84 | 3.24 |
+| INSM | bracket | 07.778 | 11.098 | 12.983 | 3.27 | 5.21 |
+| PNR | fresh stop | 09.201 | 11.175 | 15.104 | 1.97 | 5.90 |
+| SCI | fresh stop | 09.144 | 11.455 | 13.840 | 2.31 | 4.70 |
+| VVV | fresh stop | 09.188 | 11.546 | 15.688 | 2.36 | 6.50 |
+
+(MFC's stop ended at 06.501 and its move filled at 07.566: Alpaca's records show the stop cancelled before the fill, read as by the move, since a moved take-profit's fill is what cancels it; counted 0 as the brief directs for a position sold by its move.)
+- Queue wait (10 sales): lowest 1.25, median about 1.9, highest 3.27 s; **none over 5 s.**
+- Time without a stop (14 positions): lowest 0, median about 4.2, highest 6.50 s (VVV), total 48.1 s; 4 at 0. The 10 sold at market: 3.24 to 6.50 s; each includes Alpaca's 1.2 to 1.5 s hold before submitting the sale (Alpaca's part, not the stack's).
+- Thursday beside it: 16 positions, 4 moved, queue 2.09 / 2.36 / 3.29 s, time without a stop 0 / 3.27 / 5.67 s, total 49.2 s.
+
+**Requests:** the `governor_stats` row ending 10:30:48 holds the close-out: 99 requests (first tries 42, routine 53, P2 1, clock 6); lowest remaining 173 (the morning's lowest). Rate-limit answers 0. No retry (the first try went flat), no NOT FLAT alert, the cap unchanged at 1. No entry accepted after 10:30 (17 "paused for the mid-day cycle" refusals). Alpaca after it: 0 positions, 0 open orders.
+
+### 1. The morning, 8:30 to 10:30 (normal day)
+
+- Entries: 228 stored, **224 accepted and filled** (market brackets), 4 refused by Alpaca (BBWI 8:35:03 "stop_loss.stop_price must be <= base_price - 0.01"; VVV 8:35:51 and 8:41:27, P 8:39:03 "take_profit.limit_price must be >= base_price + 0.01": the price moved before the order arrived). First 8:35:04.9, last 10:28:28.8. **Highest accepted orders a minute: 13** (busiest 60 s from 8:35:04.9; `peakTradesPerMinute` 14, sends counted). Decision to acceptance: median 175 ms, 95th percentile 312, slowest 648.
+- Requests: at most 101 in a minute (the row ending 8:37:18: first tries 48, routine 47, P2 10, entries 5, clock 9, the remainders of 8:36 to 8:37); **lowest remaining 173**, never near the reserve of 80; governor holds 0; budget refusals 0; `mostBudgetedInMinute` 16, `mostCappedIn5s` 7, `mostUrgentCappedIn5s` 0; no overdraft, forced try, stuck-sale hold or retry hold; rate-limit answers 0.
+- Refusals (counted): position limit smaller than one share 680, already holding this symbol 111, first minutes of the session 86, paused for the mid-day cycle 17, Alpaca refused a moment ago 5, entry still working 2.
+- No entry over 250 dollars at its fill.
+- Cost: -149.56 to 10:30 (17,153.14 to 17,003.58; the morning line and Alpaca's account agree).
+- **Verdict: holds.** Highest accepted 13 a minute; no rate-limit errors; remaining never below the reserve; no safety sale delayed on the stack's own steps; the mid-day close-out flat at 10:30:17, by 10:35.
+
+### 2. Safety work in the morning
+
+- 33 remainders after partial take-profits (`bare_remainder`): **24 got a fresh stop**, 1.68 to 4.52 s after Alpaca's stop cancel (median 2.38), all confirmed by Alpaca's answer (215 to 284 ms), each with its `liquidation_result` "stop cancelled after a partial take-profit" (sold 0, the fresh-stop path; matched 24 of 24); **9 were finished by their own take-profit** (6 `remainder_recount` with sold 0; P-11, P-32 and P-33, whose take-profit filled the last share 0.7 to 1.05 s after the stop cancel). No remainder sold at market. The slowest fresh stop, ESTC at 8:36 (4.52 s): its take-profit kept filling (2 of 3 shares by 8:36:25.1) while its cancel landed (26.66), then the 1-share fresh stop was sent (28.09) (inferred from Alpaca's records; Fly's log has rolled).
+- List lag: 44 `stop_cancel_list_lag`, 22 `stop_cancel_list_cleared`; ranges from at least 37 to 808 ms up to 289 to 1,785 ms (Thursday's under 0.83 s).
+- No lost exits or fast sales (not a load day), no `sale_blocked`, no `late_notice`, no `unprotected_position`, no stuck sale, no fresh stop refused or unclear.
+- `sync_slow` 3: 8:35:21 (2.57 s, the start-up protection check 2.44 s), 9:00:02 (2.38 s, the order list 2.35 s), 9:00:11 (2.70 s, the order list 1.76 s, older lookups 0.50 s).
+- Alerts mentioning Michael: none (0 posts in `alerts`).
+- Time without a stop, morning (separate line): the remainders' gaps to their fresh stops, 1.7 to 4.5 s; the morning's worst is the close-out's VVV, 6.50 s, of which about 1.2 s Alpaca's hold.
+
+### 4. The pause and what followed
+
+No deploy planned or made; no `hold` or `go` from Michael by the review. Paused, flat, `middayFlat` yes. Trading resumes only by `go`.
+
+### 5. The loss stop and the shadow book
+
+Day start 17,153.14; lowest 17,003.58 at 10:31 (-149.56, 30 percent of the 500 dollar stop; Alpaca's one-minute history). Shadow book: largest difference 0.47 dollars, mean -0.11, 0 dropped.
+
+### 6. The Fly machine
+
+Prometheus 8:30 to 10:45: CPU burst balance full all morning (50,000), no throttling, CPU in use 0.97 to 1.48 every 10 minutes (highest 1.78), steal at most 0.23, memory available at least 350 MB. Worker rows (118, one long window at 8:30:04, the overnight gap, event-loop delay 104 ms in it): process CPU at most 1.5 percent, machine busy at most 1.7 percent, event-loop delay at most 19.6 ms, decision time 90th percentile at most 347 ms, queue wait at most 380 ms, 0 dropped.
+
+### 7. Discord volume
+
+`commands` 3 (the morning post, Armed, the morning line), `trading` 25 (the live list, 22 five-minute lines, the close-out line), `alerts` 0.
+
+### 8. Anything that did not behave as designed
+
+Nothing found. Two notes: Alpaca held the close-out's market sales 1.2 to 1.5 s before submitting them (Alpaca's wait, reported apart, not a fail; larger than Wednesday's or Thursday's); and today gave no test of A's 2 cent gap. **Next steps (for Michael):** keep watching for a move exactly 2 cents above its stop (accepted or refused); B's first figures put 3.4 s of the start in the 5 s tick, so if a faster start matters, a close-out timer at the due time (not built, a proposal) would save up to 5 s; Alpaca's sale hold is worth one more look at today's 2:45 close-out. Paper only; research input for a human decision, never an instruction to act.
