@@ -8520,3 +8520,10 @@ After the deploy, run the end-of-day review (include the 2:45 close-out's moves 
 Never print any token or key."
 
 - The flatten watch was stopped (no process left). The carried-position change is on `PROJECT_STATE.md`'s near-term list, not built. The deploy waits for the daily summary (a wait from 3:06 PM, ending by 3:50 PM), then `b5f8613` through the off-hours deploy tool; the end-of-day review follows it.
+
+## Michael's request of 2026-11-20 (afternoon), saved verbatim: item C on Monday
+
+"For Monday only: set the regular close-out to 2:30 PM Central, to test whether Alpaca's hold on market sales follows the clock. Deploy it with or after the timer release, outside market hours. Monday's end-of-day review compares the hold at 2:30 with this week's 2:45 close-outs. Then I will choose the permanent time."
+
+- **Built:** `stacks/cyrus/fly.toml` sets `CLOSEOUT_MINUTES_BEFORE_CLOSE = "30"` (was 15), within the setting's range of 5 to 30 (`MAX_CLOSEOUT_MINUTES_BEFORE_CLOSE` in `src/config.ts`); no code change. With the close-out timer the 2:30 first try starts on its timer, as at 2:45. Unchanged: entries end at 2:00 PM (the last entry), `load afternoon` is accepted until 1:30 and its window ends by 2:00, the retries' never-refused time stays 2:58, the summary 3:05. From 2:30 the close-out alone sells (the missing-exit check stands aside by the clock, as it did from 2:45).
+- **Plan:** a short group 1 check of this commit (its only difference from the reviewed `b5f8613` under `stacks/` is this setting); if it passes, one deploy of it after today's summary instead of `b5f8613` alone; otherwise `b5f8613` alone tonight and the setting in a later off-hours deploy before 7:30 AM Monday. **After Monday's close** (and its review), back to 15 in an off-hours deploy unless Michael has chosen the permanent time by then. Monday's review compares Alpaca's hold of the 2:30 close-out's market sales (created to submitted) with this week's 2:45 close-outs.
