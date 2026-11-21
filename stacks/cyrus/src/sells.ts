@@ -596,6 +596,7 @@ export class Liquidator {
     };
     const gateTimer: GateReadTimer = (what, f, pagesOf) => timedRead(what, f, pagesOf, "gate");
     const cancelIds = [...new Set(o.cancelIds ?? [])];
+    const pairRefusedIn = new Set<string>(); // the exit pair: symbols whose pair was refused in this sale (one try per position)
     // Group 1, round 1 (2026-11-17): honoured only for the one caller's shape (one symbol, one round, its own entry's shares, nothing to
     // cancel, no stop to place, no wait on Alpaca's cancel), so no other sale can take it by mistake.
     const cheapOk = o.cheap === true && cancelIds.length === 0 && !!only && only.size === 1 && o.maxRounds === 1 && !!o.ownEntryOnly && !o.protectWithStop && !o.protectWithPair && !o.waitForAlpacaCancel;
@@ -1248,7 +1249,9 @@ export class Liquidator {
             // The exit pair (Michael's approval of 2026-11-21, answer 2): with `protectWithPair`, the pair first; a definite refusal of it is
             // followed at once by the plain stop (client id ending "b"), and a definite refusal of that by the market sale below. An unclear
             // answer at either step ends the chain. The same prefix for the pair, so everything that knows a fresh stop knows the pair.
-            const pairAsk = o.protectWithPair?.[p.symbol];
+            // Michael's answer of 2026-11-21 (afternoon): at most one pair try per position, so a pair refused in an earlier round of this sale is
+            // not asked for again in a later round (the caller remembers it for later tries).
+            const pairAsk = pairRefusedIn.has(p.symbol) ? undefined : o.protectWithPair?.[p.symbol];
             const steps2: Array<"pair" | "stop"> = pairAsk ? ["pair", "stop"] : ["stop"];
             let pairSentAt: number | null = null;
             let placed = false;
@@ -1285,6 +1288,7 @@ export class Liquidator {
               }
               this.d.gate.invalidate();
               if (asPair) {
+                pairRefusedIn.add(p.symbol);
                 result.pairRefused = st.reason.slice(0, 160);
                 this.d.log?.("exit_pair_refused", { symbol: p.symbol, pairClientOrderId: sid, qty: free, stopPrice, takeProfitPrice: pairAsk.takeProfitPrice, reason: st.reason.slice(0, 160), httpStatus: st.status === "error" ? (st.httpStatus ?? null) : null });
                 continue; // answer 2: the plain stop at once

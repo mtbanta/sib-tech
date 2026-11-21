@@ -8795,3 +8795,19 @@ Paper only; research input for a human decision, never an instruction to act.
 
 **Runner label change `7f5fc49` (branch `runner-labels-2026-11-21`; the tool only, not in the image):** `criteria` prints "fail" when a judged T1 or T2 already rules out a pass, even if the run stopped early. Group 2 round 3: PASS (ten made-up result sets, every label as written).
 Group 1 round 3 on `7f5fc49`: PASS (the change is only in the end-of-run summary; nothing that sends, cancels or guards orders; 1,096 of 1,096). Monday's trials run from a clean clone at the commit on `main` that holds `7f5fc49` (the worker code there is `e378f96`'s, live as v37).
+
+## Michael's answer on pair retries and Monday's waits (2026-11-21, Saturday afternoon), saved verbatim
+
+> Answer: at most one pair try per position. If the pair is refused once, later retries skip it and go straight to the plain stop, then the market sale. Build it, group 1 and group 2, deploy before 8:00 AM Monday only if both pass; otherwise keep as built.
+> For Monday, set waits: (a) from 10:31, once the 10:30 close-out is flat, post in commands asking for my stop, then run the trials and the mid-day review; (b) after the 3:05 summary, run the end-of-day review including the 2:30 hold test and the pairs' first live close-out.
+> Never print any token or key.
+
+**The waits:** two one-shot jobs in this Claude session's scheduler (session only: they fire only while this session is open): (a) Monday 2026-11-23 at 10:31 AM CT, (b) at 3:07 PM CT. Each carries its own instructions: bounded background waits for the condition (the mid-day close-out flat, then Michael's stop by 11:12; the summary by 6:00 PM), the stop request posted in `commands`, the trials from a clean clone of `main`, the reviews per the brief.
+
+### One pair try per position (branch `pair-once-2026-11-21`)
+
+- `src/risk.ts`: an entry whose pair Alpaca refused is remembered (`SyncMemory.pairRefusedEntries`, at most 2,000); the cleanup sale never asks for a pair for it again, so later tries go straight to the plain stop, then the market sale (answer 2's chain without its first step).
+- `src/sells.ts`: within one sale, a pair refused in one round is not asked for again in a later round (the first try of a remainder runs up to 3 rounds; without this the pair was tried once per round).
+- **Limit:** the memory is the worker's own, so after a restart an entry could get one more pair try (a restart during the session happens only by a deploy with Michael's written yes, or a crash). Not stored in the database.
+- **Bounds:** fewer requests than before in the all-refused case; no new loop.
+- Test: everything refused (pair, plain stop, market sale) for six retries: exactly one pair try, every later try the plain stop then the market sale; another position still gets its own one try.

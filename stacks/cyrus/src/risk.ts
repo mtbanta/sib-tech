@@ -275,6 +275,9 @@ export class SyncMemory {
   // Group 1, round 1: with its order id and symbol, so the entry's missing-exit sale cancels its rest even when the sync's 10 minute order
   // list no longer shows it (a pair older than 10 minutes, the normal case with the live updates on).
   readonly brokenPairIds = new Map<string, { orderId: string | null; symbol: string; cancelled?: true }>();
+  // Michael's answer of 2026-11-21 (afternoon): "at most one pair try per position. If the pair is refused once, later retries skip it and go
+  // straight to the plain stop, then the market sale." Entries (client ids) whose pair Alpaca refused once. At most PAIR_REFUSED_KEPT.
+  readonly pairRefusedEntries = new Set<string>();
   // Ruling B of 2026-11-12: fresh stops that were not confirmed within 15 seconds (the stop's client id to its entry's). They are never
   // taken as protection again: if one shows up working later, its entry's missing-exit sale cancels it, waits for Alpaca's cancel, sells.
   readonly timedOutStops = new Map<string, string>();
@@ -545,6 +548,13 @@ async function freshStopLive(d: RiskDeps, mem: SyncMemory, f: FreshStop, listed:
     }
   }
   return !f.pairBroken && (OPEN_STATUSES.has(f.status) || f.status === "unclear");
+}
+
+// Michael's answer of 2026-11-21 (afternoon): an entry whose pair was refused once never asks for one again (bounded memory).
+export const PAIR_REFUSED_KEPT = 2_000;
+function notePairRefused(mem: SyncMemory, entryClientOrderId: string): void {
+  mem.pairRefusedEntries.add(entryClientOrderId);
+  if (mem.pairRefusedEntries.size > PAIR_REFUSED_KEPT) mem.pairRefusedEntries.delete(mem.pairRefusedEntries.values().next().value!);
 }
 
 // The exit pair, answer 3: remembers a broken pair's client id (bounded: the oldest is forgotten past BROKEN_PAIRS_KEPT).
@@ -1593,7 +1603,8 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   const protectAt = kind === "bare" && extra.stopPrice != null && extra.stopPrice > 0 ? extra.stopPrice : null;
   // The exit pair (Michael's approval of 2026-11-21): with the day's switch on, the remainder gets an exit pair instead of the stop alone, its
   // limit at the bracket's original take-profit price (answer 1). Not when that price is unknown or not at least 1 cent above the stop.
-  const pairTp = protectAt !== null && exitPairOn(day) ? pairTakeProfitFor(o, s.takeProfitPrice, protectAt) : null;
+  // Michael's answer of 2026-11-21 (afternoon): at most one pair try per position; once refused, later tries go straight to the plain stop.
+  const pairTp = protectAt !== null && exitPairOn(day) && !mem.pairRefusedEntries.has(s.clientOrderId) ? pairTakeProfitFor(o, s.takeProfitPrice, protectAt) : null;
   // The Alpaca client's own retries inside this sale are charged to the caller's reservation like any other request (request-scope.ts).
   const r = await d.liquidator.flatten({
     reason,
@@ -1619,6 +1630,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   });
   const soldQty = r.sold.filter((x) => x.symbol === s.symbol).reduce((n, x) => n + x.qty, 0);
   const now = d.now().getTime();
+  if (r.pairRefused) notePairRefused(mem, s.clientOrderId); // one pair try per position (Michael, 2026-11-21)
   // The exit pair (group 1, round 1): a remembered broken pair whose cancel Alpaca answered is not cancelled again; a broken pair the sale's
   // own read found (and so did not take as protection) is remembered, so the next try cancels its rest and sells (answer 3).
   for (const b of mem.brokenPairIds.values()) if (b.orderId && r.cancelsAccepted?.includes(b.orderId)) b.cancelled = true;

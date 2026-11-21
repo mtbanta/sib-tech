@@ -544,3 +544,36 @@ test("group 1, round 1: a whole pair older than 10 minutes, found by a sale afte
   assert.equal(f.stopPrice, 29.87);
   assert.equal(w.sim.sellLog.length, 0);
 });
+
+// Michael's answer of 2026-11-21 (afternoon): "at most one pair try per position. If the pair is refused once, later retries skip it and go
+// straight to the plain stop, then the market sale." (Group 1's probe D: before, every stuck retry sent the pair again.)
+test("one pair try per position: the pair, the plain stop and the market sale all refused; every later retry skips the pair (plain stop, then market sale); another position still gets its own one try", async () => {
+  const w = world();
+  w.sim.pairAnswer = "refuse";
+  w.sim.refuseStops = true;
+  w.sim.refuseSellIf = (s) => s.stopPrice === undefined && s.takeProfitPrice === undefined && s.symbol === "CIFR"; // the market sale refused too
+  const kinds: string[] = [];
+  const orig = w.sim.submitSell.bind(w.sim);
+  w.sim.submitSell = async (s: any) => {
+    if (s.symbol === "CIFR") kinds.push(s.takeProfitPrice !== undefined ? "pair" : s.stopPrice !== undefined ? "stop" : "market");
+    return orig(s);
+  };
+  const dd = await day(w, "on");
+  const id = await remainder(w, "CIFR", 7.27, 1, dd);
+  for (let i = 0; i < 6; i++) {
+    w.sim.advance(31_000);
+    await syncOrders(w.risk, dd, { protect: true });
+  }
+  assert.ok(kinds.length >= 6, `retried: ${kinds.join(",")}`);
+  assert.equal(kinds.filter((k) => k === "pair").length, 1, `one pair try: ${kinds.join(",")}`);
+  assert.deepEqual(kinds.slice(0, 3), ["pair", "stop", "market"]);
+  assert.ok(kinds.slice(3).every((k) => k !== "pair"), "later retries skip the pair");
+  assert.ok(kinds.slice(3).includes("stop") && kinds.slice(3).includes("market"), "plain stop, then the market sale");
+  assert.ok(w.memory.pairRefusedEntries.has(id));
+  assert.equal(w.sim.oversellAttempts, 0);
+  // Another position on another symbol still gets its own one pair try.
+  w.sim.pairAnswer = "ok";
+  w.sim.refuseStops = false;
+  await remainder(w, "QXO", 13.5, 11, dd);
+  assert.equal(w.sim.pairLog.filter((x) => x.symbol === "QXO").length, 1);
+});
