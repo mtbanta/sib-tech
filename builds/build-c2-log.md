@@ -8817,3 +8817,7 @@ Group 1 round 3 on `7f5fc49`: PASS (the change is only in the end-of-run summary
 **Group 1, round 1 on `6572d3a`: PASS** (its probe D rerun: pair, stop, market on the first try, then stop, market on every later try; one `exit_pair_refused` in all; switch off unchanged).
 
 **Logging addition after group 2's note (same branch):** a later try's accepted plain stop carries `pairRefusedEarlier: true` on its `fresh_stop` row (tested; clause in the brief). **How an unclear pair fits "one pair try per position":** only a definite refusal (Alpaca's 4xx other than 429, or our client's refusal before sending) marks the position. An unclear answer is not a refusal: it ends that try's chain, and the pair, which may exist, is looked up by its client id under ruling B. If Alpaca has it, it is that position's pair. If Alpaca does not, ruling B's path cancels and sells at market (tested: "an unclear pair that never reached Alpaca"). So an unclear answer never leads to a second pair on top of the first; after a sale the position is gone.
+
+**Group 1, round 2 on `faa5c65`: PASS** (no behaviour changed: the pair decision gives the same answer as in `6572d3a`; the new field is logging only; switch off unchanged; probe D rerun the same).
+
+**Group 2, round 2 on `faa5c65`: PASS** (logging only; the test real; the brief and the unclear-case paragraph accurate). **Both groups passed `faa5c65`; it deploys outside market hours from a clean clone through the repo checker.**
