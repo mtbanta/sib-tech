@@ -30,6 +30,13 @@ export const STORED_INFO_EVENTS = new Set([
   // The moved take-profit (Michael's decision of 2026-11-18): one row per move, and a phase skipped because the quote read failed or the
   // shared request budget had no room; a refusal by the sell gate.
   "take_profit_moved",
+  // The exit pair (Michael's approval of 2026-11-21; group 2, round 1): its refusals, a pair seen broken (answer 3) and its rest cancelled,
+  // one found broken at start-up, and the day's switch (on or off), so the end-of-day review can count them from the run log.
+  "exit_pair_refused",
+  "exit_pair_broken",
+  "exit_pair_rest_cancel",
+  "startup_exit_pair_broken",
+  "exit_pair_switch",
   "move_phase_skipped",
   "move_phase_failed",
   "move_phase_none",

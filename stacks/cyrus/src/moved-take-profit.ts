@@ -77,6 +77,9 @@ export interface MoveCandidate {
   groupId: string;
   oldLimit: number;
   stopPrice: number;
+  // The exit pair (2026-11-21): set for a remainder's pair, with the ids of its stop leg(s) as listed (MoveWatch tracks a pair by its orders'
+  // ids, since Alpaca may give a pair no group id).
+  pair?: { legIds: string[] };
 }
 export interface MovePlan extends MoveCandidate {
   limit: number;
@@ -129,7 +132,7 @@ export function structuralCandidates(positions: Position[], open: Order[], stopF
         skipped.push({ symbol: p.symbol, why: "stop price unknown" });
         continue;
       }
-      candidates.push({ symbol: p.symbol, qty: p.qty, legId: pp.id, groupId: pp.groupId || `pair-${pp.id}`, oldLimit: pp.limitPrice, stopPrice: stop ?? NaN });
+      candidates.push({ symbol: p.symbol, qty: p.qty, legId: pp.id, groupId: pp.groupId || `pair-${pp.id}`, oldLimit: pp.limitPrice, stopPrice: stop ?? NaN, pair: { legIds: flattenLegs(pp).map((l) => l.id) } });
       continue;
     }
     if (unique.length !== 1) {
@@ -217,6 +220,8 @@ export function pricedMoves(candidates: MoveCandidate[], quotes: ReadonlyMap<str
 // One move as the sale and the live updates saw it. Stored once as `take_profit_moved` (Michael: "accepted or refused with Alpaca's answer,
 // stop cancelled by Alpaca, time to fill, fallback used"). Built from the live updates only: no lookup is made for it.
 export interface MoveRow {
+  // The exit pair (2026-11-21): true when the order moved was a remainder's exit pair (its parent), not a bracket's take-profit.
+  pair?: true;
   reason: string;
   symbol: string;
   qty: number;
@@ -265,18 +270,23 @@ export interface MoveRow {
 export class MoveWatch {
   private readonly byGroup = new Map<string, { oldId: string; newId: string | null; qty: number; filledAtMs: number | null; filledSeenAtMs: number | null; filledQty: number; fillHeard: boolean; canceledAtMs: number | null; canceledSeenAtMs: number | null; stopCanceledAtMs: number | null; stopCanceledSeenAtMs: number | null }>();
   private readonly oldOf = new Map<string, string>();
+  // The exit pair (2026-11-21): a move found by its orders' ids (the pair's parent, its stop leg(s), the replacement and its legs), since
+  // Alpaca may give a pair no group id. A bracket is still found by its group id first.
+  private readonly keyOfId = new Map<string, string>();
   private readonly now: () => number;
   constructor(now: () => number) {
     this.now = now;
   }
   // Before a replace is sent: the bracket's group, the old take-profit's id, and its shares.
-  expect(groupId: string, oldId: string, qty: number): void {
+  expect(groupId: string, oldId: string, qty: number, otherIds: readonly string[] = []): void {
+    for (const id of [oldId, ...otherIds]) this.keyOfId.set(id, groupId);
     this.byGroup.set(groupId, { oldId, newId: null, qty, filledAtMs: null, filledSeenAtMs: null, filledQty: 0, fillHeard: false, canceledAtMs: null, canceledSeenAtMs: null, stopCanceledAtMs: null, stopCanceledSeenAtMs: null });
   }
   // The replace was accepted: the new order's id.
-  register(groupId: string, newId: string): void {
+  register(groupId: string, newId: string, otherIds: readonly string[] = []): void {
     const m = this.byGroup.get(groupId);
     if (!m) return;
+    for (const id of [newId, ...otherIds]) this.keyOfId.set(id, groupId);
     m.newId = newId;
     this.oldOf.set(newId, m.oldId);
   }
@@ -293,12 +303,19 @@ export class MoveWatch {
   replacedOf(o: Order): string | null {
     const known = this.oldOf.get(o.id);
     if (known) return known;
-    const m = o.groupId ? this.byGroup.get(o.groupId) : undefined;
+    const m = this.find(o);
     return m && this.isReplacement(o, m) ? m.oldId : null;
+  }
+  // The move an update belongs to: by its group id (a bracket), else by its own id or the id it replaces (an exit pair).
+  private find(o: Order) {
+    const byGroup = o.groupId ? this.byGroup.get(o.groupId) : undefined;
+    if (byGroup) return byGroup;
+    const key = this.keyOfId.get(o.id) ?? (o.replaces ? this.keyOfId.get(o.replaces) : undefined);
+    return key ? this.byGroup.get(key) : undefined;
   }
   onUpdate(u: TradeUpdate): void {
     const o = u.order;
-    const m = o.groupId ? this.byGroup.get(o.groupId) : undefined;
+    const m = this.find(o);
     if (!m) return;
     const at = u.atMs ?? this.now();
     if (this.isReplacement(o, m)) {
@@ -344,6 +361,7 @@ export class MoveWatch {
   // tally may meet a late update), at most 2,000 entries.
   reset(): void {
     this.byGroup.clear();
+    this.keyOfId.clear();
     while (this.oldOf.size > 2_000) this.oldOf.delete(this.oldOf.keys().next().value!);
   }
 }

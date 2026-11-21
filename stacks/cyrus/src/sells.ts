@@ -16,6 +16,7 @@ import { AlpacaError } from "./alpaca-trading.ts";
 import type { SellBroker } from "./broker.ts";
 import { MAX_EARLY_WAKES } from "./early-wake.ts";
 import { MOVED_TAKE_PROFIT, MOVE_CLIENT_ID_PREFIX, MOVE_FILL_WAIT_MS, MOVE_MAX_PER_SALE, MOVE_SEND_WINDOW_MS, MOVE_SETS_CLIENT_ID, type MoveRow, type MoveWatch, MOVE_REPLACE_TIMEOUT_MS, MOVE_STOPS_TIMEOUT_MS, MOVE_VIEW_MAX_AGE_MS, pricedMoves, type QuoteIn, type Skip, stopVerdict, structuralCandidates, withStops } from "./moved-take-profit.ts";
+import { isExitPair, pairBroken, pairStopLeg } from "./exit-pair.ts";
 
 export type Say = (channel: "commands" | "trading" | "alerts", text: string, opts?: { mentionOwner?: boolean }) => Promise<boolean>;
 
@@ -289,6 +290,8 @@ export interface LiquidateOptions {
   // refusal of the pair -> the plain stop at once (its own client id); that refused too -> the market sale, as before; an unclear answer at
   // either step ends the chain (nothing more is sent on top). At most two orders are sent in this step before the market sale.
   protectWithPair?: Record<string, { takeProfitPrice: number }>;
+  // The exit pair (group 1, round 1): client ids of pairs remembered broken (answer 3); never taken as a fresh stop holding the shares.
+  notProtection?: string[];
   // A5 of the proposal of 2026-11-12, with `ownEntryOnly` only: the entry filled as the stack's cancel reached Alpaca, and Alpaca cancels
   // its exits itself. Nothing is cancelled here; the sale waits (up to `waitCancelMs`) for Alpaca's cancel to free the shares. If they
   // never come free (Alpaca kept the exits), nothing is sold, no blocked sale is logged, and `exitsKept` lists the symbol.
@@ -388,7 +391,10 @@ export interface LiquidateResult {
   coveredByOwnSale?: string[];
   // A4 (group 1 review, round 1): the symbols whose shares a resting fresh stop of ours (cyrus-p-) holds, so nothing was sold: the
   // position is protected. With the open fresh stop that covers them, so the caller can remember it.
-  heldByFreshStop?: Array<{ symbol: string; clientOrderId: string; orderId: string; qty: number; stopPrice: number | null; status: string }>;
+  heldByFreshStop?: Array<{ symbol: string; clientOrderId: string; orderId: string; qty: number; stopPrice: number | null; status: string; takeProfitPrice?: number | null }>;
+  // The exit pair (group 1, round 1 of 2026-11-21): broken pairs (answer 3) this sale's own read found holding the shares, not taken as
+  // protection; the caller remembers them so its next try cancels them and sells.
+  brokenPairsSeen?: Array<{ symbol: string; clientOrderId: string; orderId: string; status: string; filledQty: number }>;
   // The moved take-profit (2026-11-18): how many replaces were sent, accepted, and filled within the wait (the rest went to today's path).
   moved?: { sent: number; accepted: number; filledInWait: number };
 }
@@ -811,9 +817,9 @@ export class Liquidator {
         triedSoFar = tried;
         const sentAtMs = this.d.now().getTime();
         const cid = MOVE_SETS_CLIENT_ID.on ? `${MOVE_CLIENT_ID_PREFIX}${o.tradeDate.replaceAll("-", "")}-${m.symbol}-${sentAtMs.toString(36)}` : undefined;
-        const row: MoveRow = { reason: o.reason, symbol: m.symbol, qty: m.qty, oldId: m.legId, newId: null, groupId: m.groupId, limit: m.limit, oldLimit: m.oldLimit, stopPrice: m.stopPrice, bid: m.bid, quoteAgeMs: m.quoteAgeMs, tradePrice: m.tradePrice, tradeAgeMs: m.tradeAgeMs, sentAtMs, answerMs: 0, accepted: false, answer: null, httpStatus: null, clientId: cid ?? null, filledAtMs: null, timeToFillMs: null, filledQtySeen: null, stopCancelledByAlpaca: null, fallback: null, fallbackSoldQty: 0, liveUpdates: live };
+        const row: MoveRow = { ...(m.pair ? { pair: true as const } : {}), reason: o.reason, symbol: m.symbol, qty: m.qty, oldId: m.legId, newId: null, groupId: m.groupId, limit: m.limit, oldLimit: m.oldLimit, stopPrice: m.stopPrice, bid: m.bid, quoteAgeMs: m.quoteAgeMs, tradePrice: m.tradePrice, tradeAgeMs: m.tradeAgeMs, sentAtMs, answerMs: 0, accepted: false, answer: null, httpStatus: null, clientId: cid ?? null, filledAtMs: null, timeToFillMs: null, filledQtySeen: null, stopCancelledByAlpaca: null, fallback: null, fallbackSoldQty: 0, liveUpdates: live };
         moveRows.push(row);
-        mv.watch.expect(m.groupId, m.legId, m.qty); // before the send: a fill may come before the answer
+        mv.watch.expect(m.groupId, m.legId, m.qty, m.pair?.legIds ?? []); // before the send: a fill may come before the answer
         const r = await this.d.gate.replace({ orderId: m.legId, symbol: m.symbol, qty: m.qty, limitPrice: m.limit, ...(cid ? { clientOrderId: cid } : {}), reason: `${o.reason}, moved take-profit`, timeoutMs: MOVE_REPLACE_TIMEOUT_MS }, { positions: held, open, atMs: readAtMs, maxAgeMs: MOVE_VIEW_MAX_AGE_MS }, gateTimer);
         row.answerMs = this.d.now().getTime() - sentAtMs;
         if (r.status === "sent") {
@@ -821,7 +827,7 @@ export class Liquidator {
           row.accepted = true;
           row.newId = r.order.id;
           row.clientId = r.order.clientOrderId;
-          mv.watch.register(m.groupId, r.order.id);
+          mv.watch.register(m.groupId, r.order.id, m.pair ? flattenLegs(r.order).map((l) => l.id) : []);
           accepted.push({ groupId: m.groupId, row });
         } else {
           if (r.status === "error" && !r.notSent) sent++; // a request went out (refused by Alpaca, or no clear answer)
@@ -1211,9 +1217,14 @@ export class Liquidator {
           // when its entry holds the whole symbol); then nothing is sold, nothing is cancelled, and it is not stuck. With another position
           // on the symbol it protects only its own shares, and this sale goes on as before.
           // Michael's ruling B of 2026-11-12: a fresh stop this sale is cancelling (named in `cancelIds`) never counts as protection.
-          const freshHolding = own && !(free > EPS) ? openOrders.find((x) => x.symbol === p.symbol && x.side === "sell" && x.clientOrderId.startsWith("cyrus-p-") && OPEN_STATUSES.has(x.status) && x.status !== "pending_cancel" && !cancelIds.includes(x.id) && remaining(x) >= p.qty - EPS) : undefined;
+          // The exit pair (group 1, round 1 of 2026-11-21, answer 3): a broken pair (its take-profit filled part, or its stop leg shown ended) is
+          // never protection; it is reported (`brokenPairsSeen`) so the caller cancels it and sells.
+          const ownP = (x: Order) => x.symbol === p.symbol && x.side === "sell" && x.clientOrderId.startsWith("cyrus-p-") && OPEN_STATUSES.has(x.status) && x.status !== "pending_cancel" && !cancelIds.includes(x.id) && remaining(x) >= p.qty - EPS;
+          if (own && !(free > EPS)) for (const x of openOrders) if (ownP(x) && isExitPair(x) && pairBroken(x)) (result.brokenPairsSeen ??= []).push({ symbol: p.symbol, clientOrderId: x.clientOrderId, orderId: x.id, status: x.status, filledQty: x.filledQty });
+          const freshHolding = own && !(free > EPS) ? openOrders.find((x) => ownP(x) && !(isExitPair(x) && pairBroken(x)) && !o.notProtection?.includes(x.clientOrderId)) : undefined;
           if (freshHolding) {
-            (result.heldByFreshStop ??= []).push({ symbol: p.symbol, clientOrderId: freshHolding.clientOrderId, orderId: freshHolding.id, qty: remaining(freshHolding), stopPrice: freshHolding.stopPrice, status: freshHolding.status });
+            const asPair = isExitPair(freshHolding);
+            (result.heldByFreshStop ??= []).push({ symbol: p.symbol, clientOrderId: freshHolding.clientOrderId, orderId: freshHolding.id, qty: remaining(freshHolding), stopPrice: asPair ? (pairStopLeg(freshHolding)?.stopPrice ?? null) : freshHolding.stopPrice, status: freshHolding.status, ...(asPair ? { takeProfitPrice: freshHolding.limitPrice } : {}) });
             continue;
           }
           // Reported only (the sale goes on exactly as before): a fresh stop of ours being cancelled still holds the shares.

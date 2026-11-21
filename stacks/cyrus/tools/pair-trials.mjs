@@ -17,7 +17,7 @@
 // flag is on from Michael's own `stop` or `flatten` (never the daily loss stop); Alpaca's clock open; Alpaca flat (no position, no open
 // order) before each trial and after its clean-up; symbols the stack traded today, priced 5 to 60 dollars. Client ids start `trial-`, so
 // the worker never takes these orders for its own (its stop sweep cancels any unfilled buy, so buys are market orders that fill at once).
-// Requests: at most 80 a rolling minute by this runner (it waits when it would exceed that), polls 0.4 to 1 s apart, every wait bounded.
+// Requests: at most 80 a rolling minute by this runner (it waits when it would exceed that); every wait bounded, its gaps growing (0.4 or 1 s, doubling to 2 s); the clean-up at most 3 rounds, 1 s then 2 s apart.
 //
 // Run from the clean checkout of the reviewed commit, like the deploy tools (self-check.mjs):
 //   node <clean clone>/stacks/cyrus/tools/pair-trials.mjs --dir <clean clone>/stacks/cyrus --reviewed <commit> --date 2026-11-23
@@ -25,6 +25,7 @@
 // Never prints a key. Paper only. Research input for a human decision, never an instruction to act.
 import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { createRequire } from "node:module";
 import { toolSelfCheck } from "./self-check.mjs";
 import { AlpacaTrading } from "../src/alpaca-trading.ts";
@@ -52,7 +53,8 @@ const refuse = (m) => {
 const dir = value("--dir");
 const reviewed = value("--reviewed");
 const date = value("--date");
-const out = value("--out");
+const outArg = value("--out");
+const out = outArg ? resolve(outArg) : null;
 const which = new Set((value("--trials") ?? "T1,T2,T3,T4").split(",").map((x) => x.trim().toUpperCase()));
 if (!dir || !reviewed || reviewed.length < 7 || !date || !out) refuse("--dir, --reviewed <commit>, --date YYYY-MM-DD and --out <file> are required");
 if (existsSync(`${dir}/.env.local`)) refuse("the checkout holds a key file");
@@ -135,7 +137,8 @@ async function guards() {
   const ny = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
   if (ny !== date) problems.push(`today is ${ny}, not ${date}`);
   const c = central();
-  if (c.hour * 60 + c.minute >= STOP_BY.hour * 60 + STOP_BY.minute) problems.push("it is 11:15 AM Central or later");
+  // A trial takes up to about 90 s (T3 and T4 wait up to 60 s, then clean up), so none starts after 11:13 and every one ends by about 11:15.
+  if (c.hour * 60 + c.minute >= STOP_BY.hour * 60 + STOP_BY.minute - 2) problems.push("it is 11:13 AM Central or later (a trial must end by 11:15)");
   const { day, stop, traded } = await dbRead();
   if (!day?.is_trading_day) problems.push("not a trading day by the day record");
   else if (!middayFlat({ phases: day.phases ?? {} })) problems.push("the mid-day close-out has not finished flat");
@@ -172,14 +175,18 @@ const heldQty = async (symbol) => {
   const r = await raw("GET", `/v2/positions/${symbol}`);
   return r.status === 404 ? 0 : Number(r.json?.qty ?? NaN);
 };
-// Waits (bounded) until `check` returns a truthy value; polls `everyMs` apart for at most `limitMs`.
-const until = async (check, limitMs, everyMs) => {
+// Waits (bounded) until `check` returns a truthy value: at most `limitMs` in all, the gaps growing from `firstMs` (doubling, at most 2 s; the
+// standing rule of 2026-11-13: every retry loop has a limit and a backoff).
+const POLL_MAX_MS = 2_000;
+const until = async (check, limitMs, firstMs) => {
   const t0 = Date.now();
+  let gap = firstMs;
   for (;;) {
     const v = await check();
     if (v) return { v, ms: Date.now() - t0 };
     if (Date.now() - t0 >= limitMs) return { v: null, ms: Date.now() - t0 };
-    await sleep(everyMs);
+    await sleep(Math.min(gap, Math.max(0, limitMs - (Date.now() - t0))));
+    gap = Math.min(gap * 2, POLL_MAX_MS);
   }
 };
 async function buy(symbol, qty) {
@@ -195,12 +202,18 @@ async function buy(symbol, qty) {
 }
 // Clean-up: cancels every open order on the symbol (this runner's own: the account was flat before), waits for them to end, sells what is
 // still held at market, and checks the symbol is flat. Bounded; reports what it could not do.
+// Bounded: at most 3 rounds, 1 s then 2 s between rounds; it sells only once the symbol's open list is empty (the stack's own sell rule).
 async function cleanUp(symbol) {
   const notes = [];
   for (let round = 1; round <= 3; round++) {
+    if (round > 1) await sleep(1_000 * 2 ** (round - 2));
     const open = await openFor(symbol).catch(() => []);
     for (const o of open) await raw("DELETE", `/v2/orders/${o.id}`);
-    await until(async () => (await openFor(symbol).catch(() => [1])).length === 0, 4_000, 500);
+    const cleared = await until(async () => (await openFor(symbol).catch(() => [1])).length === 0, 4_000, 400);
+    if (!cleared.v) {
+      notes.push(`round ${round}: orders still open after 4 s; not selling yet`);
+      continue;
+    }
     const q = await heldQty(symbol);
     if (q > 0) {
       const r = await raw("POST", "/v2/orders", { symbol, qty: String(q), side: "sell", type: "market", time_in_force: "day", client_order_id: tag("x", symbol) });
@@ -219,7 +232,9 @@ async function workerView(symbol, qty) {
   await pace();
   const positions = (await alpaca.listPositions()).filter((p) => p.symbol === symbol);
   const mine = listed.orders.filter((o) => o.symbol === symbol);
-  const shape = mine.map((o) => ({ clientOrderId: o.clientOrderId, type: o.type, orderClass: o.orderClass, status: o.status, legs: o.legs.map((l) => ({ type: l.type, status: l.status, stopPrice: l.stopPrice })) }));
+  // Group 2, round 1: the group id (MoveWatch finds a bracket by it) and the parent's own stop price (the digest takes a pair's parent to be a
+  // limit with no stop price) are recorded too.
+  const shape = mine.map((o) => ({ id: o.id, clientOrderId: o.clientOrderId, type: o.type, orderClass: o.orderClass, status: o.status, groupId: o.groupId ?? null, limitPrice: o.limitPrice, stopPrice: o.stopPrice, legs: o.legs.map((l) => ({ id: l.id, clientOrderId: l.clientOrderId, type: l.type, status: l.status, stopPrice: l.stopPrice, groupId: l.groupId ?? null })) }));
   const sells = openSellQty(listed.orders, symbol);
   const cands = structuralCandidates(positions, listed.orders);
   return { shape, openSellQty: sells, countedOnce: Math.abs(sells - qty) < 1e-9, moveCandidate: cands.candidates.map((c) => c.symbol), moveSkipped: cands.skipped };
@@ -247,7 +262,9 @@ async function t1t2(symbol) {
     const x = await alpaca.findOrderByClientId(p.clientOrderId);
     return x ? { id: x.id, status: x.status, legs: x.legs.length } : null;
   });
-  const pass1 = t1.accepted && t1.clientIdKept && t1.view.countedOnce;
+  // The written criterion (build log, "Pass criteria"): accepted, client id kept, counted once, and offered as a move candidate.
+  t1.offeredForMove = t1.view.moveCandidate.includes(symbol);
+  const pass1 = t1.accepted && t1.clientIdKept && t1.view.countedOnce && t1.offeredForMove;
   record(t1);
   if (!which.has("T2") || !pass1) return { t1, pass1, surprise: pass1 ? null : "T1 did not hold up" };
   // T2: the move, as a close-out sends it (limit to the bid less 1 cent, at least 2 cents above the stop: MOVE_MIN_ABOVE_STOP).
@@ -257,7 +274,7 @@ async function t1t2(symbol) {
   if (!(limit >= stop + 0.02 - 1e-9)) {
     t2.skipped = "the bid fell to the stop; no move possible";
     record(t2);
-    return { t1, pass1, t2, pass2: null, surprise: null };
+    return { t1, pass1, t2, pass2: null, skipped2: true, surprise: null };
   }
   const moveId = tag("m", symbol);
   const rp = await timed(() => alpaca.replaceOrder(order.id, { limitPrice: limit, clientOrderId: moveId }, 2_000));
@@ -274,15 +291,31 @@ async function t1t2(symbol) {
     return o?.status === "filled" ? o : null;
   }, 5_000, 400);
   t2.filled = !!filled.v;
+  // The runner's own time (polling, so up to about 0.4 s late) and Alpaca's: the replacement's submitted_at to its filled_at.
   t2.fillMs = filled.v ? filled.ms + rp.ms : null;
+  t2.alpacaSubmittedAt = filled.v?.submitted_at ?? null;
+  t2.alpacaFilledAt = filled.v?.filled_at ?? null;
+  t2.alpacaFillMs = filled.v && Number.isFinite(Date.parse(filled.v.filled_at)) && Number.isFinite(Date.parse(filled.v.submitted_at)) ? Date.parse(filled.v.filled_at) - Date.parse(filled.v.submitted_at) : null;
   t2.fillPrice = filled.v ? Number(filled.v.filled_avg_price) : null;
   t2.legsAfter = filled.v ? (filled.v.legs ?? []).map((l) => ({ type: l.type, status: l.status, canceled_at: l.canceled_at })) : null;
   const clear = await until(async () => (await openFor(symbol)).length === 0 && (await heldQty(symbol)) === 0, 3_000, 500);
   t2.noOrderLeftMs = clear.v ? clear.ms : null;
-  const pass2 = t2.accepted && t2.filled && t2.fillMs <= 2_000 && clear.v !== null;
-  t2.withinMoveWait = t2.fillMs !== null && t2.fillMs <= 2_000;
+  // Within the move's 2 s wait, by Alpaca's own times when it gave them, else the runner's.
+  const fillTime = t2.alpacaFillMs ?? t2.fillMs;
+  t2.withinMoveWait = fillTime !== null && fillTime <= 2_000;
+  // Read again after the wait above (Alpaca cancels the stop a moment after the fill; the clean-up has not run yet, so any cancel is Alpaca's).
+  const after = filled.v ? await getOrder(rp.value.id) : null;
+  t2.legsAfterWait = after ? (after.legs ?? []).map((l) => ({ type: l.type, status: l.status, canceled_at: l.canceled_at })) : null;
+  // Cancelled by Alpaca: its stop leg shown cancelled, or (if the replacement shows no leg) no order left open on the symbol before any clean-up.
+  const legsShown = after?.legs ?? [];
+  t2.stopCancelledByAlpaca = !!after && (legsShown.some((l) => (l.type === "stop" || l.stop_price) && l.status === "canceled") || (legsShown.length === 0 && clear.v !== null));
+  t2.nothingLeftOpen = clear.v !== null;
+  const pass2 = t2.accepted && t2.filled && t2.withinMoveWait && t2.nothingLeftOpen;
   record(t2);
-  return { t1, pass1, t2, pass2, surprise: pass2 ? null : "T2 did not hold up" };
+  // A slow fill is a result, not a surprise (the criterion counts fills within 2 s over the three trials); a refusal, no fill within 5 s, or
+  // an order left open is a surprise and stops the run.
+  const surprise = !t2.accepted ? "the move was refused" : !t2.filled ? "the moved pair did not fill within 5 s" : !t2.nothingLeftOpen ? "an order was left open after the moved pair filled" : null;
+  return { t1, pass1, t2, pass2, within: t2.withinMoveWait, stopCancelled: t2.stopCancelledByAlpaca, surprise };
 }
 
 async function t3(symbol) {
@@ -365,7 +398,12 @@ async function t4(symbol) {
 }
 
 // ---- main ----
-const g = await guards();
+let g;
+try {
+  g = await guards();
+} catch (err) {
+  refuse(`could not check the guards: ${scrub(err.message).slice(0, 200)}`);
+}
 say(JSON.stringify({ date, checkout: head.slice(0, 7), guards: g.problems, symbols: g.symbols.slice(0, 6) }));
 record({ event: "start", checkout: head.slice(0, 7), guards: g.problems, symbols: g.symbols.slice(0, 6), trials: [...which] });
 if (g.problems.length) refuse(g.problems.join("; "));
@@ -381,7 +419,13 @@ for (const s of g.symbols.slice(0, 3)) {
 if (which.has("T4")) plan.push(["T4", g.symbols[0]]);
 const results = [];
 for (const [kind, symbol] of plan) {
-  const gg = await guards();
+  let gg;
+  try {
+    gg = await guards();
+  } catch (err) {
+    say(`stopped before ${kind} ${symbol}: could not check the guards: ${scrub(err.message).slice(0, 200)}`);
+    break;
+  }
   if (gg.problems.length) {
     say(`stopped before ${kind} ${symbol}: ${gg.problems.join("; ")}`);
     break;
@@ -394,12 +438,25 @@ for (const [kind, symbol] of plan) {
   }
   const cu = await cleanUp(symbol).catch((err) => ({ flat: false, notes: [scrub(err.message).slice(0, 120)] }));
   record({ event: "cleanup", kind, symbol, ...cu });
-  results.push({ kind, symbol, pass1: res.pass1 ?? null, pass2: res.pass2 ?? null, pass: res.pass ?? null, surprise: res.surprise ?? null, flatAfter: cu.flat });
+  results.push({ kind, symbol, pass1: res.pass1 ?? null, pass2: res.pass2 ?? null, within: res.within ?? null, stopCancelled: res.stopCancelled ?? null, skipped2: res.skipped2 ?? false, pass: res.pass ?? null, surprise: res.surprise ?? null, flatAfter: cu.flat });
   say(JSON.stringify(results.at(-1)));
   if (res.surprise || !cu.flat) {
     say(`stopped at the first surprise: ${res.surprise ?? "not flat after clean-up"}`);
     break;
   }
 }
-record({ event: "end", results });
+// The written criteria (build log, "Pass criteria for telling Michael `pair on`"), judged from these results. "not settled" and "unchecked"
+// go to Michael as such; only "pass" on T1, T2 and the clean-ups (with T3 not "fail") lets the builder name `pair on`.
+const t12 = results.filter((r) => r.kind === "T1T2");
+const t2judged = t12.filter((r) => r.pass1 && !r.skipped2 && r.pass2 !== null);
+const t3s = results.filter((r) => r.kind === "T3");
+const criteria = {
+  T1: t12.length === 3 && t12.every((r) => r.pass1) ? "pass" : t12.length < 3 ? "not settled" : "fail",
+  T2: t2judged.length < 2 ? "not settled" : t2judged.filter((r) => r.within).length >= 2 && t2judged.every((r) => r.stopCancelled && r.surprise === null) ? "pass" : "fail",
+  T3: t3s.some((r) => r.pass === false) ? "fail" : t3s.some((r) => r.pass === true) ? "pass" : "unchecked (no stop sold)",
+  cleanups: results.every((r) => r.flatAfter) ? "pass" : "fail",
+  T4: "reported only",
+};
+say(JSON.stringify({ criteria }));
+record({ event: "end", results, criteria });
 say(`done: ${results.length} trial(s); records in ${out}`);

@@ -426,7 +426,9 @@ export class Worker {
     for (const o of this.syncMemory.lastSeen.values()) if (o.groupId) byGroup.set(o.groupId, o);
     for (const l of legs) {
       // The exit pair (2026-11-21): a remainder's pair (its parent's id is the leg moved): the stop price it was placed with, while it is
-      // still whole (not broken, answer 3). A pair whose stop leg was listed already carries its stop price (structuralCandidates).
+      // still whole (not broken, answer 3). A pair whose stop leg was listed already carries its stop price (structuralCandidates), and the move
+      // phase uses that even for a pair declined here (group 1, round 1: a lagging list showing a broken pair whole). That is safe: in a
+      // close-out the shares are being sold, and a move that does not fill falls back to today's cancel and sell.
       const pair = [...this.syncMemory.freshStops.values()].find((f) => f.takeProfitPrice !== undefined && f.orderId === l.legId && f.symbol === l.symbol);
       if (pair) {
         if (!pair.pairBroken && pair.stopPrice > 0) out.set(l.legId, pair.stopPrice);
@@ -1957,7 +1959,7 @@ export class Worker {
         // protection loop looks at the entry at once; its missing-exit sale cancels the pair's rest and sells at market. No second pair.
         if (f.takeProfitPrice !== undefined && info.event === "partial_fill" && !f.pairBroken) {
           f.pairBroken = true;
-          notePairBroken(this.syncMemory, f.stopClientOrderId);
+          notePairBroken(this.syncMemory, f.stopClientOrderId, { orderId: f.orderId, symbol: f.symbol });
           this.d.log?.("info", "exit_pair_broken", { symbol: info.symbol, clientOrderId: f.entryClientOrderId, pairClientOrderId: info.clientOrderId, status: info.status, by: "live update" });
           if (this.closingOut || this.liquidator.isLiquidatingOthers() || this.middayOwnsSelling) return;
           this.protectFirst.mark(f.entryClientOrderId, info.symbol, "an exit pair's take-profit filled part");
@@ -2060,7 +2062,15 @@ export class Worker {
     // counted once, at its first fill or partial fill, because A4 cancels the rest of a partly filled take-profit (its full fill never comes).
     // The exit pair (2026-11-21, messaging only): its parent (cyrus-p-, a limit) filling is a take-profit; its stop leg (Alpaca's own client id)
     // filling is a stop.
-    else if (o.side === "sell" && u.event === "fill" && o.clientOrderId.startsWith("cyrus-p-")) this.digest.count(isExitPair(o) ? "take_profit" : "stop");
+    // Group 2, round 1: a pair's take-profit is counted once, at its first fill or partial fill (answer 3 cancels the rest of a partly filled
+    // pair, so its full fill may never come), like a bracket's take-profit below.
+    else if (o.side === "sell" && (u.event === "fill" || u.event === "partial_fill") && o.clientOrderId.startsWith("cyrus-p-") && isExitPair(o)) {
+      if (!this.digestTakeProfits.has(o.id)) {
+        this.digestTakeProfits.add(o.id);
+        if (this.digestTakeProfits.size > 20_000) this.digestTakeProfits.delete(this.digestTakeProfits.values().next().value!);
+        this.digest.count("take_profit");
+      }
+    } else if (o.side === "sell" && u.event === "fill" && o.clientOrderId.startsWith("cyrus-p-")) this.digest.count("stop");
     else if (o.side === "sell" && u.event === "fill" && o.orderClass === "oco" && (o.type === "stop" || o.type === "stop_limit" || o.stopPrice !== null)) this.digest.count("stop");
     else if (o.side === "sell" && o.groupId && (u.event === "fill" || u.event === "partial_fill")) {
       if (o.type === "stop" || o.stopPrice !== null) {

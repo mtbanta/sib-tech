@@ -15,6 +15,7 @@ import { clientOrderIdFor } from "../src/gate.ts";
 import { EXIT_PAIR_PHASE, exitPairOn, isExitPair, pairBroken, pairTakeProfitFor } from "../src/exit-pair.ts";
 import { SimBroker } from "./sim-broker.ts";
 import { D } from "./rig.ts";
+import { STORED_INFO_EVENTS } from "../src/run-log.ts";
 
 const MID = Date.UTC(2026, 10, 2, 15, 0); // 9:00 AM Central on the rig's day, in the session
 const CLOSE = new Date(Date.UTC(2026, 10, 2, 21, 0));
@@ -159,7 +160,7 @@ test("answer 2: the pair refused -> the plain stop at once (its own client id); 
   const refused = w.events.find((e) => e.event === "exit_pair_refused")!;
   assert.equal(refused.data.httpStatus, 422);
   const fs = w.events.find((e) => e.event === "fresh_stop")!;
-  assert.ok(fs.data.afterPairRefused && typeof fs.data.afterPairRefusedMs === "number");
+  assert.ok(fs.data.afterPairRefused === true && typeof fs.data.afterPairRefusedReason === "string" && typeof fs.data.afterPairRefusedMs === "number");
   assert.equal(fs.data.pair, undefined);
   assert.equal(w.sim.sellLog.length, 0);
 
@@ -227,7 +228,7 @@ test("answer 3: once seen broken (the live update ahead of the list), a lagging 
   const f = w.memory.freshStops.get(id)!;
   // What the worker does on Alpaca's live `partial_fill` for the pair, before the list shows it (here the list never shows it).
   f.pairBroken = true;
-  notePairBroken(w.memory, f.stopClientOrderId);
+  notePairBroken(w.memory, f.stopClientOrderId, { orderId: f.orderId, symbol: f.symbol });
   w.sim.advance(500);
   await syncOrders(w.risk, dd, { protect: true, streamLive: true });
   assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["SOFI", 7]]);
@@ -294,6 +295,11 @@ test("close-out: the pair's limit is moved to the bid less 1 cent (one replace o
     assert.equal((await w.sim.listOrders("open")).length, 0, `${shape}: nothing left open`);
     const moved = w.events.find((e) => e.event === "take_profit_moved");
     assert.ok(moved && moved.data.accepted === true && moved.data.symbol === "ADT", `${shape}: one move row, accepted`);
+    // Group 2, round 1: the row says it was a pair and carries the fill and the stop's cancel, heard from the live updates (the pair is
+    // tracked by its orders' ids, as Alpaca may give it no group id), so the move step does not wait out its full 2 s.
+    assert.equal(moved.data.pair, true, `${shape}: marked as a pair`);
+    assert.equal(typeof moved.data.timeToFillMs, "number", `${shape}: its fill heard`);
+    assert.equal(moved.data.stopCancelledByAlpaca, true, `${shape}: its stop leg's cancel heard`);
     assert.equal(w.sim.oversellAttempts, 0);
   }
 });
@@ -409,10 +415,132 @@ test("live update (the worker): a pair's take-profit partial fill marks it broke
   assert.ok(logs.some((l) => l.e === "exit_pair_broken" && l.d.by === "live update"));
   const counts = () => Object.fromEntries((r.worker as any).digest.counts as Map<string, number>) as Record<string, number>;
   const before = counts();
+  await r.orderUpdate(upd("partial_fill", { id: "p2", clientOrderId: "cyrus-p-20261102-RRC-x-s1", symbol: "RRC", side: "sell", type: "limit", orderClass: "oco", status: "partially_filled", qty: 3, filledQty: 1 }, 2) as any);
   await r.orderUpdate(upd("fill", { id: "p2", clientOrderId: "cyrus-p-20261102-RRC-x-s1", symbol: "RRC", side: "sell", type: "limit", orderClass: "oco", status: "filled", qty: 3, filledQty: 3 }, 0) as any);
   await r.orderUpdate(upd("fill", { id: "p3", clientOrderId: "alpaca-leg-9", symbol: "SOFI", side: "sell", type: "stop", stopPrice: 8.87, orderClass: "oco", status: "filled", qty: 4, filledQty: 4 }, 0) as any);
   await r.orderUpdate(upd("fill", { id: "p4", clientOrderId: "cyrus-p-20261102-MARA-x-s1", symbol: "MARA", side: "sell", type: "stop", stopPrice: 14.87, status: "filled", qty: 2, filledQty: 2 }, 0) as any);
   const after = counts();
-  assert.equal((after.take_profit ?? 0) - (before.take_profit ?? 0), 1, "the pair's take-profit");
+  assert.equal((after.take_profit ?? 0) - (before.take_profit ?? 0), 1, "RRC's pair counted once, at its first partial fill, not again at its fill");
   assert.equal((after.stop ?? 0) - (before.stop ?? 0), 2, "the pair's stop leg and a plain fresh stop");
+});
+
+test("group 2, round 1: the exit pair's events are stored in the run log, not only Fly's log", () => {
+  for (const e of ["exit_pair_refused", "exit_pair_broken", "exit_pair_rest_cancel", "startup_exit_pair_broken", "exit_pair_switch", "fresh_stop", "fresh_stop_unclear", "fresh_stop_refused", "take_profit_moved"]) assert.ok(STORED_INFO_EVENTS.has(e), e);
+});
+
+test("group 2, round 1: if Alpaca resizes the pair's stop at a partial fill instead of cancelling it, answer 3 still sells the rest at market (it acts on the partial fill itself)", async () => {
+  const w = world();
+  w.sim.pairPartialCancelsStop = false;
+  const dd = await day(w, "on");
+  await remainder(w, "QXO", 13.5, 11, dd);
+  w.sim.fillPairTakeProfit("QXO", 2);
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["QXO", 5]]);
+  assert.equal(pairOrder(w, "QXO")!.status, "canceled");
+  assert.equal(w.sim.oversellAttempts, 0);
+});
+
+test("group 2, round 1: a close-out whose move of the pair is refused falls back to cancel and sell; flat, nothing left open", async () => {
+  const w = world(CLOSE.getTime() - 6 * 3600_000, { alpacaShape: true });
+  const dd = await day(w, "on");
+  await remainder(w, "ADT", 9.9, 6, dd);
+  w.sim.refuseReplaceIf = () => 422;
+  w.sim.advanceTo(CLOSE.getTime() - 15 * 60_000);
+  w.sim.setPrice("ADT", 9.95);
+  const res = await closeOut({ broker: w.sim, liquidator: w.liquidator, store: w.store, now: w.now, say: w.say as any, sleep: w.sim.sleep }, D, { closeAt: CLOSE, path: "close-out" });
+  w.sim.advance(5_000);
+  assert.equal(res.flat, true);
+  const row = w.events.find((e) => e.event === "take_profit_moved")!;
+  assert.equal(row.data.accepted, false);
+  assert.equal(row.data.pair, true);
+  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["ADT", 7]], "sold at market by the fallback");
+  assert.equal((await w.sim.listOrders("open")).length, 0);
+  assert.equal(w.sim.oversellAttempts, 0);
+});
+
+test("group 2, round 1: an unclear pair that never reached Alpaca: looked up by its client id, found missing, and the shares are sold (ruling B's path), no pair on top", async () => {
+  const w = world();
+  w.sim.pairAnswer = "unclear";
+  const dd = await day(w, "on");
+  await remainder(w, "MARA", 15, 3, dd);
+  w.sim.pairAnswer = "ok";
+  for (let i = 0; i < 4 && w.sim.heldQty("MARA") > 0; i++) {
+    w.sim.advance(5_000);
+    await syncOrders(w.risk, dd, { protect: true });
+    w.sim.advance(2_000);
+  }
+  assert.equal(w.sim.heldQty("MARA"), 0, "sold");
+  assert.equal(w.sim.pairLog.length, 0, "no pair placed on top");
+  assert.ok(w.sim.sellLog.some((x) => x.symbol === "MARA" && x.qty === 7));
+  assert.equal(w.sim.oversellAttempts, 0);
+});
+
+// Group 1, round 1 (its probes A and B): the pair older than the sync's 10 minute order list, with the live updates on (the normal case).
+test("group 1, round 1, probe A: a restart with a partly filled pair older than 10 minutes (live updates on): remembered broken, its rest cancelled, the shares sold; never re-taken as protection", async () => {
+  const w = world();
+  const dd = await day(w, "on");
+  await remainder(w, "HIMS", 30, 9, dd);
+  w.sim.advance(15 * 60_000);
+  w.sim.fillPairTakeProfit("HIMS", 3); // 4 left, the pair's stop cancelled
+  const m = new SyncMemory();
+  w.risk.syncMemory = m;
+  for (let i = 0; i < 4 && w.sim.heldQty("HIMS") > 0; i++) {
+    w.sim.advance(1_000);
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    w.sim.advance(2_000);
+  }
+  assert.ok(w.events.some((e) => e.event === "startup_exit_pair_broken"));
+  assert.ok(!w.events.some((e) => e.event === "fresh_stop_recovered"), "never re-taken as protection");
+  assert.equal(w.sim.heldQty("HIMS"), 0, "the 4 sold");
+  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["HIMS", 4]]);
+  assert.equal(pairOrder(w, "HIMS")!.status, "canceled");
+  assert.equal(w.sim.pairLog.length, 1, "no second pair");
+  assert.equal(w.sim.oversellAttempts, 0);
+});
+
+test("group 1, round 1, probe B: a pair marked broken by the live update, older than 10 minutes, whose first cancel Alpaca refuses: the next try cancels and sells; never re-taken as protection", async () => {
+  const w = world();
+  const dd = await day(w, "on");
+  const id = await remainder(w, "SOFI", 9, 4, dd);
+  w.sim.advance(15 * 60_000);
+  w.sim.fillPairTakeProfit("SOFI", 2); // 5 left
+  const f = w.memory.freshStops.get(id)!;
+  f.pairBroken = true; // what the worker does on the live partial_fill
+  notePairBroken(w.memory, f.stopClientOrderId, { orderId: f.orderId, symbol: f.symbol });
+  const { AlpacaError } = await import("../src/alpaca-trading.ts");
+  const orig = w.sim.cancelOrder.bind(w.sim);
+  let refused = 0;
+  w.sim.cancelOrder = async (oid: string) => {
+    if (oid === pairOrder(w, "SOFI")!.id && refused === 0) {
+      refused++;
+      throw new AlpacaError("cancel refused (test)", 500);
+    }
+    return orig(oid);
+  };
+  for (let i = 0; i < 8 && w.sim.heldQty("SOFI") > 0; i++) {
+    w.sim.advance(6_000);
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  }
+  assert.equal(refused, 1);
+  assert.ok(!w.events.some((e) => e.event === "fresh_stop_recovered"), "never re-taken as protection");
+  assert.equal(w.sim.heldQty("SOFI"), 0, "sold");
+  assert.equal(pairOrder(w, "SOFI")!.status, "canceled");
+  assert.equal(w.sim.oversellAttempts, 0);
+});
+
+test("group 1, round 1: a whole pair older than 10 minutes, found by a sale after a restart, is recovered as a pair (its take-profit and stop kept), so a later partial fill is still recognised", async () => {
+  const w = world();
+  const dd = await day(w, "on");
+  const id = await remainder(w, "HIMS", 30, 9, dd);
+  w.sim.advance(15 * 60_000);
+  const m = new SyncMemory();
+  w.risk.syncMemory = m;
+  w.sim.advance(1_000);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  const f = m.freshStops.get(id)!;
+  assert.ok(f, "remembered");
+  assert.equal(f.takeProfitPrice, 30.08);
+  assert.equal(f.stopPrice, 29.87);
+  assert.equal(w.sim.sellLog.length, 0);
 });
