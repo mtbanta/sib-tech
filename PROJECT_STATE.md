@@ -382,6 +382,7 @@ Earlier entry, superseded by the paragraph above: **NOT STARTED.** Created Octob
 
 ## Completed
 
+- **2026-11-21. Strategy run 3, bull market winners revised with 1 minute detail and time of day (research, separate from the stacks).** Read `strategy/runs/strategy-run-3-deliverable.md` (source of record), its page `strategy/runs/strategy-run-3-deliverable.html` and `strategy/runs/strategy-run-3-trajectory.md`. Research input, not financial advice.
 - **2026-11-20. Strategy run 2, trading costs and a cost calculator (research, separate from the stacks).** Read `strategy/runs/strategy-run-2-deliverable.md` (source of record), its page `strategy/runs/strategy-run-2-calculator.html` and `strategy/runs/strategy-run-2-trajectory.md`. Research input, not financial or tax advice.
 - **2026-11-06. The early wake-up fix reviewed (group 1 round 3 PASS) and deployed as Fly release v12.** Record: `builds/build-c2-log.md`, "The early wake-up fix" and "Deploy (2026-11-06, 11:57 PM Central".
 - **2026-11-06. Release 11 built, reviewed (group 2 PASS; group 1 stopped on item 7 in round 2) and deployed as Fly release v11 with the reserve held at 80, per Michael.** Record: `builds/build-c2-log.md`, "Michael's decisions after the Friday review" to "Deploy (2026-11-06, 11:41 PM Central".

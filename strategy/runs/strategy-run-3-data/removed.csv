@@ -1,0 +1,156 @@
+period,ticker,name,gain_group,multiple,start,end,removed_for,all_flags_exact_text
+A,CPXX,CELATOR PHARMACEUTICALS INC. C,6x+,17.18181818,2016-01-04,2016-07-11,acquired,acquired; check: overnight price jump x4.85 on 2016-03-15
+A,ARQL,ARQULE INC,6x+,9.216589862,2016-01-04,2020-01-15,acquired,acquired
+A,SODA,SODASTREAM INTERNATIONAL LTD,6x+,9.042164884,2016-01-04,2018-12-04,delisted,delisted; market cap unknown (start and end)
+A,CIH,CHINA INDEX HLDGS LTD SPON ADS,6x+,8.941176471,2019-06-12,2020-01-31,missing earnings date,new listing; missing earnings date; ADR; market cap unknown (start and end)
+A,AVXS,AVEXIS INC COM STK (DE),6x+,8.829752736,2016-03-17,2018-05-14,acquired,new listing; acquired
+A,LOXO,LOXO ONCOLOGY INC COM STK,6x+,8.48066498,2016-01-04,2019-02-14,acquired,acquired
+A,MXPT,"MAXPOINT INTERACTIVE, INC. COM",6x+,8.147058824,2016-01-04,2017-10-09,acquired,acquired; check: overnight price jump x3.85 on 2016-04-26
+A,ARGX,argenx SE - American Depositary Shares,6x+,8.060893855,2017-05-18,2020-01-31,missing earnings date,new listing; missing earnings date; ADR; market cap unknown (start and end)
+A,REN,RESOLUTE ENERGY CORP COM SHS N,6x+,7.025,2016-01-04,2019-02-28,acquired,acquired
+A,YECO,YULONG ECO-MATLS LTD SHS NEW 2,6x+,6.715135492,2017-10-02,2018-12-13,delisted,history starts late in Alpaca (company was exchange-registered earlier; ticker change or data gap); delisted; market cap unknown (end)
+A,FMI,FOUNDATION MEDICINE INC COM,6x+,6.676413255,2016-01-04,2018-07-30,acquired,acquired
+A,ECYT,ENDOCYTE INC COM,6x+,6.088832487,2016-01-04,2018-12-20,acquired,acquired
+A,ESIO,ELECTRO SCIENTIFIC INDS INC,5x,5.846003899,2016-01-04,2019-02-01,acquired,acquired
+A,MZOR,MAZOR ROBOTICS LTD ADS (ISR),5x,5.759643917,2016-01-04,2018-12-18,delisted,delisted; ADR; market cap unknown (start and end)
+A,CLCD,COLUCID PHARMACEUTICALS INC CO,5x,5.538690476,2016-01-04,2017-02-28,acquired,acquired
+A,GDS,GDS Holdings Limited - American Depositary Shares,5x,5.171,2016-11-02,2020-01-31,missing earnings date,new listing; missing earnings date; ADR; market cap unknown (start and end)
+A,WCG,"WELLCARE HEALTH PLANS, INC",4x,4.54028805,2016-01-04,2020-01-23,acquired,acquired
+A,CWEI,WILLIAMS CLAYTON ENERGY INC,4x,4.497101943,2016-01-04,2017-04-24,acquired,acquired
+A,TBRA,TOBIRA THERAPEUTICS INC COM,4x,4.330246914,2016-01-04,2016-10-31,acquired,acquired; check: overnight price jump x6.96 on 2016-09-20
+A,TST,THESTREET INC COM STK NEW (DE),4x,4.301937208,2016-01-04,2019-08-07,acquired,acquired; check: overnight price jump x0.32 on 2019-04-23
+A,HNR,"HARVEST NATURAL RESOURCES, INC",3x,3.919478982,2016-01-04,2017-05-04,acquired,acquired
+A,ARIA,ARIAD PHARMACEUTICALS INC,3x,3.900813008,2016-01-04,2017-02-15,acquired,acquired; ticker later reused by another company
+A,BOLD,AUDENTES THERAPEUTICS INC COM,3x,3.879042691,2016-09-01,2020-01-14,acquired,new listing; acquired; ticker later reused by another company
+A,KL,KIRKLAND LAKE GOLD LTD (CANADA,3x,3.854732896,2017-08-16,2020-01-31,missing earnings date,new listing; missing earnings date
+A,THOR,SYNTHORX INC COM,3x,3.806830907,2019-03-13,2020-01-22,acquired,new listing; acquired; ticker later reused by another company
+A,CCCR,"CHINA COMMERCIAL CREDIT, INC",3x,3.636363636,2016-01-04,2018-07-12,acquired,acquired
+A,PCMI,PC MALL INC,3x,3.576098059,2016-01-04,2019-08-29,acquired,acquired
+A,RLJE,RLJ ENTMT INC COM NEW,3x,3.531073446,2016-01-04,2018-10-31,acquired,acquired
+A,CTRL,CONTROL4 CORP COM STK (DE),3x,3.348739496,2016-01-04,2019-07-31,acquired,acquired
+A,KMG,K M G CHEMICALS INC,3x,3.34828496,2016-01-04,2018-11-14,acquired,acquired
+A,NEFF,NEFF CORP COM STK CL A (DE),3x,3.328894807,2016-01-04,2017-09-29,acquired,acquired; market cap unknown (start and end)
+A,INMD,InMode Ltd.  - Ordinary Shares,3x,3.21037037,2019-08-08,2020-01-31,missing earnings date,new listing; missing earnings date
+A,CACQ,CAESARS ACQUISTION COMPANY CLA,3x,3.162202381,2016-01-04,2017-10-05,acquired,acquired
+B,HOME,AT HOME GROUP INC COM (DE),6x+,19.57142857,2020-04-01,2021-07-22,acquired,acquired
+B,FPRX,FIVE PRIME THERAPEUTICS INC,6x+,16.81415929,2020-04-01,2021-04-15,acquired,acquired; check: overnight price jump x4.22 on 2020-11-11
+B,MWK,MOHAWK GROUP HLDGS INC COM,6x+,14.33323254,2020-04-01,2021-04-29,delisted,delisted
+B,MIK,MICHAELS COS INC COM STK (DE),6x+,14.17419355,2020-04-01,2021-04-14,acquired,acquired
+B,NMCI,NAVIOS MARITIME CONTAINERS LP,6x+,13.18571429,2020-04-01,2021-03-31,delisted,delisted; partnership units; market cap unknown (end)
+B,TRCH,"TORCHLIGHT ENERGY RESOURCES, I",6x+,13.02631579,2020-04-01,2021-06-25,acquired,acquired
+B,QEP,"QEP RESOURCES,INC COM",6x+,12.75,2020-04-01,2021-03-16,acquired,acquired
+B,SPRT,SUPPORT COM INC,6x+,10.72727273,2020-04-01,2021-09-14,acquired,acquired; check: overnight price jump x3.72 on 2021-03-22
+B,VSLR,VIVINT SOLAR INC COM STK (DE),6x+,10.35576923,2020-04-01,2020-10-07,acquired,acquired; market cap unknown (start and end)
+B,LDL,LYDALL INC,6x+,10.1954023,2020-04-01,2021-09-30,acquired,acquired
+B,PVAC,PENN VA CORP NEW COM STK (VA),6x+,10.18604651,2020-04-01,2021-10-15,delisted,delisted
+B,IMMU,IMMUNOMEDICS INC,6x+,8.090239411,2020-04-01,2020-10-22,acquired,acquired
+B,LB,L BRANDS INC COM STK (DE),6x+,7.54674221,2020-04-01,2021-08-02,delisted,delisted; ticker later reused by another company
+B,SIC,SELECT INTERIOR CONCEPTS INC,6x+,7.137931034,2020-04-01,2021-10-20,acquired,acquired
+B,NETE,NET ELEMENT INC COM PAR $0.000,6x+,6.998502994,2020-04-01,2021-11-04,acquired,acquired
+B,NWHM,THE NEW HOME COMPANY INC,6x+,6.86259542,2020-04-01,2021-09-07,acquired,acquired
+B,LEAF,LEAF GROUP LTD COM (DE),6x+,6.581395349,2020-04-01,2021-06-11,acquired,acquired
+B,ANCN,ANCHIANO THERAPEUTICS LTD,6x+,6.541666667,2020-04-01,2021-03-16,delisted,delisted
+B,CLCT,COLLECTORS UNIVERSE INC,6x+,6.023591088,2020-04-01,2021-02-05,acquired,acquired
+B,GNMK,GENMARK DIAGNOSTICS INC COM ST,5x,5.921182266,2020-04-01,2021-04-21,acquired,acquired
+B,ZIM,ZIM Integrated Shipping Services Ltd. Ordinary Shares,5x,5.80173913,2021-01-28,2022-01-31,missing earnings date,new listing; missing earnings date
+B,UMRX,UNUM THERAPEUTICS INC COM,5x,5.731707317,2020-04-01,2020-10-05,delisted,delisted
+B,RNET,"RIGNET INC, COM STK",5x,5.647058824,2020-04-01,2021-04-30,acquired,acquired
+B,XEC,CIMAREX ENERGY CO,5x,5.443196005,2020-04-01,2021-09-30,acquired,acquired
+B,EIGI,ENDURANCE INTL GROUP HLDGS INC,5x,5.361581921,2020-04-01,2021-02-10,acquired,acquired
+B,BCEI,BONANZA CREEK ENERGY INC COM N,5x,5.223463687,2020-04-01,2021-11-01,delisted,delisted
+B,CLNY,COLONY CAPITAL INC NEW CL A CO,5x,5.214723926,2020-04-01,2021-06-21,delisted,delisted; market cap unknown (start and end)
+B,APHA,APHRIA INC COM (CAN),5x,5.213559322,2020-04-01,2021-04-30,delisted,delisted; market cap unknown (end)
+B,LVGO,LIVONGO HEALTH INC COM,5x,5.178584661,2020-04-01,2020-10-29,acquired,acquired
+B,MDP,MEREDITH CORP,5x,5.053036784,2020-04-01,2021-12-01,acquired,acquired; market cap unknown (start and end)
+B,ORBC,"ORBCOMM, INC COM STK",4x,4.952586207,2020-04-01,2021-08-31,acquired,acquired
+B,MYOK,MYOKARDIA INC COM,4x,4.917140359,2020-04-01,2020-11-16,acquired,acquired
+B,MOSY,MOSYS INC COM STK NEW (DE),4x,4.891304348,2020-04-01,2021-12-17,acquired,acquired
+B,SKYS,SKY SOLAR HLDGS LTD SPONSORED,4x,4.87755102,2020-04-01,2020-10-08,acquired,acquired; market cap unknown (end)
+B,VEDL,VEDANTA LTD SPONSORED ADR (IND,4x,4.838709677,2020-04-01,2021-11-08,acquired,acquired; ADR; market cap unknown (start and end)
+B,WLL,WHITING PETE CORP COM NEW,4x,4.83713355,2020-11-06,2022-01-31,new shares after bankruptcy,"new shares: price break x49.43 overnight on 2020-09-02 (share exchange or unadjusted split), measured after it; new listing"
+B,VRML,VERMILLION INC (DE),4x,4.667444574,2020-04-01,2020-06-11,delisted,delisted
+B,NBLX,NOBLE MIDSTREAM PARTNERS LP,4x,4.345714286,2020-04-01,2021-05-10,delisted,delisted; partnership units
+B,XONE,EXONE CO COM (THE),4x,4.334415584,2020-04-01,2021-11-11,acquired,acquired; ticker later reused by another company
+B,CAI,"CAI INTERNATIONAL, INC.",4x,4.117647059,2020-04-01,2021-11-22,acquired,acquired; ticker later reused by another company
+B,DEN,DENBURY INC NEW COM (DE),4x,4.050673854,2020-11-17,2022-01-31,new shares after bankruptcy,new shares after bankruptcy; new listing
+B,OSB,NORBORD INC ORDINARY SHARES (C,3x,3.931631723,2020-04-01,2021-01-29,delisted,delisted
+B,CTB,COOPER TIRE & RUBBER CO,3x,3.837372449,2020-04-01,2021-06-04,acquired,acquired
+B,MTSL,MER TELEMANAGEMENT SOLUTIONS L,3x,3.744444444,2020-04-01,2021-07-27,delisted,delisted
+B,JAX,J ALEXANDERS HLDGS INC COM STK,3x,3.733333333,2020-04-01,2021-09-29,acquired,acquired
+B,QADB,OAD INC CL B,3x,3.645980841,2020-04-01,2021-11-04,acquired,acquired; market cap unknown (start)
+B,CRC,California Resources Corporation Common Stock,3x,3.533996683,2020-11-06,2022-01-31,new shares after bankruptcy,"new shares: price break x16.91 overnight on 2020-10-28 (share exchange or unadjusted split), measured after it; new listing; gap in price history"
+B,ATH,ATHENE HLDG LTD CL A (BMU),3x,3.530932203,2020-04-01,2021-12-31,acquired,acquired
+B,SNR,NEW SR INVT GROUP INC COM STK,3x,3.528,2020-04-01,2021-09-20,acquired,acquired
+B,HPK,"HighPeak Energy, Inc. - Common Stock",3x,3.484313725,2020-11-11,2022-01-31,shell (SPAC) merger,new listing (shell merger)
+B,DMPI,DELMAR PHARMACEUTICALS INC COM,3x,3.435897436,2020-04-01,2020-08-19,delisted,delisted
+B,GPX,GP STRATEGIES CORP,3x,3.357487923,2020-04-01,2021-10-14,acquired,acquired
+B,WPX,"WPX ENERGY, INC COM STK",3x,3.332155477,2020-04-01,2021-01-06,acquired,acquired
+B,CIT,CIT GROUP INC NEW (DE),3x,3.320918684,2020-04-01,2022-01-03,acquired,acquired
+B,PAND,PANDION THERAPEUTICS INC,3x,3.310363837,2020-09-01,2021-03-31,acquired,new listing; acquired
+B,JMP,JMP GROUP LLC,3x,3.263991644,2020-04-01,2021-11-15,delisted,delisted; market cap unknown (start and end)
+B,GFN,GENERAL FINANCE CORP,3x,3.227504244,2020-04-01,2021-05-25,acquired,acquired
+B,SC,SANTANDER CONSUMER USA HOLDING,3x,3.187739464,2020-04-01,2022-01-28,acquired,acquired
+B,PLT,PLANTRONICS INC,3x,3.187,2020-04-01,2021-05-21,delisted,delisted
+B,BMCH,BMC STK HLDGS INC COM STK (DE),3x,3.176331361,2020-04-01,2020-12-31,acquired,acquired
+B,RBNC,RELIANT BANCORP INC,3x,3.165318806,2020-04-01,2021-12-31,acquired,acquired
+B,WBAI,500.COM LTD ADR SHS EACH REPST,3x,3.100436681,2020-04-01,2021-04-19,delisted,delisted; ADR; market cap unknown (start and end)
+B,PE,PARSLEY ENERGY INC CLASS A COM,3x,3.072595281,2020-04-01,2021-01-12,acquired,acquired; market cap unknown (start and end)
+B,MJCO,MAJESCO COM STK (CA),3x,3.071017274,2020-04-01,2020-09-21,acquired,acquired
+B,ETM,ENTERCOM COMMUNICATIONS CL-A,3x,3.048484848,2020-04-01,2021-04-08,delisted,delisted; market cap unknown (start and end)
+B,GSUM,GRIDSUM HLDG INC ADR RPSTG CL,3x,3,2020-04-01,2021-03-25,acquired,acquired; ADR; market cap unknown (start and end)
+B,TLND,TALEND S.A. AMERICAN DEPOSITAR,3x,3,2020-04-01,2021-07-29,acquired,acquired
+C,LBPH,LONGBOARD PHARMACEUTICALS INC,6x+,17.66715758,2023-01-03,2024-11-29,acquired,acquired; check: overnight price jump x3.06 on 2024-01-02
+C,DGNX,Diginex Limited - Ordinary Shares,6x+,16.1314554,2025-01-22,2025-02-28,missing earnings date,new listing; missing earnings date
+C,ALPN,ALPINE IMMUNE SCIENCES INC,6x+,8.827445652,2023-01-03,2024-05-17,acquired,acquired
+C,ATGL,Alpha Technology Group Limited - Class A Ordinary Shares,6x+,7.8225,2023-10-31,2025-02-28,missing earnings date,new listing; missing earnings date
+C,TAST,"CARROLS RESTAURANT GROUP, INC",6x+,6.913043478,2023-01-03,2024-05-15,acquired,acquired
+C,FUSN,FUSION PHARMACEUTICALS INC (CA,6x+,6.550151976,2023-01-03,2024-06-03,acquired,acquired
+C,IMGN,IMMUNOGEN INC,6x+,6.283702213,2023-01-03,2024-02-09,acquired,acquired
+C,USAP,UNIVERSAL STAINLESS&ALLOY PROD,6x+,6.248611111,2023-01-03,2025-01-22,acquired,acquired
+C,SSNT,SILVERSUN TECHNOLOGIES INC COM,5x,5.663194444,2023-01-03,2024-06-05,delisted,delisted
+C,CBAY,CYMABAY THERAPEUTICS INC. COMM,5x,5.139240506,2023-01-03,2024-03-21,acquired,acquired
+C,SGTX,SIGILON THERAPEUTICS INC COM N,4x,4.938461538,2023-01-03,2023-08-10,acquired,acquired; check: overnight price jump x6.82 on 2023-06-29
+C,LABP,LANDOS BIOPHARMA INC COM NEW,4x,4.726860441,2023-01-03,2024-05-23,acquired,acquired
+C,OKLO,Oklo Inc. Class A common stock,4x,4.542857143,2024-08-14,2025-02-28,shell (SPAC) merger,new listing (shell merger)
+C,ORTX,ORCHARD THERAPEUTICS PLC ADS N,4x,4.498922414,2023-01-03,2024-01-23,acquired,acquired; ADR; market cap unknown (start and end)
+C,RETA,REATA PHARMACEUTICALS INC CL A,4x,4.462972553,2023-01-03,2023-09-25,acquired,acquired; market cap unknown (start and end)
+C,GRCL,GRACELL BIOTECHNOLOGIES INC SP,4x,4.456521739,2023-01-03,2024-02-21,delisted,delisted; market cap unknown (end)
+C,GATO,GATOS SILVER INC COM,3x,3.47826087,2023-01-03,2025-01-15,acquired,acquired
+C,USX,U S XPRESS ENTERPRISES INC CLA,3x,3.468926554,2023-01-03,2023-06-30,acquired,acquired; ticker later reused by another company; check: overnight price jump x3.95 on 2023-03-21; market cap unknown (start and end)
+C,PETQ,PETIQ INC COM CL A,3x,3.331182796,2023-01-03,2024-10-24,acquired,acquired; market cap unknown (start and end)
+C,CORZ,"Core Scientific, Inc. - Common Stock",3x,3.225433526,2024-03-13,2025-02-28,new shares after bankruptcy,new shares after bankruptcy; new listing
+C,LHDXQ,LUCIRA HEALTH INC COM,3x,3.207801418,2023-01-03,2023-03-03,delisted,delisted; check: overnight price jump x4.96 on 2023-02-27
+C,HARP,HARPOON THERAPEUTICS INC COM N,3x,3.027631579,2023-01-03,2024-03-08,acquired,acquired
+C,RYZB,RAYZEBIO INC COM,3x,3.013018322,2023-11-14,2024-02-23,acquired,new listing; acquired
+C,BVH,BLUEGREEN VACATIONS HOLDING CO,3x,3.003604325,2023-01-03,2024-01-16,acquired,acquired; market cap unknown (start and end)
+D,MGRT,Mega Fortune Company Limited - Ordinary Shares,6x+,26.39598997,2025-07-16,2026-10-01,missing earnings date,new listing; missing earnings date; market cap unknown (end)
+D,TERN,TERNS PHARMACEUTICALS INC COM,6x+,19.25454545,2025-04-01,2026-05-04,acquired,acquired
+D,KDLY,KINDLY MD INC COM(UT),6x+,15.88535032,2025-04-01,2025-05-22,delisted,delisted; check: overnight price jump x7.31 on 2025-05-12
+D,JNVR,JANOVER INC COM NEW COM PAR $0,6x+,15.25192308,2025-04-01,2025-05-02,delisted,delisted; check: overnight price jump x3.57 on 2025-04-07
+D,VTYX,VENTYX BIOSCIENCES INC,6x+,12.06896552,2025-04-01,2026-03-03,acquired,acquired
+D,CDTX,CIDARA THERAPEUTICS INC COM NE,6x+,10.34969612,2025-04-01,2026-01-06,acquired,acquired
+D,FBRX,FORTE BIOSCIENCES INC,6x+,10.21087533,2025-04-01,2026-08-26,acquired,acquired
+D,BUUU,BUUU Group Limited - Class A Ordinary Share,6x+,9.6875,2025-08-14,2026-10-01,missing earnings date,new listing; missing earnings date; market cap unknown (start and end)
+D,GRYP,GRYPHON DIGITAL MNG INC COM,6x+,8.146399055,2025-04-01,2025-09-02,delisted,delisted; check: overnight price jump x4.25 on 2025-05-12
+D,ATNF,180 LIFE SCIENCES CORP COM PAR,6x+,7.111111111,2025-04-01,2025-08-15,delisted,delisted
+D,MCTA,Charming Medical Limited - Class A Ordinary Shares,6x+,6.395424837,2025-10-21,2025-11-11,missing earnings date; delisted,new listing; missing earnings date; delisted; check: history ended early but the symbol is listed today (possible ticker reuse); market cap unknown (start and end)
+D,RAPT,RAPT THERAPEUTICS INC COM NEW,6x+,6.04375,2025-04-01,2026-03-02,acquired,acquired
+D,FRGE,FORGE GLOBAL HLDGS INC COM NEW,5x,5.355867651,2025-04-01,2026-02-27,acquired,acquired
+D,HOUS,ANYWHERE REAL ESTATE INC COM,5x,5.345454545,2025-04-01,2026-01-08,acquired,acquired
+D,RGLS,REGULUS THERAPEUTICS INC COM P,4x,4.771929825,2025-04-01,2025-06-24,acquired,acquired
+D,SKYT,SKYWATER TECHNOLOGY INC COM (D,4x,4.578279267,2025-04-01,2026-07-30,acquired,acquired
+D,VIGL,VIGIL NEUROSCIENCE INC COM,4x,4.573863636,2025-04-01,2025-08-04,acquired,acquired; check: overnight price jump x3.41 on 2025-05-22
+D,INZY,INOZYME PHARMA INC,4x,4.418424832,2025-04-01,2025-06-30,acquired,acquired
+D,EMPG,EMPRO GROUP INC SHS (CYM),4x,4.075117371,2025-07-02,2025-10-08,missing earnings date; delisted,new listing; missing earnings date; delisted; market cap unknown (start and end)
+D,EVOK,EVOKE PHARMA INC COM PAR $0.00,4x,4.044117647,2025-04-01,2025-12-16,acquired,acquired; check: overnight price jump x3.20 on 2025-07-09
+D,AGCC,Agencia Comercial Spirits Ltd - Class A Ordinary Share,3x,3.952879581,2025-10-22,2026-10-01,missing earnings date,new listing; missing earnings date; market cap unknown (start and end)
+D,BREA,BRERA HLDGS PLC CL B NEW (IRL),3x,3.9375,2025-04-01,2025-10-02,delisted,delisted; market cap unknown (start and end)
+D,KORE,KORE GROUP HLDGS INC COM NEW,3x,3.670634921,2025-04-01,2026-07-20,acquired,acquired
+D,APGE,APOGEE THERAPEUTICS INC COM,3x,3.649554175,2025-04-01,2026-09-02,acquired,acquired; market cap unknown (start and end)
+D,DALN,DALLASNEWS CORPORATION SERIES,3x,3.568726628,2025-04-01,2025-09-24,acquired,acquired; check: overnight price jump x3.08 on 2025-07-10; market cap unknown (start and end)
+D,MRSN,MERSANA THERAPEUTICS INC COM N,3x,3.372767339,2025-04-01,2026-01-05,acquired,acquired; check: overnight price jump x3.12 on 2025-11-13
+D,AIFU,AIFU Inc. - Class A Ordinary Share,3x,3.264826776,2025-05-19,2026-10-01,new shares after bankruptcy; missing earnings date,"new shares: price break x0.05 overnight on 2025-05-19 (share exchange or unadjusted split), measured after it; new listing; missing earnings date; check: overnight price jump x8.70 on 2025-05-21; market cap unknown (start and end)"
+D,ALOT,ASTRONOVA INC COM,3x,3.243672656,2025-04-01,2026-08-26,acquired,acquired
+D,AUGO,Aura Minerals Inc. - Common Shares,3x,3.218367347,2025-07-16,2026-10-01,missing earnings date,new listing; missing earnings date; market cap unknown (end)
+D,SOHO,SOTHERLY HOTELS INC COM STK (M,3x,3.210158368,2025-04-01,2026-02-12,acquired,acquired; market cap unknown (start and end)
+D,TRML,TOURMALINE BIO INC COM,3x,3.17118308,2025-04-01,2025-10-27,acquired,acquired
