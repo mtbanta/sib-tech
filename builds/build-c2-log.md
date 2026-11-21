@@ -8706,3 +8706,16 @@ Outside market hours (Saturday), under Michael's words "deploy before 7:30 AM Mo
 - **Rollback: v35** (`94ad29c`, image `deployment-01M7XCJR5M0DZ1XVFZWJBZ3VJE`), by the rollback branch `rollback-v35` (`b362197`): `94ad29c` plus only `stacks/cyrus/tools/` from `main`. `git diff --stat 94ad29c rollback-v35` touches only `stacks/cyrus/tools/` (4 files), and `src/midday.ts` at `94ad29c` equals `main`'s, so both conditions of group 1's round 2 hold. Pending Michael's answer on the rollback route (or redeploying the old image instead).
 
 Paper only; research input for a human decision, never an instruction to act.
+
+## Michael's approval of the exit pair (2026-11-21, Saturday afternoon), saved verbatim
+
+> Exit pair approved, with these answers:
+> 1. (a) the original take-profit price (updates my November 12 ruling for remainders).
+> 2. As recommended: plain stop at once if the pair is refused, then a market sale if that is refused too; an unanswered pair is looked up by id within 15 s.
+> 3. As recommended: if the pair's take-profit fills only partly, cancel the rest and sell at market; no second pair.
+> 4. As described: pair on / pair off, that day only, off each morning, survives a same-day restart.
+> 5. Yes: add one 3-share trial on Monday.
+> 6. Pairs on for Monday's afternoon and the 2:30 close-out, if the trials hold up; measure Alpaca's hold on the positions that do not move.
+> Build now, group 1 and group 2, up to 8 rounds, switch off by default; deploy before 8:00 AM Monday only if both pass.
+> Also: the off-hours checker refuses from 8:00 AM Central until the open on trading days (not 7:30). Rollback route: the prepared branch, through the reviewed checker. Monday's limits are approved (no load window).
+> Never print any token or key.
