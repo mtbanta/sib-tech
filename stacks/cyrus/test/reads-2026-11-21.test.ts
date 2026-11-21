@@ -9,18 +9,36 @@ import { closeOut } from "../src/closeout.ts";
 import { MemoryStore } from "../src/store.ts";
 import { ensureDay } from "../src/morning.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
+import { MoveWatch } from "../src/moved-take-profit.ts";
 import { SimBroker } from "./sim-broker.ts";
 import { D } from "./rig.ts";
 
 const CLOSE = new Date(Date.UTC(2026, 10, 2, 21, 0));
 
-function world() {
+function world(withMoves = false) {
   const sim = new SimBroker(CLOSE.getTime() - 15 * 60_000);
   const events: Array<{ event: string; data: any }> = [];
   const log = (event: string, data?: Record<string, unknown>) => void events.push({ event, data });
   const say = async () => true;
   const gate = new SellGate({ broker: sim, say, nowMs: () => sim.simMs, log });
-  const liquidator = new Liquidator({ broker: sim, gate, now: () => new Date(sim.simMs), sleep: sim.sleep, log });
+  // The moved take-profit, as in night-2026-11-19.test.ts (the simulator's 2026-11-18 open-list shape, quotes at the simulator's price).
+  sim.openShape20261118 = withMoves;
+  const watch = new MoveWatch(() => sim.simMs);
+  if (withMoves) sim.onOrderEvent = (event, o, atMs) => watch.onUpdate({ event, order: o, positionQty: null, atMs });
+  const moves = {
+    quotes: async (symbols: string[]) => new Map(symbols.map((s) => [s, { bid: sim.prices.get(s)!, ask: sim.prices.get(s)! + 0.01, atMs: sim.simMs }])),
+    stopsFor: async (legs: Array<{ legId: string; groupId: string; symbol: string }>) => {
+      const out = new Map<string, number>();
+      for (const l of legs) {
+        const stop = sim.orders.find((o) => o.groupId === l.groupId)?.legs.find((x) => x.type === "stop")?.stopPrice;
+        if (stop) out.set(l.legId, stop);
+      }
+      return out;
+    },
+    watch,
+    room: () => true,
+  };
+  const liquidator = new Liquidator({ broker: sim, gate, now: () => new Date(sim.simMs), sleep: sim.sleep, log, ...(withMoves ? { moves } : {}) });
   const store = new MemoryStore();
   const now = () => new Date(sim.simMs);
   return { sim, events, say, liquidator, store, now };
@@ -140,4 +158,28 @@ test("item 1: at most SALE_READS_STORED reads are kept; the rest are counted in 
   assert.equal(t.reads.length, SALE_READS_STORED);
   assert.ok(t.readsMore > 0, `readsMore ${t.readsMore}`);
   assert.ok(t.reads.length + t.readsMore <= n.clock + n.positions + n.pages + n.lookups, "never more than the reads made (the close-out's own reads are not the sale's)");
+});
+
+test("item 1 (group 2, round 1): with a move sent, round 1 starts again and the record holds two sets of round 1 reads: the first step's three answered by movePhaseStartedAt, then a second round 1 clock read at or after it", async () => {
+  const w = world(true);
+  await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
+  await hold(w, "AAA", 10, 20, 1); // moves (bid 20, limit 19.99, stop 19.87)
+  await hold(w, "BBB", 5, 30, 2); // moves too
+  const res = await closeOut(deps(w), D, { closeAt: CLOSE, path: "close-out", timing: { dueAt: null, triggeredAt: w.now().toISOString() } });
+  assert.equal(res.flat, true);
+  const r = result(w);
+  assert.ok(r.steps?.replaces?.length >= 1, "a move was sent");
+  const t = r.timing;
+  const move = iso(t.movePhaseStartedAt);
+  // In the record's order: round 1's first clock, positions and open-orders reads are the first step (each answered by the move step's
+  // start); the next round 1 clock read marks round 1 started again after the moves (asked at or after the move step's start).
+  const r1 = t.reads.filter((x: any) => x.round === 1);
+  assert.deepEqual(r1.slice(0, 3).map((x: any) => x.what), ["clock", "positions", "openOrders"], "the first step: round 1's three reads");
+  for (const x of r1.slice(0, 3)) assert.ok(iso(x.at) + x.ms <= move, "answered by the move step's start");
+  const againAt = r1.findIndex((x: any, i: number) => i > 0 && x.what === "clock");
+  assert.ok(againAt >= 3, "a second round 1 clock read: round 1 started again, same number");
+  assert.deepEqual(r1.slice(againAt, againAt + 3).map((x: any) => x.what), ["clock", "positions", "openOrders"]);
+  assert.ok(iso(r1[againAt].at) >= move, "asked at or after the move step's start");
+  assert.ok(!r1.slice(3, againAt).some((x: any) => x.by === "gate"), "the replaces used the sale's own fresh view: no gate read for them");
+  assert.equal(w.sim.oversellAttempts, 0);
 });

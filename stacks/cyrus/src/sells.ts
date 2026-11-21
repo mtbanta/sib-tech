@@ -293,7 +293,10 @@ export interface LiquidateOptions {
 // Michael's approval of 2026-11-21, item 1 (logging only): each read from Alpaca's trading interface made inside one sale (the clock, the
 // positions, the open orders, a cancel's one lookup), with when it was asked for, how long it took to answer, and whether it answered.
 // The time includes the Alpaca client's own retries of that read, if any; it adds no request and no wait. At most SALE_READS_STORED a sale,
-// the rest counted in `readsMore`. Read by the close-out's record (`closeout_result.timing.reads`).
+// the rest counted in `readsMore` (the first 40 are kept, so the first step's reads always are). Read by the close-out's record
+// (`closeout_result.timing.reads`). When the moved take-profit sends a replace, round 1 starts again from fresh reads and keeps its number,
+// so the record then holds two sets of round 1 reads: the first step is the set asked for before `movePhaseStartedAt`, the second set came
+// after the moves. Not included: the move step's stop lookup and quote read (market data), and the close-out's own reads outside the sale.
 export interface SaleRead {
   what: "clock" | "positions" | "openOrders" | "orderLookup";
   round: number;

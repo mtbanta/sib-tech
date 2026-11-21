@@ -25,7 +25,9 @@ export function toolSelfCheck(selfUrl, dir, name) {
   const problems = [];
   if (!self || !expected || self !== expected) problems.push(`run the tool from the checkout it deploys: node ${join(dir, "tools", name)} --dir ${dir} ...`);
   const blob = self ? (spawnSync("git", ["hash-object", self], { encoding: "utf8" }).stdout || "").trim() : "";
-  const committed = (spawnSync("git", ["-C", dir, "rev-parse", `HEAD:./tools/${name}`], { encoding: "utf8" }).stdout || "").trim();
+  // --verify -q: a path not committed at HEAD gives nothing (plain rev-parse would echo its argument back).
+  const rp = spawnSync("git", ["-C", dir, "rev-parse", "--verify", "-q", `HEAD:./tools/${name}`], { encoding: "utf8" });
+  const committed = rp.status === 0 ? (rp.stdout || "").trim() : "";
   if (!blob || !committed || blob !== committed) problems.push(`the tool's contents (${blob.slice(0, 12) || "unknown"}) are not the committed copy at HEAD (${committed.slice(0, 12) || "not committed"})`);
   return { problems, blob, committed };
 }

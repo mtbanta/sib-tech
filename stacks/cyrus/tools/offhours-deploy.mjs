@@ -1,5 +1,5 @@
-// A normal deploy outside market hours (CLAUDE.md: flat, no open orders, the reviewed commit, a clean checkout). Scratchpad tool for the
-// redesign deploy of 2026-11-15. Reads only (paper Alpaca, the database in a read-only transaction) until every check has passed; then
+// A normal deploy outside market hours (CLAUDE.md: flat, no open orders, the reviewed commit, a clean checkout). Written as a scratchpad
+// tool for the redesign deploy of 2026-11-15; in the repo since 2026-11-21. Reads only (paper Alpaca, the database in a read-only transaction) until every check has passed; then
 // pauses the Healthchecks check (the worker's next ping un-pauses it) and runs the Fly deploy. Never prints a key. Paper only.
 // Usage: node <clean clone>/stacks/cyrus/tools/offhours-deploy.mjs --dir <clean clone>/stacks/cyrus --reviewed <commit> [--check-only]
 // In the repo since Michael's request of 2026-11-21 (item 2): it must be run from the checkout it deploys (self-check.mjs), so the copy
