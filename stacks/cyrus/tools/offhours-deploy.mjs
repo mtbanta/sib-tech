@@ -1,10 +1,13 @@
 // A normal deploy outside market hours (CLAUDE.md: flat, no open orders, the reviewed commit, a clean checkout). Scratchpad tool for the
 // redesign deploy of 2026-11-15. Reads only (paper Alpaca, the database in a read-only transaction) until every check has passed; then
 // pauses the Healthchecks check (the worker's next ping un-pauses it) and runs the Fly deploy. Never prints a key. Paper only.
-// Usage: node offhours-deploy.mjs --dir <clean clone>/stacks/cyrus --reviewed <commit> [--check-only]
+// Usage: node <clean clone>/stacks/cyrus/tools/offhours-deploy.mjs --dir <clean clone>/stacks/cyrus --reviewed <commit> [--check-only]
+// In the repo since Michael's request of 2026-11-21 (item 2): it must be run from the checkout it deploys (self-check.mjs), so the copy
+// that runs is the one committed at the reviewed commit; it prints its own git blob hash for the deploy's log entry.
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
+import { toolSelfCheck } from "./self-check.mjs";
 
 const KEY_FILE = "/Users/mtbanta/Projects/sib-tech/stacks/cyrus/.env.local";
 const PAPER = "https://paper-api.alpaca.markets"; // paper only
@@ -16,6 +19,9 @@ const reviewed = value("--reviewed");
 const refuse = (m) => { console.log("refused: " + m); process.exit(1); };
 if (!dir || !reviewed || reviewed.length < 7) refuse("--dir and --reviewed <commit, 7+ chars> are required");
 if (existsSync(`${dir}/.env.local`)) refuse("the checkout holds a key file");
+const self = toolSelfCheck(import.meta.url, dir, "offhours-deploy.mjs");
+console.log(`tool: offhours-deploy.mjs blob ${self.blob.slice(0, 12)} (committed at HEAD: ${self.committed.slice(0, 12)})`);
+if (self.problems.length) refuse(self.problems.join("; "));
 process.loadEnvFile(KEY_FILE);
 const secrets = Object.entries(process.env).filter(([k, v]) => /TOKEN|KEY|SECRET|URL|ID/.test(k) && v && v.length >= 8).map(([, v]) => v.trim());
 const scrub = (s) => secrets.reduce((t, k) => t.split(k).join("<redacted>"), String(s ?? ""));

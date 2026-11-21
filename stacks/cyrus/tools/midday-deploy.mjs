@@ -4,8 +4,8 @@
 // checks every condition right before the deploy and refuses if any fails; only then it pauses the Healthchecks check (the worker's
 // next ping un-pauses it) and runs the Fly deploy.
 //
-// Usage (from any folder; the key file is read from the main checkout and never printed):
-//   node stacks/cyrus/tools/midday-deploy.mjs --dir <clean checkout>/stacks/cyrus --reviewed <commit> [--after-130]
+// Usage (from any working folder, but the tool itself from the checkout it deploys; the key file is read from the main checkout and never printed):
+//   node <clean checkout>/stacks/cyrus/tools/midday-deploy.mjs --dir <clean checkout>/stacks/cyrus --reviewed <commit> [--after-130]
 //        [--michael-yes "<where and when Michael wrote his yes for this deploy>"] [--check-only]
 // --michael-yes is passed ONLY after Michael has written an explicit yes for this specific deploy, in the builder's session or in
 // Discord `commands`; it is never inferred from `stop`, `flatten`, an earlier approval or a standing rule (Michael, 2026-11-12). The one
@@ -16,6 +16,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { deployRefusals, deployRoute, middayKey } from "../src/midday.ts";
+import { toolSelfCheck } from "./self-check.mjs";
 
 const KEY_FILE = "/Users/mtbanta/Projects/sib-tech/stacks/cyrus/.env.local";
 const PAPER = "https://paper-api.alpaca.markets"; // paper only, never anything else
@@ -35,6 +36,14 @@ if (!dir) {
 }
 if (existsSync(`${dir}/.env.local`)) {
   console.log("refused: the checkout holds a key file (.env.local); deploy from a clean checkout");
+  process.exit(2);
+}
+// Michael's request of 2026-11-21 (item 2): run from the checkout it deploys, so the copy that runs is the one committed at the reviewed
+// commit (self-check.mjs); its own git blob hash is printed for the deploy's log entry.
+const self = toolSelfCheck(import.meta.url, dir, "midday-deploy.mjs");
+console.log(`tool: midday-deploy.mjs blob ${self.blob.slice(0, 12)} (committed at HEAD: ${self.committed.slice(0, 12)})`);
+if (self.problems.length) {
+  console.log("refused: " + self.problems.join("; "));
   process.exit(2);
 }
 process.loadEnvFile(KEY_FILE);
