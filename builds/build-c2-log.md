@@ -8821,3 +8821,14 @@ Group 1 round 3 on `7f5fc49`: PASS (the change is only in the end-of-run summary
 **Group 1, round 2 on `faa5c65`: PASS** (no behaviour changed: the pair decision gives the same answer as in `6572d3a`; the new field is logging only; switch off unchanged; probe D rerun the same).
 
 **Group 2, round 2 on `faa5c65`: PASS** (logging only; the test real; the brief and the unclear-case paragraph accurate). **Both groups passed `faa5c65`; it deploys outside market hours from a clean clone through the repo checker.**
+
+## Release v38 deployed at 1:14 PM CT (Saturday 2026-11-21)
+
+Outside market hours, under Michael's words "deploy before 8:00 AM Monday only if both pass" (group 1 and group 2 PASS in round 2 on `faa5c65`). From a clean clone at exactly `faa5c65` (no key file), by the repo's `tools/offhours-deploy.mjs` from that clone: `tool: offhours-deploy.mjs blob 4fbd02c12f64 (committed at HEAD: 4fbd02c12f64)`; Alpaca's clock closed (next open Monday 9:30 AM ET), 0 positions, 0 open orders, not a trading day, Monday's limits approved; Healthchecks paused (200), then `fly deploy`.
+
+- Image `deployment-01M7ZREBCCNJS27NF6Y4Y0BMSR`, machine `847319a2d79518` (Fly version 38), started 19:14:00 UTC; deploy exit 0 at 19:14:12 UTC.
+- Post-check (read only): one `worker_started` at 19:14:05 UTC (`deploy: true`, `closeoutMinutesBeforeClose: 30`, `recentStarts: 2` with v37's start 36 minutes earlier), no error or warning events, Healthchecks up. Live line posted in `commands` (200).
+- v38 = v37 plus one exit pair try per position (Michael's answer of 2026-11-21), with `pairRefusedEarlier` on later plain stops. The exit pair stays OFF until Michael sends `pair on`.
+- **Rollback: v37** (`e378f96`, image `deployment-01M7ZPC8C4K08VCT1GNK7HZ78N`), by branch `rollback-v37` (`8f51a88`: `e378f96` plus only `stacks/cyrus/tools/` from `main`; the diff touches `tools/pair-trials.mjs` only; `src/midday.ts` equal to `main`'s), through the reviewed checker.
+
+Paper only; research input for a human decision, never an instruction to act.
