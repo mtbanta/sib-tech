@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { toolSelfCheck } from "./self-check.mjs";
+import { offhoursWindowProblems } from "./offhours-window.mjs";
 
 const KEY_FILE = "/Users/mtbanta/Projects/sib-tech/stacks/cyrus/.env.local";
 const PAPER = "https://paper-api.alpaca.markets"; // paper only
@@ -39,7 +40,6 @@ const get = async (p) => { const r = await fetch(PAPER + p, { headers: H, redire
 let clock, positions, orders;
 try { [clock, positions, orders] = await Promise.all([get("/v2/clock"), get("/v2/positions"), get("/v2/orders?status=open&limit=500&nested=true")]); }
 catch (e) { refuse("could not read Alpaca: " + scrub(e.message).slice(0, 200)); }
-if (clock.is_open !== false) problems.push("Alpaca's clock does not say closed");
 if (positions.length !== 0) problems.push(`${positions.length} position(s)`);
 if (orders.length !== 0) problems.push(`${orders.length} open order(s)`);
 
@@ -58,7 +58,9 @@ try {
 } catch (e) { refuse("could not read the database: " + scrub(e.message).slice(0, 200)); }
 finally { await db.end().catch(() => undefined); }
 const now = new Date();
-if (today?.is_trading_day && today.open_at && today.close_at && now >= new Date(today.open_at) && now < new Date(today.close_at)) problems.push("market hours by the day record");
+// The time window (market hours, and Michael's 8:00 AM cutoff of 2026-11-21), from the day record and Alpaca's clock (offhours-window.mjs).
+problems.push(...offhoursWindowProblems(now, clock, today));
+if (!today) console.log("note: no day record for today; the 8:00 AM cutoff rests on Alpaca's clock alone");
 
 console.log(JSON.stringify({ nyDate: ny, checkout: head.slice(0, 7), alpacaClockOpen: clock.is_open, nextOpen: clock.next_open, positions: positions.length, openOrders: orders.length, today: today && { date: today.trade_date, tradingDay: today.is_trading_day, status: today.status }, nextDay: next && { date: next.trade_date, status: next.status, decided: next.decided, suggested: next.suggested }, stopFlag: stop ? { on: stop.on, reason: stop.reason } : null }));
 if (problems.length) refuse(problems.join("; "));

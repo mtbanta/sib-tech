@@ -295,8 +295,8 @@ export interface LiquidateOptions {
 // The time includes the Alpaca client's own retries of that read, if any; it adds no request and no wait. At most SALE_READS_STORED a sale,
 // the rest counted in `readsMore` (the first 40 are kept, so the first step's reads always are). Read by the close-out's record
 // (`closeout_result.timing.reads`). When the moved take-profit sends a replace, round 1 starts again from fresh reads and keeps its number,
-// so the record then holds two sets of round 1 reads: the first step is the set asked for before `movePhaseStartedAt`, the second set came
-// after the moves. Not included: the move step's stop lookup and quote read (market data), and the close-out's own reads outside the sale.
+// so the record then holds two sets of round 1 reads: the first step is the first three entries (round 1's clock, positions and open
+// orders, each answered by `movePhaseStartedAt`), and a second round 1 clock read, asked at or after it, begins the set after the moves. Not included: the move step's stop lookup and quote read (market data), and the close-out's own reads outside the sale.
 export interface SaleRead {
   what: "clock" | "positions" | "openOrders" | "orderLookup";
   round: number;
