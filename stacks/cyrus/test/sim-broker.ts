@@ -87,6 +87,15 @@ export class SimBroker implements FullBroker {
   // A4: fresh stops placed, and whether Alpaca refuses them.
   readonly stopLog: Array<{ symbol: string; qty: number; stopPrice: number; at: number; clientOrderId: string }> = [];
   refuseStops = false;
+  // The exit pair (2026-11-21): pairs placed; how Alpaca answers one ("refuse": a 422; "unclear": a 503 after it may have landed, here it does
+  // not); how the open list shows it (Alpaca's shape is not measured until Monday 2026-11-23's trials, so all three are served): "nested"
+  // (the parent with its stop leg under it, as the documentation says), "parentAlone" (the parent without its leg), "separate" (the stop leg
+  // also as its own top-level sell). `pairPartialCancelsStop`: a partial fill of the pair's take-profit cancels its stop (as Alpaca does a
+  // bracket's).
+  readonly pairLog: Array<{ symbol: string; qty: number; stopPrice: number; takeProfitPrice: number; at: number; clientOrderId: string }> = [];
+  pairAnswer: "ok" | "refuse" | "unclear" = "ok";
+  pairListShape: "nested" | "parentAlone" | "separate" = "nested";
+  pairPartialCancelsStop = true;
   // A4: the price fell to a resting stop sell of this symbol: it fills now.
   triggerStop(symbol: string): void {
     const o = this.orders.find((x) => x.symbol === symbol && x.side === "sell" && x.type === "stop" && OPEN.has(x.status) && x.status !== "pending_cancel");
@@ -147,6 +156,13 @@ export class SimBroker implements FullBroker {
   }
   // A resting take-profit leg whose limit is at or below the price fills now; its sibling is cancelled (OCO).
   private fillLegIfMarketable(id: string): void {
+    const pair = this.orders.find((o) => o.id === id && o.side === "sell" && o.orderClass === "oco" && o.type === "limit");
+    if (pair) {
+      if (!(pair.status === "new" || pair.status === "accepted") || pair.limitPrice === null) return;
+      const price = this.prices.get(pair.symbol) ?? 0;
+      if (pair.limitPrice <= price + 1e-9) this.fillPairTakeProfit(pair.symbol, undefined, price);
+      return;
+    }
     for (const p of this.orders) {
       const leg = p.legs.find((l) => l.id === id);
       if (!leg) continue;
@@ -362,6 +378,10 @@ export class SimBroker implements FullBroker {
         return o.legs.filter((l) => OPEN.has(l.status) && l.type === "limit").map((l) => ({ ...l, legs: [] }));
       });
     }
+    if (status === "open" && this.pairListShape !== "nested") {
+      // The exit pair's other possible list shapes (see `pairListShape`).
+      rows = rows.flatMap((o) => (o.side === "sell" && o.orderClass === "oco" && o.type === "limit" ? [{ ...o, legs: [] }, ...(this.pairListShape === "separate" ? o.legs.filter((l) => OPEN.has(l.status)) : [])] : [o]));
+    }
     if (afterIso) rows = rows.filter((o) => (o.createdAt ?? "") > afterIso);
     rows = rows.filter((o) => !this.hiddenFromListing.has(o.clientOrderId));
     return rows.slice(0, 500).map((o) => structuredClone(o)); // oldest first, at most 500
@@ -469,6 +489,18 @@ export class SimBroker implements FullBroker {
       this.oversellAttempts++;
       throw new AlpacaError(`insufficient qty available for order (requested: ${s.qty}, available: ${Math.max(0, free)})`, 403);
     }
+    // The exit pair: one OCO order, its parent the take-profit limit and its child the stop (held), as Alpaca's documentation describes.
+    if (s.stopPrice !== undefined && s.takeProfitPrice !== undefined) {
+      if (this.pairAnswer === "refuse") throw new AlpacaError("oco orders refused (test)", 422);
+      if (this.pairAnswer === "unclear") throw new AlpacaError("service unavailable (test)", 503);
+      const created = new Date(this.simMs + this.n).toISOString();
+      const parent = order({ id: this.id(), clientOrderId: s.clientOrderId, symbol: s.symbol, side: "sell", qty: s.qty, status: "new", type: "limit", limitPrice: Math.floor(s.takeProfitPrice * 100 + 1e-9) / 100, orderClass: "oco", createdAt: created });
+      parent.legs = [order({ id: this.id(), clientOrderId: `alpaca-leg-${this.n}`, symbol: s.symbol, side: "sell", qty: s.qty, status: "held", type: "stop", stopPrice: Math.floor(s.stopPrice * 100 + 1e-9) / 100, orderClass: "oco", createdAt: created })];
+      this.orders.push(parent);
+      this.pairLog.push({ symbol: s.symbol, qty: s.qty, stopPrice: s.stopPrice, takeProfitPrice: s.takeProfitPrice, at: this.simMs, clientOrderId: s.clientOrderId });
+      this.limitChecks.push({ id: parent.id, at: this.simMs });
+      return structuredClone(parent);
+    }
     // A4 of 2026-11-12: a stop sell rests at Alpaca (it holds the shares) until `triggerStop` fills it. `refuseStops` makes Alpaca refuse
     // it outright, as it does when the price is already below the stop price.
     if (s.stopPrice !== undefined) {
@@ -492,6 +524,8 @@ export class SimBroker implements FullBroker {
     this.spend("plain");
     const forced = this.refuseReplaceIf?.(id, change) ?? null;
     if (forced !== null) throw new AlpacaError(`replace refused (test ${forced})`, forced);
+    const pairParent = this.orders.find((o) => o.id === id && o.side === "sell" && o.orderClass === "oco" && o.type === "limit");
+    if (pairParent) return this.replacePair(pairParent, change, timeoutMs);
     const parent = this.orders.find((o) => o.legs.some((l) => l.id === id));
     const leg = parent?.legs.find((l) => l.id === id);
     if (!parent || !leg) throw new AlpacaError("order not found", 404);
@@ -524,6 +558,68 @@ export class SimBroker implements FullBroker {
     }
     return structuredClone(nu);
   }
+  // The exit pair: a replace of the pair's take-profit (its parent). Assumed (not measured until Monday's trial T2): a new parent with a new id,
+  // keeping the asked client id, its stop leg carried over; the limit must stay above the stop.
+  private replacePair(p: Order, change: ReplaceOrder, timeoutMs: number): Order {
+    if (!OPEN.has(p.status) || p.status === "pending_cancel") throw new AlpacaError(`order is not open (${p.status})`, 422);
+    const leg = p.legs.find((l) => l.type === "stop");
+    const newLimit = change.limitPrice !== undefined ? Math.floor(change.limitPrice * 100 + 1e-9) / 100 : p.limitPrice;
+    if (leg && OPEN.has(leg.status) && newLimit !== null && leg.stopPrice !== null && !(newLimit > leg.stopPrice + 1e-9)) throw new AlpacaError("take_profit.limit_price must be > stop_loss.stop_price", 422);
+    const nu: Order = structuredClone(p);
+    nu.id = this.id();
+    nu.clientOrderId = change.clientOrderId && this.keepsReplaceClientId ? change.clientOrderId : `alpaca-${this.n}`;
+    nu.limitPrice = newLimit;
+    nu.replaces = p.id;
+    nu.status = "new";
+    nu.createdAt = new Date(this.simMs).toISOString();
+    nu.legs = p.legs.map((l) => ({ ...structuredClone(l), id: this.id() }));
+    p.status = "replaced";
+    for (const l of p.legs) if (OPEN.has(l.status)) l.status = "replaced";
+    this.replacedOrders.push(p);
+    this.orders.push(nu);
+    this.replaceLog.push({ id: p.id, newId: nu.id, at: this.simMs, change });
+    this.onOrderEvent?.("replaced", structuredClone(p), this.simMs);
+    this.limitChecks.push({ id: nu.id, at: this.simMs + this.replaceFillDelayMs });
+    if (this.replaceAnswerMs > 0) {
+      if (this.replaceAnswerMs > timeoutMs) {
+        this.advance(timeoutMs);
+        throw new Error("The operation was aborted due to timeout");
+      }
+      this.advance(this.replaceAnswerMs);
+    }
+    return structuredClone(nu);
+  }
+  // The exit pair's take-profit fills `qty` (all of it by default) at `price` (test-side). A partial fill cancels the stop leg when
+  // `pairPartialCancelsStop` (as Alpaca does a bracket's); a full fill cancels it (one cancels other).
+  fillPairTakeProfit(symbol: string, qty?: number, price?: number): void {
+    const p = this.orders.find((o) => o.symbol === symbol && o.side === "sell" && o.orderClass === "oco" && o.type === "limit" && OPEN.has(o.status));
+    if (!p) throw new Error("no open pair");
+    const q = Math.min(qty ?? p.qty - p.filledQty, p.qty - p.filledQty);
+    const px = price ?? p.limitPrice ?? 0;
+    p.filledQty += q;
+    p.filledAvgPrice = px;
+    const whole = p.filledQty >= p.qty - 1e-9;
+    p.status = whole ? "filled" : "partially_filled";
+    if (whole) p.filledAt = new Date(this.simMs).toISOString();
+    this.removeShares(symbol, q, px);
+    this.onOrderEvent?.(whole ? "fill" : "partial_fill", structuredClone(p), this.simMs);
+    for (const l of p.legs) if (OPEN.has(l.status) && (whole || this.pairPartialCancelsStop)) this.setStatus(l.id, "canceled");
+  }
+  // The exit pair's stop is reached (test-side): its stop leg fills and the take-profit (the parent) is cancelled.
+  triggerPairStop(symbol: string): void {
+    const p = this.orders.find((o) => o.symbol === symbol && o.side === "sell" && o.orderClass === "oco" && o.type === "limit" && OPEN.has(o.status));
+    const leg = p?.legs.find((l) => l.type === "stop" && OPEN.has(l.status));
+    if (!p || !leg) throw new Error("no open pair stop");
+    const price = this.prices.get(symbol) ?? leg.stopPrice ?? 0;
+    const q = leg.qty - leg.filledQty;
+    leg.status = "filled";
+    leg.filledQty = leg.qty;
+    leg.filledAvgPrice = price;
+    leg.filledAt = new Date(this.simMs).toISOString();
+    this.removeShares(symbol, q, price);
+    this.onOrderEvent?.("fill", structuredClone(leg), this.simMs);
+    this.setStatus(p.id, "canceled");
+  }
   // The price moves: a resting take-profit at or below the new price fills (test-side).
   setPrice(symbol: string, price: number): void {
     this.prices.set(symbol, price);
@@ -533,6 +629,11 @@ export class SimBroker implements FullBroker {
     if (!o || !OPEN.has(o.status) || o.status === "pending_cancel") return;
     o.status = "pending_cancel";
     this.cancels.push({ id, doneAt: this.simMs + this.cancelMs });
+    // The exit pair: cancelling its parent cancels its stop leg with it (assumed; checked by Monday's trials' clean-ups).
+    if (o.side === "sell" && o.orderClass === "oco" && o.type === "limit") for (const l of o.legs) if (OPEN.has(l.status) && l.status !== "pending_cancel") {
+      l.status = "pending_cancel";
+      this.cancels.push({ id: l.id, doneAt: this.simMs + this.cancelMs });
+    }
     // In the 2026-11-18 mode, cancelling one leg of a filled bracket cancels its sibling too (one-cancels-other; paper test A of 2026-11-17:
     // the stop's own cancel was answered "already cancelling with its sibling").
     if (this.openShape20261118) {

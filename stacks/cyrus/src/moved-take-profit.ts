@@ -23,6 +23,7 @@
 import type { Order, Position } from "./alpaca-trading.ts";
 import type { TradeUpdate } from "./order-stream.ts";
 import { OPEN_STATUSES, flattenLegs } from "./sells.ts";
+import { isExitPair, pairStopLeg } from "./exit-pair.ts";
 
 // The switch (one constant, so the release can ship with it off if a review stalls).
 export const MOVED_TAKE_PROFIT = { on: true };
@@ -102,6 +103,35 @@ export function structuralCandidates(positions: Position[], open: Order[], stopF
     const sells: Order[] = [];
     for (const o of open) for (const x of [o, ...flattenLegs(o)]) if (x.symbol === p.symbol && x.side === "sell" && OPEN_STATUSES.has(x.status)) sells.push(x);
     const unique = [...new Map(sells.map((x) => [x.id, x])).values()];
+    // The exit pair (Michael's approval of 2026-11-21): a remainder's pair (cyrus-p-, an OCO whose parent is the take-profit limit and whose
+    // child is the stop) counts as one sell: its parent with its own stop leg, when listed, and nothing else open on the symbol. It is moved
+    // like a bracket's take-profit, by the same rules. A pair whose stop leg is listed as a separate top-level sell is not recognised (more
+    // than one sell open: today's path).
+    const pairs = unique.filter((x) => isExitPair(x) && x.legs !== undefined);
+    if (pairs.length === 1 && unique.every((x) => x.id === pairs[0]!.id || flattenLegs(pairs[0]!).some((l) => l.id === x.id))) {
+      const pp = pairs[0]!;
+      const leg = pairStopLeg(pp);
+      if (!(pp.status === "new" || pp.status === "accepted") || pp.filledQty > EPS || pp.limitPrice === null) {
+        skipped.push({ symbol: p.symbol, why: pp.filledQty > EPS ? "exit pair's take-profit partly filled" : `exit pair ${pp.status}` });
+        continue;
+      }
+      if (leg && !OPEN_STATUSES.has(leg.status)) {
+        skipped.push({ symbol: p.symbol, why: `exit pair's stop ${leg.status}` });
+        continue;
+      }
+      if (Math.abs(pp.qty - p.qty) > EPS || (p.qtyAvailable != null && p.qtyAvailable > EPS)) {
+        skipped.push({ symbol: p.symbol, why: "the exit pair does not cover the whole holding" });
+        continue;
+      }
+      // The stop price: from the pair's own stop leg when listed, else from `stopFor` (the worker's memory of the pair it placed).
+      const stop = leg?.stopPrice ?? (stopFor ? stopFor(pp) : NaN);
+      if ((leg || stopFor) && (stop === null || !(stop > 0))) {
+        skipped.push({ symbol: p.symbol, why: "stop price unknown" });
+        continue;
+      }
+      candidates.push({ symbol: p.symbol, qty: p.qty, legId: pp.id, groupId: pp.groupId || `pair-${pp.id}`, oldLimit: pp.limitPrice, stopPrice: stop ?? NaN });
+      continue;
+    }
     if (unique.length !== 1) {
       skipped.push({ symbol: p.symbol, why: unique.length === 0 ? "no take-profit open" : "more than one sell open" });
       continue;

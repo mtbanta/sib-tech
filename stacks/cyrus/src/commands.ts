@@ -9,6 +9,7 @@ import { decideLimits, decideLoad, limitLines, parseCommand, type NextSessionFin
 import { AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_AFTERNOON_ENDED_EARLY_PHASE, LOAD_AFTERNOON_PHASE, LOAD_AFTERNOON_PREVIOUS_PHASE, LOAD_MAX_POSITION_USD, LOAD_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, afternoonMayStartAgain, afternoonLoadExits, beforeLoadWindow, DEFAULT_LOAD_EXITS, exitsInWords, formatLoadExits, inAfternoonLoad, isLoadDay, LOAD_AFTERNOON_EXITS_PHASE, loadLine, loadWindow, loadWindowRules, type LoadExits } from "./load-mode.ts";
 import type { Liquidator, Say } from "./sells.ts";
 import { inRequestScope } from "./request-scope.ts";
+import { EXIT_PAIR_PHASE, exitPairOn } from "./exit-pair.ts";
 import { CONTROL_COMMAND_CURSOR, CONTROL_NOT_FLAT, CONTROL_STOP, setPhase, type DayRecord, type NotFlatState, type StopFlag, type Store } from "./store.ts";
 import { MAX_TRADES_PER_MINUTE, MAX_TRADES_PER_MINUTE_LOAD_DAY, MIN_MINUTES_BEFORE_CLOSE, describeLimits } from "./limits.ts";
 import { addMinutes, centralClock, dayWord, etDate, sessionPhase } from "./time.ts";
@@ -172,8 +173,9 @@ const HELP = [
   "`limits` today's limits",
   "`approve` or `approve cap` accept the next trading day's limits; `position 1500`, `loss 150`, `trades 20`, `cap 2` change one (`trades` is orders a minute, 1 to 100, or up to 150 on a load day: send `load on` first, or in the same message). Until the `Armed` message 5 minutes before the open you can change any limit; after it only tighten (lower) a limit, until the evening post.",
   "`go` end the mid-day pause now (the pause starts at 10:30 AM CT; `go` works once the mid-day close-out is flat, with or without a deploy). `hold` no automatic resume after a mid-day deploy today (the automatic resume ends at 1:30 PM CT, or at the last entry if earlier; `go` still resumes).",
+  "`pair on` / `pair off` exit pairs for leftover shares, today only.",
   "`load on` / `load off` make the next trading day a load day or a normal day (see line 5 of the limits); `load on` until the morning screen, 15 minutes before the open (8:15 AM CT); after `Armed` only `load off`.",
-  "You can send several commands in one message, one per line; I answer each line in one short reply and then show the limits once.",
+  "You can send several commands in one message, one per line.",
 ].join("\n");
 
 // The limits list that ends a reply to a limit or load command (once per message), with a closing line on what it means.
@@ -485,6 +487,25 @@ export class CommandProcessor {
                   "Running the cheap-symbol screen for the afternoon load window now; it can take a few minutes. Your stop stays on meanwhile. When it is done I check again that the account is flat and the stop is still on, then clear the stop, start the window and resume trading. `stop`, `flatten` or `go` before then cancels the window; after a `resume` it does not start." + values
                 : "Running the cheap-symbol screen for the afternoon load window now; it can take a few minutes. When it is done I check again that the account is flat and paused, then start the window and resume trading. `stop`, `flatten` or `go` before then cancels the window." + values
               : `Not started yet: the cheap-symbol screen for the afternoon load window is already running.${cmd.given ? " The stop and take-profit in this line were not used; the window keeps the values sent with the earlier `load afternoon`." : ""}`,
+        );
+        return;
+      }
+      case "pair": {
+        // The exit pair (Michael's approval of 2026-11-21, answer 4): stored in today's day record, so it is off on every new trading day and
+        // survives a restart the same day. It affects only remainders protected after it; pairs already placed stay as they are.
+        const date = etDate(now);
+        const day = await this.d.store.getDay(date);
+        if (!day?.isTradingDay) {
+          await this.say(`Today is not a trading day, so \`pair ${cmd.on ? "on" : "off"}\` changes nothing (it is for that day only; send it on the trading day).`);
+          return;
+        }
+        const was = exitPairOn(day);
+        await setPhase(this.d.store, date, EXIT_PAIR_PHASE, cmd.on ? "on" : "off");
+        this.d.log?.("exit_pair_switch", { date, on: cmd.on, was });
+        await this.say(
+          cmd.on
+            ? `Exit pairs on for today${was ? " (they were already on)" : ""}: leftover shares after a partial take-profit now get an exit pair (a take-profit at the bracket's own price and the stop, one cancelling the other) instead of a stop alone, so a close-out can move the take-profit to sell. Off again at the start of the next trading day, or with \`pair off\`.`
+            : `Exit pairs off for today${was ? "" : " (they were not on)"}: leftover shares get a stop alone again. Pairs already placed stay as they are and are still moved at a close-out.`,
         );
         return;
       }

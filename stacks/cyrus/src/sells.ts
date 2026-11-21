@@ -110,7 +110,8 @@ export class SellGate {
   // `stopPrice` (A4 of 2026-11-12): a stop sell instead of a market sell. The same check applies: it may not be larger than the shares
   // held minus the sells already open.
   // `time` (item 1 of 2026-11-21, logging only): the sale's timer for the gate's own reads, when this sell makes them.
-  sell(req: { symbol: string; qty: number; clientOrderId: string; reason: string; stopPrice?: number }, time?: GateReadTimer): Promise<SellResult> {
+  // `takeProfitPrice` (the exit pair, 2026-11-21), with `stopPrice`: one OCO order of a limit at that price and the stop; the same check.
+  sell(req: { symbol: string; qty: number; clientOrderId: string; reason: string; stopPrice?: number; takeProfitPrice?: number }, time?: GateReadTimer): Promise<SellResult> {
     const run = this.chain.then(() => this.run(req, time));
     this.chain = run.catch(() => undefined);
     return run;
@@ -201,7 +202,7 @@ export class SellGate {
     return this.view;
   }
 
-  private async run(req: { symbol: string; qty: number; clientOrderId: string; reason: string; stopPrice?: number }, time?: GateReadTimer): Promise<SellResult> {
+  private async run(req: { symbol: string; qty: number; clientOrderId: string; reason: string; stopPrice?: number; takeProfitPrice?: number }, time?: GateReadTimer): Promise<SellResult> {
     let v: { positions: Position[]; open: Order[] };
     try {
       v = await this.read(time);
@@ -224,7 +225,7 @@ export class SellGate {
       return { status: "refused", reason };
     }
     try {
-      const order = await this.d.broker.submitSell({ symbol: req.symbol, qty: req.qty, clientOrderId: req.clientOrderId, ...(req.stopPrice !== undefined ? { stopPrice: req.stopPrice } : {}) });
+      const order = await this.d.broker.submitSell({ symbol: req.symbol, qty: req.qty, clientOrderId: req.clientOrderId, ...(req.stopPrice !== undefined ? { stopPrice: req.stopPrice } : {}), ...(req.stopPrice !== undefined && req.takeProfitPrice !== undefined ? { takeProfitPrice: req.takeProfitPrice } : {}) });
       this.sent.push({ symbol: req.symbol, qty: req.qty, at: this.nowMs() });
       return { status: "sent", order };
     } catch (err) {
@@ -283,6 +284,11 @@ export interface LiquidateOptions {
   // before). If Alpaca refuses the stop outright (an answer in the 400s other than 429, for example the price is already below the stop
   // price), the shares are sold at market in the same round, as before.
   protectWithStop?: Record<string, number>;
+  // The exit pair (Michael's approval of 2026-11-21, exit-pair.ts), with `protectWithStop` for the same symbol: an exit pair (a limit at this
+  // take-profit price and the stop at `protectWithStop`'s price, one OCO order) is placed instead of the plain stop. Answer 2: a definite
+  // refusal of the pair -> the plain stop at once (its own client id); that refused too -> the market sale, as before; an unclear answer at
+  // either step ends the chain (nothing more is sent on top). At most two orders are sent in this step before the market sale.
+  protectWithPair?: Record<string, { takeProfitPrice: number }>;
   // A5 of the proposal of 2026-11-12, with `ownEntryOnly` only: the entry filled as the stack's cancel reached Alpaca, and Alpaca cancels
   // its exits itself. Nothing is cancelled here; the sale waits (up to `waitCancelMs`) for Alpaca's cancel to free the shares. If they
   // never come free (Alpaca kept the exits), nothing is sold, no blocked sale is logged, and `exitsKept` lists the symbol.
@@ -369,11 +375,13 @@ export interface LiquidateResult {
   // A4: the fresh stop placed (with `protectWithStop`), when one was.
   // `sentAtMs`: when the fresh stop was sent (Michael's ruling B of 2026-11-12: its time to confirm is stored, and an unclear one is
   // timed from it).
-  freshStop?: { symbol: string; qty: number; stopPrice: number; clientOrderId: string; orderId: string; sentAtMs: number; answerMs: number };
+  freshStop?: { symbol: string; qty: number; stopPrice: number; clientOrderId: string; orderId: string; sentAtMs: number; answerMs: number; pair?: { takeProfitPrice: number }; afterPairRefusedMs?: number };
+  // The exit pair: Alpaca refused the pair outright (its reason); the plain stop was then tried (answer 2).
+  pairRefused?: string;
   // A4: Alpaca refused the fresh stop and the shares were sold at market instead (the reason Alpaca gave).
   freshStopRefused?: string;
   // A4: the fresh stop's answer was unclear (it may exist at Alpaca); nothing else was sent.
-  freshStopUnclear?: { symbol: string; qty: number; stopPrice: number; clientOrderId: string; sentAtMs: number };
+  freshStopUnclear?: { symbol: string; qty: number; stopPrice: number; clientOrderId: string; sentAtMs: number; pair?: { takeProfitPrice: number } };
   // A5: the symbols whose shares never came free because Alpaca kept the exits (nothing was sold for them).
   exitsKept?: string[];
   // A5, with `ownEntryOnly`: the symbols whose shares a sale of ours (cyrus-x-) already covers, so this cleanup had nothing to do.
@@ -584,7 +592,7 @@ export class Liquidator {
     const cancelIds = [...new Set(o.cancelIds ?? [])];
     // Group 1, round 1 (2026-11-17): honoured only for the one caller's shape (one symbol, one round, its own entry's shares, nothing to
     // cancel, no stop to place, no wait on Alpaca's cancel), so no other sale can take it by mistake.
-    const cheapOk = o.cheap === true && cancelIds.length === 0 && !!only && only.size === 1 && o.maxRounds === 1 && !!o.ownEntryOnly && !o.protectWithStop && !o.waitForAlpacaCancel;
+    const cheapOk = o.cheap === true && cancelIds.length === 0 && !!only && only.size === 1 && o.maxRounds === 1 && !!o.ownEntryOnly && !o.protectWithStop && !o.protectWithPair && !o.waitForAlpacaCancel;
     let cheapView: { positions: Position[]; open: Order[] } | null = null;
     // Group 1, round 1: the cheap look starts from a fresh read (the gate's view is cleared first), never a read from before an earlier sale
     // of the same symbol within the last second, which would make the gate refuse the sell and post a false "short sale" alert. Still 2 reads
@@ -744,7 +752,10 @@ export class Liquidator {
           skipAll(structural, `stop prices not found within ${MOVE_STOPS_TIMEOUT_MS} ms`);
           return 0;
         }
-        stops = got;
+        // The exit pair (2026-11-21): a pair whose stop leg was listed already carries its stop price; it is used when the lookup has none.
+        const known = new Map(got);
+        for (const c of structural) if (Number.isFinite(c.stopPrice) && c.stopPrice > 0 && !known.has(c.legId)) known.set(c.legId, c.stopPrice);
+        stops = known;
       } catch (err) {
         this.d.log?.("move_phase_skipped", { reason: o.reason, why: "stop prices not found", error: (err as Error).message.slice(0, 120) });
         skipAll(structural, "stop prices not found");
@@ -1223,35 +1234,55 @@ export class Liquidator {
           if (stopPrice !== undefined && own && soleHolder(p.symbol) && free > EPS) {
             // Its own prefix (cyrus-p-, "protect"), not cyrus-x-: every whole-account sale (the close-outs, the loss stop and its retry, `flatten`)
             // treats an open cyrus-x- sell as a sale of ours still working and leaves it alone, but must cancel a fresh stop like any exit.
-            const sid = `cyrus-p-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-s${round}`;
-            const sentAtMs = this.d.now().getTime();
-            const st = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: sid, reason: `${o.reason}, as a fresh stop`, stopPrice }, gateTimer);
-            if (st.status === "sent") {
-              result.freshStop = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, orderId: st.order.id, sentAtMs, answerMs: this.d.now().getTime() - sentAtMs };
-              steps.sells.push({ symbol: p.symbol, qty: free, at: stamp() });
-              try {
-                result.heldAfter = Object.fromEntries((await heldNow()).map((x) => [x.symbol, x.qty]));
-              } catch {
-                /* only for the record */
+            // The exit pair (Michael's approval of 2026-11-21, answer 2): with `protectWithPair`, the pair first; a definite refusal of it is
+            // followed at once by the plain stop (client id ending "b"), and a definite refusal of that by the market sale below. An unclear
+            // answer at either step ends the chain. The same prefix for the pair, so everything that knows a fresh stop knows the pair.
+            const pairAsk = o.protectWithPair?.[p.symbol];
+            const steps2: Array<"pair" | "stop"> = pairAsk ? ["pair", "stop"] : ["stop"];
+            let pairSentAt: number | null = null;
+            let placed = false;
+            for (const kind of steps2) {
+              const asPair = kind === "pair" && pairAsk !== undefined;
+              const sid = `cyrus-p-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-s${round}${kind === "stop" && pairAsk ? "b" : ""}`;
+              const sentAtMs = this.d.now().getTime();
+              if (asPair) pairSentAt = sentAtMs;
+              const st = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: sid, reason: asPair ? `${o.reason}, as an exit pair` : `${o.reason}, as a fresh stop`, stopPrice, ...(asPair ? { takeProfitPrice: pairAsk.takeProfitPrice } : {}) }, gateTimer);
+              if (st.status === "sent") {
+                result.freshStop = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, orderId: st.order.id, sentAtMs, answerMs: this.d.now().getTime() - sentAtMs, ...(asPair ? { pair: { takeProfitPrice: pairAsk.takeProfitPrice } } : {}), ...(!asPair && pairSentAt !== null ? { afterPairRefusedMs: sentAtMs - pairSentAt } : {}) };
+                steps.sells.push({ symbol: p.symbol, qty: free, at: stamp() });
+                try {
+                  result.heldAfter = Object.fromEntries((await heldNow()).map((x) => [x.symbol, x.qty]));
+                } catch {
+                  /* only for the record */
+                }
+                result.remaining = [p.symbol];
+                placed = true;
+                break;
               }
-              result.remaining = [p.symbol];
-              return done();
+              // A definite refusal: Alpaca answered in the 400s (not 429). For the pair also our own client's refusal before sending (status 0:
+              // nothing was sent, for example the stop not 1 cent below the limit), so the plain stop is tried.
+              const definite = st.status === "error" && st.httpStatus !== undefined && ((st.httpStatus >= 400 && st.httpStatus < 500 && st.httpStatus !== 429) || (asPair && st.httpStatus === 0));
+              if (!definite) {
+                // Unclear (a network error, a timeout, a 5xx) or refused by our own sell gate: the stop (or pair) may exist, so no market sale on top
+                // of it; the next order sync looks again.
+                result.errors.push(`round ${round}: ${p.symbol}: ${asPair ? "exit pair" : "fresh stop"} not confirmed: ${st.reason}`);
+                // `sentToAlpaca: false`: our own sell gate stopped it before any request (the briefs leave it out of the stops sent).
+                this.d.log?.("fresh_stop_unclear", { symbol: p.symbol, stopClientOrderId: sid, qty: free, stopPrice, reason: st.reason.slice(0, 160), sentToAlpaca: !(st.status === "refused" || (st.status === "error" && st.notSent === true)), ...(asPair ? { pair: true, takeProfitPrice: pairAsk.takeProfitPrice } : {}) });
+                result.freshStopUnclear = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, sentAtMs, ...(asPair ? { pair: { takeProfitPrice: pairAsk.takeProfitPrice } } : {}) };
+                result.remaining = [p.symbol];
+                return done();
+              }
+              this.d.gate.invalidate();
+              if (asPair) {
+                result.pairRefused = st.reason.slice(0, 160);
+                this.d.log?.("exit_pair_refused", { symbol: p.symbol, pairClientOrderId: sid, qty: free, stopPrice, takeProfitPrice: pairAsk.takeProfitPrice, reason: st.reason.slice(0, 160), httpStatus: st.status === "error" ? (st.httpStatus ?? null) : null });
+                continue; // answer 2: the plain stop at once
+              }
+              result.freshStopRefused = st.reason.slice(0, 160);
+              this.d.log?.("fresh_stop_refused", { symbol: p.symbol, stopClientOrderId: sid, qty: free, stopPrice, reason: st.reason.slice(0, 160), httpStatus: st.status === "error" ? (st.httpStatus ?? null) : null, ...(pairSentAt !== null ? { afterPairRefused: true } : {}) });
+              // Falls through to the market sale below, as before A4.
             }
-            const definite = st.status === "error" && st.httpStatus !== undefined && st.httpStatus >= 400 && st.httpStatus < 500 && st.httpStatus !== 429;
-            if (!definite) {
-              // Unclear (a network error, a timeout, a 5xx) or refused by our own sell gate: the stop may exist, so no market sale on top
-              // of it; the next order sync looks again.
-              result.errors.push(`round ${round}: ${p.symbol}: fresh stop not confirmed: ${st.reason}`);
-              // `sentToAlpaca: false`: our own sell gate stopped it before any request (the briefs leave it out of the stops sent).
-              this.d.log?.("fresh_stop_unclear", { symbol: p.symbol, stopClientOrderId: sid, qty: free, stopPrice, reason: st.reason.slice(0, 160), sentToAlpaca: !(st.status === "refused" || (st.status === "error" && st.notSent === true)) });
-              result.freshStopUnclear = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, sentAtMs };
-              result.remaining = [p.symbol];
-              return done();
-            }
-            result.freshStopRefused = st.reason.slice(0, 160);
-            this.d.log?.("fresh_stop_refused", { symbol: p.symbol, stopClientOrderId: sid, qty: free, stopPrice, reason: st.reason.slice(0, 160), httpStatus: st.status === "error" ? (st.httpStatus ?? null) : null });
-            this.d.gate.invalidate();
-            // Falls through to the market sale below, as before A4.
+            if (placed) return done();
           }
           if (!(free > EPS)) {
             // Part A, step 1: held, not free, and no open order visible that would explain it.

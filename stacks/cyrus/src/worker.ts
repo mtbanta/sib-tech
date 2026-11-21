@@ -26,7 +26,8 @@ import { closeOut, type CloseoutOptions } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
 import { ProgressGap, RetryBackoff } from "./retry-backoff.ts";
-import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, noteTimedOutStopEnded, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
+import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, notePairBroken, noteTimedOutStopEnded, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
+import { isExitPair } from "./exit-pair.ts";
 import type { SelfMonitor } from "./self-monitor.ts";
 import { SCREEN_MINUTES_BEFORE_OPEN, AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, inLoadWindow, isLoadDay, loadExitsAt, loadLine, loadWindow, type LoadExits } from "./load-mode.ts";
 import { BusyPlaceholder } from "./strategy.ts";
@@ -424,6 +425,13 @@ export class Worker {
     const byGroup = new Map<string, Order>();
     for (const o of this.syncMemory.lastSeen.values()) if (o.groupId) byGroup.set(o.groupId, o);
     for (const l of legs) {
+      // The exit pair (2026-11-21): a remainder's pair (its parent's id is the leg moved): the stop price it was placed with, while it is
+      // still whole (not broken, answer 3). A pair whose stop leg was listed already carries its stop price (structuralCandidates).
+      const pair = [...this.syncMemory.freshStops.values()].find((f) => f.takeProfitPrice !== undefined && f.orderId === l.legId && f.symbol === l.symbol);
+      if (pair) {
+        if (!pair.pairBroken && pair.stopPrice > 0) out.set(l.legId, pair.stopPrice);
+        continue;
+      }
       const seen = byGroup.get(l.groupId);
       const stopLeg = seen ? flattenLegs(seen).find((x) => x.side === "sell" && (x.type === "stop" || x.type === "stop_limit") && x.stopPrice !== null && x.stopPrice > 0) : undefined;
       // Michael's scope, "both legs open" (group 1, round 1): a stop the sync's copy shows ended (cancelled, filled) leaves the leg unknown.
@@ -1944,6 +1952,18 @@ export class Worker {
         }
         // Ruling B of 2026-11-12: a stop that was unclear gets its time to confirm logged here too.
         settleFreshStop((e, data) => this.d.log?.("info", e, data), f, info.status, "live update", this.d.now().getTime());
+        // The exit pair, answer 3 (Michael's approval of 2026-11-21): its take-profit filled part. Alpaca most likely cancels the pair's stop
+        // then (as it does a bracket's), so the rest is no longer protected: remembered for good (a lagging list cannot undo it), and the
+        // protection loop looks at the entry at once; its missing-exit sale cancels the pair's rest and sells at market. No second pair.
+        if (f.takeProfitPrice !== undefined && info.event === "partial_fill" && !f.pairBroken) {
+          f.pairBroken = true;
+          notePairBroken(this.syncMemory, f.stopClientOrderId);
+          this.d.log?.("info", "exit_pair_broken", { symbol: info.symbol, clientOrderId: f.entryClientOrderId, pairClientOrderId: info.clientOrderId, status: info.status, by: "live update" });
+          if (this.closingOut || this.liquidator.isLiquidatingOthers() || this.middayOwnsSelling) return;
+          this.protectFirst.mark(f.entryClientOrderId, info.symbol, "an exit pair's take-profit filled part");
+          this.loop.wake(f.entryClientOrderId, this.d.now().getTime(), "protect");
+          return;
+        }
         if (info.event === "canceled" || info.event === "expired" || info.event === "rejected") {
           this.d.log?.("info", "fresh_stop_ended", { symbol: info.symbol, stopClientOrderId: info.clientOrderId, event: info.event });
           if (this.closingOut || this.liquidator.isLiquidatingOthers() || this.middayOwnsSelling) return;
@@ -2038,7 +2058,10 @@ export class Worker {
     else if (entryOfOurs && (u.event === "canceled" || u.event === "expired") && !(o.filledQty > 0)) this.digest.count("cancelled");
     // A4 of 2026-11-12 (group 2 review, messaging only): a fresh stop (cyrus-p-, no group id) that fills is a stop; a take-profit leg is
     // counted once, at its first fill or partial fill, because A4 cancels the rest of a partly filled take-profit (its full fill never comes).
-    else if (o.side === "sell" && u.event === "fill" && o.clientOrderId.startsWith("cyrus-p-")) this.digest.count("stop");
+    // The exit pair (2026-11-21, messaging only): its parent (cyrus-p-, a limit) filling is a take-profit; its stop leg (Alpaca's own client id)
+    // filling is a stop.
+    else if (o.side === "sell" && u.event === "fill" && o.clientOrderId.startsWith("cyrus-p-")) this.digest.count(isExitPair(o) ? "take_profit" : "stop");
+    else if (o.side === "sell" && u.event === "fill" && o.orderClass === "oco" && (o.type === "stop" || o.type === "stop_limit" || o.stopPrice !== null)) this.digest.count("stop");
     else if (o.side === "sell" && o.groupId && (u.event === "fill" || u.event === "partial_fill")) {
       if (o.type === "stop" || o.stopPrice !== null) {
         if (u.event === "fill") this.digest.count("stop");

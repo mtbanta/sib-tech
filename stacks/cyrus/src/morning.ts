@@ -216,6 +216,8 @@ export type Command =
   | { kind: "loadAfternoonInvalid"; why: string }
   | { kind: "go" }
   | { kind: "hold" }
+  // The exit pair (Michael's approval of 2026-11-21, answer 4): `pair on` / `pair off`, today only.
+  | { kind: "pair"; on: boolean }
   | { kind: "deployApproval"; commit: string }
   | { kind: "unknown"; text: string };
 
@@ -247,6 +249,8 @@ export function parseCommand(content: string): Command {
       return arg1 === undefined ? { kind: word } : { kind: "unknown", text: content.slice(0, 40) };
     case "limits":
       return { kind: "limits" };
+    case "pair":
+      return arg2 === undefined && (arg1 === "on" || arg1 === "off") ? { kind: "pair", on: arg1 === "on" } : { kind: "unknown", text: content.slice(0, 40) };
     case "approve": {
       if (arg1 === undefined || arg1 === "all") return { kind: "approve", name: "all" };
       return (LIMIT_NAMES as readonly string[]).includes(arg1) ? { kind: "approve", name: arg1 as LimitName } : { kind: "unknown", text: content.slice(0, 40) };
