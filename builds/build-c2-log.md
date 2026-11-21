@@ -8654,3 +8654,11 @@ Nothing failed. Notes: (a) the 2:45 close-out's 4.89 s round 1 reads, cause not 
 - **Monday:** v35's first session (the close-out timer live; each first try should show `triggeredBy` "timer") and the 2:30 close-out test, then the setting back to 15 after Monday's close unless Michael chooses the permanent time.
 
 Paper only; research input for a human decision, never an instruction to act.
+
+## Michael's weekend requests (2026-11-21, Saturday morning), saved verbatim
+
+> Over the weekend:
+> 1. Approved: record the time of each read from Alpaca in the close-out's sale (logging only). Group 1 and group 2; deploy before 7:30 AM Monday only if both pass.
+> 2. The deploy-check tool must live in the repo (for example tools/), committed and reviewed, not only in a temporary folder. Confirm the version in the repo is the one used for every deploy.
+> 3. The replacement exit pair (OCO) for leftover shares after a partial take-profit, so they can use the moved take-profit. Write the proposal today and send it to me for approval. After I approve: build it with tests, group 1 and group 2, up to 8 rounds each, behind a switch that is off by default, and deploy before 7:30 AM Monday only if both pass. Monday after the 10:30 close-out is flat and my stop is on: run one-share paper trials of the exit pair (accepted, take-profit movable, stop behaviour on a fill). If they hold up, tell me the command to switch it on for the afternoon and the 2:30 close-out.
+> Never print any token or key.
