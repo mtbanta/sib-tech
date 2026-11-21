@@ -8794,3 +8794,4 @@ Outside market hours, under Michael's words "deploy before 8:00 AM Monday only i
 Paper only; research input for a human decision, never an instruction to act.
 
 **Runner label change `7f5fc49` (branch `runner-labels-2026-11-21`; the tool only, not in the image):** `criteria` prints "fail" when a judged T1 or T2 already rules out a pass, even if the run stopped early. Group 2 round 3: PASS (ten made-up result sets, every label as written).
+Group 1 round 3 on `7f5fc49`: PASS (the change is only in the end-of-run summary; nothing that sends, cancels or guards orders; 1,096 of 1,096). Monday's trials run from a clean clone at the commit on `main` that holds `7f5fc49` (the worker code there is `e378f96`'s, live as v37).
