@@ -571,6 +571,12 @@ test("one pair try per position: the pair, the plain stop and the market sale al
   assert.ok(kinds.slice(3).includes("stop") && kinds.slice(3).includes("market"), "plain stop, then the market sale");
   assert.ok(w.memory.pairRefusedEntries.has(id));
   assert.equal(w.sim.oversellAttempts, 0);
+  // Group 2, round 1 (logging): once the plain stop is accepted on a later try, its row says the entry's pair was refused earlier.
+  w.sim.refuseStops = false;
+  w.sim.advance(31_000);
+  await syncOrders(w.risk, dd, { protect: true });
+  const later = w.events.filter((e) => e.event === "fresh_stop" && e.data.symbol === "CIFR").at(-1);
+  assert.ok(later && later.data.pairRefusedEarlier === true && later.data.pair === undefined, "a plain stop, marked");
   // Another position on another symbol still gets its own one pair try.
   w.sim.pairAnswer = "ok";
   w.sim.refuseStops = false;

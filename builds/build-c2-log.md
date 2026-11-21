@@ -8811,3 +8811,9 @@ Group 1 round 3 on `7f5fc49`: PASS (the change is only in the end-of-run summary
 - **Limit:** the memory is the worker's own, so after a restart an entry could get one more pair try (a restart during the session happens only by a deploy with Michael's written yes, or a crash). Not stored in the database.
 - **Bounds:** fewer requests than before in the all-refused case; no new loop.
 - Test: everything refused (pair, plain stop, market sale) for six retries: exactly one pair try, every later try the plain stop then the market sale; another position still gets its own one try.
+
+**Group 2, round 1 on `6572d3a`: PASS.** Notes: a later try's plain stop carries no marker that the entry's pair was refused earlier (suggested `pairRefusedEarlier: true` on its `fresh_stop` row, and a clause in the brief); one sentence on how an unclear pair fits "one pair try per position".
+
+**Group 1, round 1 on `6572d3a`: PASS** (its probe D rerun: pair, stop, market on the first try, then stop, market on every later try; one `exit_pair_refused` in all; switch off unchanged).
+
+**Logging addition after group 2's note (same branch):** a later try's accepted plain stop carries `pairRefusedEarlier: true` on its `fresh_stop` row (tested; clause in the brief). **How an unclear pair fits "one pair try per position":** only a definite refusal (Alpaca's 4xx other than 429, or our client's refusal before sending) marks the position. An unclear answer is not a refusal: it ends that try's chain, and the pair, which may exist, is looked up by its client id under ruling B. If Alpaca has it, it is that position's pair. If Alpaca does not, ruling B's path cancels and sells at market (tested: "an unclear pair that never reached Alpaca"). So an unclear answer never leads to a second pair on top of the first; after a sale the position is gone.

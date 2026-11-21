@@ -1604,7 +1604,8 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   // The exit pair (Michael's approval of 2026-11-21): with the day's switch on, the remainder gets an exit pair instead of the stop alone, its
   // limit at the bracket's original take-profit price (answer 1). Not when that price is unknown or not at least 1 cent above the stop.
   // Michael's answer of 2026-11-21 (afternoon): at most one pair try per position; once refused, later tries go straight to the plain stop.
-  const pairTp = protectAt !== null && exitPairOn(day) && !mem.pairRefusedEntries.has(s.clientOrderId) ? pairTakeProfitFor(o, s.takeProfitPrice, protectAt) : null;
+  const pairRefusedEarlier = protectAt !== null && exitPairOn(day) && mem.pairRefusedEntries.has(s.clientOrderId); // logging (group 2, round 1)
+  const pairTp = protectAt !== null && exitPairOn(day) && !pairRefusedEarlier ? pairTakeProfitFor(o, s.takeProfitPrice, protectAt) : null;
   // The Alpaca client's own retries inside this sale are charged to the caller's reservation like any other request (request-scope.ts).
   const r = await d.liquidator.flatten({
     reason,
@@ -1680,7 +1681,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     const cancelled = extra.stopCancelledAt ? Date.parse(extra.stopCancelledAt) : NaN;
     // Ruling B: its time to confirm is Alpaca's answer to the order itself (`msToConfirm`). The exit pair: `pair` and its take-profit price;
     // a plain stop placed after a refused pair says so, with the time the extra step took (`afterPairRefusedMs`).
-    d.log?.("fresh_stop", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: f.clientOrderId, qty: f.qty, stopPrice: f.stopPrice, msFromStopCancel: Number.isFinite(cancelled) ? now - cancelled : null, msToConfirm: f.answerMs, confirmedBy: "answer", ...(f.pair ? { pair: true, takeProfitPrice: f.pair.takeProfitPrice } : {}), ...(r.pairRefused ? { afterPairRefused: true, afterPairRefusedReason: r.pairRefused, afterPairRefusedMs: f.afterPairRefusedMs ?? null } : {}) });
+    d.log?.("fresh_stop", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: f.clientOrderId, qty: f.qty, stopPrice: f.stopPrice, msFromStopCancel: Number.isFinite(cancelled) ? now - cancelled : null, msToConfirm: f.answerMs, confirmedBy: "answer", ...(f.pair ? { pair: true, takeProfitPrice: f.pair.takeProfitPrice } : {}), ...(r.pairRefused ? { afterPairRefused: true, afterPairRefusedReason: r.pairRefused, afterPairRefusedMs: f.afterPairRefusedMs ?? null } : {}), ...(pairRefusedEarlier ? { pairRefusedEarlier: true } : {}) });
     try {
       d.onFreshStop?.({ symbol: s.symbol, shares: f.qty });
     } catch {
