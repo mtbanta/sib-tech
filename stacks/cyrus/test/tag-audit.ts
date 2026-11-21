@@ -42,11 +42,12 @@ export const routineAsks: string[] = [];
     return lf.call(this, o);
   };
   const gs = SellGate.prototype.sell;
-  SellGate.prototype.sell = function (r: any) {
+  // Every argument is passed on (item 1 of 2026-11-21: the sale's read timer is the second).
+  SellGate.prototype.sell = function (r: any, ...rest: any[]) {
     if (currentTag() === "routine") {
       routineAsks.push(`sell(${r.reason})`);
       if (process.env.STRICT_TAGS) console.log(`ROUTINE_ASK sell(${r.reason}) ${where() || "(test)"}`);
     }
-    return gs.call(this, r);
+    return (gs as any).call(this, r, ...rest);
   };
 }

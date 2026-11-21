@@ -80,7 +80,7 @@ test("B: closeout_result.timing holds the due and trigger times passed in, the c
   assert.equal(res.flat, true);
   const r = result(w);
   const t = r.timing;
-  assert.deepEqual(Object.keys(t), ["dueAt", "triggeredAt", "triggeredBy", "startedAt", "saleStartedAt", "movePhaseStartedAt"]); // triggeredBy: the timer of 2026-11-20
+  assert.deepEqual(Object.keys(t), ["dueAt", "triggeredAt", "triggeredBy", "startedAt", "saleStartedAt", "movePhaseStartedAt", "reads", "readsMore"]); // triggeredBy: the timer of 2026-11-20; reads, readsMore: item 1 of 2026-11-21
   assert.equal(t.triggeredBy, null, "not passed in");
   assert.equal(t.dueAt, due);
   assert.equal(t.triggeredAt, trig);

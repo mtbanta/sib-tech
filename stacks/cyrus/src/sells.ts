@@ -109,8 +109,9 @@ export class SellGate {
   // gate has sent since that read, and it is also kept below the shares Alpaca itself reports as free.
   // `stopPrice` (A4 of 2026-11-12): a stop sell instead of a market sell. The same check applies: it may not be larger than the shares
   // held minus the sells already open.
-  sell(req: { symbol: string; qty: number; clientOrderId: string; reason: string; stopPrice?: number }): Promise<SellResult> {
-    const run = this.chain.then(() => this.run(req));
+  // `time` (item 1 of 2026-11-21, logging only): the sale's timer for the gate's own reads, when this sell makes them.
+  sell(req: { symbol: string; qty: number; clientOrderId: string; reason: string; stopPrice?: number }, time?: GateReadTimer): Promise<SellResult> {
+    const run = this.chain.then(() => this.run(req, time));
     this.chain = run.catch(() => undefined);
     return run;
   }
@@ -125,16 +126,16 @@ export class SellGate {
   // check only while it is younger than `maxAgeMs` (default VIEW_MAX_AGE_MS, the sells' rule; at most 10 s); else the gate reads as usual. A
   // replace adds no shares (Alpaca keeps the order's own quantity, already held against the position), so a read a few seconds old cannot let
   // it oversell. It saves the gate's reads during a sale's moves. `timeoutMs`: the replace's own time limit (unclear after it).
-  replace(req: { orderId: string; symbol: string; qty: number; limitPrice?: number; stopPrice?: number; clientOrderId?: string; reason: string; timeoutMs?: number }, view?: { positions: Position[]; open: Order[]; atMs: number; maxAgeMs?: number }): Promise<ReplaceResult> {
-    const run = this.chain.then(() => this.runReplace(req, view));
+  replace(req: { orderId: string; symbol: string; qty: number; limitPrice?: number; stopPrice?: number; clientOrderId?: string; reason: string; timeoutMs?: number }, view?: { positions: Position[]; open: Order[]; atMs: number; maxAgeMs?: number }, time?: GateReadTimer): Promise<ReplaceResult> {
+    const run = this.chain.then(() => this.runReplace(req, view, time));
     this.chain = run.catch(() => undefined);
     return run;
   }
 
-  private async runReplace(req: { orderId: string; symbol: string; qty: number; limitPrice?: number; stopPrice?: number; clientOrderId?: string; reason: string; timeoutMs?: number }, given?: { positions: Position[]; open: Order[]; atMs: number; maxAgeMs?: number }): Promise<ReplaceResult> {
+  private async runReplace(req: { orderId: string; symbol: string; qty: number; limitPrice?: number; stopPrice?: number; clientOrderId?: string; reason: string; timeoutMs?: number }, given?: { positions: Position[]; open: Order[]; atMs: number; maxAgeMs?: number }, time?: GateReadTimer): Promise<ReplaceResult> {
     let v: { positions: Position[]; open: Order[] };
     try {
-      v = given && this.nowMs() - given.atMs < Math.min(given.maxAgeMs ?? VIEW_MAX_AGE_MS, 10_000) ? given : await this.read();
+      v = given && this.nowMs() - given.atMs < Math.min(given.maxAgeMs ?? VIEW_MAX_AGE_MS, 10_000) ? given : await this.read(time);
     } catch (err) {
       this.view = null;
       return { status: "error", reason: `could not read the position to check the replace: ${(err as Error).message.slice(0, 120)}`, unclear: false, notSent: true };
@@ -183,24 +184,27 @@ export class SellGate {
     return this.read();
   }
 
-  private async read(): Promise<{ positions: Position[]; open: Order[] }> {
+  private async read(time?: GateReadTimer): Promise<{ positions: Position[]; open: Order[] }> {
     const t = this.nowMs();
     if (this.view && t - this.view.at < VIEW_MAX_AGE_MS) return this.view;
     // Open orders FIRST, then positions: a sell that fills between the two reads then shows up in both (the shares gone
     // from the position AND the sell still counted as open), so the gate errs toward refusing, never toward overselling.
-    const listed = await this.d.broker.listOrdersPaged("open", FAR_PAST, 5);
+    // Item 1 of 2026-11-21 (logging only): a sale's timer, when given, times each of the two reads; it changes nothing they return or throw.
+    const readOpen = () => this.d.broker.listOrdersPaged("open", FAR_PAST, 5);
+    const readPositions = () => this.d.broker.listPositions();
+    const listed = time ? await time("openOrders", readOpen, (l) => l.pages) : await readOpen();
     if (!listed.complete) throw new Error("the list of open orders is longer than I can read, so I cannot count the sells already open");
-    const positions = await this.d.broker.listPositions();
+    const positions = time ? await time("positions", readPositions) : await readPositions();
     this.view = { positions, open: listed.orders, at: t };
     // A sell sent clearly before this read is now part of what the broker shows.
     this.sent = this.sent.filter((x) => x.at + SEEN_MARGIN_MS > t);
     return this.view;
   }
 
-  private async run(req: { symbol: string; qty: number; clientOrderId: string; reason: string; stopPrice?: number }): Promise<SellResult> {
+  private async run(req: { symbol: string; qty: number; clientOrderId: string; reason: string; stopPrice?: number }, time?: GateReadTimer): Promise<SellResult> {
     let v: { positions: Position[]; open: Order[] };
     try {
-      v = await this.read();
+      v = await this.read(time);
     } catch (err) {
       this.view = null;
       return { status: "error", reason: `could not read the position to check the sell: ${(err as Error).message.slice(0, 120)}`, notSent: true };
@@ -286,6 +290,26 @@ export interface LiquidateOptions {
 }
 
 // What a sale did and when (release A, fix 5: written to the close-out's run-log event).
+// Michael's approval of 2026-11-21, item 1 (logging only): each read from Alpaca's trading interface made inside one sale (the clock, the
+// positions, the open orders, a cancel's one lookup), with when it was asked for, how long it took to answer, and whether it answered.
+// The time includes the Alpaca client's own retries of that read, if any; it adds no request and no wait. At most SALE_READS_STORED a sale,
+// the rest counted in `readsMore`. Read by the close-out's record (`closeout_result.timing.reads`).
+export interface SaleRead {
+  what: "clock" | "positions" | "openOrders" | "orderLookup";
+  round: number;
+  at: string;
+  ms: number;
+  ok: boolean;
+  // openOrders only: the pages of 500 read.
+  pages?: number;
+  // "gate": made by the sell gate to check a sell or a replace of this sale (otherwise by the sale itself).
+  by?: "gate";
+}
+export const SALE_READS_STORED = 40;
+// The sale's timer handed to the sell gate for the gate's own reads (open orders, then positions) before a sell or a replace; those are
+// stored with `by: "gate"`.
+export type GateReadTimer = <T>(what: "openOrders" | "positions", f: () => Promise<T>, pagesOf?: (v: T) => number) => Promise<T>;
+
 export interface LiquidateSteps {
   cancelsSentAt: string[];
   cancelsAnsweredAt: string[];
@@ -306,6 +330,9 @@ export interface LiquidateResult {
   // first read) and when its move step began (the moved take-profit's phase; absent when no move phase ran). Read by the close-out's record.
   startedAt?: string;
   movePhaseStartedAt?: string;
+  // Michael's approval of 2026-11-21, item 1 (logging only): the sale's reads from Alpaca (SaleRead), and how many more were not kept.
+  reads?: SaleRead[];
+  readsMore?: number;
   // Only with yieldToPriority: the sale stopped early because the daily loss stop's sale goes first, or (with `ownEntryOnly`) it stood
   // aside at its turn, before any request (`stoodAside`): a sale of the whole account was asked for ("whole account"), or a close-out step
   // owns selling or the close-out time has come ("close-out").
@@ -500,8 +527,10 @@ export class Liquidator {
     return this.priorityPending > 0;
   }
 
-  private async openOrders(): Promise<Order[]> {
-    const listed = await this.d.broker.listOrdersPaged("open", FAR_PAST, 5);
+  // `time`: item 1 of 2026-11-21 (logging only), the sale's timer for the listing.
+  private async openOrders(time?: <T extends { pages: number }>(f: () => Promise<T>) => Promise<T>): Promise<Order[]> {
+    const read = () => this.d.broker.listOrdersPaged("open", FAR_PAST, 5);
+    const listed = time ? await time(read) : await read();
     if (!listed.complete) throw new Error("the list of open orders is longer than I can read");
     return listed.orders;
   }
@@ -514,6 +543,41 @@ export class Liquidator {
     const steps: LiquidateSteps = { cancelsSentAt: [], cancelsAnsweredAt: [], sells: [] };
     const stamp = () => this.d.now().toISOString();
     result.startedAt = stamp(); // decision B of 2026-11-19 (logging only)
+    // Item 1 of 2026-11-21 (logging only): every read from Alpaca in this sale, timed with the same clock. Recording never throws and
+    // never changes what the read returns or throws.
+    const reads: SaleRead[] = [];
+    let readsMore = 0;
+    let readRound = 0; // the round the next read belongs to (0: before the first round)
+    const noteRead = (what: SaleRead["what"], startMs: number, ok: boolean, pages?: number, by?: "gate"): void => {
+      try {
+        if (reads.length >= SALE_READS_STORED) {
+          readsMore++;
+          return;
+        }
+        reads.push({ what, round: readRound, at: new Date(startMs).toISOString(), ms: Math.max(0, this.d.now().getTime() - startMs), ok, ...(pages !== undefined ? { pages } : {}), ...(by ? { by } : {}) });
+      } catch {
+        // logging only
+      }
+    };
+    const timedRead = async <T>(what: SaleRead["what"], fn: () => Promise<T>, pagesOf?: (v: T) => number, by?: "gate"): Promise<T> => {
+      const t = this.d.now().getTime();
+      let v: T;
+      try {
+        v = await fn();
+      } catch (err) {
+        noteRead(what, t, false, undefined, by);
+        throw err;
+      }
+      let pages: number | undefined;
+      try {
+        pages = pagesOf ? pagesOf(v) : undefined;
+      } catch {
+        pages = undefined;
+      }
+      noteRead(what, t, true, pages, by);
+      return v;
+    };
+    const gateTimer: GateReadTimer = (what, f, pagesOf) => timedRead(what, f, pagesOf, "gate");
     const cancelIds = [...new Set(o.cancelIds ?? [])];
     // Group 1, round 1 (2026-11-17): honoured only for the one caller's shape (one symbol, one round, its own entry's shares, nothing to
     // cancel, no stop to place, no wait on Alpaca's cancel), so no other sale can take it by mistake.
@@ -529,8 +593,9 @@ export class Liquidator {
       }
       return cheapView;
     };
-    const heldNow = async (): Promise<Position[]> => (cheapOk ? (await cview()).positions : await this.d.broker.listPositions()).filter((p) => !only || only.has(p.symbol));
-    const openOrdersR = async (): Promise<Order[]> => (cheapOk ? (await cview()).open : await this.openOrders());
+    // Item 1 of 2026-11-21: the plain reads are timed (the cheap retry's one look is never a close-out's and is not timed).
+    const heldNow = async (): Promise<Position[]> => (cheapOk ? (await cview()).positions : await timedRead("positions", () => this.d.broker.listPositions())).filter((p) => !only || only.has(p.symbol));
+    const openOrdersR = async (): Promise<Order[]> => (cheapOk ? (await cview()).open : await this.openOrders((f) => timedRead("openOrders", f, (l) => l.pages)));
     // Item 6: a remainder sale stops at its next step while the daily loss stop's sale waits or runs; that sale sells these shares too.
     const yieldNow = (): boolean => o.yieldToPriority === true && !o.priority && this.priorityPending > 0;
     const yielded = (): LiquidateResult => {
@@ -735,7 +800,7 @@ export class Liquidator {
         const row: MoveRow = { reason: o.reason, symbol: m.symbol, qty: m.qty, oldId: m.legId, newId: null, groupId: m.groupId, limit: m.limit, oldLimit: m.oldLimit, stopPrice: m.stopPrice, bid: m.bid, quoteAgeMs: m.quoteAgeMs, tradePrice: m.tradePrice, tradeAgeMs: m.tradeAgeMs, sentAtMs, answerMs: 0, accepted: false, answer: null, httpStatus: null, clientId: cid ?? null, filledAtMs: null, timeToFillMs: null, filledQtySeen: null, stopCancelledByAlpaca: null, fallback: null, fallbackSoldQty: 0, liveUpdates: live };
         moveRows.push(row);
         mv.watch.expect(m.groupId, m.legId, m.qty); // before the send: a fill may come before the answer
-        const r = await this.d.gate.replace({ orderId: m.legId, symbol: m.symbol, qty: m.qty, limitPrice: m.limit, ...(cid ? { clientOrderId: cid } : {}), reason: `${o.reason}, moved take-profit`, timeoutMs: MOVE_REPLACE_TIMEOUT_MS }, { positions: held, open, atMs: readAtMs, maxAgeMs: MOVE_VIEW_MAX_AGE_MS });
+        const r = await this.d.gate.replace({ orderId: m.legId, symbol: m.symbol, qty: m.qty, limitPrice: m.limit, ...(cid ? { clientOrderId: cid } : {}), reason: `${o.reason}, moved take-profit`, timeoutMs: MOVE_REPLACE_TIMEOUT_MS }, { positions: held, open, atMs: readAtMs, maxAgeMs: MOVE_VIEW_MAX_AGE_MS }, gateTimer);
         row.answerMs = this.d.now().getTime() - sentAtMs;
         if (r.status === "sent") {
           sent++;
@@ -801,6 +866,8 @@ export class Liquidator {
     };
     const done = (): LiquidateResult => {
       writeMoveRows();
+      if (reads.length > 0) result.reads = reads; // item 1 of 2026-11-21 (logging only)
+      if (readsMore > 0) result.readsMore = readsMore;
       if (steps.cancelsSentAt.length > 0 || steps.sells.length > 0 || (steps.replaces?.length ?? 0) > 0) result.steps = steps;
       // Michael's decision of 2026-11-09 (logging only): an attempt that sold nothing and met no error but left shares held is logged
       // too (on 2026-11-09 such attempts left no trace), with how many times a symbol was skipped because its shares were not free.
@@ -826,11 +893,12 @@ export class Liquidator {
       return done();
     }
     for (let round = 1; round <= rounds; round++) {
+      readRound = round; // item 1 of 2026-11-21 (logging only); a round started again after the moves keeps its number
       result.lastLookOk = false; // set true below only by this round's successful look (reported only)
       if (yieldNow()) return yielded();
       // Nothing is sent while the market is closed: a market sell then queues for the next open (and cancelling the
       // exits first would leave the position bare overnight). If the clock cannot be read, carry on.
-      const clock = await this.d.broker.getClock().catch(() => null);
+      const clock = await timedRead("clock", () => this.d.broker.getClock()).catch(() => null);
       if (clock && !clock.isOpen) {
         result.errors.push("the market is closed, so nothing was sent");
         try {
@@ -976,7 +1044,7 @@ export class Liquidator {
             this.d.log?.("cancel_lookup_skipped", { reason: o.reason, id, resends: c.resends }); // Fly's log, at most once a re-send
             still = true;
           } else try {
-            const x = await this.d.broker.getOrderById(id);
+            const x = await timedRead("orderLookup", () => this.d.broker.getOrderById(id));
             c.lookups++; // only a lookup that answered counts toward CANCEL_LOOKUPS_MAX
             still = !!x && OPEN_STATUSES.has(x.status) && x.status !== "pending_cancel";
           } catch (err) {
@@ -1154,7 +1222,7 @@ export class Liquidator {
             // treats an open cyrus-x- sell as a sale of ours still working and leaves it alone, but must cancel a fresh stop like any exit.
             const sid = `cyrus-p-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-s${round}`;
             const sentAtMs = this.d.now().getTime();
-            const st = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: sid, reason: `${o.reason}, as a fresh stop`, stopPrice });
+            const st = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: sid, reason: `${o.reason}, as a fresh stop`, stopPrice }, gateTimer);
             if (st.status === "sent") {
               result.freshStop = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, orderId: st.order.id, sentAtMs, answerMs: this.d.now().getTime() - sentAtMs };
               steps.sells.push({ symbol: p.symbol, qty: free, at: stamp() });
@@ -1204,7 +1272,7 @@ export class Liquidator {
             continue;
           }
           const id = `cyrus-x-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-${round}`;
-          const r = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: id, reason: o.reason });
+          const r = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: id, reason: o.reason }, gateTimer);
           if (r.status === "sent") {
             if (own) (result.ownTarget ??= {})[p.symbol] = (soldBy.get(p.symbol) ?? 0) + cap; // fix A: the recount at this sale
             soldBy.set(p.symbol, (soldBy.get(p.symbol) ?? 0) + free);

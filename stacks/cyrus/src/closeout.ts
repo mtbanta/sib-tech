@@ -52,7 +52,8 @@ export interface CloseoutOptions {
   onlySymbols?: string[];
   // Michael's decision B of 2026-11-19 (logging only): when this close-out was due (its scheduled time: the mid-day pause, the afternoon
   // window's end, the regular close-out time; null for a retry, whose time is its retry gap) and when the worker decided to start it.
-  // Stored in `closeout_result.timing` with the close-out's own start, its sale's start and its move step's start. Michael's decision of
+  // Stored in `closeout_result.timing` with the close-out's own start, its sale's start and its move step's start (and, since Michael's
+  // approval of 2026-11-21, item 1, the sale's reads from Alpaca: `reads` and `readsMore`, see SaleRead in sells.ts). Michael's decision of
   // 2026-11-20 (the close-out timer): `triggeredBy` says what started it: "timer" (the timer set for its due time) or "pass" (the worker's
   // pass every 5 s: every retry, and a first try whose timer did not start it).
   timing?: { dueAt: string | null; triggeredAt: string; triggeredBy?: "timer" | "pass" };
@@ -207,7 +208,7 @@ export async function closeOut(d: CloseoutDeps, tradeDate: string, options: Clos
   const errors = res.errors.filter((e) => !benignError(e));
   // Decision B of 2026-11-19 (logging only): when the close-out was due, triggered, started (this call, before its clock read), its sale's
   // start (its turn in the sale queue) and its move step's start (null when no move phase ran). Always stored, even when nothing was sent.
-  const timing = { dueAt: options.timing?.dueAt ?? null, triggeredAt: options.timing?.triggeredAt ?? null, triggeredBy: options.timing?.triggeredBy ?? null, startedAt: new Date(startedAt).toISOString(), saleStartedAt: res.startedAt ?? null, movePhaseStartedAt: res.movePhaseStartedAt ?? null };
+  const timing = { dueAt: options.timing?.dueAt ?? null, triggeredAt: options.timing?.triggeredAt ?? null, triggeredBy: options.timing?.triggeredBy ?? null, startedAt: new Date(startedAt).toISOString(), saleStartedAt: res.startedAt ?? null, movePhaseStartedAt: res.movePhaseStartedAt ?? null, reads: res.reads ?? [], readsMore: res.readsMore ?? 0 };
   await d.store.addEvent(flat ? "info" : "error", "closeout_result", { path, flat, remaining: flat ? [] : remaining, sold: res.sold, errors: res.errors.slice(0, 8), waitedMs, steps: res.steps ?? null, timing }).catch(() => undefined);
   if (flat) {
     // Flat, but something went wrong on the way (a sell was refused and had to be repeated): say so. Waiting for Alpaca to fill
