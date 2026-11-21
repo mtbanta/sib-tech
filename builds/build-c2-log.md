@@ -8756,6 +8756,7 @@ Three commits so one failed review cannot hold the rest: (1) `98a3eb0` the 8:00 
 - **T3:** pass when, in every trial where the stop sold, the limit was cancelled and nothing was left open. When no stop sold in any trial: unchecked, and I tell Michael so (the assumption that a stop fill cancels the limit is then not measured); he decides.
 - **Clean-ups:** every one flat.
 - **T4:** reported only (it may show nothing).
+- A judged trial that rules out a pass makes that criterion "fail" even if the run stopped early (runner change `7f5fc49`, group 2 round 3).
 - Only with T1, T2 and the clean-ups "pass" (and T3 not "fail") do I name `pair on`; anything else goes to Michael as it is.
 - In place of the proposal's "what the worker's own sync did with it": the worker's own pure functions on Alpaca's real list (`openSellQty`, `structuralCandidates`), and its stored rows during the trials (its order sync walks only its own entries, so `trial-` orders are not its).
 
@@ -8791,3 +8792,5 @@ Outside market hours, under Michael's words "deploy before 8:00 AM Monday only i
 **Monday's plan:** the trials run after the 10:30 close-out is flat and Michael's own `stop` is on, from a clean clone of the latest reviewed commit (`e378f96` or later), by `tools/pair-trials.mjs --date 2026-11-23`, finishing by 11:15. The builder reports the runner's `criteria` against the pass criteria above; only if they pass does the builder name `pair on` for the afternoon and the 2:30 close-out (Michael's answer 6). Michael then sends `go`/`resume` and `pair on` himself. Monday's review measures Alpaca's hold on the positions that did not move.
 
 Paper only; research input for a human decision, never an instruction to act.
+
+**Runner label change `7f5fc49` (branch `runner-labels-2026-11-21`; the tool only, not in the image):** `criteria` prints "fail" when a judged T1 or T2 already rules out a pass, even if the run stopped early. Group 2 round 3: PASS (ten made-up result sets, every label as written).
