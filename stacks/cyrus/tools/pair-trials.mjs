@@ -450,9 +450,11 @@ for (const [kind, symbol] of plan) {
 const t12 = results.filter((r) => r.kind === "T1T2");
 const t2judged = t12.filter((r) => r.pass1 && !r.skipped2 && r.pass2 !== null);
 const t3s = results.filter((r) => r.kind === "T3");
+// Group 2, round 2: a judged trial that failed is a "fail" even when the run stopped early (before, that read "not settled").
+const t2failed = t2judged.some((r) => !r.stopCancelled || r.surprise !== null) || t2judged.filter((r) => !r.within).length >= 2;
 const criteria = {
-  T1: t12.length === 3 && t12.every((r) => r.pass1) ? "pass" : t12.length < 3 ? "not settled" : "fail",
-  T2: t2judged.length < 2 ? "not settled" : t2judged.filter((r) => r.within).length >= 2 && t2judged.every((r) => r.stopCancelled && r.surprise === null) ? "pass" : "fail",
+  T1: t12.some((r) => r.pass1 === false) ? "fail" : t12.length === 3 && t12.every((r) => r.pass1) ? "pass" : "not settled",
+  T2: t2failed ? "fail" : t2judged.length < 2 ? "not settled" : t2judged.filter((r) => r.within).length >= 2 ? "pass" : "fail",
   T3: t3s.some((r) => r.pass === false) ? "fail" : t3s.some((r) => r.pass === true) ? "pass" : "unchecked (no stop sold)",
   cleanups: results.every((r) => r.flatAfter) ? "pass" : "fail",
   T4: "reported only",
