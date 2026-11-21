@@ -8694,3 +8694,15 @@ Paper only; research input for a human decision, never an instruction to act.
 **Group 2, round 2 (on d77108e): PASS, no blocking finding.** Both round 1 findings fixed; nothing under checks 2, 7 or 10; 1,065 of 1,065. Non-blocking: the `SaleRead` comment in `sells.ts` still says the first step is the set "asked for before `movePhaseStartedAt`", where the brief and log use the safer rule (the first three entries, each answered by it); on Fly both give the same answer (reads take real time). Left as is so the deployed commit stays the reviewed one; to be aligned in the next change to `sells.ts`. v23 may have run the same tool text (its one recorded Write was 6 minutes before v23's deploy); the log's "cannot be shown" stays. For Michael on rollbacks: redeploying the old Fly image is the other option to weigh against the rollback branch.
 
 **Items 1 and 2 passed both groups (group 1 and group 2 PASS in round 2 on `d77108e`).** Under Michael's words ("deploy before 7:30 AM Monday only if both pass") item 1 deploys outside market hours from a clean clone at exactly `d77108e`, through the repo's `tools/offhours-deploy.mjs`.
+
+## Release v36 deployed at 11:25 AM CT (Saturday 2026-11-21)
+
+Outside market hours (Saturday), under Michael's words "deploy before 7:30 AM Monday only if both pass" (group 1 and group 2 PASS in round 2 on `d77108e`). From a clean clone at exactly `d77108e` (no key file), by the repo's own tool run from that clone: `tools/offhours-deploy.mjs`, blob `f038f025f86a` (equal to the committed one at `d77108e`). Its checks: Alpaca's clock closed (next open Monday 2026-11-23, 9:30 AM ET), 0 positions, 0 open orders, not a trading day, stop flag off (owner `resume`), Monday's limits still pending (suggested 250 / 500 / 100 / 1). Healthchecks paused (200), then `fly deploy --ha=false`.
+
+- Image `deployment-01M7ZJ5P8K17H5A3XBJABTSQTN`, machine `847319a2d79518` (Fly version 36), started 17:24:57 UTC; deploy exit 0 at 17:25:09 UTC.
+- Post-check (read only, a scratchpad script; the earlier `postcheck.mjs` was gone from the scratchpad): one `worker_started` at 17:25:02 UTC (`deploy: true`, `closeoutMinutesBeforeClose: 30`, so Monday's 2:30 test stands), no error or warning events, Healthchecks up (pinged 17:25:37 UTC), machine started.
+- Live line posted in `commands` (200).
+- v36 = v35 plus item 1 (the read times in the close-out's sale, logging only) plus the deploy tools' self-check (item 2; tools are not in the image). The CPU burst balance resets at a deploy and refills well before Monday's open.
+- **Rollback: v35** (`94ad29c`, image `deployment-01M7XCJR5M0DZ1XVFZWJBZ3VJE`), by the rollback branch `rollback-v35` (`b362197`): `94ad29c` plus only `stacks/cyrus/tools/` from `main`. `git diff --stat 94ad29c rollback-v35` touches only `stacks/cyrus/tools/` (4 files), and `src/midday.ts` at `94ad29c` equals `main`'s, so both conditions of group 1's round 2 hold. Pending Michael's answer on the rollback route (or redeploying the old image instead).
+
+Paper only; research input for a human decision, never an instruction to act.
