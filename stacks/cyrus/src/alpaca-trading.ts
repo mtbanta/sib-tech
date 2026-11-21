@@ -126,6 +126,11 @@ export interface SellOrder {
   // A4 of the proposal of 2026-11-12 (Michael's approval): a plain stop sell at this price instead of a market sell. It protects a
   // remainder after a partial take-profit; it fills only if the price falls to it.
   stopPrice?: number;
+  // The exit pair (Michael's approval of 2026-11-21): with `stopPrice`, an exit pair instead of the plain stop: one OCO ("one cancels other")
+  // order of two sells on the same shares, a limit at this take-profit price and a stop at `stopPrice`; when one fills Alpaca cancels the
+  // other. Alpaca's documentation (read 2026-11-21): order_class "oco", type "limit", take_profit.limit_price and stop_loss.stop_price,
+  // exit orders only, the stop at least 1 cent below the take-profit's limit.
+  takeProfitPrice?: number;
 }
 
 // What the rate-limit headers on a response said. Alpaca counts the account, order and position calls in one
@@ -555,6 +560,16 @@ export class AlpacaTrading {
     if (!(sell.qty > 0) || !Number.isFinite(sell.qty)) throw new AlpacaError("Sell quantity must be positive", 0);
     if (!/^[\w.-]{8,128}$/.test(sell.clientOrderId)) throw new AlpacaError("Bad client order id", 0);
     if (sell.stopPrice !== undefined && !(sell.stopPrice > 0 && Number.isFinite(sell.stopPrice))) throw new AlpacaError("Stop price must be positive", 0);
+    if (sell.takeProfitPrice !== undefined) {
+      // The exit pair: both prices rounded down to the cent as sent; the stop at least 1 cent below the limit (Alpaca's rule), checked here
+      // so a pair Alpaca would refuse is never sent (status 0: not sent).
+      if (sell.stopPrice === undefined) throw new AlpacaError("An exit pair needs a stop price", 0);
+      if (!(sell.takeProfitPrice > 0 && Number.isFinite(sell.takeProfitPrice))) throw new AlpacaError("Take-profit price must be positive", 0);
+      const limit = this.cents(sell.takeProfitPrice);
+      const stop = this.cents(sell.stopPrice);
+      if (!(Math.round(Number(limit) * 100) - Math.round(Number(stop) * 100) >= 1)) throw new AlpacaError("An exit pair's stop must be at least 1 cent below its take-profit", 0);
+      return this.postOrder(exitPairBody(sell, limit, stop), sell.clientOrderId, true);
+    }
     const body: Json = {
       symbol: sell.symbol,
       qty: Number.isInteger(sell.qty) ? String(sell.qty) : String(Number(sell.qty.toFixed(9))),
@@ -565,6 +580,11 @@ export class AlpacaTrading {
       ...(sell.stopPrice !== undefined ? { stop_price: this.cents(sell.stopPrice) } : {}),
     };
     return this.postOrder(body, sell.clientOrderId, true);
+  }
+
+  // Exposed for the trial runner (tools/pair-trials.mjs), so its trials send exactly the body the worker sends.
+  static exitPairBody(sell: SellOrder, limit: string, stop: string): Json {
+    return exitPairBody(sell, limit, stop);
   }
 
   // The moved take-profit (Michael's decision of 2026-11-18): replaces a resting sell (a bracket's take-profit leg, later its stop leg) with
@@ -624,4 +644,20 @@ export class AlpacaTrading {
       }
     }
   }
+}
+
+// The exit pair's order body (Michael's approval of 2026-11-21). `limit` and `stop` are already rounded down to the cent. Time in force "day",
+// like the plain fresh stop (the account is flat at the close); Alpaca's OCO examples use "gtc", and "day" is checked by Monday's trial T1.
+function exitPairBody(sell: SellOrder, limit: string, stop: string): Json {
+  return {
+    symbol: sell.symbol,
+    qty: Number.isInteger(sell.qty) ? String(sell.qty) : String(Number(sell.qty.toFixed(9))),
+    side: "sell",
+    type: "limit",
+    time_in_force: "day",
+    order_class: "oco",
+    client_order_id: sell.clientOrderId,
+    take_profit: { limit_price: limit },
+    stop_loss: { stop_price: stop },
+  };
 }
