@@ -8989,3 +8989,18 @@ To the close-out's post (10:30:12): `commands` 3 (the morning post, Armed, the m
 **Next steps (for Michael):** (1) for further trials during the day, use market buys or expect the worker to cancel resting buys while the stop is on, and read the trade lines with the trials in mind; (2) the time without a stop rose with the number of market sales (14, mostly remainders under fresh stops that cannot move): this is what the exit pair, still off, is meant to reduce; (3) the read times ruled out a slow first step at 10:30 (0 ms uncovered); the 2:30 close-out's reads come in today's end-of-day review, with the hold comparison; (4) whether 7 cents over the largest position at a market fill matters is a question, not a finding of fault.
 
 Research input for a human decision, never an instruction to act. Paper only.
+
+## Michael's trial and mid-day decisions (2026-11-23, about 12:45 PM CT), saved verbatim
+
+"Trial and mid-day decisions:
+1. Pairs are on and trading resumed (pair on, resume, go sent at about 10:35). Today's 2:30 close-out is the pairs' first live test; the end-of-day review reports every pair move (accepted, filled, stop cancelled by Alpaca, time to fill, fallback) and Alpaca's hold on the positions that do not move.
+2. Tonight, logging only: record for every fresh stop when the stack learned the old stop was gone, when it sent the new one, and when Alpaca accepted it, so cases like SNDK's 5.9 s can be judged against the 5-second rule.
+3. Tonight: the trial tool waits for the stop's final status in T3, and takes the symbols as an option.
+4. Messaging backlog, not tonight: the 5-minute trading lines exclude test orders (client ids starting ptest-).
+Group 1 and group 2 for 2 and 3; deploy after the close, before 8:00 AM, only if both pass.
+Never print any token or key."
+
+**Builder's notes (read only, no change):**
+- The stored run log shows `pair` at 18:37:55 UTC (12:37 PM CT; `exit_pair_switch` on: true, was false), `resume` at 18:38:00 and `go` at 18:38:05, so the afternoon's trading started at about 12:38 PM CT, not 10:35. The day record's phase `exitPair` is "on". The stack has sent orders since (17 by 12:46 PM CT).
+- Item 4: the 2026-11-17 and 2026-11-18 tests used client ids `ptest-`; today's trial runner uses `trial-`. The backlog item should cover both prefixes (for Michael to confirm when it is built).
+- Item 2 touches the fresh-stop step (money-touching code, logging only), so group 1 and group 2; item 3 is the reviewed trial tool, group 1 and group 2. Built during the session, deployed only after the close and before 8:00 AM, only if both pass, through the repo's off-hours checker from a clean clone.
