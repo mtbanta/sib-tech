@@ -1061,7 +1061,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
     await ctx.loop.act(id, "missing-exit sale", async () => {
       if (!stillProtect()) return;
       const c = remainderStop !== null && timedOutIds.length === 0 && pairIds.length === 0
-        ? await inTry(d, mem, s, due.go, "remainder", () => timedCleanup(d, day, mem, s, o, "bare", undefined, { stopPrice: remainderStop, stopCancelledAt: stopLeg(o)?.canceledAt ?? null, learned: learnedGone(mem, s.clientOrderId, nowMs) }))
+        ? await inTry(d, mem, s, due.go, "remainder", () => timedCleanup(d, day, mem, s, o, "bare", undefined, { stopPrice: remainderStop, stopCancelledAt: stopLeg(o)?.canceledAt ?? null, learned: learnedGone(mem, s.clientOrderId, mem.bareSeen.get(s.clientOrderId) ?? nowMs) }))
         : await inTry(d, mem, s, due.go, "missing-exit sale", () => timedCleanup(d, day, mem, s, o, "missing", undefined, timedOutIds.length > 0 || pairIds.length > 0 ? { alsoCancel: [...timedOutIds, ...pairIds], alsoCancelStops: timedOutShown.map((x) => x.clientOrderId) } : {}));
       if (c.attempted) (ctx.unprotected.push(s.symbol), mem.protectFirst?.mark(s.clientOrderId, s.symbol, "the order sync found it unprotected"));
       return c.recheckAt !== undefined ? { recheckAt: c.recheckAt, ...(c.room ? { room: c.room } : {}) } : undefined;
@@ -1548,14 +1548,15 @@ async function resolveStuck(d: RiskDeps, mem: SyncMemory, clientOrderId: string,
 // A5: `extra.fast` (a "missing" entry that filled as the stack's 5 second cancel reached Alpaca): sold at once, without waiting for
 // Alpaca's cancel of its exits to show; the sale waits in sells.ts until that cancel frees the share, and nothing happens if Alpaca kept them.
 // Michael's decision 2 of 2026-11-23 (logging only): the worker's first sight of an entry's old stop gone, on its own clock: the live
-// update's arrival (`liveStopCancelSeenAt`) or the order sync's first sight (`seenMs`), whichever came first. Reads memory only.
+// update's arrival (`liveStopCancelSeenAt`) or the order sync's first sight (`seenMs`: `bareSeen`, kept across a stuck try, else this
+// sync's start), whichever came first. Reads memory only. After a restart the memory is empty, so it is the new worker's first sync.
 export interface LearnedGone {
   atMs: number;
   by: "live update" | "order sync";
 }
 export function learnedGone(mem: Pick<SyncMemory, "liveStopCancelSeenAt">, clientOrderId: string, seenMs: number | undefined): LearnedGone | undefined {
   const live = mem.liveStopCancelSeenAt.get(clientOrderId);
-  if (live !== undefined && (seenMs === undefined || live <= seenMs)) return { atMs: live, by: "live update" };
+  if (live !== undefined && Number.isFinite(live) && (seenMs === undefined || !Number.isFinite(seenMs) || live <= seenMs)) return { atMs: live, by: "live update" };
   return seenMs !== undefined && Number.isFinite(seenMs) ? { atMs: seenMs, by: "order sync" } : undefined;
 }
 
@@ -1639,7 +1640,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     ...(protectAt !== null ? { protectWithStop: { [s.symbol]: protectAt } } : {}),
     ...(protectAt !== null && pairTp !== null ? { protectWithPair: { [s.symbol]: { takeProfitPrice: pairTp } } } : {}),
     // Michael's decision 2 of 2026-11-23 (logging only): the fresh stop's times start from these.
-    ...(protectAt !== null ? { protectTimes: { [s.symbol]: { stopGoneAt: extra.stopCancelledAt ?? null, learnedAt: extra.learned ? new Date(extra.learned.atMs).toISOString() : null, learnedBy: extra.learned?.by ?? null } } } : {}),
+    ...(protectAt !== null ? { protectTimes: { [s.symbol]: { stopGoneAt: extra.stopCancelledAt ?? null, learnedAt: extra.learned && Number.isFinite(extra.learned.atMs) ? new Date(extra.learned.atMs).toISOString() : null, learnedBy: extra.learned?.by ?? null } } } : {}),
     ...(mem.brokenPairIds.size > 0 ? { notProtection: [...mem.brokenPairIds.entries()].filter(([, b]) => b.symbol === s.symbol).map(([cid]) => cid) } : {}),
     ...((extra.alsoCancel?.length ?? 0) > 0 ? { endOnCancelFail: true } : {}),
     // Item 2 of 2026-11-13: such a try waits half a second for Alpaca's cancel (a cancel usually lands in about 0.2 s), so a whole try (at

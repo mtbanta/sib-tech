@@ -329,12 +329,14 @@ export type GateReadTimer = <T>(what: "openOrders" | "positions", f: () => Promi
 // Michael's decision 2 of 2026-11-23 (logging only): "record for every fresh stop when the stack learned the old stop was gone, when it sent
 // the new one, and when Alpaca accepted it, so cases like SNDK's 5.9 s can be judged against the 5-second rule." Stored on `fresh_stop`,
 // `fresh_stop_unclear` and `fresh_stop_refused`. Every time is an ISO time on the worker's own clock except `stopGoneAt`, which is Alpaca's
-// (its cancel of the old stop). `learnedAt`/`learnedBy`: the worker's first sight of the old stop gone, by Alpaca's live update or by the
-// order sync (null when not known, for example after a restart). `saleStartedAt`: when this try's sale began (its turn in the sale queue).
-// `cancelsSentAt`/`cancelsAnsweredAt`: the sale's cancels (for a remainder, the take-profit's rest), sent and answered, at most 3 each;
-// SNDK's 3.76 s on 2026-11-23 sat here. `askedAt`: when the sale asked the sell gate for the stop (the old `sentAtMs`); `sentAt`: after the
-// gate's own reads, when the order went to Alpaca (its reads are in the sale's `reads` with `by: "gate"`; equal to `askedAt` when the gate
-// read nothing); `acceptedAt` (fresh_stop) or `answeredAt` (unclear, refused): Alpaca's answer. `round`: the sale's round.
+// (its cancel of the old stop). `learnedAt`/`learnedBy`: the worker's first sight of the old stop gone, by Alpaca's live update (its arrival)
+// or by the order sync (the start of the sync that first saw it, kept across a stuck try; after a restart, the new worker's first sync).
+// The rest are THIS TRY's: `saleStartedAt`, when its sale began (its turn in the sale queue); `cancelsSentAt`/`cancelsAnsweredAt`, its
+// cancels (for a remainder, the take-profit's rest), sent and answered, at most 3 each (a cancel that threw has no answer, so the two lists
+// can differ in length); SNDK's 3.76 s on 2026-11-23 sat here. `askedAt`: when the sale asked the sell gate for the stop (the old
+// `sentAtMs`); `sentAt`: an estimate of when the order went to Alpaca, the end of the gate's own timed reads after `askedAt` (the sale's
+// reads with `by: "gate"`; equal to `askedAt` when none is recorded; it does not include a wait in the gate's queue or the client's own
+// retries); `acceptedAt` (fresh_stop) or `answeredAt` (unclear, refused): the answer, after the client's own retries. `round`: the round.
 export interface FreshStopTimes {
   stopGoneAt: string | null;
   learnedAt: string | null;

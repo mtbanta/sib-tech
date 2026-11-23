@@ -174,3 +174,87 @@ test("decision 2 of 2026-11-23: with exit pairs on, the pair's fresh_stop row ca
   assert.equal(ev.data.pair, true);
   inOrder(ev.data.times, "acceptedAt");
 });
+
+// ---------------- Group 1 and group 2, round 1 of 2026-11-23 ----------------
+
+test("round 1 (both groups): a remainder whose first try stuck, protected on a later try by the remainder route (asRemainder): learnedAt is the first sight, kept across the stuck try, not the later sync's time", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "LUNR", 5, 12, 51);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 2, 12.08);
+  w.sim.cancelMs = 25_000; // the take-profit rest's cancel takes 25 s at Alpaca, so the first try sticks
+  w.sim.advance(300);
+  const firstSync = w.sim.simMs;
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.ok(w.memory.stuck.get(id)?.protecting, "the first try stuck while protecting");
+  assert.equal(w.events.some((e) => e.event === "fresh_stop"), false);
+  w.sim.advance(26_000);
+  w.memory.stuck.get(id)!.nextAt = 0;
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.ok(w.events.some((e) => e.event === "unprotected_position" && e.data.asRemainder === true), "the remainder route");
+  const t = w.events.find((e) => e.event === "fresh_stop")!.data.times;
+  assert.equal(t.learnedBy, "order sync");
+  assert.equal(ms(t.learnedAt), firstSync, "the first sight, 26 s before this try");
+  assert.ok(ms(t.saleStartedAt) - ms(t.learnedAt) >= 26_000, "this try's sale started 26 s later: the stuck try's time shows as the stack's, not as late learning");
+});
+
+// The sell gate reads Alpaca's open orders and positions before it sends; here every read takes 70 ms.
+function slowReads(w: World, readMs: number) {
+  const ends: number[] = [];
+  const lo = w.sim.listOrdersPaged.bind(w.sim);
+  const lp = w.sim.listPositions.bind(w.sim);
+  (w.sim as any).listOrdersPaged = async (...a: any[]) => {
+    w.sim.advance(readMs);
+    const r = await (lo as any)(...a);
+    ends.push(w.sim.simMs);
+    return r;
+  };
+  (w.sim as any).listPositions = async () => {
+    w.sim.advance(readMs);
+    const r = await lp();
+    ends.push(w.sim.simMs);
+    return r;
+  };
+  return ends;
+}
+
+test("round 1 (group 2): sentAt is the end of the sell gate's own reads after askedAt, later than askedAt when the gate's reads take time, and never after Alpaca's answer", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "SNDK", 2, 94.06, 2);
+  const ends = slowReads(w, 70);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 1, 94.14);
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  const t = w.events.find((e) => e.event === "fresh_stop")!.data.times;
+  inOrder(t, "acceptedAt");
+  const asked = ms(t.askedAt);
+  const sent = ms(t.sentAt);
+  assert.ok(sent - asked >= 70, `the gate's reads took ${sent - asked} ms`);
+  assert.ok(ends.includes(sent), "the end of a read");
+  assert.equal(sent, Math.max(...ends.filter((x) => x >= asked && x <= ms(t.acceptedAt))), "the last of the gate's reads before the answer");
+});
+
+test("round 1 (group 2): with exit pairs on and the pair refused, the plain stop's sentAt counts only its own gate reads, not the pair's", async () => {
+  const w = world();
+  w.sim.pairAnswer = "refuse";
+  const dd = await day(w, "on");
+  const id = await hold(w, "CIFR", 10, 7.27, 3);
+  const ends = slowReads(w, 70);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 3, 7.35);
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.ok(w.events.some((e) => e.event === "exit_pair_refused"));
+  const ev = w.events.find((e) => e.event === "fresh_stop")!;
+  assert.equal(ev.data.afterPairRefused, true);
+  const t = ev.data.times;
+  inOrder(t, "acceptedAt");
+  const asked = ms(t.askedAt);
+  const pairAsked = asked - ev.data.afterPairRefusedMs;
+  assert.ok(pairAsked < asked, "the pair was asked first");
+  assert.ok(ends.some((x) => x > pairAsked && x < asked), "the pair's gate reads came before the plain stop was asked");
+  assert.ok(ms(t.sentAt) - asked >= 70 && ms(t.sentAt) - asked < 70 * 3, `only the plain stop's own reads: ${ms(t.sentAt) - asked} ms`);
+});
