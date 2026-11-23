@@ -8832,3 +8832,29 @@ Outside market hours, under Michael's words "deploy before 8:00 AM Monday only i
 - **Rollback: v37** (`e378f96`, image `deployment-01M7ZPC8C4K08VCT1GNK7HZ78N`), by branch `rollback-v37` (`8f51a88`: `e378f96` plus only `stacks/cyrus/tools/` from `main`; the diff touches `tools/pair-trials.mjs` only; `src/midday.ts` equal to `main`'s), through the reviewed checker.
 
 Paper only; research input for a human decision, never an instruction to act.
+
+## Exit pair paper trials (Monday 2026-11-23, 10:34 to 10:40 AM CT)
+
+Michael's request of 2026-11-21 (item 3) and his answer 5 (the 3-share trial). Wait (a) first fired at 10:27 AM CT, 4 minutes early; its first step refuses before 10:31, so it did nothing and was set again for 10:32. Michael sent `stop` in `commands` before it fired again, so the builder ran the trials by hand at 10:34 and cancelled the 10:32 wait so they could not run twice.
+
+- **Runner:** `tools/pair-trials.mjs` from a clean clone of `main` at `afab27d` (no code change since the live release `faa5c65`; the stacks/cyrus code and tools are identical), no key file in the clone: `tool: pair-trials.mjs blob 0e01bc44c467 (committed at HEAD: 0e01bc44c467)`. The check-only run passed every guard (date; before 11:13; the 10:30 close-out flat; Michael's own stop on; the account flat). Symbols chosen by the runner: UMC, APG, CGNX (T4 on UMC). Records: the scratchpad's `trials/2026-11-23.jsonl` (20 rows), cross-checked against Alpaca's own order records (read only).
+- **Runner's `criteria`:** T1 pass, T2 not settled, T3 unchecked (no stop sold), clean-ups pass, T4 reported only. **Under the written pass criteria (T2 must be "pass"), `pair on` was not named.** Michael was told the results as they are, in the session and in `commands` (200). The runner made no surprise stop and exited 0. The account was flat after every clean-up.
+
+| Trial | Stock | Result (Alpaca's records) |
+|---|---|---|
+| T1 | UMC, APG, CGNX | Accepted in 80 to 97 ms (HTTP 200), client id kept, the parent a limit with class `oco` and the stop as its one child leg (status `held`), `openSellQty` 1 (counted once), offered as a move candidate; a lookup by client id found it. **Pass** (3 of 3). |
+| T2 | UMC | Replaced the limit to 14.54 (bid 14.55 less 1 cent); accepted in 79 ms; filled at 14.55 in 885 ms by Alpaca's own times (the replacement's `submitted_at` 16:34:48.735 equals the original's `replaced_at`, so Alpaca stamps the replace time, as group 2 assumed); Alpaca cancelled the stop leg itself 1.7 ms after the fill; nothing left open. Judged: pass. |
+| T2 | APG | Skipped: the feed's bid 43.05 was below the pair's stop 44.65 (fill 44.75; the market sale that followed filled at 44.71, so the IEX bid was about 4 percent below the market). Counts neither way. |
+| T2 | CGNX | Skipped: bid 48.33 (quote 9 s old) below the stop 48.49; the market sale that followed filled at 48.50. Counts neither way. |
+| T3 | UMC | Stop 14.53, limit 15.05; no trigger in 60 s; moving the stop to the bid (14.53) was refused 422 "order parameters are not changed" (the same price); cleaned up by a market sale. |
+| T3 | APG | No trigger in the wait; the stop moved to 44.68 (accepted); Alpaca cancelled the limit at 16:37:12.692 as the stop triggered and **the stop leg filled 1 share at 44.68 at 16:37:14.042**; nothing left open; flat with no clean-up sale. The runner recorded `stopFilledAfterMove: false` because its poll ended when the parent showed cancelled, before the leg showed filled (`legStatusAfter: "new"`). By Alpaca's records the stop sold and the limit was cancelled: **T3 pass on the written rule** (the runner printed "unchecked"). |
+| T3 | CGNX | The stop moved to 48.37 (accepted); no trigger within 15 s; cleaned up by a market sale at 48.38. |
+| T4 | UMC (3 shares) | Limit 14.47 at a bid of 14.46: no fill in 60 s, so no partial fill to see. Reported only. |
+
+**Reading (measurement and guess marked):** measured: Alpaca accepts the pair as built, lists it parent and child as the code expects, accepts the replace and fills it under 1 s while cancelling the stop itself (one case), and cancels the limit when the stop triggers (one case). Not measured: a second T2 case (the criteria need two), and a partial fill of the pair's take-profit (answer 3's case). Guess: on thin names the free IEX bid can sit far from the market (APG), so at a close-out fewer pairs would qualify for a move and would fall back to the cancel-and-sell path; that is safe but lowers the share moved.
+
+**Runner note, for a later fix (not changed under the money-touching rule; tools are reviewed):** T3's poll should wait for the stop leg's final status after the parent is cancelled, and the runner should let the builder name symbols (it always takes the first three, so a rerun the same day repeats APG).
+
+**Michael's decision:** leave pairs off today (the 2:30 hold test stays clean), or send `pair on` on the one T2 case plus T1 and T3. The builder sends no command for him.
+
+Research input for a human decision, never an instruction to act. Paper only.
