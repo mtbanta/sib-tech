@@ -9032,3 +9032,9 @@ Deploy (Michael's words): after the close, before 8:00 AM, only if group 1 and g
 **Group 2, round 2 on `cc20384`: PASS** (all three round 1 findings fixed; the reviewer's mutations: `sentAtMs = askedAtMs` fails both `sentAt` tests, the remainder route on `nowMs` fails its test; the rewritten clause accurate on every point checked). Notes, not changed (for a later documents-only change): the refused-pair test passes even without the `>= askedAt` filter, because the gate reads again after the pair's error and `Math.max` picks the later reads (the behaviour is right; the test's name claims more than it checks); and if a sell waited in the gate's queue and the gate then read nothing, that wait lands in `sentAt` to `acceptedAt`, which the briefs call Alpaca's (rare, since sales run one at a time).
 
 **Both groups passed `cc20384`.** Under Michael's words ("deploy after the close, before 8:00 AM, only if both pass") it deploys outside market hours from a clean clone at exactly `cc20384`, through the repo's `tools/offhours-deploy.mjs`. It carries `fly.toml` as it stands (`CLOSEOUT_MINUTES_BEFORE_CLOSE` 30) unless the close-out time is changed and reviewed first (Michael's choice after today's end-of-day review, or back to 15).
+
+## Michael's answer on the cancel times and the close-out time (2026-11-23, about 1:20 PM CT), saved verbatim
+
+"Yes, keep the two cancel times. I will choose the close-out time after today's end-of-day review; if I have not answered by 7:00 PM Central, set it back to 2:45 PM as planned. Keep the 3:07 wait."
+
+So: the take-profit rest's cancel times (`cancelsSentAt`, `cancelsAnsweredAt`) stay in the fresh-stop times. The close-out time: Michael's choice after the end-of-day review; with no answer by 7:00 PM CT, `CLOSEOUT_MINUTES_BEFORE_CLOSE` goes back to 15 (2:45 PM CT) in its own commit with a group 1 review, deployed with `cc20384`'s code outside market hours through the repo's off-hours checker from a clean clone.
