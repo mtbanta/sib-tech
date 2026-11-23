@@ -1928,6 +1928,8 @@ export class Worker {
         this.d.log?.("info", "stop_cancelled_at_partial_take_profit", { symbol: info.symbol });
         // Item 1 of 2026-11-13 (afternoon): the order sync takes this live report over an order list that may still show the stop open.
         this.syncMemory.liveStopCancelled.set(info.clientOrderId, info.atMs);
+        // Michael's decision 2 of 2026-11-23 (logging only): when this worker received the report, on its own clock (the first only).
+        if (!this.syncMemory.liveStopCancelSeenAt.has(info.clientOrderId)) this.syncMemory.liveStopCancelSeenAt.set(info.clientOrderId, this.d.now().getTime());
         this.protectFirst.mark(info.clientOrderId, info.symbol, "a remainder's stop was cancelled");
         this.stopCancelPending.set(info.clientOrderId, { symbol: info.symbol, at: this.d.now().getTime(), tries: 0 });
         this.stopCancelSeen.set(info.symbol, { alpacaAtMs: info.atMs, receivedMs: this.d.now().getTime(), wokeFor: info.atMs + BARE_GRACE_MS });

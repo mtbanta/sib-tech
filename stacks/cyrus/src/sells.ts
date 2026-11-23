@@ -292,6 +292,10 @@ export interface LiquidateOptions {
   protectWithPair?: Record<string, { takeProfitPrice: number }>;
   // The exit pair (group 1, round 1): client ids of pairs remembered broken (answer 3); never taken as a fresh stop holding the shares.
   notProtection?: string[];
+  // Michael's decision 2 of 2026-11-23 (logging only), with `protectWithStop`: the caller's times for that symbol's fresh stop (when Alpaca
+  // cancelled the old stop, when the stack learned it was gone, and how), copied into the fresh stop's `times` (FreshStopTimes). Never
+  // changes what the sale does.
+  protectTimes?: Record<string, { stopGoneAt: string | null; learnedAt: string | null; learnedBy: string | null }>;
   // A5 of the proposal of 2026-11-12, with `ownEntryOnly` only: the entry filled as the stack's cancel reached Alpaca, and Alpaca cancels
   // its exits itself. Nothing is cancelled here; the sale waits (up to `waitCancelMs`) for Alpaca's cancel to free the shares. If they
   // never come free (Alpaca kept the exits), nothing is sold, no blocked sale is logged, and `exitsKept` lists the symbol.
@@ -321,6 +325,29 @@ export const SALE_READS_STORED = 40;
 // The sale's timer handed to the sell gate for the gate's own reads (open orders, then positions) before a sell or a replace; those are
 // stored with `by: "gate"`.
 export type GateReadTimer = <T>(what: "openOrders" | "positions", f: () => Promise<T>, pagesOf?: (v: T) => number) => Promise<T>;
+
+// Michael's decision 2 of 2026-11-23 (logging only): "record for every fresh stop when the stack learned the old stop was gone, when it sent
+// the new one, and when Alpaca accepted it, so cases like SNDK's 5.9 s can be judged against the 5-second rule." Stored on `fresh_stop`,
+// `fresh_stop_unclear` and `fresh_stop_refused`. Every time is an ISO time on the worker's own clock except `stopGoneAt`, which is Alpaca's
+// (its cancel of the old stop). `learnedAt`/`learnedBy`: the worker's first sight of the old stop gone, by Alpaca's live update or by the
+// order sync (null when not known, for example after a restart). `saleStartedAt`: when this try's sale began (its turn in the sale queue).
+// `cancelsSentAt`/`cancelsAnsweredAt`: the sale's cancels (for a remainder, the take-profit's rest), sent and answered, at most 3 each;
+// SNDK's 3.76 s on 2026-11-23 sat here. `askedAt`: when the sale asked the sell gate for the stop (the old `sentAtMs`); `sentAt`: after the
+// gate's own reads, when the order went to Alpaca (its reads are in the sale's `reads` with `by: "gate"`; equal to `askedAt` when the gate
+// read nothing); `acceptedAt` (fresh_stop) or `answeredAt` (unclear, refused): Alpaca's answer. `round`: the sale's round.
+export interface FreshStopTimes {
+  stopGoneAt: string | null;
+  learnedAt: string | null;
+  learnedBy: string | null;
+  saleStartedAt: string | null;
+  cancelsSentAt: string[];
+  cancelsAnsweredAt: string[];
+  askedAt: string;
+  sentAt: string;
+  acceptedAt?: string;
+  answeredAt?: string;
+  round: number;
+}
 
 export interface LiquidateSteps {
   cancelsSentAt: string[];
@@ -377,8 +404,8 @@ export interface LiquidateResult {
   ownGone?: string[];
   // A4: the fresh stop placed (with `protectWithStop`), when one was.
   // `sentAtMs`: when the fresh stop was sent (Michael's ruling B of 2026-11-12: its time to confirm is stored, and an unclear one is
-  // timed from it).
-  freshStop?: { symbol: string; qty: number; stopPrice: number; clientOrderId: string; orderId: string; sentAtMs: number; answerMs: number; pair?: { takeProfitPrice: number }; afterPairRefusedMs?: number };
+  // timed from it). `times`: Michael's decision 2 of 2026-11-23 (logging only, FreshStopTimes).
+  freshStop?: { symbol: string; qty: number; stopPrice: number; clientOrderId: string; orderId: string; sentAtMs: number; answerMs: number; pair?: { takeProfitPrice: number }; afterPairRefusedMs?: number; times?: FreshStopTimes };
   // The exit pair: Alpaca refused the pair outright (its reason); the plain stop was then tried (answer 2).
   pairRefused?: string;
   // A4: Alpaca refused the fresh stop and the shares were sold at market instead (the reason Alpaca gave).
@@ -595,6 +622,18 @@ export class Liquidator {
       return v;
     };
     const gateTimer: GateReadTimer = (what, f, pagesOf) => timedRead(what, f, pagesOf, "gate");
+    // Michael's decision 2 of 2026-11-23 (logging only): the fresh stop's times (FreshStopTimes). Never throws; never changes the sale.
+    const freshStopTimes = (symbol: string, askedAtMs: number, answeredAtMs: number, accepted: boolean, round: number): FreshStopTimes | undefined => {
+      try {
+        const iso = (ms: number) => new Date(ms).toISOString();
+        const gateEnds = reads.filter((x) => x.by === "gate" && Date.parse(x.at) >= askedAtMs).map((x) => Date.parse(x.at) + x.ms).filter((t) => Number.isFinite(t) && t <= answeredAtMs);
+        const sentAtMs = gateEnds.length > 0 ? Math.max(...gateEnds) : askedAtMs;
+        const given = o.protectTimes?.[symbol];
+        return { stopGoneAt: given?.stopGoneAt ?? null, learnedAt: given?.learnedAt ?? null, learnedBy: given?.learnedBy ?? null, saleStartedAt: result.startedAt ?? null, cancelsSentAt: steps.cancelsSentAt.slice(0, 3), cancelsAnsweredAt: steps.cancelsAnsweredAt.slice(0, 3), askedAt: iso(askedAtMs), sentAt: iso(sentAtMs), ...(accepted ? { acceptedAt: iso(answeredAtMs) } : { answeredAt: iso(answeredAtMs) }), round };
+      } catch {
+        return undefined;
+      }
+    };
     const cancelIds = [...new Set(o.cancelIds ?? [])];
     const pairRefusedIn = new Set<string>(); // the exit pair: symbols whose pair was refused in this sale (one try per position)
     // Group 1, round 1 (2026-11-17): honoured only for the one caller's shape (one symbol, one round, its own entry's shares, nothing to
@@ -1261,8 +1300,10 @@ export class Liquidator {
               const sentAtMs = this.d.now().getTime();
               if (asPair) pairSentAt = sentAtMs;
               const st = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: sid, reason: asPair ? `${o.reason}, as an exit pair` : `${o.reason}, as a fresh stop`, stopPrice, ...(asPair ? { takeProfitPrice: pairAsk.takeProfitPrice } : {}) }, gateTimer);
+              const answeredAtMs = this.d.now().getTime();
               if (st.status === "sent") {
-                result.freshStop = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, orderId: st.order.id, sentAtMs, answerMs: this.d.now().getTime() - sentAtMs, ...(asPair ? { pair: { takeProfitPrice: pairAsk.takeProfitPrice } } : {}), ...(!asPair && pairSentAt !== null ? { afterPairRefusedMs: sentAtMs - pairSentAt } : {}) };
+                const times = freshStopTimes(p.symbol, sentAtMs, answeredAtMs, true, round);
+                result.freshStop = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, orderId: st.order.id, sentAtMs, answerMs: answeredAtMs - sentAtMs, ...(asPair ? { pair: { takeProfitPrice: pairAsk.takeProfitPrice } } : {}), ...(!asPair && pairSentAt !== null ? { afterPairRefusedMs: sentAtMs - pairSentAt } : {}), ...(times ? { times } : {}) };
                 steps.sells.push({ symbol: p.symbol, qty: free, at: stamp() });
                 try {
                   result.heldAfter = Object.fromEntries((await heldNow()).map((x) => [x.symbol, x.qty]));
@@ -1281,7 +1322,7 @@ export class Liquidator {
                 // of it; the next order sync looks again.
                 result.errors.push(`round ${round}: ${p.symbol}: ${asPair ? "exit pair" : "fresh stop"} not confirmed: ${st.reason}`);
                 // `sentToAlpaca: false`: our own sell gate stopped it before any request (the briefs leave it out of the stops sent).
-                this.d.log?.("fresh_stop_unclear", { symbol: p.symbol, stopClientOrderId: sid, qty: free, stopPrice, reason: st.reason.slice(0, 160), sentToAlpaca: !(st.status === "refused" || (st.status === "error" && st.notSent === true)), ...(asPair ? { pair: true, takeProfitPrice: pairAsk.takeProfitPrice } : {}) });
+                this.d.log?.("fresh_stop_unclear", { symbol: p.symbol, stopClientOrderId: sid, qty: free, stopPrice, reason: st.reason.slice(0, 160), sentToAlpaca: !(st.status === "refused" || (st.status === "error" && st.notSent === true)), ...(asPair ? { pair: true, takeProfitPrice: pairAsk.takeProfitPrice } : {}), times: freshStopTimes(p.symbol, sentAtMs, answeredAtMs, false, round) ?? null });
                 result.freshStopUnclear = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, sentAtMs, ...(asPair ? { pair: { takeProfitPrice: pairAsk.takeProfitPrice } } : {}) };
                 result.remaining = [p.symbol];
                 return done();
@@ -1294,7 +1335,7 @@ export class Liquidator {
                 continue; // answer 2: the plain stop at once
               }
               result.freshStopRefused = st.reason.slice(0, 160);
-              this.d.log?.("fresh_stop_refused", { symbol: p.symbol, stopClientOrderId: sid, qty: free, stopPrice, reason: st.reason.slice(0, 160), httpStatus: st.status === "error" ? (st.httpStatus ?? null) : null, ...(pairSentAt !== null ? { afterPairRefused: true } : {}) });
+              this.d.log?.("fresh_stop_refused", { symbol: p.symbol, stopClientOrderId: sid, qty: free, stopPrice, reason: st.reason.slice(0, 160), httpStatus: st.status === "error" ? (st.httpStatus ?? null) : null, ...(pairSentAt !== null ? { afterPairRefused: true } : {}), times: freshStopTimes(p.symbol, sentAtMs, answeredAtMs, false, round) ?? null });
               // Falls through to the market sale below, as before A4.
             }
             if (placed) return done();

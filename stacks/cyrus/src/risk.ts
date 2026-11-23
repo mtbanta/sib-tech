@@ -292,6 +292,9 @@ export class SyncMemory {
   // Michael's item 1 of 2026-11-13 (afternoon): entries (client ids) whose stop cancel Alpaca's live update reported complete, with its
   // time; set by the worker, dropped when the entry closes. Also: entries whose list lag was already logged (once each).
   readonly liveStopCancelled = new Map<string, number>();
+  // Michael's decision 2 of 2026-11-23 (logging only): when the worker received that live report, on its own clock (set by the worker with
+  // `liveStopCancelled`, dropped with it when the entry closes).
+  readonly liveStopCancelSeenAt = new Map<string, number>();
   readonly listLagLogged = new Set<string>();
   // Group 2, round 4 of the weekend build: the quick rechecks while the list still shows such a stop open (per entry), and the entries whose
   // list clearing was logged.
@@ -663,6 +666,7 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   for (const id of [...mem.mustLook]) if (!activeIds.has(id)) mem.mustLook.delete(id);
   for (const id of [...mem.lateLogged]) if (!activeIds.has(id)) mem.lateLogged.delete(id);
   for (const id of [...mem.liveStopCancelled.keys()]) if (!activeIds.has(id)) mem.liveStopCancelled.delete(id);
+  for (const id of [...mem.liveStopCancelSeenAt.keys()]) if (!activeIds.has(id)) mem.liveStopCancelSeenAt.delete(id);
   for (const id of [...mem.listLagLogged]) if (!activeIds.has(id)) mem.listLagLogged.delete(id);
   for (const id of [...mem.liveLagTries.keys()]) if (!activeIds.has(id)) mem.liveLagTries.delete(id);
   for (const id of [...mem.listClearLogged]) if (!activeIds.has(id)) mem.listClearLogged.delete(id);
@@ -1057,7 +1061,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
     await ctx.loop.act(id, "missing-exit sale", async () => {
       if (!stillProtect()) return;
       const c = remainderStop !== null && timedOutIds.length === 0 && pairIds.length === 0
-        ? await inTry(d, mem, s, due.go, "remainder", () => timedCleanup(d, day, mem, s, o, "bare", undefined, { stopPrice: remainderStop, stopCancelledAt: stopLeg(o)?.canceledAt ?? null }))
+        ? await inTry(d, mem, s, due.go, "remainder", () => timedCleanup(d, day, mem, s, o, "bare", undefined, { stopPrice: remainderStop, stopCancelledAt: stopLeg(o)?.canceledAt ?? null, learned: learnedGone(mem, s.clientOrderId, nowMs) }))
         : await inTry(d, mem, s, due.go, "missing-exit sale", () => timedCleanup(d, day, mem, s, o, "missing", undefined, timedOutIds.length > 0 || pairIds.length > 0 ? { alsoCancel: [...timedOutIds, ...pairIds], alsoCancelStops: timedOutShown.map((x) => x.clientOrderId) } : {}));
       if (c.attempted) (ctx.unprotected.push(s.symbol), mem.protectFirst?.mark(s.clientOrderId, s.symbol, "the order sync found it unprotected"));
       return c.recheckAt !== undefined ? { recheckAt: c.recheckAt, ...(c.room ? { room: c.room } : {}) } : undefined;
@@ -1147,7 +1151,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
   };
   await ctx.loop.act(id, "remainder", async () => {
     if (!stillProtect()) return;
-    const c = await inTry(d, mem, s, stuckDue.go, "remainder", () => timedCleanup(d, day, mem, s, o, "bare", onSellSent, { stopPrice: bare.stop.stopPrice ?? s.stopPrice, stopCancelledAt: cancelTime }));
+    const c = await inTry(d, mem, s, stuckDue.go, "remainder", () => timedCleanup(d, day, mem, s, o, "bare", onSellSent, { stopPrice: bare.stop.stopPrice ?? s.stopPrice, stopCancelledAt: cancelTime, learned: learnedGone(mem, s.clientOrderId, firstSeen) }));
     if (c.attempted) (ctx.unprotected.push(s.symbol), mem.protectFirst?.mark(s.clientOrderId, s.symbol, "the order sync found it unprotected"));
     if (!c.stuck) mem.bareSeen.delete(s.clientOrderId);
     return c.recheckAt !== undefined ? { recheckAt: c.recheckAt, ...(c.room ? { room: c.room } : {}) } : undefined;
@@ -1543,7 +1547,19 @@ async function resolveStuck(d: RiskDeps, mem: SyncMemory, clientOrderId: string,
 // A4: `extra.stopPrice` (a "bare" remainder): a fresh stop at that price instead of the market sale (sells.ts protectWithStop).
 // A5: `extra.fast` (a "missing" entry that filled as the stack's 5 second cancel reached Alpaca): sold at once, without waiting for
 // Alpaca's cancel of its exits to show; the sale waits in sells.ts until that cancel frees the share, and nothing happens if Alpaca kept them.
-async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, listedCopy: Order, kind: "missing" | "bare", onSellSent?: (x: { symbol: string; qty: number; clientOrderId: string; atMs: number }) => void, extra: { stopPrice?: number | null; stopCancelledAt?: string | null; fast?: { fillAtMs: number }; alsoCancel?: string[]; alsoCancelStops?: string[]; alsoCancelBy?: string } = {}): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }> {
+// Michael's decision 2 of 2026-11-23 (logging only): the worker's first sight of an entry's old stop gone, on its own clock: the live
+// update's arrival (`liveStopCancelSeenAt`) or the order sync's first sight (`seenMs`), whichever came first. Reads memory only.
+export interface LearnedGone {
+  atMs: number;
+  by: "live update" | "order sync";
+}
+export function learnedGone(mem: Pick<SyncMemory, "liveStopCancelSeenAt">, clientOrderId: string, seenMs: number | undefined): LearnedGone | undefined {
+  const live = mem.liveStopCancelSeenAt.get(clientOrderId);
+  if (live !== undefined && (seenMs === undefined || live <= seenMs)) return { atMs: live, by: "live update" };
+  return seenMs !== undefined && Number.isFinite(seenMs) ? { atMs: seenMs, by: "order sync" } : undefined;
+}
+
+async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, listedCopy: Order, kind: "missing" | "bare", onSellSent?: (x: { symbol: string; qty: number; clientOrderId: string; atMs: number }) => void, extra: { stopPrice?: number | null; stopCancelledAt?: string | null; fast?: { fillAtMs: number }; alsoCancel?: string[]; alsoCancelStops?: string[]; alsoCancelBy?: string; learned?: LearnedGone } = {}): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }> {
   let o = listedCopy;
   // Group 1, round 5: a live update during this try that the entry's timed-out stop ended overrides any backoff this try would set.
   const tryStartMs = d.now().getTime();
@@ -1622,6 +1638,8 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     onSellSent: sent,
     ...(protectAt !== null ? { protectWithStop: { [s.symbol]: protectAt } } : {}),
     ...(protectAt !== null && pairTp !== null ? { protectWithPair: { [s.symbol]: { takeProfitPrice: pairTp } } } : {}),
+    // Michael's decision 2 of 2026-11-23 (logging only): the fresh stop's times start from these.
+    ...(protectAt !== null ? { protectTimes: { [s.symbol]: { stopGoneAt: extra.stopCancelledAt ?? null, learnedAt: extra.learned ? new Date(extra.learned.atMs).toISOString() : null, learnedBy: extra.learned?.by ?? null } } } : {}),
     ...(mem.brokenPairIds.size > 0 ? { notProtection: [...mem.brokenPairIds.entries()].filter(([, b]) => b.symbol === s.symbol).map(([cid]) => cid) } : {}),
     ...((extra.alsoCancel?.length ?? 0) > 0 ? { endOnCancelFail: true } : {}),
     // Item 2 of 2026-11-13: such a try waits half a second for Alpaca's cancel (a cancel usually lands in about 0.2 s), so a whole try (at
@@ -1681,7 +1699,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     const cancelled = extra.stopCancelledAt ? Date.parse(extra.stopCancelledAt) : NaN;
     // Ruling B: its time to confirm is Alpaca's answer to the order itself (`msToConfirm`). The exit pair: `pair` and its take-profit price;
     // a plain stop placed after a refused pair says so, with the time the extra step took (`afterPairRefusedMs`).
-    d.log?.("fresh_stop", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: f.clientOrderId, qty: f.qty, stopPrice: f.stopPrice, msFromStopCancel: Number.isFinite(cancelled) ? now - cancelled : null, msToConfirm: f.answerMs, confirmedBy: "answer", ...(f.pair ? { pair: true, takeProfitPrice: f.pair.takeProfitPrice } : {}), ...(r.pairRefused ? { afterPairRefused: true, afterPairRefusedReason: r.pairRefused, afterPairRefusedMs: f.afterPairRefusedMs ?? null } : {}), ...(pairRefusedEarlier ? { pairRefusedEarlier: true } : {}) });
+    d.log?.("fresh_stop", { symbol: s.symbol, clientOrderId: s.clientOrderId, stopClientOrderId: f.clientOrderId, qty: f.qty, stopPrice: f.stopPrice, msFromStopCancel: Number.isFinite(cancelled) ? now - cancelled : null, msToConfirm: f.answerMs, confirmedBy: "answer", ...(f.pair ? { pair: true, takeProfitPrice: f.pair.takeProfitPrice } : {}), ...(r.pairRefused ? { afterPairRefused: true, afterPairRefusedReason: r.pairRefused, afterPairRefusedMs: f.afterPairRefusedMs ?? null } : {}), ...(pairRefusedEarlier ? { pairRefusedEarlier: true } : {}), times: f.times ?? null });
     try {
       d.onFreshStop?.({ symbol: s.symbol, shares: f.qty });
     } catch {

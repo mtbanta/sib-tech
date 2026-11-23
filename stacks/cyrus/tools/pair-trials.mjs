@@ -21,7 +21,10 @@
 //
 // Run from the clean checkout of the reviewed commit, like the deploy tools (self-check.mjs):
 //   node <clean clone>/stacks/cyrus/tools/pair-trials.mjs --dir <clean clone>/stacks/cyrus --reviewed <commit> --date 2026-11-23
-//        --out <file outside the repo> [--trials T1,T2,T3,T4] [--check-only]
+//        --out <file outside the repo> [--trials T1,T2,T3,T4] [--symbols A,B,C] [--check-only]
+// `--symbols` (Michael's decision 3 of 2026-11-23): 1 to 3 names, in the order given (T4 on the first), each one the guards already accept
+// (traded by the stack today, priced 5 to 60 dollars); any other name is refused before anything is sent, because a held symbol the stack
+// has no order for today draws the worker's carried-position alert and sale. Without it, the first three accepted names, as before.
 // Never prints a key. Paper only. Research input for a human decision, never an instruction to act.
 import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync } from "node:fs";
@@ -56,6 +59,9 @@ const date = value("--date");
 const outArg = value("--out");
 const out = outArg ? resolve(outArg) : null;
 const which = new Set((value("--trials") ?? "T1,T2,T3,T4").split(",").map((x) => x.trim().toUpperCase()));
+const symbolsArg = args.includes("--symbols") ? (value("--symbols") ?? "") : null;
+const chosen = symbolsArg === null ? null : [...new Set(symbolsArg.split(",").map((x) => x.trim().toUpperCase()).filter(Boolean))];
+if (chosen !== null && (chosen.length < 1 || chosen.length > 3 || chosen.some((x) => !/^[A-Z]{1,5}$/.test(x)))) refuse("--symbols takes 1 to 3 symbols, comma separated");
 if (!dir || !reviewed || reviewed.length < 7 || !date || !out) refuse("--dir, --reviewed <commit>, --date YYYY-MM-DD and --out <file> are required");
 if (existsSync(`${dir}/.env.local`)) refuse("the checkout holds a key file");
 if (out.startsWith(dir) || out.includes("/Projects/sib-tech/")) refuse("--out must be outside the repo");
@@ -150,8 +156,12 @@ async function guards() {
   const open = await raw("GET", "/v2/orders?status=open&limit=500&nested=true");
   if (pos.status !== 200 || !Array.isArray(pos.json) || pos.json.length !== 0) problems.push(`Alpaca is not flat (positions: ${Array.isArray(pos.json) ? pos.json.length : pos.status})`);
   if (open.status !== 200 || !Array.isArray(open.json) || open.json.length !== 0) problems.push(`Alpaca has open orders (${Array.isArray(open.json) ? open.json.length : open.status})`);
-  const symbols = traded.filter((r) => /^[A-Z]{1,5}$/.test(r.symbol) && r.px >= 5 && r.px <= 60).map((r) => r.symbol);
-  if (symbols.length < 3) problems.push("fewer than 3 symbols traded today priced 5 to 60 dollars");
+  const accepted = traded.filter((r) => /^[A-Z]{1,5}$/.test(r.symbol) && r.px >= 5 && r.px <= 60).map((r) => r.symbol);
+  // Decision 3 of 2026-11-23: chosen symbols must each be one the guards accept; checked again before every trial.
+  const notOk = chosen === null ? [] : chosen.filter((x) => !accepted.includes(x));
+  if (notOk.length > 0) problems.push(`not traded by the stack today at 5 to 60 dollars: ${notOk.join(", ")}`);
+  const symbols = chosen === null ? accepted : chosen.filter((x) => accepted.includes(x));
+  if (chosen === null && symbols.length < 3) problems.push("fewer than 3 symbols traded today priced 5 to 60 dollars");
   return { problems, symbols };
 }
 
@@ -355,6 +365,20 @@ async function t3(symbol) {
       row.stopFilledAfterMove = !!done.v && legOf(done.v)?.status === "filled";
     }
   }
+  // Michael's decision 3 of 2026-11-23: when the wait ended with the limit cancelled but the stop leg not yet final (a triggered stop shows
+  // "new" for a moment as its market sale works; APG on 2026-11-23 filled 1.35 s after the limit's cancel), wait for the leg's final status
+  // (filled, cancelled, expired or rejected), at most 10 s, gaps growing from 0.4 s, and judge "stop sold" from it.
+  const FINAL = new Set(["filled", "canceled", "expired", "rejected"]);
+  if (done.v && !FINAL.has(legOf(done.v)?.status ?? "")) {
+    const fin = await until(async () => {
+      const x = await getOrder(parentId);
+      return FINAL.has(legOf(x)?.status ?? "") ? x : null;
+    }, 10_000, 400);
+    row.legFinalWaitMs = fin.ms;
+    if (fin.v) done = fin;
+    // Reached only after the stop's move (the 60 s wait ends only on a filled leg or a filled limit, both final).
+    if (fin.v && legOf(fin.v)?.status === "filled" && !row.stopFilledInWait) row.stopFilledAfterMove = true;
+  }
   if (done.v) {
     row.parentStatusAfter = done.v.status;
     row.legStatusAfter = legOf(done.v)?.status ?? null;
@@ -412,7 +436,7 @@ if (args.includes("--check-only")) {
   process.exit(0);
 }
 const plan = [];
-for (const s of g.symbols.slice(0, 3)) {
+for (const s of g.symbols.slice(0, 3)) { // the chosen symbols (--symbols) or the first three accepted
   if (which.has("T1")) plan.push(["T1T2", s]);
   if (which.has("T3")) plan.push(["T3", s]);
 }
