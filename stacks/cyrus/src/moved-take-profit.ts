@@ -45,6 +45,12 @@ export const MOVE_FILL_WAIT_MS = 2_000;
 // at or below the real bid fills at the real bid, a limit above it rests and falls back after MOVE_FILL_WAIT_MS, and a stray low bid fails
 // the margin rule (MOVE_MIN_ABOVE_STOP).
 export const MOVE_QUOTE_MAX_AGE_MS = 30_000;
+// Michael's decision 2 of 2026-11-24: "When the bid is below the stop but the latest trade (from the same snapshot) is above it, price the
+// move from the latest trade minus 1 cent; today's fallback still applies if it does not fill." With his answer on the trade's age: "10 s
+// limit on the latest trade's age." On the free IEX feed a thin name's bid can sit far below the market (BIP, SJM, SNDK and SUNB at the
+// 10:30 close-out of 2026-11-24, by up to 6.6 dollars; their market sales then filled above their stops). The trade-priced limit must
+// still pass every other rule (the quote's own age first, the 2 cent margin above the stop, below the old take-profit).
+export const MOVE_TRADE_MAX_AGE_MS = 10_000;
 // Bounds on the phase (the advisor's point: one hung replace is 10 s): at most this many replaces in one sale, and none sent once this
 // long has passed since the phase began. What is not moved takes today's path.
 export const MOVE_MAX_PER_SALE = 30;
@@ -86,9 +92,11 @@ export interface MovePlan extends MoveCandidate {
   bid: number;
   ask: number;
   quoteAgeMs: number;
-  // The snapshot's latest trade, for the record only (null when it carried none).
+  // The snapshot's latest trade (null when it carried none): for the record, and the price itself when `priceFrom` is "trade".
   tradePrice: number | null;
   tradeAgeMs: number | null;
+  // Michael's decision 2 of 2026-11-24: which price the limit came from, the bid (as before) or the latest trade.
+  priceFrom: "bid" | "trade";
 }
 // Why a position was not moved (Michael's request of 2026-11-19: stored for every position skipped, in every move phase). The prices are
 // given where the step that skipped it knew them.
@@ -203,16 +211,23 @@ export function pricedMoves(candidates: MoveCandidate[], quotes: ReadonlyMap<str
       skipped.push({ symbol: c.symbol, why: `quote ${Math.round(age / 1000)} s old`, ...seen });
       continue;
     }
-    const limit = floorCents(q.bid - MOVE_BELOW_BID);
+    let limit = floorCents(q.bid - MOVE_BELOW_BID);
+    let priceFrom: MovePlan["priceFrom"] = "bid";
+    // Decision 2 of 2026-11-24: only when the bid is below the stop, the same snapshot's latest trade is above it, and that trade is at most
+    // MOVE_TRADE_MAX_AGE_MS old; the trade less 1 cent then replaces the bid's price and must pass the same rules below.
+    if (!(limit >= c.stopPrice + MOVE_MIN_ABOVE_STOP - EPS) && q.bid < c.stopPrice - EPS && tradePrice !== null && tradePrice > c.stopPrice + EPS && tradeAgeMs !== null && tradeAgeMs <= MOVE_TRADE_MAX_AGE_MS) {
+      limit = floorCents(tradePrice - MOVE_BELOW_BID);
+      priceFrom = "trade";
+    }
     if (!(limit >= c.stopPrice + MOVE_MIN_ABOVE_STOP - EPS)) {
-      skipped.push({ symbol: c.symbol, why: `price within ${MOVE_MIN_ABOVE_STOP_CENTS} cents of the stop`, ...seen });
+      skipped.push({ symbol: c.symbol, why: priceFrom === "trade" ? `price within ${MOVE_MIN_ABOVE_STOP_CENTS} cents of the stop (from the latest trade; the bid is below the stop)` : `price within ${MOVE_MIN_ABOVE_STOP_CENTS} cents of the stop`, ...seen });
       continue;
     }
     if (!(limit < c.oldLimit - EPS)) {
       skipped.push({ symbol: c.symbol, why: "take-profit already at or below the price", ...seen });
       continue;
     }
-    moves.push({ ...c, limit, bid: q.bid, ask: q.ask, quoteAgeMs: Math.max(0, age), tradePrice, tradeAgeMs });
+    moves.push({ ...c, limit, bid: q.bid, ask: q.ask, quoteAgeMs: Math.max(0, age), tradePrice, tradeAgeMs, priceFrom });
   }
   return { moves, skipped };
 }
@@ -236,6 +251,8 @@ export interface MoveRow {
   // The snapshot's latest trade at the move, for the record (Michael's request of 2026-11-19); null when it carried none.
   tradePrice: number | null;
   tradeAgeMs: number | null;
+  // Michael's decision 2 of 2026-11-24: the price the limit came from ("bid", or "trade" when the bid was below the stop).
+  priceFrom: "bid" | "trade";
   sentAtMs: number;
   answerMs: number;
   accepted: boolean;

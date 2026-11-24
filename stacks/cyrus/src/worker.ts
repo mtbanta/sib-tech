@@ -174,6 +174,9 @@ export function notSwitchedWhy(pause: { on: boolean } | null, stop: StopFlag | n
   return stop?.on ? "the stop flag is on" : "trading is no longer paused for the mid-day cycle";
 }
 
+// Michael's decision 5 of 2026-11-24: at most one alert per this long for a not-flat check that keeps failing outside the session.
+export const NOT_FLAT_FAIL_ALERT_MS = 30 * 60_000;
+
 export class Worker {
   private readonly d: WorkerDeps;
   private readonly commands: CommandProcessor;
@@ -252,6 +255,8 @@ export class Worker {
   // Review round 5 (finding 3): the last day record read for today, used when the database cannot be read.
   private lastDay: DayRecord | null = null;
   private lastDayFallbackAlert = 0;
+  // Michael's decision 5 of 2026-11-24: when a failed not-flat check outside the session last posted its alert.
+  private lastNotFlatFailAlert = 0;
   private passDegraded = false;
   private lastMigrateAlert = 0;
   // The loss stop's own schedule and memory, and the date its first check after this start (with today's equity history) worked.
@@ -1104,6 +1109,16 @@ export class Worker {
       // A failed check must not stop the limits flow, arming or the close-out below; the gate reads the saved flag itself.
       this.lastTickError = `not-flat check: ${(err as Error).message.slice(0, 120)}`;
       this.d.log?.("error", "not_flat_check_failed", { error: (err as Error).message.slice(0, 200) });
+      // Michael's decision 5 of 2026-11-24 (with his answer "Not-flat, no mention"): a failed check outside the session posts an alert, without a
+      // mention, at most once per NOT_FLAT_FAIL_ALERT_MS (the check runs every pass). Never waited on (Discord is not in the pass's path).
+      try {
+        if (sessionPhase(today, now) !== "open" && now.getTime() - this.lastNotFlatFailAlert >= NOT_FLAT_FAIL_ALERT_MS) {
+          this.lastNotFlatFailAlert = now.getTime();
+          void this.say("alerts", `The overnight not-flat check failed (${(err as Error).message.slice(0, 100)}). I keep checking every few seconds; while it keeps failing this message repeats at most every 30 minutes. Paper trading only.`).catch(() => undefined);
+        }
+      } catch {
+        /* an alert must never break the pass */
+      }
     }
     const steps: MorningSteps = { store: this.d.store, broker: this.d.broker, say: (c, t) => this.say(c, t), now: this.d.now, feed: this.d.settings.alpaca.dataFeed };
 
