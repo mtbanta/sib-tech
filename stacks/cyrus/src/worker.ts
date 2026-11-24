@@ -1976,7 +1976,7 @@ export class Worker {
         // protection loop looks at the entry at once; its missing-exit sale cancels the pair's rest and sells at market. No second pair.
         if (f.takeProfitPrice !== undefined && info.event === "partial_fill" && !f.pairBroken) {
           f.pairBroken = true;
-          notePairBroken(this.syncMemory, f.stopClientOrderId, { orderId: f.orderId, symbol: f.symbol });
+          notePairBroken(this.syncMemory, f.stopClientOrderId, { orderId: f.orderId, symbol: f.symbol, nowMs: this.d.now().getTime() });
           this.d.log?.("info", "exit_pair_broken", { symbol: info.symbol, clientOrderId: f.entryClientOrderId, pairClientOrderId: info.clientOrderId, status: info.status, by: "live update" });
           if (this.closingOut || this.liquidator.isLiquidatingOthers() || this.middayOwnsSelling) return;
           this.protectFirst.mark(f.entryClientOrderId, info.symbol, "an exit pair's take-profit filled part");
@@ -2059,6 +2059,9 @@ export class Worker {
     const o = u.order;
     for (const w of [...this.waiters]) if (w.symbols.has(o.symbol)) w.wake();
     const nowMs = this.d.now().getTime();
+    // Michael's decision 4 of 2026-11-24: a remembered broken pair that Alpaca reports filled is forgotten (its shares are sold; nothing is
+    // left to cancel). Other ends are forgotten when the sync's order list shows them (forgetEndedBrokenPairs).
+    if (o.side === "sell" && u.event === "fill" && this.syncMemory.brokenPairIds.delete(o.clientOrderId)) this.d.log?.("info", "exit_pair_forgotten", { pairClientOrderIds: [o.clientOrderId], by: "live update" });
     // Decision 4 of 2026-11-06 (shadow only): every fill moves the estimate's own book.
     if ((u.event === "fill" || u.event === "partial_fill") && (o.side === "buy" || o.side === "sell")) {
       try {

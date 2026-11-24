@@ -258,3 +258,86 @@ test("round 1 (group 2): with exit pairs on and the pair refused, the plain stop
   assert.ok(ends.some((x) => x > pairAsked && x < asked), "the pair's gate reads came before the plain stop was asked");
   assert.ok(ms(t.sentAt) - asked >= 70 && ms(t.sentAt) - asked < 70 * 3, `only the plain stop's own reads: ${ms(t.sentAt) - asked} ms`);
 });
+
+// ---------------- Michael's decision 4 of 2026-11-24: stale broken-pair records, and why a broken pair waits ----------------
+import { forgetOldBrokenPairs, notePairBroken } from "../src/risk.ts";
+
+const pairOf = (w: World, symbol: string) => w.sim.orders.filter((o) => o.symbol === symbol && o.side === "sell" && o.orderClass === "oco" && o.type === "limit");
+async function pairRemainder(w: World, dd: any, symbol: string, n: number) {
+  const id = await hold(w, symbol, 10, 14.5, n);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 3, 14.58);
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  return id;
+}
+
+test("decision 4 of 2026-11-24, Monday's UMC: a pair noted broken by the live update whose rest then filled is forgotten once the order list shows it filled, so a later remainder's rest cancel never names it", async () => {
+  const w = world();
+  const dd = await day(w, "on");
+  const a = await pairRemainder(w, dd, "UMC", 16);
+  const f = w.memory.freshStops.get(a)!;
+  f.pairBroken = true; // what the worker does on Alpaca's live partial fill
+  notePairBroken(w.memory, f.stopClientOrderId, { orderId: f.orderId, symbol: "UMC", nowMs: w.sim.simMs });
+  w.sim.fillPairTakeProfit("UMC"); // the whole pair fills before the stack acts: every UMC-16 share sold
+  w.sim.advance(1_000);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(w.memory.brokenPairIds.has(f.stopClientOrderId), false, "forgotten: the list shows it filled");
+  assert.ok(w.events.some((e) => e.event === "exit_pair_forgotten" && e.data.by === "order list"));
+  // A new UMC remainder whose own pair breaks: its rest cancel names only its own pair.
+  const b = await pairRemainder(w, dd, "UMC", 22);
+  w.sim.advance(1_000);
+  w.sim.fillPairTakeProfit("UMC", 2);
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  const rc = w.events.filter((e) => e.event === "exit_pair_rest_cancel").at(-1)!;
+  const oldId = pairOf(w, "UMC")[0]!.id;
+  assert.equal(rc.data.orderIds.includes(oldId), false, "Monday's filled pair is not named");
+  assert.ok(w.memory.freshStops.get(b) === undefined || w.memory.freshStops.get(b)!.pairBroken);
+  assert.equal(w.sim.oversellAttempts, 0);
+});
+
+test("decision 4: remembered broken pairs are forgotten at a new trading day (with their logged waits); the same day keeps them", () => {
+  const mem = new SyncMemory();
+  forgetOldBrokenPairs(mem, "2026-11-23");
+  notePairBroken(mem, "cyrus-p-a", { orderId: "o1", symbol: "UMC", nowMs: 1 });
+  mem.pairWaitLogged.add("cyrus-p-a|x");
+  forgetOldBrokenPairs(mem, "2026-11-23");
+  assert.equal(mem.brokenPairIds.size, 1);
+  forgetOldBrokenPairs(mem, "2026-11-24");
+  assert.equal(mem.brokenPairIds.size, 0);
+  assert.equal(mem.pairWaitLogged.size, 0);
+});
+
+test("decision 4: the worker forgets a remembered broken pair when Alpaca's live update says it filled", async () => {
+  const { rig } = await import("./rig.ts");
+  const r = rig({ orderStream: true });
+  const wk: any = r.worker;
+  notePairBroken(wk.syncMemory, "cyrus-p-20261102-UMC-x-s1", { orderId: "p1", symbol: "UMC", nowMs: 0 });
+  const order = { id: "p1", clientOrderId: "cyrus-p-20261102-UMC-x-s1", symbol: "UMC", side: "sell", type: "limit", orderClass: "oco", status: "filled", qty: 7, filledQty: 7, legs: [] };
+  wk.afterOrderUpdate({ event: "partial_fill", order: { ...order, status: "partially_filled" }, positionQty: null });
+  assert.equal(wk.syncMemory.brokenPairIds.size, 1, "a partial fill keeps it");
+  wk.afterOrderUpdate({ event: "fill", order, positionQty: null });
+  assert.equal(wk.syncMemory.brokenPairIds.size, 0);
+});
+
+test("decision 4 (logging): a broken pair's entry left alone while selling is owned elsewhere is stored once with why and the time since it was noted broken; its sale's start is stored with its queue time", async () => {
+  const w = world();
+  const dd = await day(w, "on");
+  const a = await pairRemainder(w, dd, "SOFI", 4);
+  const f = w.memory.freshStops.get(a)!;
+  f.pairBroken = true;
+  notePairBroken(w.memory, f.stopClientOrderId, { orderId: f.orderId, symbol: "SOFI", nowMs: w.sim.simMs });
+  w.sim.advance(700);
+  await syncOrders(w.risk, dd, { protect: false });
+  await syncOrders(w.risk, dd, { protect: false });
+  const waits = w.events.filter((e) => e.event === "exit_pair_broken_wait");
+  assert.equal(waits.length, 1, "once per reason");
+  assert.deepEqual([waits[0]!.data.why, waits[0]!.data.msFromBroken], ["selling is owned by a close-out or another sale", 700]);
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  const start = w.events.find((e) => e.event === "exit_pair_sale_start")!;
+  assert.equal(start.data.msFromBroken, 1_000);
+  assert.equal(typeof start.data.msInQueue, "number");
+  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["SOFI", 7]], "the sale itself unchanged");
+});

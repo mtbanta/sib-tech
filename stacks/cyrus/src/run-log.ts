@@ -35,6 +35,13 @@ export const STORED_INFO_EVENTS = new Set([
   "exit_pair_refused",
   "exit_pair_broken",
   "exit_pair_rest_cancel",
+  // Michael's decisions 4 and 1 of 2026-11-24 (logging): why a broken pair waited, when its sale started, a broken pair forgotten, and a
+  // remainder's sale that ended because its symbol was fully protected or its own shares were gone.
+  "exit_pair_broken_wait",
+  "exit_pair_sale_start",
+  "exit_pair_forgotten",
+  "cleanup_fully_protected",
+  "cleanup_own_none_left",
   "startup_exit_pair_broken",
   "exit_pair_switch",
   "move_phase_skipped",
