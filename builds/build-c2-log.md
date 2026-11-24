@@ -9431,3 +9431,9 @@ Paper only; research input for a human decision, never an instruction to act.
 7. Messaging backlog, not tonight: clearer wording for the partly filled pair's market-sale alert; exclude test orders (ptest-) from the 5-minute lines and the daily summary.
 Build 1 to 6 tonight, group 1 and group 2, up to 8 rounds; deploy after the close, before 8:00 AM, only if both pass.
 Never print any token or key."
+
+**Michael's answers to the builder's four questions (2026-11-24, about 12:05 PM CT), saved verbatim:**
+- Item 2, the trade's age: "10 s limit on the latest trade's age." (The figures given with the question: today's skipped moves BIP, SNDK and SUNB had trades 1 to 4 s old and SJM 260 s old; Friday's ESTC and INSM 1 to 2 s old; stored `move_phase_skips` rows.)
+- Item 5, which checks and whether to mention: "Not-flat, no mention" (only the not-flat check outside the session, posted in `alerts` without a mention, at most once per 30 minutes).
+- Splitting the deploy: "Yes, split" (what passes deploys before 8:00 AM; the rest stays built and waits).
+- Item 4, a stale broken-pair record: "Fix it tonight" (if confirmed: forget a remembered broken pair once Alpaca shows it ended, and at each new trading day; group 1 and group 2).
