@@ -9675,3 +9675,11 @@ The `not_flat_check_failed` at 2:11 AM Tuesday ("The operation was aborted due t
 - The pair move at a close-out and the 2:30 hold were not tested today, because the account was flat at 2:30.
 
 Research input for a human decision, never an instruction to act. Paper only.
+
+## Michael's answers of Tuesday 2026-11-24 (evening), saved verbatim
+
+"Answers:
+1. Yes: the stack keeps watching every position by its own entry id until it ends, including an older leftover after a newer position opens on the same stock. Also confirm whether a stock with an open leftover blocks new entries; if not, propose making it block them (one position per stock). Group 1 review if code changes.
+2. Proposal only: the fixed ~0.5 s pause in the fresh-stop step. Can it be removed or shortened safely?
+3. Set the usual waits for Wednesday: the mid-day review once the 10:30 close-out is flat, and the end-of-day review after the 3:05 summary. Post a line in commands when each is done.
+Never print any token or key."
