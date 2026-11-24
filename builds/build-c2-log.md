@@ -9683,3 +9683,18 @@ Research input for a human decision, never an instruction to act. Paper only.
 2. Proposal only: the fixed ~0.5 s pause in the fresh-stop step. Can it be removed or shortened safely?
 3. Set the usual waits for Wednesday: the mid-day review once the 10:30 close-out is flat, and the end-of-day review after the 3:05 summary. Post a line in commands when each is done.
 Never print any token or key."
+
+## Item 1 of Michael's answers of 2026-11-24 (evening): one position per stock, measured; no code changed
+
+**Does a stock with an open leftover block new entries? Yes, already.** The order gate (`src/gate.ts`) refuses an entry while the account view shows the stock held ("already holding this symbol", 4,862 refusals on 2026-11-24 alone) and while any entry record for the stock is still active ("an entry for this symbol is still working"), and it decides one entry at a time. So one position per stock is enforced today.
+
+**Measured from Alpaca's own fills (read only; every trading day 2026-11-02 to 2026-11-24: 114,325 fills, 57,048 buy fills, 44,011 buy orders): 0 cases** of a new entry filling while the account still held shares of that stock from an earlier order. Checks: the net position never went below zero; every stock flat at every day's end; the method caught a planted overlap in a self-test. The quickest re-entry after a stock went flat was 218 ms (the median about 10.9 s); the five quickest new buys were created 118 to 153 ms after the earlier position's exit filled, which fits the live update freeing the stock. Not measured: whether the gate ever sent an entry while shares were held that then sold before it filled (it would not show in the fills; settling it needs about 44,000 lookups).
+
+**What that means for "keep watching every position by its own entry id until it ends":**
+- The case group 1 raised (an older leftover with shares while a newer position is open) came from a probe that put the newer entry straight into the simulator and the store, so it never met the gate. In live trading it has not happened once in 44,011 buys.
+- The paths that could in theory let it through, from the code: a record closed by the `goneForGood` rule if Alpaca's positions read lagged a real holding by more than 10 s, or a wrong live update. Neither has ever caused an overlap.
+- **The literal change is unsafe today.** A record cannot yet tell by its own id when it has ended if a fresh stop, an exit pair or a market sale sold its shares (those carry no entry number), so an older record kept active under a newer position would aim its sale at the newer position's shares: the same stock-level trap that failed round 1 of the SUNB fix. So the builder changed no code and asks Michael whether he still wants it, given the measurement; a safe version would first need each sale of ours to carry its entry, a proposal of its own.
+
+**Item 2:** proposal written, `builds/c2-proposal-2026-11-24-fresh-stop-pause.md` (recommended: A, read only after the pause, and B, end it early on Alpaca's live confirmation of the exact orders cancelled, for one position's own sale only; about 0.5 s saved per fresh stop, estimated).
+
+**Item 3:** Wednesday's two waits are set as wall-clock waits (10:31 AM and 3:07 PM CT, each ending on its own; fired late, never early, if the Mac sleeps).
