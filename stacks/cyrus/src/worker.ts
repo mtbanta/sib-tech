@@ -1114,7 +1114,7 @@ export class Worker {
       try {
         if (sessionPhase(today, now) !== "open" && now.getTime() - this.lastNotFlatFailAlert >= NOT_FLAT_FAIL_ALERT_MS) {
           this.lastNotFlatFailAlert = now.getTime();
-          void this.say("alerts", `The overnight not-flat check failed (${(err as Error).message.slice(0, 100)}). I keep checking every few seconds; while it keeps failing this message repeats at most every 30 minutes. Paper trading only.`).catch(() => undefined);
+          void this.say("alerts", `The not-flat check outside market hours failed (${(err as Error).message.slice(0, 100)}). I keep checking every few seconds; while it keeps failing this message repeats at most every 30 minutes. Paper trading only.`).catch(() => undefined);
         }
       } catch {
         /* an alert must never break the pass */
@@ -1976,10 +1976,14 @@ export class Worker {
         // protection loop looks at the entry at once; its missing-exit sale cancels the pair's rest and sells at market. No second pair.
         if (f.takeProfitPrice !== undefined && info.event === "partial_fill" && !f.pairBroken) {
           f.pairBroken = true;
-          notePairBroken(this.syncMemory, f.stopClientOrderId, { orderId: f.orderId, symbol: f.symbol, nowMs: this.d.now().getTime() });
+          notePairBroken(this.syncMemory, f.stopClientOrderId, { orderId: f.orderId, symbol: f.symbol, nowMs: this.d.now().getTime(), entry: f.entryClientOrderId });
           this.d.log?.("info", "exit_pair_broken", { symbol: info.symbol, clientOrderId: f.entryClientOrderId, pairClientOrderId: info.clientOrderId, status: info.status, by: "live update" });
           if (this.closingOut || this.liquidator.isLiquidatingOthers() || this.middayOwnsSelling) return;
           this.protectFirst.mark(f.entryClientOrderId, info.symbol, "an exit pair's take-profit filled part");
+          // Michael's answer of 2026-11-24 ("Fix it tonight", group 2's finding 1): the look this wakes looks the entry up even when it is older
+          // than the order list's 10 minute window (before, such an entry looked up in the last 30 s was skipped, and its shares could wait up
+          // to about 30 s without a stop: in the simulator 30.05 s; Monday's GAP, UMC and MOS fit). As a bracket's ended exit already does.
+          this.syncMemory.mustLook.add(f.entryClientOrderId);
           this.loop.wake(f.entryClientOrderId, this.d.now().getTime(), "protect");
           return;
         }

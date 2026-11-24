@@ -327,7 +327,7 @@ test("decision 4 (logging): a broken pair's entry left alone while selling is ow
   const a = await pairRemainder(w, dd, "SOFI", 4);
   const f = w.memory.freshStops.get(a)!;
   f.pairBroken = true;
-  notePairBroken(w.memory, f.stopClientOrderId, { orderId: f.orderId, symbol: "SOFI", nowMs: w.sim.simMs });
+  notePairBroken(w.memory, f.stopClientOrderId, { orderId: f.orderId, symbol: "SOFI", nowMs: w.sim.simMs, entry: a });
   w.sim.advance(700);
   await syncOrders(w.risk, dd, { protect: false });
   await syncOrders(w.risk, dd, { protect: false });
@@ -338,6 +338,97 @@ test("decision 4 (logging): a broken pair's entry left alone while selling is ow
   await syncOrders(w.risk, dd, { protect: true });
   const start = w.events.find((e) => e.event === "exit_pair_sale_start")!;
   assert.equal(start.data.msFromBroken, 1_000);
-  assert.equal(typeof start.data.msInQueue, "number");
+  assert.equal(start.data.pairClientOrderId, f.stopClientOrderId, "this entry's own pair");
+  assert.equal(typeof start.data.msFromLookStart, "number");
+  assert.equal("msInQueue" in start.data, false, "group 2, round 1: there is no queue to measure");
   assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["SOFI", 7]], "the sale itself unchanged");
+});
+
+// ---------------- Group 1 and group 2, round 1 of the 2026-11-24 build ----------------
+
+test("round 1 (group 2, finding 1, Michael's answer \"Fix it tonight\"): a broken pair on an entry older than the order list: marked for a lookup, its look sells at once; unmarked, the look cannot see it and stores why", async () => {
+  for (const marked of [true, false]) {
+    const w = world();
+    const dd = await day(w, "on");
+    const id = await hold(w, "UMC", 10, 14.5, 16);
+    w.sim.advance(11 * 60_000); // older than the sync's 10 minute order list
+    w.sim.partialTakeProfit(id, 3, 14.58);
+    w.sim.advance(300);
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true }); // looked up (an old entry), the pair placed
+    const f = w.memory.freshStops.get(id)!;
+    assert.ok(f && f.takeProfitPrice !== undefined, "the pair placed");
+    w.sim.advance(2_000);
+    w.sim.fillPairTakeProfit("UMC", 2); // 5 left
+    // What the worker does on Alpaca's live partial fill (src/worker.ts onFreshStopUpdate).
+    f.pairBroken = true;
+    notePairBroken(w.memory, f.stopClientOrderId, { orderId: f.orderId, symbol: "UMC", nowMs: w.sim.simMs, entry: id });
+    if (marked) w.memory.mustLook.add(id);
+    w.sim.advance(200);
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true }); // the look the live update wakes, 2.2 s after the last
+    if (marked) {
+      assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["UMC", 5]], "sold in the look the live update woke");
+    } else {
+      assert.equal(w.sim.sellLog.length, 0, "the old behaviour: not seen (looked up 2 s ago)");
+      const wait = w.events.find((e) => e.event === "exit_pair_broken_wait")!;
+      assert.equal(wait.data.why, "not seen in this look (older than the order list and not looked up)");
+    }
+    assert.equal(w.sim.oversellAttempts, 0);
+  }
+});
+
+test("round 1 (group 2, finding 1): the worker's live partial fill of a pair marks its entry for a lookup and stamps the break with its own clock and the entry", async () => {
+  const { rig } = await import("./rig.ts");
+  const r = rig({ orderStream: true });
+  const wk: any = r.worker;
+  wk.startOrderStream(D);
+  wk.loop.wake = () => undefined;
+  const entry = "cyrus-20261102-UMC-16";
+  wk.syncMemory.freshStops.set(entry, { symbol: "UMC", entryClientOrderId: entry, stopClientOrderId: "cyrus-p-20261102-UMC-x-s1", orderId: "p1", qty: 7, stopPrice: 14.37, placedAt: 0, status: "accepted", lookedAt: 0, takeProfitPrice: 14.58 });
+  const t = wk.d.now().getTime();
+  wk.orderHandler.d.onFreshStopUpdate({ clientOrderId: "cyrus-p-20261102-UMC-x-s1", symbol: "UMC", event: "partial_fill", status: "partially_filled", atMs: t });
+  assert.ok(wk.syncMemory.mustLook.has(entry), "looked up in the woken look");
+  const b = wk.syncMemory.brokenPairIds.get("cyrus-p-20261102-UMC-x-s1");
+  assert.deepEqual([b.entry, b.notedAt], [entry, t]);
+});
+
+test("round 1 (group 2, finding 3): a wait row is found by the entry after its fresh stop record is gone (a later look; after a restart)", async () => {
+  const w = world();
+  const dd = await day(w, "on");
+  const a = await pairRemainder(w, dd, "SOFI", 5);
+  const f = w.memory.freshStops.get(a)!;
+  w.memory.freshStops.delete(a); // as after a restart, or once a look dropped it
+  notePairBroken(w.memory, f.stopClientOrderId, { orderId: f.orderId, symbol: "SOFI", nowMs: w.sim.simMs, entry: a });
+  w.sim.advance(400);
+  await syncOrders(w.risk, dd, { protect: false });
+  assert.equal(w.events.filter((e) => e.event === "exit_pair_broken_wait").length, 1);
+});
+
+test("round 1 (group 2, finding 4): a pair the order sync's list shows broken is stamped when that read returned, with its entry", async () => {
+  const w = world();
+  const dd = await day(w, "on");
+  const a = await pairRemainder(w, dd, "QXO", 11);
+  const f = w.memory.freshStops.get(a)!;
+  w.sim.advance(2_000);
+  w.sim.fillPairTakeProfit("QXO", 2);
+  w.sim.advance(300);
+  const before = w.sim.simMs;
+  await syncOrders(w.risk, dd, { protect: true });
+  const b = w.memory.brokenPairIds.get(f.stopClientOrderId);
+  assert.ok(b === undefined || (b.entry === a && b.notedAt! >= before), "stamped after the reads, with the entry (or already forgotten once its rest was cancelled)");
+  assert.ok(w.events.some((e) => e.event === "exit_pair_broken" && e.data.by === "order list"));
+});
+
+test("round 1 (group 2, finding 5): the order sync forgets the remembered broken pairs of an earlier day; a pair noted again keeps its cancelled flag", async () => {
+  const w = world();
+  const dd = await day(w, "on");
+  notePairBroken(w.memory, "cyrus-p-old", { orderId: "o-old", symbol: "UMC", nowMs: 0, entry: "cyrus-20261030-UMC-1" });
+  w.memory.brokenPairsDay = "2026-10-30";
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.equal(w.memory.brokenPairIds.has("cyrus-p-old"), false, "a new trading day forgets it");
+  assert.equal(w.memory.brokenPairsDay, D);
+  notePairBroken(w.memory, "cyrus-p-a", { orderId: "o1", symbol: "UMC", nowMs: 1 });
+  w.memory.brokenPairIds.get("cyrus-p-a")!.cancelled = true;
+  notePairBroken(w.memory, "cyrus-p-a", { orderId: "o1", symbol: "UMC", nowMs: 2 });
+  assert.equal(w.memory.brokenPairIds.get("cyrus-p-a")!.cancelled, true);
+  assert.equal(w.memory.brokenPairIds.get("cyrus-p-a")!.notedAt, 1, "the first time is kept");
 });

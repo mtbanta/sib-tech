@@ -297,8 +297,8 @@ export interface LiquidateOptions {
   // changes what the sale does.
   protectTimes?: Record<string, { stopGoneAt: string | null; learnedAt: string | null; learnedBy: string | null }>;
   // Michael's decision 1 of 2026-11-24 (the SUNB false alert), with `ownEntryOnly` only: when the entry's shares are not free at the sale's
-  // step and no other bracket's stop covers the holding, its own remaining shares are recounted once in this sale by its own id (one
-  // lookup; null when unknown).
+  // step and another order holds them or another bracket's stops cover the holding, its own remaining shares are recounted once in this sale
+  // by its own id (one lookup; null when unknown). Only this recount can end the sale.
   ownRecount?: () => Promise<number | null>;
   // A5 of the proposal of 2026-11-12, with `ownEntryOnly` only: the entry filled as the stack's cancel reached Alpaca, and Alpaca cancels
   // its exits itself. Nothing is cancelled here; the sale waits (up to `waitCancelMs`) for Alpaca's cancel to free the shares. If they
@@ -408,9 +408,9 @@ export interface LiquidateResult {
   // are no longer held at the last look (every one of its shares is gone, whoever sold them).
   ownTarget?: Record<string, number>;
   ownGone?: string[];
-  // Michael's decision 1 of 2026-11-24, with `ownEntryOnly` only: the sale ended without acting because every share of the symbol is under
-  // another bracket's working stop (`fullyProtected`), or because the entry's own recount by its id found none of its shares left
-  // (`ownNoneLeft`, with the recount).
+  // Michael's decision 1 of 2026-11-24, with `ownEntryOnly` only: the sale ended with no sale or stop sent because the entry's own recount by
+  // its id found none of its shares left, with every share of the symbol under another bracket's working stop (`fullyProtected`) or not
+  // (`ownNoneLeft`, with the recount). It may already have cancelled the entry's own take-profit rest.
   fullyProtected?: string[];
   ownNoneLeft?: { symbol: string; recounted: number };
   // A4: the fresh stop placed (with `protectWithStop`), when one was.
@@ -438,18 +438,27 @@ export interface LiquidateResult {
 }
 
 // Michael's decision 1 of 2026-11-24 (the SUNB false alert): shares of one symbol under a working stop of another bracket, from the open
-// orders already read. Counted: a stop (or stop limit) leg, open and not pending cancel, in a group whose top order is not a fresh stop or
-// exit pair of ours (cyrus-p-, judged by their own rules), not a broken pair, not named in `notProtection`, and not an order this sale is
-// cancelling (`excludeIds`: the entry's own legs, a timed-out fresh stop). A bracket's take-profit is a limit, never counted: a remainder's
-// own take-profit rest holds its shares without protecting them. One stop per group (a bracket has one).
+// orders already read. Counted only for a bracket listed under its own entry (a buy) that has filled: at most the shares that entry still
+// holds (its fill less what its exits filled), its stop leg open and not pending cancel. Never counted: a bracket whose take-profit has filled
+// any piece (Alpaca cancels the stop at the first piece, and its list can show it `held` for about 2 s more), an entry not yet filled, a sell
+// listed without its entry, a take-profit limit, a fresh stop or exit pair of ours (cyrus-p-), a broken pair, one named in `notProtection`, or
+// an order this sale is cancelling (`excludeIds`). Each leg once. Group 1, round 1 of 2026-11-24: this count alone never ends a sale; it
+// only asks for the entry's own recount by its id (`ownRecount`), which decides.
 export function bracketStopCover(orders: Order[], symbol: string, excludeIds: readonly string[], notProtection: readonly string[] = []): number {
   let total = 0;
+  const seen = new Set<string>();
   const isStop = (x: Order) => x.type === "stop" || x.type === "stop_limit" || x.type === "trailing_stop";
   for (const o of orders) {
-    if (o.clientOrderId.startsWith("cyrus-p-") || notProtection.includes(o.clientOrderId)) continue;
-    if (isExitPair(o) && pairBroken(o)) continue;
-    const group = (o.side === "buy" ? flattenLegs(o) : [o, ...flattenLegs(o)]).filter((x) => x.symbol === symbol && x.side === "sell" && OPEN_STATUSES.has(x.status) && x.status !== "pending_cancel" && isStop(x) && !excludeIds.includes(x.id));
-    if (group.length > 0) total += Math.max(...group.map(remaining));
+    if (o.side !== "buy" || o.clientOrderId.startsWith("cyrus-p-") || notProtection.includes(o.clientOrderId)) continue;
+    if (!(o.filledQty > EPS)) continue;
+    const exits = flattenLegs(o).filter((x) => x.symbol === symbol && x.side === "sell");
+    if (exits.length === 0) continue;
+    if (exits.some((x) => x.type === "limit" && x.filledQty > EPS)) continue;
+    const stops = exits.filter((x) => OPEN_STATUSES.has(x.status) && x.status !== "pending_cancel" && isStop(x) && !excludeIds.includes(x.id) && !seen.has(x.id));
+    if (stops.length === 0) continue;
+    const holds = Math.max(0, o.filledQty - exits.reduce((n, x) => n + x.filledQty, 0));
+    for (const x of stops) seen.add(x.id);
+    total += Math.min(holds, Math.max(...stops.map(remaining)));
   }
   return total;
 }
@@ -1375,20 +1384,16 @@ export class Liquidator {
             // Michael's decision 1 of 2026-11-24 (the SUNB false alert of that morning: a remainder sold out by its own take-profit while a
             // newer entry held the symbol under its own bracket; the sale read the newer entry's shares as the remainder's): "the leftover-share
             // step matches positions by the entry's own id, never by symbol alone, and skips any position that is fully protected."
-            // (a) Fully protected: every share held is under another bracket's working stop, so none of this entry's can be unprotected.
+            // When another order holds the symbol's shares, or every share is under another bracket's working stop (`bracketStopCover`), the
+            // entry's own remaining shares are recounted once in this sale by its own id (one lookup). Only that recount ends the sale: none of
+            // its own shares left -> nothing more to do (stored as `cleanup_fully_protected` when the stops cover the holding, else
+            // `cleanup_own_none_left`). Group 1, round 1 of 2026-11-24: never on the symbol's stops alone (a stop of an entry not yet filled,
+            // or one Alpaca already cancelled while its list lags, protects nothing). A hold with no other order visible (Alpaca's hidden hold)
+            // keeps today's path and costs no lookup.
             const cover = bracketStopCover(openOrders, p.symbol, cancelIds, o.notProtection ?? []);
-            if (cover >= p.qty - EPS) {
-              (result.fullyProtected ??= []).push(p.symbol);
-              this.d.log?.("cleanup_fully_protected", { symbol: p.symbol, reason: o.reason, round, qty: p.qty, stopCover: cover });
-              result.remaining = [p.symbol];
-              return done();
-            }
-            // (b) By the entry's own id, never by the symbol alone: its own remaining shares, once per sale (one lookup), when an open sell
-            // that is not the entry's own (not one this sale is cancelling) holds the symbol's shares, as SUNB-19's take-profit did. Also
-            // when the first look saw only its shares: a newer entry may have bought the symbol since. A hold with no such order visible
-            // (Alpaca's hidden hold) keeps today's path and costs no lookup.
+            const fully = cover >= p.qty - EPS;
             const heldByOther = openSellOrdersFor(openOrders, p.symbol).some((x) => !cancelIds.includes(x.id));
-            if (o.ownRecount && !ownRecounted && heldByOther) {
+            if (o.ownRecount && !ownRecounted && (fully || heldByOther)) {
               ownRecounted = true;
               let n: number | null = null;
               try {
@@ -1397,12 +1402,19 @@ export class Liquidator {
                 n = null; // unknown: the sale goes on as before
               }
               if (n !== null && !(n > EPS)) {
-                result.ownNoneLeft = { symbol: p.symbol, recounted: n };
-                this.d.log?.("cleanup_own_none_left", { symbol: p.symbol, reason: o.reason, round, held: p.qty, recounted: n });
+                if (fully) {
+                  (result.fullyProtected ??= []).push(p.symbol);
+                  this.d.log?.("cleanup_fully_protected", { symbol: p.symbol, reason: o.reason, round, qty: p.qty, stopCover: cover, recounted: n });
+                } else {
+                  result.ownNoneLeft = { symbol: p.symbol, recounted: n };
+                  this.d.log?.("cleanup_own_none_left", { symbol: p.symbol, reason: o.reason, round, held: p.qty, recounted: n, stopCover: cover });
+                }
                 result.remaining = [p.symbol];
                 return done();
               }
               if (n !== null) ownRecount.set(p.symbol, n);
+              // Logging only: the list's stops cover the holding, but the entry's own count says it still holds shares (a stale list).
+              if (fully && n !== null) this.d.log?.("cleanup_cover_disagrees", { symbol: p.symbol, reason: o.reason, round, qty: p.qty, stopCover: cover, recounted: n });
             }
           }
           if (!(free > EPS)) {

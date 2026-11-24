@@ -275,7 +275,8 @@ export class SyncMemory {
   // Group 1, round 1: with its order id and symbol, so the entry's missing-exit sale cancels its rest even when the sync's 10 minute order
   // list no longer shows it (a pair older than 10 minutes, the normal case with the live updates on).
   // Michael's decision 4 of 2026-11-24: `notedAt`, when the worker first noted it broken (logging only, for why its sale waited).
-  readonly brokenPairIds = new Map<string, { orderId: string | null; symbol: string; cancelled?: true; notedAt?: number }>();
+  // `entry`: the entry the pair protected (logging: the wait rows find a broken pair by its entry, after its fresh stop record is dropped).
+  readonly brokenPairIds = new Map<string, { orderId: string | null; symbol: string; cancelled?: true; notedAt?: number; entry?: string }>();
   // Michael's decision 4 of 2026-11-24 ("Fix it tonight"): the trading day the remembered broken pairs belong to; a new day forgets them, and
   // a pair Alpaca shows ended (the sync's order list) or filled (a live update) is forgotten at once. Before, nothing but the 2,000 cap
   // forgot one, so Monday's filled UMC-16 pair was named in a rest cancel on Tuesday.
@@ -389,7 +390,7 @@ async function startupProtectionCheck(d: RiskDeps, mem: SyncMemory, tradeDate: s
           // The exit pair (2026-11-21): a pair whose take-profit filled part (or whose stop leg is shown ended) is not protection; it is neither
           // confirmed nor treated as a timed-out stop: the walk's missing-exit sale cancels its rest and sells (answer 3).
           if (isExitPair(x) && pairBroken(x)) {
-            notePairBroken(mem, x.clientOrderId, { orderId: x.id, symbol: p.symbol, nowMs: d.now().getTime() }); // group 1, round 1: remembered, so the sale cancels it
+            notePairBroken(mem, x.clientOrderId, { orderId: x.id, symbol: p.symbol, nowMs: d.now().getTime(), entry: entry.clientOrderId }); // group 1, round 1: remembered, so the sale cancels it
             d.log?.("startup_exit_pair_broken", { symbol: p.symbol, clientOrderId: entry.clientOrderId, pairClientOrderId: x.clientOrderId, status: x.status, filledQty: x.filledQty });
             continue;
           }
@@ -523,7 +524,7 @@ async function freshStopLive(d: RiskDeps, mem: SyncMemory, f: FreshStop, listed:
   const notePair = (x: Order, by: string): void => {
     if (f.takeProfitPrice === undefined || f.pairBroken || !pairBroken(x)) return;
     f.pairBroken = true;
-    notePairBroken(mem, f.stopClientOrderId, { orderId: f.orderId ?? x.id, symbol: f.symbol, nowMs });
+    notePairBroken(mem, f.stopClientOrderId, { orderId: f.orderId ?? x.id, symbol: f.symbol, nowMs: d.now().getTime(), entry: f.entryClientOrderId });
     d.log?.("exit_pair_broken", { symbol: f.symbol, clientOrderId: f.entryClientOrderId, pairClientOrderId: f.stopClientOrderId, status: x.status, filledQty: x.filledQty, stopLeg: pairStopLeg(x)?.status ?? null, by });
   };
   if (inList) {
@@ -569,11 +570,35 @@ function notePairRefused(mem: SyncMemory, entryClientOrderId: string): void {
 
 // The exit pair, answer 3: remembers a broken pair's client id (bounded: the oldest is forgotten past BROKEN_PAIRS_KEPT).
 export const BROKEN_PAIRS_KEPT = 2_000;
-export function notePairBroken(mem: SyncMemory, pairClientOrderId: string, where: { orderId: string | null; symbol: string; nowMs?: number }): void {
+// Decision 4 of 2026-11-24 (logging): `nowMs`, when the worker learned the pair was broken (the live update's arrival, or the moment the read
+// that showed it returned), kept from the first note; `entry`, the entry it protected. A pair noted again keeps its `cancelled` flag (an
+// earlier cancel Alpaca answered is not sent again; before, a second note cleared it and the cancel was named again).
+export function notePairBroken(mem: SyncMemory, pairClientOrderId: string, where: { orderId: string | null; symbol: string; nowMs?: number; entry?: string }): void {
   const had = mem.brokenPairIds.get(pairClientOrderId);
   const notedAt = had?.notedAt ?? where.nowMs;
-  mem.brokenPairIds.set(pairClientOrderId, { orderId: where.orderId ?? had?.orderId ?? null, symbol: where.symbol, ...(had?.cancelled ? { cancelled: true as const } : {}), ...(notedAt !== undefined ? { notedAt } : {}) });
+  const entry = had?.entry ?? where.entry;
+  mem.brokenPairIds.set(pairClientOrderId, { orderId: where.orderId ?? had?.orderId ?? null, symbol: where.symbol, ...(had?.cancelled ? { cancelled: true as const } : {}), ...(notedAt !== undefined ? { notedAt } : {}), ...(entry !== undefined ? { entry } : {}) });
   if (mem.brokenPairIds.size > BROKEN_PAIRS_KEPT) mem.brokenPairIds.delete(mem.brokenPairIds.keys().next().value!);
+}
+
+// Michael's decision 4 of 2026-11-24 (logging only): "record why a partly filled pair waits before its cancel and sale". The entry's own
+// broken pair (by `entry`, not yet cancelled), and a wait row stored once per pair and reason with the time since the worker learned of it.
+function brokenPairOf(mem: SyncMemory, entryClientOrderId: string): { cid: string; notedAt?: number } | null {
+  for (const [cid, b] of mem.brokenPairIds) if (b.entry === entryClientOrderId && !b.cancelled) return { cid, ...(b.notedAt !== undefined ? { notedAt: b.notedAt } : {}) };
+  return null;
+}
+function logPairWait(d: Pick<RiskDeps, "log" | "now">, mem: SyncMemory, s: Pick<OrderRecord, "clientOrderId" | "symbol">, why: string): void {
+  try {
+    const b = brokenPairOf(mem, s.clientOrderId);
+    if (!b) return;
+    const k = `${b.cid}|${why}`;
+    if (mem.pairWaitLogged.has(k)) return;
+    mem.pairWaitLogged.add(k);
+    if (mem.pairWaitLogged.size > BROKEN_PAIRS_KEPT) mem.pairWaitLogged.delete(mem.pairWaitLogged.values().next().value!);
+    d.log?.("exit_pair_broken_wait", { symbol: s.symbol, clientOrderId: s.clientOrderId, pairClientOrderId: b.cid, why, msFromBroken: b.notedAt !== undefined ? d.now().getTime() - b.notedAt : null });
+  } catch {
+    /* logging only */
+  }
 }
 
 // Michael's decision 4 of 2026-11-24: forget the remembered broken pairs of an earlier trading day (the account is flat at every close).
@@ -878,7 +903,12 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   for (const s of walk) {
     if (opts.only && !opts.only.has(s.clientOrderId)) continue;
     const o = byClientId.get(s.clientOrderId);
-    if (!o) continue;
+    if (!o) {
+      // Decision 4 of 2026-11-24 (logging only): an entry with a broken pair that this look could not see (older than the order list's window
+      // and not looked up in this look) is left for a later look.
+      logPairWait(d, mem, s, "not seen in this look (older than the order list and not looked up)");
+      continue;
+    }
     mem.lastSeen.set(s.clientOrderId, o);
     if (s.status === "intent" && o.status !== "filled" && o.status !== "canceled" && o.status !== "expired" && o.status !== "rejected") {
       await d.store.updateOrder(s.clientOrderId, { status: "submitted", alpacaOrderId: o.id, note: null });
@@ -992,25 +1022,12 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
   const { d, day, mem, opts, nowMs, listed, held, heldQty, latestPerSymbol, sellingSymbols, lookedUp, listAgeMs, fromMs, createdMs, lateNotice, timedCleanup } = ctx;
   const brokenPairs = new Set(ctx.brokenPairs);
   const id = s.clientOrderId;
-  // Michael's decision 4 of 2026-11-24 (logging only): "record why a partly filled pair waits before its cancel and sale". For an entry whose
-  // pair is known broken, each reason this look leaves it alone is stored once per pair (`exit_pair_broken_wait`), with the time since the
-  // worker noted it broken; the sale's own start is stored as `exit_pair_sale_start` below. Reads memory only.
-  const brokenFresh = mem.freshStops.get(id);
-  const brokenMine = brokenFresh?.pairBroken ? { cid: brokenFresh.stopClientOrderId, notedAt: mem.brokenPairIds.get(brokenFresh.stopClientOrderId)?.notedAt } : null;
-  const logPairWait = (why: string): void => {
-    try {
-      if (!brokenMine) return;
-      const k = `${brokenMine.cid}|${why}`;
-      if (mem.pairWaitLogged.has(k)) return;
-      mem.pairWaitLogged.add(k);
-      if (mem.pairWaitLogged.size > BROKEN_PAIRS_KEPT) mem.pairWaitLogged.delete(mem.pairWaitLogged.values().next().value!);
-      d.log?.("exit_pair_broken_wait", { symbol: s.symbol, clientOrderId: id, pairClientOrderId: brokenMine.cid, why, msFromBroken: brokenMine.notedAt !== undefined ? d.now().getTime() - brokenMine.notedAt : null });
-    } catch {
-      /* logging only */
-    }
-  };
+  // Michael's decision 4 of 2026-11-24 (logging only): each reason this look leaves an entry with a broken pair alone is stored once per pair
+  // (`exit_pair_broken_wait`, module helper logPairWait); the sale's own start is stored as `exit_pair_sale_start` below.
+  const pairWait = (why: string): void => logPairWait(d, mem, s, why);
+  const brokenMine = brokenPairOf(mem, id);
   // The redesign of 2026-11-14, part 2: an entry whose action is running is decided again when it ends (the loop keeps its wake).
-  if (ctx.loop.busy(id)) return logPairWait("its own action is still running");
+  if (ctx.loop.busy(id)) return pairWait("its own action is still running");
   const wake = (at: number, room?: RoomNeed): void => ctx.loop.wake(id, at, "protect", room ? { room } : {});
   // Asked again just before each action starts (a close-out or another liquidation may have started meanwhile).
   const stillProtect = (): boolean => (typeof opts.protect === "function" ? opts.protect() : opts.protect);
@@ -1018,7 +1035,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
   // Group 1 review, round 1 (messaging): an entry reported stuck that is no longer the newest on its symbol gets its resolution line.
   if (latestPerSymbol.get(s.symbol)?.clientOrderId !== s.clientOrderId) await resolveStuck(d, mem, s.clientOrderId, `a newer ${s.symbol} position took over, and I watch that one now`);
   if (!protectNow || latestPerSymbol.get(s.symbol)?.clientOrderId !== s.clientOrderId || sellingSymbols.has(s.symbol)) {
-    logPairWait(!protectNow ? "selling is owned by a close-out or another sale" : latestPerSymbol.get(s.symbol)?.clientOrderId !== s.clientOrderId ? "a newer position on the symbol" : "another open sell holds the symbol");
+    pairWait(!protectNow ? "selling is owned by a close-out or another sale" : latestPerSymbol.get(s.symbol)?.clientOrderId !== s.clientOrderId ? "a newer position on the symbol" : "another open sell holds the symbol");
     return;
   }
   // A4: a remainder protected by its fresh stop is left alone while that stop can still execute. Once the stop is gone (cancelled,
@@ -1069,7 +1086,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
       freshEnded = { status: fresh.status, stopClientOrderId: fresh.stopClientOrderId, msFromSent: nowMs - fresh.placedAt, covering };
     }
   }
-  if (brokenMine && hasLiveExit(o)) logPairWait("the order list still shows a live exit of the bracket"); // decision 4, logging only
+  if (brokenMine && hasLiveExit(o)) pairWait("the order list still shows a live exit of the bracket"); // decision 4, logging only
   if (!hasLiveExit(o)) {
     // Item 2 of 2026-11-13: an entry whose timed-out stop is known open with its cancel accepted or pending waits for that stop to end
     // (status checks, no sale tries); one known to have ended is tried at once.
@@ -1086,7 +1103,7 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
       // Part A, step 1: tried moments ago and stuck; it is tried again at `due` (or when the shared request budget has room), and the
       // sync carries on with the others.
       (ctx.unprotected.push(s.symbol), mem.protectFirst?.mark(s.clientOrderId, s.symbol, "the order sync found it unprotected"));
-      logPairWait("waiting for its retry time or for room in the request budget"); // decision 4, logging only
+      pairWait("waiting for its retry time or for room in the request budget"); // decision 4, logging only
       wake(due.wait, due.room);
       return;
     }
@@ -1112,16 +1129,16 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
     const rememberedBroken = [...mem.brokenPairIds.values()].filter((b) => b.symbol === s.symbol && b.orderId && !b.cancelled).map((b) => b.orderId!).slice(-5);
     const pairIds = [...new Set([...listed.orders.filter((x) => x.symbol === s.symbol && x.clientOrderId.startsWith("cyrus-p-") && isExitPair(x) && OPEN_STATUSES.has(x.status) && (pairBroken(x) || brokenPairs.has(x.clientOrderId))).map((x) => x.id), ...rememberedBroken, ...(brokenPairId ? [brokenPairId] : [])])].filter((x) => !timedOutIds.includes(x));
     if (pairIds.length > 0) d.log?.("exit_pair_rest_cancel", { symbol: s.symbol, clientOrderId: s.clientOrderId, orderIds: pairIds });
-    // Decision 4 of 2026-11-24 (logging only): when the sale of a broken pair's shares starts, how long after the worker noted the pair broken
-    // and how long it waited in the protection loop's one-at-a-time action queue.
-    const queuedAt = d.now().getTime();
-    const notedAts = [...mem.brokenPairIds.values()].filter((b) => b.symbol === s.symbol && b.notedAt !== undefined).map((b) => b.notedAt!);
+    // Decision 4 of 2026-11-24 (logging only): when the sale of a broken pair's shares starts: how long after the worker learned this entry's
+    // pair was broken (`msFromBroken`), and how much of that was this look's own reads (`msFromLookStart`, from the start of the look or sync
+    // that reached the entry); the rest is the time before the look reached it.
+    const own = brokenPairOf(mem, id);
     // Group 2, round 3 (logging only): the cancel's outcome is logged by the sale after it was tried (cleanupSale), not here before it.
     await ctx.loop.act(id, "missing-exit sale", async () => {
       if (pairIds.length > 0) {
         try {
           const t = d.now().getTime();
-          d.log?.("exit_pair_sale_start", { symbol: s.symbol, clientOrderId: s.clientOrderId, msInQueue: t - queuedAt, msFromBroken: notedAts.length > 0 ? t - Math.min(...notedAts) : null, protectNow: stillProtect() });
+          d.log?.("exit_pair_sale_start", { symbol: s.symbol, clientOrderId: s.clientOrderId, pairClientOrderId: own?.cid ?? null, msFromBroken: own?.notedAt !== undefined ? t - own.notedAt : null, msFromLookStart: t - nowMs, protectNow: stillProtect() });
         } catch {
           /* logging only */
         }
@@ -1731,7 +1748,8 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   for (const b of r.brokenPairsSeen ?? []) {
     if (b.symbol !== s.symbol) continue;
     if (!mem.brokenPairIds.has(b.clientOrderId)) newlyBroken = true;
-    notePairBroken(mem, b.clientOrderId, { orderId: b.orderId, symbol: b.symbol, nowMs: now });
+    // Logging: the sale's read saw it broken some time in the sale; its start is the earliest that read can have been.
+    notePairBroken(mem, b.clientOrderId, { orderId: b.orderId, symbol: b.symbol, nowMs: r.startedAt ? Date.parse(r.startedAt) : now, entry: s.clientOrderId });
     d.log?.("exit_pair_broken", { symbol: b.symbol, clientOrderId: s.clientOrderId, pairClientOrderId: b.clientOrderId, status: b.status, filledQty: b.filledQty, by: "sale" });
   }
   // A pair seen broken for the first time by this sale's own read held the shares, so nothing was sold: looked at again in half a second (once

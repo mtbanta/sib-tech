@@ -149,7 +149,7 @@ function overnightRig() {
   const r = rig({ broker: b, bot });
   return { r, bot, setFail: (x: boolean) => void (fail = x) };
 }
-const failAlerts = (bot: FakeBot) => bot.posts.filter((p) => p.channel === "alerts" && p.text.includes("overnight not-flat check failed"));
+const failAlerts = (bot: FakeBot) => bot.posts.filter((p) => p.channel === "alerts" && p.text.includes("not-flat check outside market hours failed"));
 
 test("item 5 of 2026-11-24: a not-flat check that fails outside the session (Monday's 2:11 AM timeout) posts an alert in alerts, without a mention; again only after 30 minutes while it keeps failing", async () => {
   assert.equal(NOT_FLAT_FAIL_ALERT_MS, 30 * 60_000);
@@ -172,9 +172,21 @@ test("item 5: a check that succeeds posts nothing; a failure during the session 
   ok.setFail(false);
   await ok.r.at("2026-11-03T08:11:00Z");
   assert.equal(failAlerts(ok.bot).length, 0);
-  const inSession = overnightRig();
-  await inSession.r.at("2026-11-03T16:00:00Z"); // 10:00 AM Central, in the session
-  assert.equal(failAlerts(inSession.bot).length, 0);
+  // In the session the check fails too (here its first read of the saved flag): logged, no such alert.
+  const logs: string[] = [];
+  const b = new FakeBroker();
+  b.calendar = [{ date: "2026-11-02", open: "09:30", close: "16:00" }, { date: "2026-11-03", open: "09:30", close: "16:00" }];
+  b.clock = { isOpen: true, timestamp: "", nextOpen: "", nextClose: "" };
+  const bot = new FakeBot();
+  const r = rig({ broker: b, bot, log: (_l: string, e: string) => void logs.push(e) });
+  const realGet = r.store.getControl.bind(r.store);
+  (r.store as any).getControl = async (k: string) => {
+    if (k === "not_flat") throw new Error("database timeout (test)");
+    return realGet(k);
+  };
+  await r.at("2026-11-03T16:00:00Z"); // 10:00 AM Central, in the session
+  assert.ok(logs.includes("not_flat_check_failed"), "the check did fail");
+  assert.equal(failAlerts(bot).length, 0, "no alert in the session");
 });
 
 // ---------------- item 1: the SUNB false alert ----------------
@@ -211,7 +223,7 @@ async function sunbWorld() {
 }
 // SUNB-18 (3 shares): its take-profit fills 1 (Alpaca cancels the stop); as the stack cancels the take-profit's rest, the rest fills (every
 // SUNB-18 share sold) and SUNB-19 enters SUNB with its own bracket: the morning of 2026-11-24 at 9:53.
-async function sunbCase(w: Awaited<ReturnType<typeof sunbWorld>>, opts: { rest: "fills" | "stays" }) {
+async function sunbCase(w: Awaited<ReturnType<typeof sunbWorld>>, opts: { rest: "fills" | "stays"; newer?: (sim: SimBroker) => Promise<void> }) {
   const a = await w.enter(18);
   w.sim.advance(5_000);
   w.sim.partialTakeProfit(a, 1, 70.08);
@@ -222,7 +234,8 @@ async function sunbCase(w: Awaited<ReturnType<typeof sunbWorld>>, opts: { rest: 
     if (!done && oid === tpId) {
       done = true;
       if (opts.rest === "fills") w.sim.partialTakeProfit(a, 2, 70.08);
-      await w.enter(19);
+      if (opts.newer) await opts.newer(w.sim);
+      else await w.enter(19);
     }
     return orig(oid);
   };
@@ -285,7 +298,8 @@ test("item 1, the opposite case: the remainder really still holds a share withou
 
 test("item 1: bracketStopCover counts another bracket's working stop leg once, never a take-profit limit, a fresh stop or pair of ours, a stop pending cancel, an order being cancelled, or one named not protection", () => {
   const leg = (over: any) => ({ id: "s", clientOrderId: "x", symbol: "SUNB", side: "sell", type: "stop", status: "held", qty: 3, filledQty: 0, legs: [], orderClass: "", limitPrice: null, stopPrice: 69.87, ...over });
-  const tp = (legs: any[], over: any = {}) => ({ id: "t", clientOrderId: "cyrus-20261102-SUNB-19", symbol: "SUNB", side: "sell", type: "limit", status: "new", qty: 3, filledQty: 0, legs, orderClass: "bracket", limitPrice: 70.08, stopPrice: null, ...over });
+  // A filled entry with its stop leg (and its take-profit leg, unfilled) under it, as Alpaca lists a filled bracket.
+  const tp = (legs: any[], over: any = {}) => ({ id: "e", clientOrderId: "cyrus-20261102-SUNB-19", symbol: "SUNB", side: "buy", type: "market", status: "filled", qty: 3, filledQty: 3, legs: [{ ...leg({ id: "t", type: "limit", status: "new", limitPrice: 70.08, stopPrice: null }) }, ...legs], orderClass: "bracket", limitPrice: null, stopPrice: null, ...over });
   assert.equal(bracketStopCover([tp([leg({})])] as any, "SUNB", []), 3);
   assert.equal(bracketStopCover([tp([])] as any, "SUNB", []), 0, "a take-profit alone protects nothing");
   assert.equal(bracketStopCover([tp([leg({ status: "pending_cancel" })])] as any, "SUNB", []), 0);
@@ -293,4 +307,43 @@ test("item 1: bracketStopCover counts another bracket's working stop leg once, n
   assert.equal(bracketStopCover([tp([leg({})], { clientOrderId: "cyrus-p-20261102-SUNB-x" })] as any, "SUNB", []), 0, "our fresh stops and pairs follow their own rules");
   assert.equal(bracketStopCover([tp([leg({})])] as any, "SUNB", [], ["cyrus-20261102-SUNB-19"]), 0);
   assert.equal(bracketStopCover([tp([leg({})])] as any, "OTHER", []), 0);
+});
+
+// Group 1, round 1 of the 2026-11-24 build: stops that protect nothing must never end a remainder's sale.
+const remainderStillActedOn = (w: Awaited<ReturnType<typeof sunbWorld>>) => {
+  assert.equal(w.events.filter((e) => e.event === "cleanup_fully_protected" || e.event === "cleanup_own_none_left").length, 0, "not skipped");
+  const acted = w.sim.sellLog.filter((x) => x.symbol === "SUNB").reduce((n, x) => n + x.qty, 0) + w.sim.stopLog.filter((x) => x.symbol === "SUNB").reduce((n, x) => n + x.qty, 0);
+  const alerted = w.said.some((x) => x.ch === "alerts" && x.m);
+  assert.ok(acted === 2 || alerted, `SUNB-18's 2 shares protected or sold (${acted}), or Michael told (${alerted}), as on v39`);
+  assert.equal(w.sim.oversellAttempts, 0);
+};
+
+test("round 1 (group 1): a newer SUNB bracket whose entry has not filled (Alpaca lists its legs held) never counts as protection: the remainder's 2 real shares are acted on as before", async () => {
+  const w = await sunbWorld();
+  await sunbCase(w, { rest: "stays", newer: async (sim) => void (await sim.submitEntry({ symbol: "SUNB", qty: 3, stopPrice: 69.87, takeProfitPrice: 70.08, referencePrice: 70, clientOrderId: clientOrderIdFor(RD, "SUNB", 19) })) });
+  remainderStillActedOn(w);
+});
+
+test("round 1 (group 1): a stop still listed held after its bracket's take-profit filled a piece (Alpaca cancels it at the first piece) never counts: the remainder is acted on as before", async () => {
+  const w = await sunbWorld();
+  const realPaged = w.sim.listOrdersPaged.bind(w.sim);
+  (w.sim as any).listOrdersPaged = async (...a: any[]) => {
+    const r: any = await (realPaged as any)(...a);
+    // The lagging list: SUNB-19's take-profit shows 1 filled while its (cancelled) stop still shows held for the full 3.
+    return a[0] === "open" ? { ...r, orders: r.orders.map((o: any) => o.clientOrderId.endsWith("SUNB-19") ? { ...o, legs: o.legs.map((l: any) => l.type === "limit" ? { ...l, filledQty: 1, status: "partially_filled" } : { ...l, status: "held" }) } : o) } : r;
+  };
+  await sunbCase(w, { rest: "stays" });
+  remainderStillActedOn(w);
+});
+
+test("round 1 (group 1): bracketStopCover counts only a filled entry's own shares: not an unfilled entry, a partly filled one only up to what it holds, nothing once its take-profit filled a piece, each leg once", () => {
+  const leg = (over: any) => ({ id: "s", clientOrderId: "x", symbol: "SUNB", side: "sell", type: "stop", status: "held", qty: 10, filledQty: 0, legs: [], orderClass: "", limitPrice: null, stopPrice: 69.87, ...over });
+  const tpLeg = (over: any = {}) => leg({ id: "t", type: "limit", status: "held", limitPrice: 70.08, stopPrice: null, ...over });
+  const entry = (filledQty: number, legs: any[], over: any = {}) => ({ id: "e", clientOrderId: "cyrus-20261102-SUNB-19", symbol: "SUNB", side: "buy", type: "market", status: filledQty >= 10 ? "filled" : filledQty > 0 ? "partially_filled" : "new", qty: 10, filledQty, legs, orderClass: "bracket", limitPrice: null, stopPrice: null, ...over });
+  assert.equal(bracketStopCover([entry(10, [tpLeg(), leg({})])] as any, "SUNB", []), 10);
+  assert.equal(bracketStopCover([entry(0, [tpLeg(), leg({})])] as any, "SUNB", []), 0, "not filled");
+  assert.equal(bracketStopCover([entry(3, [tpLeg(), leg({})])] as any, "SUNB", []), 3, "partly filled: what it holds");
+  assert.equal(bracketStopCover([entry(10, [tpLeg({ filledQty: 1, status: "partially_filled" }), leg({})])] as any, "SUNB", []), 0, "its take-profit filled a piece");
+  assert.equal(bracketStopCover([entry(10, [tpLeg(), leg({})]), entry(10, [tpLeg(), leg({})], { id: "e2" })] as any, "SUNB", []), 10, "the same leg listed twice counts once");
+  assert.equal(bracketStopCover([leg({ clientOrderId: "cyrus-20261102-SUNB-19" })] as any, "SUNB", []), 0, "a sell listed without its entry");
 });
