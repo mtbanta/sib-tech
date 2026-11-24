@@ -9230,3 +9230,181 @@ Flat overnight, by records rather than a live read at the time: Monday's fills n
 - **What is running today, Tuesday 2026-11-24 (facts from the records):** no `worker_started` since Saturday, so **v38 with the close-out setting of 30 is still live: today's regular close-out is due at 2:30 PM CT**, not 2:45 as planned for no answer by 7 PM Monday, and the fresh-stop times release (`cc20384`) is not deployed. Exit pairs were switched on again today (`exit_pair_switch` at 9:59:45 AM CT). Today's limits were approved at 8:10 AM.
 
 Research input for a human decision, never an instruction to act. Paper only.
+
+## Tuesday 2026-11-24 mid-day session review (v38, normal morning; exit pairs on from 9:59 AM; no pair open at the 10:30 close-out)
+
+Read only, per `builds/midday-review-brief.md` (normal-morning sections), the exit pair paragraph and the read-times part of the "Note for Monday 2026-11-23" in `builds/daily-review-brief.md`. The "Fresh-stop times" clause does not apply: that release (`cc20384`) is not deployed (none of today's 48 `fresh_stop` rows carries `times`). Records read 10:31 to 10:47 AM CT. Read only on Alpaca (paper, about 33 requests, paced at one every 2 s), Supabase (read-only transaction), Discord, Healthchecks and Fly's metrics; nothing changed, deployed, sent, posted or ordered by the review. Fly's log returned no lines (`fly logs --no-tail`, as on earlier days), so the review rests on the run log, Alpaca's order records and fills, Discord and Prometheus. Times are Central. "Measured" means read from a timestamp or counter; "inferred" means worked out from the code and those times; "guess" means neither.
+
+Release: Fly v38 (`faa5c65`) all morning. The latest stored `worker_started` is still Saturday 2026-11-21 19:14:05 UTC, `closeoutMinutesBeforeClose: 30`, so today's regular close-out is due at 2:30 PM CT. Limits (normal day, approved by Michael at 8:10 AM): largest position 250 dollars, daily loss stop 500, 100 orders a minute, cap 1. Day start 16,856.59 (the Armed message). Exit pairs: Michael sent `pair on` at 9:59:44; stored `exit_pair_switch` on: true (was false) at 9:59:45.757; day phase `exitPair` "on". Scripts and data: scratchpad `mid-1124/`.
+
+**Verdict: holds on three of the four criteria; the fourth (no safety step delayed on the stack) is inconclusive for one case, SMTC at 9:00.** Highest accepted orders a minute **17**; **no rate-limit answers**; Alpaca's remaining requests never below **162** in the session (reserve 80); the mid-day close-out **flat at 10:30:13.37**, started by the timer 1 ms after its due time. The open case: SMTC-12's fresh stop came 12.5 s after Alpaca cancelled its stop, during Alpaca's slow stretch at 9:00 and a 3.3 s order sync; the stack's part lies between about 1.4 s and about 12 s depending on how that sync and the take-profit's cancel are split, so it is not shown either way (section 2). The other two fresh stops over 5 s (BBY-1, SMTC-21) clear on the stack's part.
+
+**On the three priorities, one line each:** (a) **13 exit pairs placed, 0 refused, 0 unclear; 10 sold whole at their take-profit, 3 partly filled and finished at market; all had ended by 10:24:54, so again no pair was open at the close-out and none was moved.** (b) **The 10:30 close-out moved 5 of 15 positions (all brackets, none a pair), all accepted, all filled in one piece**, so no moved take-profit left shares without a stop today; 10 sold at market; flat in 13.4 s (Monday 12.0 s). Four of the five brackets skipped were skipped on feed bids far below their stops while the market sales filled above them. (c) **One false alert mentioned Michael** (SUNB at 9:53: a remainder already sold by its own take-profit, mistaken for a newer entry's shares; three blocked sale rounds), and the morning lost **241.18 dollars**, about 48 percent of the 500 dollar loss stop.
+
+### Priority (a): the exit pairs, 9:59 to 10:30 (measured, Alpaca's records and the run log)
+
+- **Placed: 13** (`fresh_stop` with `pair: true`; each a `cyrus-p-` OCO order at Alpaca, its limit at the bracket's take-profit, its stop leg at the bracket's stop). Every one confirmed by Alpaca's answer in 203 to 312 ms; placed (confirmed) 1.74 to 2.75 s after Alpaca's cancel of the bracket stop (`msFromStopCancel`, median 2.24 s). The stack's part cannot be split out today (fresh-stop times not deployed); the whole span is under 5 s in every case.
+- **Refused: 0** (no `exit_pair_refused`, so no `afterPairRefused` or `pairRefusedEarlier` stop). **Unclear: 0.** **`startup_exit_pair_broken`: 0.** No plain fresh stop after 9:59: every remainder that needed protection got a pair.
+- **The other 3 remainders after 9:59** (16 `bare_remainder` in all) needed none: SUNB-21, SNDK-67 and APH-37, whose own take-profit sold the rest 0.93 to 1.45 s after the stop cancel.
+
+| How it ended | Pairs | Detail |
+| :--- | ---: | :--- |
+| Take-profit filled, one piece | 10 | SNDK x7 (57, 58, 59, 61, 63, 66, 68), SMTC-30, SUNB-22, BIP-6; 0.37 to 31.5 s after placed (median 0.73 s) |
+| Partly filled, rest cancelled, sold at market | 3 | UMC-22, BSP-20, SNDK-69 (table below) |
+| Take-profit filled in pieces | 0 | |
+| Stop leg filled | 0 | |
+| Moved at the 10:30 close-out | 0 | none open at 10:30; the last pair ended 10:24:54.253 (SNDK-69) |
+
+**The 3 broken pairs** (`exit_pair_broken`, all `by: "live update"`, status `partially_filled`). Alpaca cancelled each pair's stop leg 1 to 6 ms after the first partial fill, so the shares left were without a stop until the market sale filled.
+
+| Entry | Pair shares | First piece (stop leg cancelled) | Stack saw it | Rest cancel sent / landed | Market sale created / filled | Time without a stop | Stack's part | Alpaca's part |
+| :--- | ---: | :--- | :--- | :--- | :--- | ---: | ---: | ---: |
+| UMC-22 | 2 | 10:21:06.814 (06.820) | 06.897 | 07.122 / 07.401 | 08.524 / 09.047 (1 share) | 2.23 s | 1.63 | 0.60 |
+| BSP-20 | 4 | 10:21:40.474 (40.476) | 40.532 | 40.784 / 41.069 | 42.128 / 42.840 (3 shares) | 2.36 s | 1.60 | 0.76 |
+| SNDK-69 | 2 | 10:24:53.700 (53.701) | 53.754 | 53.942 / 54.253 | 55.288 / 55.827 (1 share) | 2.13 s | 1.53 | 0.60 |
+
+- The stack's part runs from the live update to the market sale created at Alpaca (it includes about 0.3 s of Alpaca landing the rest cancel); Alpaca's part is the live update's delivery plus the hold (0.004 to 0.010 s) and the fill (0.52 to 0.71 s). Each came with `exit_pair_rest_cancel`, `unprotected_position`, `fresh_stop_gone`, a `liquidation_result` "protective stop not confirmed" (flat) and a `remainder_recount` (kind "missing"), as the brief's paragraph describes (answer 3: no second pair). Unlike three of Monday's nine, every broken pair today got its rest cancel and sale.
+- UMC's `exit_pair_rest_cancel` lists two order ids: today's pair limit (cancelled 07.401) and **Monday's UMC-16 exit pair** (`cyrus-p-20261123-UMC-...`, an OCO for 4 shares that filled on Monday at 2:00:30 PM; one read-only lookup by id). Inferred: the worker (not restarted since Saturday) still held Monday's UMC-16 pair, one of Monday's three broken pairs that got no rest cancel, among UMC's pair orders, and sent a cancel for it today. Harmless here (an order already filled cannot be cancelled; at most one wasted request), but a stale record.
+- **Two `late_notice` rows** (UMC-22 `lagMs` 6,982; BSP-20 `lagMs` 37,664) carry the label "fresh stop ended (new): the gap began at its end, not at the bracket stop's cancel that lagMs counts from", `notAGap` false. By the brief's clause D these are real gaps that began at the pair's partial fill, not at the bracket stop's cancel: the real gaps are the 2.23 s and 2.36 s above, not 7.0 s and 37.7 s.
+- **Time without a stop, pairs (separate line):** 10 pairs 0 (one piece); 3 sold at market, 2.13 to 2.36 s. Before each pair, the remainder had no stop from the bracket stop's cancel to the pair's acceptance (1.74 to 2.75 s, above).
+
+### Priority (b): the 10:30 mid-day close-out (measured, stored `closeout_result`, `take_profit_moved`, `move_phase_skips`, and Alpaca's orders)
+
+**Timing (stored `closeout_result.timing`):** due 10:30:00.000; **triggered 00.001 by the timer** (`triggeredBy` "timer"); started 00.029; sale's turn 00.238; move step 00.873 (+0.64, the first step's reads); first replace sent 01.110 (+0.24, the stop lookup and quote read); last replace sent 01.832, last answered 02.053; moves filled at Alpaca 02.116 (BSP), 02.481 (APH), 02.520 (CRWD), 03.636 (UMC), 03.883 (ZS); the move step's 2 s wait ran its full length (to about 03.832, 2 s after ZS's replace was sent; the next reads began there; ZS filled 0.05 s later: inferred); cancel-all sent 04.321, answered 04.542; the five non-moved bracket stops cancelled at Alpaca 04.463, the five fresh stops 04.636 to 04.726; first of 10 market sales created at Alpaca 06.659, last 09.135; Alpaca submitted them 07.203 to 09.142 (holds 0.007 to 0.544 s); last fill 13.223 (IP, 6 shares in four pieces); the sale's own `liquidation_result` at 10.028 (5 sales still working); `closeout_result` flat at **10:30:13.370** (`waitedMs` 3,384); day phase `midday` 13.383, `middayFlat` yes; "Mid-day close-out done" posted 10:30:13. No retry, no NOT FLAT alert, the cap unchanged at 1.
+
+**Read times (`timing.reads`, 20 reads, `readsMore` 0):**
+- **The first step:** clock asked 00.238, 68 ms; positions 00.306, 138 ms; open orders 00.444, **429 ms** (1 page; the slowest read of the close-out; Monday's was 93 ms). They sum to 635 ms, exactly `saleStartedAt` to `movePhaseStartedAt` (00.238 to 00.873), so **the gap those reads do not cover is 0 ms**.
+- After the move step's wait, the second round 1 set: clock 03.832 (73 ms), positions 03.905 (312), open orders 04.217 (104); the cancel-all followed at 04.321.
+- **From the cancel-all's answer to the first sale (2.12 s):** open orders 04.542 (372), positions 04.914 (225), then 0.50 s with no read (inferred: the sale's timed look), open orders 05.640 (242), positions 05.882 (113), positions 05.996 (121), then the gate's open orders 06.117 (360) and positions 06.477 (67); the sale reached Alpaca at 06.659, 0.12 s after the gate's last read. Reads 1.50 s of it.
+- **The gate's reads before the market sales** (`by: "gate"`): three pairs: 06.117 (360 + 67 ms), 07.217 (253 + 74), 08.413 (319 + 138), 1.21 s in all. Round 2: clock 09.502 (64), positions 09.566 (83), open orders 09.649 (324).
+- A read's time is wall time until the worker carried on (Alpaca's answer, the network, the Alpaca client's own retries, or the worker itself), so it shows which read was slow, not why. The machine was not throttled (section 6).
+- A `sync_slow` row at 10:30:04.068 (2.90 s: the order list 2.18 s, older lookups 0.69 s) ran alongside the close-out; the missing-exit check stands aside then by design, and no effect on the close-out's steps is visible.
+
+**Per-move rows** (stored `take_profit_moved`, reason "mid-day close-out"; no row carries `pair: true`):
+
+| Sent | Symbol | Shares | Old take-profit | New limit | Stop | Above stop | Bid (quote age) | Accepted | Stop cancelled by Alpaca | Time to fill (stored) | Alpaca: created to fill | Fallback (stored) | Backup sold | Shares seen filled | Live updates |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | :--- | :--- | :--- | ---: | :--- | :--- | ---: | ---: | :--- |
+| 10:30:01.110 | APH | 3 | 73.24 | 72.80 | 72.77 | 3 c | 72.81 (230 ms) | yes, 107 ms | yes | 1,371 ms | 1.31 s, one piece at 72.82 | no | 0 | 3 | yes |
+| 10:30:01.217 | BSP | 6 | 41.45 | 41.28 | 41.18 | 10 c | 41.29 (1,910 ms) | yes, 128 ms | yes | 899 ms | 0.81 s, one piece at 41.31 | no | 0 | 6 | yes |
+| 10:30:01.345 | CRWD | 1 | 210.83 | 209.55 | 209.46 | 9 c | 209.56 (869 ms) | yes, 388 ms | yes | 1,175 ms | 0.87 s, one piece at 210.01 | no | 0 | 1 | yes |
+| 10:30:01.733 | UMC | 18 | 13.27 | 13.24 | 13.19 | 5 c | 13.25 (66 ms) | yes, 99 ms | yes | 1,903 ms | 1.86 s, one piece (18 at 13.25) | no | 0 | 18 | yes |
+| 10:30:01.832 | ZS | 1 | 231.50 | 230.48 | 230.00 | 48 c | 230.49 (9,257 ms) | yes, 221 ms | yes | 2,051 ms | 1.88 s, one piece at 230.50 | no | 0 | 1 | yes |
+
+- **Moves tried 5, accepted 5, refused 0; filled 5, every one in a single piece**; four filled inside the 2 s wait and ZS 0.05 s after it, yet before the next reads finished, so `fallback` is false on all five and the backup sold 0. Time to fill (stored, two clocks, a guide): lowest 899, median 1,371, highest 2,051 ms. Stops cancelled by Alpaca: 5 yes. **No move was exactly 2 cents above its stop** (APH was 3 cents), so Alpaca's acceptance of a 2 cent gap is still not tested.
+- **Yesterday's finding (a moved take-profit filling in pieces leaves its last shares without a stop for 1.3 to 1.6 s) did not recur today:** all five fills were single pieces, UMC's 18 shares included, so every moved position's time without a stop is 0 (measured).
+- **Qualified: 5 of 15** (the 5 move rows; no position was skipped only for a move not sent). Skipped (the one stored `move_phase_skips` row, 15 positions, 5 moved), grouped by reason:
+  - "the open sell is not a bracket's take-profit", 5: BBY, GTLB, HPE, IP, LYB, remainders under **plain** fresh stops placed before pairs were on (8:36 to 9:56).
+  - "price within 2 cents of the stop", 4: BIP (bid 43.13, stop 44.68, quote 3.2 s old, last trade 44.72), SJM (bid 126.07, stop 132.69, quote 40 ms, last trade 133.06 but 260 s old), SNDK (bid 75.50, stop 76.02, quote 154 ms, last trade 76.33), SUNB (bid 68.37, stop 72.50, quote 670 ms, last trade 72.65).
+  - "quote 35 s old", 1: DKS (over the 30 s limit; last trade 283 s old).
+- **The four "within 2 cents" skips rest on bids below the stops, while each market sale filled above its stop seconds later (measured):** BIP filled at 44.73 (stop 44.68), SJM 132.72 (132.69), SNDK 76.25 (76.02), SUNB 72.59 (72.50). Inferred: the free IEX feed's bid was far from the market (1.6 to 6.6 dollars low for BIP, SJM and SUNB), the mirror of Monday's NUE, whose bid sat above the market. With bids near those fills, BIP, SNDK and SUNB would have cleared the 2 cent margin and SJM would have sat at it (a guess about the true bid, not a measurement).
+
+**Queue wait and time without a stop (Michael's ruling of 2026-11-18; from Alpaca's orders, measured):** queue wait from the cancel-all's answer (04.542) or the stop's cancel if later, to the sale created at Alpaca; time without a stop from the stop's cancel at Alpaca to the last fill. Stack's part: stop's cancel to the sale created; Alpaca's hold: created to submitted; Alpaca's fill: submitted to filled.
+
+| Symbol | Kind | Stop ended | Sale sent | Submitted | Sold | Queue wait | Time without a stop | Stack's part | Alpaca's hold | Alpaca's fill |
+| :--- | :--- | :--- | :--- | :--- | :--- | ---: | ---: | ---: | ---: | ---: |
+| APH | bracket, moved | 02.483 (by the move's fill) | (move) | | 02.481 | n/a | 0 | | | |
+| BSP | bracket, moved | 02.118 | (move) | | 02.116 | n/a | 0 | | | |
+| CRWD | bracket, moved | 02.522 | (move) | | 02.520 | n/a | 0 | | | |
+| UMC | bracket, moved | 03.641 | (move) | | 03.636 | n/a | 0 | | | |
+| ZS | bracket, moved | 03.887 | (move) | | 03.883 | n/a | 0 | | | |
+| BBY | fresh stop | 04.692 | 06.659 | 07.203 | 08.933 | 1.97 | 4.24 | 1.97 | 0.54 | 1.73 |
+| BIP | bracket | 04.463 | 06.864 | 07.390 | 08.783 | 2.32 | 4.32 | 2.40 | 0.53 | 1.39 |
+| DKS | bracket | 04.463 | 07.155 | 07.623 | 08.463 | 2.61 | 4.00 | 2.69 | 0.47 | 0.84 |
+| GTLB | fresh stop | 04.636 | 07.671 | 08.094 | 11.200 | 3.04 | 6.56 | 3.04 | 0.42 | 3.11 |
+| HPE | fresh stop | 04.726 | 07.782 | 08.175 | 09.853 | 3.06 | 5.13 | 3.06 | 0.39 | 1.68 |
+| IP | fresh stop | 04.676 | 07.951 | 08.276 | 13.223 | 3.27 | 8.55 | 3.27 | 0.33 | 4.95 |
+| LYB | fresh stop | 04.649 | 08.085 | 08.401 | 09.568 | 3.44 | 4.92 | 3.44 | 0.32 | 1.17 |
+| SJM | bracket | 04.463 | 08.322 | 08.520 | 09.505 | 3.78 | 5.04 | 3.86 | 0.20 | 0.98 |
+| SNDK | bracket | 04.463 | 08.984 | 09.009 | 09.793 | 4.44 | 5.33 | 4.52 | 0.03 | 0.78 |
+| SUNB | bracket | 04.463 | 09.135 | 09.142 | 10.037 | 4.59 | 5.57 | 4.67 | 0.01 | 0.90 |
+
+- Queue wait (10 market sales): lowest 1.97, median about 3.17, highest 4.59 s. **None over 5 s in queue** (Monday: 3, up to 5.66 s).
+- Time without a stop (15 positions): lowest 0, median 4.32, highest **8.55 s (IP**, of which 4.95 s Alpaca filling 6 shares in four pieces), total 53.7 s; 5 at 0 (the moves). Of the 10 market sales' 53.7 s: the stack's part 32.9 s (1.97 to 4.67 s each), Alpaca's hold 3.2 s (0.007 to 0.544 s each), Alpaca's fill 17.5 s (0.78 to 4.95 s each).
+
+**Against Monday's 10:30 close-out (both v38; Monday's figures from "Monday 2026-11-23 mid-day session review", today's measured):**
+
+| | Monday 2026-11-23 | Tuesday 2026-11-24 |
+| :--- | ---: | ---: |
+| Positions at the pause | 16 (2 moved, 14 at market) | 15 (5 moved, 10 at market) |
+| Remainders under plain fresh stops | 13 | 5 (pairs on from 9:59; no pair open) |
+| Due to triggered | 0.001 s (timer) | 0.001 s (timer) |
+| Sale's turn to move step (first step's reads) | 0.229 s | 0.635 s |
+| Due to first replace sent | 0.55 s | 1.11 s |
+| Move step's wait | ended on the fills, about 1.5 s after the first replace | full 2 s after the last replace |
+| Due to cancel-all answered | 2.84 s | 4.54 s |
+| Cancel-all answered to first market sale | 2.63 s | 2.12 s |
+| First to last market sale | 3.03 s (14 sales) | 2.48 s (10 sales) |
+| Alpaca's hold, created to submitted | 0.12 to 0.80 s | 0.007 to 0.544 s |
+| Cancel-all answered to flat | 9.13 s | 8.83 s |
+| Due to flat | about 12.0 s | about 13.4 s |
+| Queue wait, lowest / median / highest | 2.63 / 3.85 / 5.66 s | 1.97 / 3.17 / 4.59 s |
+| Time without a stop, lowest / median / highest (total) | 0 / 6.3 / 8.97 s (89.9 s) | 0 / 4.32 / 8.55 s (53.7 s) |
+| Requests in the close-out's minute; lowest remaining | 105; 179 | 82 (row ending 10:31:01); 187 |
+
+- What differs: the 1.4 s longer time to flat came entirely before the cancel-all (1.7 s): five moves sent over 0.72 s instead of two, a full 2 s wait because the last move filled just after it (Monday's wait ended on its fills), and a 429 ms open-orders read in the first step. After the cancel-all today was 0.3 s quicker (fewer market sales, shorter Alpaca holds). The time without a stop fell by 36 s because more positions moved and fewer were sold at market. Both normal mornings.
+
+**Requests:** the `governor_stats` row ending 10:31:01 holds the close-out after its first second: 82 requests (first tries 36, routine 42, clock 4), lowest remaining 187; the row ending 10:30:01 (56 requests, first 3) holds its first reads. Rate-limit answers 0. No entry accepted after 10:30 (last entry 10:29:55.3; 78 "paused for the mid-day cycle" refusals from 10:30). Nothing left open: Alpaca at 10:34:42: 0 positions, 0 open orders, no order created after 10:30:30; again at 10:46:58: 0 positions, 0 open orders.
+
+### 1. The morning, 8:30 to 10:30 (normal day)
+
+- Entries: 516 sent, **505 accepted and filled** (market brackets), **11 refused by Alpaca** (HTTP 422, "take_profit.limit_price must be >= base_price + 0.01" or "stop_loss.stop_price must be <= base_price - 0.01": the price moved past the bracket's take-profit or stop before Alpaca took the order; KYMR 4, ANF 3, DKS 2, SMTC 1, GTLB 1; 8:37 to 9:06); each drew the one-minute wait for its symbol (10 "Alpaca refused this symbol a moment ago" refusals). First entry 8:35:00.7, last 10:29:55.3. **Highest accepted orders a minute: 17** (busiest 60 s from 8:38:52.5; `peakTradesPerMinute` 17; busiest calendar minute 8:35 with 16). Decision to acceptance: median 157 ms, 95th percentile 312, slowest 696.
+- Requests: at most 153 in a minute (the row ending 10:21:55: first tries 78, routine 56, P2 10, entries 6, clock 14; the minute of two pairs, UMC's and BSP's broken pairs and their sales); next 146 (ending 9:54:16, first tries 87: SUNB's blocked sale, section 2). **Lowest remaining 162** (10:21:55), never near the reserve of 80 (the day's first row, 8:30:02, shows 125 but covers the overnight window). Governor holds 0; budget refusals 0; `mostBudgetedInMinute` 22, `mostCappedIn5s` 9, `mostUrgentCappedIn5s` 0; no overdraft, forced try, stuck-sale hold, retry hold or giving-way refusal; rate-limit answers 0.
+- Refusals before 10:30 (counting each "(many)" row by `detail.count`): already holding this symbol 2,559, position limit smaller than one share 184, first minutes of the session 155, an entry for this symbol is still working 29, Alpaca refused this symbol a moment ago 10.
+- **Two entries over 250 dollars at their fill:** BURL-1 (8:35:15, 1 share, sized at 247.97 on the price seen, filled at 252.33, 4.36 over) and BSP-20 (10:20:40, 6 shares, sized at 249.30, filled at an average 41.70, so 250.20). Inferred cause, as Monday's MOS: the gate sizes on the price seen and a market order can fill higher.
+- Cost: **-241.18** to 10:30 (16,856.59 to 16,615.41; the morning line and Alpaca's one-minute history agree). Monday's morning: -30.97.
+- **Verdict: holds on three criteria, inconclusive on the fourth for one case** (SMTC-12, section 2).
+
+### 2. Safety work in the morning
+
+- **67 remainders after partial take-profits** (`bare_remainder`): **48 got protection**, 35 a plain fresh stop (8:36 to 9:56) and 13 an exit pair (after 9:59), all confirmed by Alpaca's answer (198 to 1,162 ms, median 213); **19 needed none**: their own take-profit sold the rest 0.93 to 2.21 s after the stop cancel (3 stored as `remainder_recount` sold 0: BSP-2, SNDK-8, SNDK-32), one of them SUNB-18, below. No remainder sold at market except the three broken pairs' shares (priority (a)).
+- Plain fresh stops: 1.77 to **12.53 s** after Alpaca's stop cancel (`msFromStopCancel`, to Alpaca's answer), median 2.54 s. Three were over 5 s:
+  - **SMTC-12, 9:00, 12.53 s (does not clear, not shown either way).** Alpaca cancelled the bracket stop at 9:00:09.104 after the take-profit sold 1 of 2 shares. The stack stored the remainder at 12.502, the moment a `sync_slow` ended (3.34 s, of which Alpaca's order list and positions read 3.03 s); no list-lag row was stored, and that minute's protection loop shows **17 looks put off** a quarter second each while a sync ran (inferred: the live update's look waited behind that sync). The take-profit's cancel landed at Alpaca at 19.675, **7.17 s after the sighting**; the fresh stop was sent at about 21.06 (its answer at 21.646 less 582 ms) and created at Alpaca at 21.532. That minute (the row ending 9:00:55) also holds GTLB-7's fresh stop at 9:00:49 (`actions` 2): its 42 first-try requests compare with about 26 to 30 for two single-round fresh stops, so SMTC-12 took about one extra round (inferred, as Monday's SNDK), and of the 17 put-off looks about 13 fit the 3.3 s sync. **Alpaca was slow at 9:00** (measured): SUNB-8 and ZS-19, market buys created at 9:00:12.1 and 12.8, were held 6.7 s and 6.6 s before Alpaca submitted them, and the fresh stop itself was held 4.5 s (created 21.532, submitted 26.009). **Bounds:** the stack's part is at least about 1.4 s (the cancel landing to the stop sent), about 4.8 s if the 3.4 s behind the slow sync counts as the stack's busy sync rather than Alpaca's slow read, and at most about 12 s (Alpaca's cancel to the stop sent). Whether the 7.17 s before the take-profit's cancel landed was Alpaca holding the cancel or the stack sending it late is not stored; Alpaca's holds at 9:00 make the first possible, not shown. Nothing flagged it: the stack saw the remainder 3.4 s after the cancel, under the 6 s `late_notice` line, and no alert was posted. This is the case the fresh-stop times release (`cc20384`, not deployed) would split. The share had a working sell limit but no stop for 12.4 s; the fresh stop then triggered and filled at 89.30 at 9:00:33 (stop 90.05).
+  - **BBY-1, 8:36, 6.55 s (clears).** Alpaca cancelled the stop at 8:36:25.932; Alpaca's order list lagged (lag at least 542 ms, cleared at the stack's second look); the stack stored the remainder at 27.712; the take-profit's cancel landed at 30.986; the fresh stop was sent at about 32.28 and created at 32.379. From the list clearing to the stop sent is 4.57 s at most, the list lag before it Alpaca's and its rechecks the design's; Alpaca was slow at the open too (BBY-1 itself, a market buy, was held 10.0 s between Alpaca receiving and submitting it). Under 5 s on the stack, if only just.
+  - **SMTC-21, 9:30, 5.36 s (clears).** Stop cancelled 9:29:59.568; list lag between 296 ms and 1,425 ms; remainder stored 9:30:01.471; take-profit's cancel landed 02.331; fresh stop sent about 03.78, created at Alpaca 04.716 (Alpaca's answer took 1,162 ms). The stack's part is about 2.3 s at most.
+  - UMC-4 (8:50, 4.67 s) was the slowest under 5 s.
+- **Exit pairs:** 1.74 to 2.75 s after the stop cancel (priority (a)).
+- **The blocked sale (Michael asked for its logged quantities): SUNB at 9:53.** SUNB-18 (3 shares) had its take-profit fill 1 share at 9:53:17.511; Alpaca cancelled its stop at 17.516; the take-profit then filled the other 2 at 18.009 and 19.132, so **SUNB-18 had sold every share by 9:53:19.132** (Alpaca's records; 1.62 s without a stop). The stack stored the remainder at 18.602 (1 share). SUNB-19, a new entry, was bought at 19.491 (0.36 s after SUNB-18's last fill) and its own bracket was in place (its take-profit leg submitted 19.816). The remainder's action then read the symbol's 3 shares, SUNB-19's, as SUNB-18's and asked for them; three `sale_blocked` rows followed:
+
+| Round | Stored at | Reason | `qty` | `qtyAvailable` | `openSellQty` | Open sells listed | `openListAgeMs` | `waitedMs` | `hiddenHold` |
+| ---: | :--- | :--- | ---: | ---: | ---: | :--- | ---: | ---: | :--- |
+| 1 | 9:53:28.458 | stop cancelled after a partial take-profit (cleanup) | 3 | 0 | 3 | id b1f50b52..., sell limit 3, status new, filled 0 (SUNB-19's take-profit leg) | 139 | 6,550 | false |
+| 2 | 9:53:37.256 | same | 3 | 0 | 3 | same | 145 | 6,050 | false |
+| 3 | 9:53:46.175 | same | 3 | 0 | 3 | same | 139 | 6,050 | false |
+
+  Then `liquidation_result` at 9:53:47.247: sold 0, blocked 3, remaining SUNB. SUNB-19's shares sold by its own take-profit at 9:54:29.653. **What Alpaca's records show:** the only order holding SUNB's shares was SUNB-19's take-profit leg; SUNB-19 was fully protected throughout; the sell gate refused correctly; nothing was sold or left unprotected by the episode. **What it cost:** about 29 s in the one-at-a-time sale queue (no other sale or remainder was stored in that window, so nothing is seen waiting behind it), and the minute ending 9:54:16 shows 87 first-try requests (inferred: about 70 for the three rounds), plus the false alert below. Inferred cause: a remainder whose own take-profit finishes while a newer entry already holds the symbol is not recounted (the recount, fix A of 2026-11-10, acts only when the entry holds the whole symbol), so the positions read cannot tell its shares from the new entry's.
+- **List lag:** 70 `stop_cancel_list_lag` (all "held"), 50 `stop_cancel_list_cleared`; the lag lies between at least 0 to 804 ms and at most 295 to 1,907 ms (one row stores a negative lower bound, -264 ms, read as no lower bound). No `timed_out_try_out_of_room`.
+- No lost exits or fast sales (not a load day), no `unprotected_position` other than the three broken pairs (none `asRemainder`), no stuck sale beyond SUNB's blocked try, no fresh stop refused or unclear, no `fresh_stop_timeout*`, no `cancel_not_confirmed`.
+- `sync_slow` 2: 9:00:12 (3.34 s; the order list and positions 3.03 s, older lookups 0.31 s) and 10:30:04 (2.90 s; the order list 2.18 s, older lookups 0.69 s, during the close-out).
+- **Alerts that mentioned Michael: one, false in substance.** 9:53:47 in `alerts`: "Michael: I can't confirm a protective stop for SUNB's 1 share (since 9:53 AM CT), and I could not protect or sell it yet (Alpaca cancelled the stop when the take-profit partly filled; still held). ..." The 1 share had been sold by its own take-profit 28 s earlier; the shares "still held" were SUNB-19's, under a full bracket. The wording is one of the brief's allowed forms (not one of the fault phrases), and the resolution line followed at 9:53:49 ("SUNB: no longer held (2 seconds after I reported that I could not confirm its protective stop)"), itself true only of SUNB-18's share (SUNB-19 held 3 until 9:54:29). No action was needed.
+- **Without a mention:** three `alerts` posts, "UMC / BSP / SNDK: I could not confirm a live protective stop, so I sold it." (10:21:09, 10:21:43, 10:24:56), the broken pairs' market sales: true in substance and by design (answer 3), worded as on Monday (Monday's proposal B, plainer wording, is still open).
+- **Total time without a stop, morning (separate line):** fresh stops 1.74 to 12.4 s from the stop cancel to protection (SMTC-12 the worst; positions over 10 s without a stop: SMTC-12 only); broken pairs 2.13 to 2.36 s; remainders finished by their take-profit 0.93 to 2.21 s; the close-out's worst IP 8.55 s (4.95 s of it Alpaca's fill). The day's worst so far: SMTC-12, 12.4 s, its split not shown (section 2, above).
+
+### 4. The pause and what followed
+
+No deploy (no `worker_started` since Saturday; no deploy approval in `commands`; `cc20384` is reviewed and could go at the pause only with Michael's written yes for that deploy). Paused and flat since 10:30:13 (`middayFlat` yes); no `go`, `hold`, `stop` or `flatten` by 10:47, and no event stored after 10:30:13. The morning line (10:30:13): "505 entries sent (505 filled), 11 refused by Alpaca; P and L -241.18 dollars (equity 16856.59 to 16615.41); rate-limit answers from Alpaca: 0", matching the records. Healthchecks: up, last ping 10:39:01, no flips today.
+
+### 5. The loss stop and the shadow book
+
+Day start 16,856.59; lowest 16,615.41 at 10:31 (the flat value after the close-out; -241.18, **about 48 percent of the 500 dollar stop**; Alpaca's one-minute history). The fall was steady: 16,827.92 at 8:39, 16,745.44 at 9:00, 16,676.95 at 9:30, 16,645.55 at 10:00, 16,616.85 at 10:30. The placeholder strategy is long only and meaningless by design, so a falling morning costs it; the loss stop did not fire. Shadow book: largest difference 2.77 dollars (8:40:46), the book's `dropped` count 1 (Monday 0).
+
+### 6. The Fly machine
+
+Prometheus 8:30 to 10:40: CPU burst balance full all morning (lowest 49,997 at 10:25 of 50,000), no throttling in any minute, CPU in use 0.95 to 1.87 cores at the 10-minute points (highest 1.90), steal at most 0.83, 1 minute load at most 0.30, memory available at least 333 MB. Worker rows (119 per-minute, one long window at 8:30:02 covering the overnight gap, event-loop delay 156.9 ms in it): process CPU at most 1.8 percent, machine busy at most 2.1 percent, steal at most 0.4 percent, event-loop delay at most 16.2 ms (no minute over 20), decision time 90th percentile at most 327 ms (10:22), queue wait at most 431 ms (9:07), 0 dropped.
+
+### 7. Discord volume
+
+To the close-out's post (10:30:13): `commands` 8 (the 7:30 morning post, Michael's `Approve` and its reply, Armed, Michael's `pair on` and its reply, the builder's 10:20:53 post that Monday's end-of-day review was done, the morning line), `trading` 25 (the live list, 23 five-minute lines, the close-out line), `alerts` 5 (above). After it, to 10:47: `trading` 1 (the 10:31 five-minute line), nothing else.
+
+### 8. Anything that did not behave as designed
+
+- **SUNB at 9:53:** a remainder already sold by its own take-profit was treated as still held because a newer entry held the symbol; three blocked rounds (about 29 s, about 70 requests, inferred) and a false alert that mentioned Michael. No share was at risk.
+- **SMTC-12 at 9:00:** 12.4 s without a stop; the stack's part not shown either way (1.4 to 12 s), during Alpaca's slow stretch and a 3.3 s sync.
+- **The feed's bids:** four of five skipped brackets were skipped on bids 0.5 to 6.6 dollars below their stops while the market sales filled above them (Monday's NUE was the other way).
+- **A stale pair record:** UMC-22's rest cancel also named Monday's already-filled UMC-16 exit pair (inferred: kept in the worker's memory since Monday; harmless today, one wasted cancel at most).
+- Two entries filled over the 250 dollar largest position (BURL by 4.36, BSP by 0.90), as Monday's MOS.
+- The two pair `late_notice` rows carry `lagMs` counted from the bracket stop's cancel (7.0 and 37.7 s); the real gaps were about 2.2 to 2.4 s (by design of clause D; noted so the figures are not misread).
+- Again no exit pair was open at a close-out (all pairs end within seconds by design), so the pair move remains measured only by Monday's one trial.
+
+**Next steps (for Michael; research input, not instructions):** (1) the fresh-stop times release (`cc20384`) would have split SMTC-12; its deploy is your call (at a mid-day pause with your written yes for that deploy, or after the close). (2) SUNB's case suggests the remainder step check the entry's own take-profit fills before acting when another entry holds the symbol; that touches money-touching code, so it is a question for you, not a fix the builder may make unasked. (3) Whether the move step should distrust a bid far from the last trade (four positions today, one on Monday) is likewise a question for you. (4) The morning's -241.18 is 48 percent of the daily loss stop before any afternoon trading; the afternoon starts only on your `go`. (5) The close-out time decision is still on hold until you have read Monday's review; today's regular close-out is due at 2:30 PM CT on the setting of 30.
+
+Research input for a human decision, never an instruction to act. Paper only.
