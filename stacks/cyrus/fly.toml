@@ -7,11 +7,10 @@ primary_region = "sjc"
 [env]
   ALPACA_DATA_FEED = "iex"
   # The regular close-out, in minutes before the market close (Michael's night build request of 2026-11-16, item 4). The default,
-  # without this line, is 5 (2:55 PM Central). 15 for the test: 2:45 PM Central, or 11:45 AM on a half day. A whole number from 5 to 30.
-  # 30 for Monday 2026-11-23 only (Michael, 2026-11-20: "For Monday only: set the regular close-out to 2:30 PM Central, to test whether
-  # Alpaca's hold on market sales follows the clock"): 2:30 PM Central. Back to 15 after Monday's close unless Michael chooses the
-  # permanent time first.
-  CLOSEOUT_MINUTES_BEFORE_CLOSE = "30"
+  # without this line, is 5 (2:55 PM Central). A whole number from 5 to 30 (15: 2:45 PM Central, or 11:45 AM on a half day).
+  # 15 permanently: 2:45 PM Central (Michael's decision 3 of 2026-11-24, after the 2:30 test of Monday 2026-11-23: "Close-out time: set
+  # it back to 2:45 PM permanently.").
+  CLOSEOUT_MINUTES_BEFORE_CLOSE = "15"
 
 [[vm]]
   size = "shared-cpu-1x"
