@@ -9038,3 +9038,14 @@ Deploy (Michael's words): after the close, before 8:00 AM, only if group 1 and g
 "Yes, keep the two cancel times. I will choose the close-out time after today's end-of-day review; if I have not answered by 7:00 PM Central, set it back to 2:45 PM as planned. Keep the 3:07 wait."
 
 So: the take-profit rest's cancel times (`cancelsSentAt`, `cancelsAnsweredAt`) stay in the fresh-stop times. The close-out time: Michael's choice after the end-of-day review; with no answer by 7:00 PM CT, `CLOSEOUT_MINUTES_BEFORE_CLOSE` goes back to 15 (2:45 PM CT) in its own commit with a group 1 review, deployed with `cc20384`'s code outside market hours through the repo's off-hours checker from a clean clone.
+
+## Michael's instructions of Tuesday 2026-11-24 (about 10:00 AM CT), saved verbatim
+
+"My Mac was closed yesterday, so the 3:07 end-of-day review never ran and nothing deployed. Now:
+1. Delete yesterday's end-of-day wait if it still exists.
+2. Run yesterday's (Monday 2026-11-23) end-of-day review now, read only, from the stored records: the pairs' first live 2:30 close-out (every pair move: accepted, filled, stop cancelled by Alpaca, time to fill, fallback) and Alpaca's hold at 2:30 against last week's 2:45.
+3. Set two waits for today: from 10:31 AM Central, run the mid-day review once the 10:30 close-out is flat; after the 3:05 summary, run today's end-of-day review. Post a line in commands when each is done.
+4. cc20384 (reviewed) can deploy at today's mid-day pause with my written yes, or tonight after the close, before 8:00 AM. Hold the close-out time decision until I have read yesterday's review.
+Never print any token or key."
+
+**Builder's notes:** no scheduled job was left (the scheduler list was empty) and no wait process was running (both timed waits ended when the Mac closed), so there was nothing to delete. Yesterday's 7:00 PM close-out fallback did not run either, and Michael has now put the close-out decision on hold until he has read Monday's review, so it is superseded. Today's two waits are timed background waits (the scheduler fired both of Monday's waits early), ending on their own at 10:31 AM and 3:07 PM CT. Fly still runs v38 with `CLOSEOUT_MINUTES_BEFORE_CLOSE` 30, so today's regular close-out is also at 2:30 PM CT. The mid-day pause route deploys `cc20384` only on Michael's explicit written yes for that deploy; "can deploy ... with my written yes" is not itself that yes.
