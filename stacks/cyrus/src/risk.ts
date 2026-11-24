@@ -1642,6 +1642,12 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     // Michael's decision 2 of 2026-11-23 (logging only): the fresh stop's times start from these.
     ...(protectAt !== null ? { protectTimes: { [s.symbol]: { stopGoneAt: extra.stopCancelledAt ?? null, learnedAt: extra.learned && Number.isFinite(extra.learned.atMs) ? new Date(extra.learned.atMs).toISOString() : null, learnedBy: extra.learned?.by ?? null } } } : {}),
     ...(mem.brokenPairIds.size > 0 ? { notProtection: [...mem.brokenPairIds.entries()].filter(([, b]) => b.symbol === s.symbol).map(([cid]) => cid) } : {}),
+    // Michael's decision 1 of 2026-11-24: the entry's own remaining shares by its own id, looked up at most once in the sale and only when its
+    // shares are not free at the sale's step (one request). Not on the fast sale or a timed-out stop's try, whose shapes are fixed.
+    ...(!extra.fast && !timedOutTry ? { ownRecount: async () => {
+      const x = await d.broker.findOrderByClientId(s.clientOrderId);
+      return x ? Math.max(0, x.filledQty - exitFilledQty(x)) : null;
+    } } : {}),
     ...((extra.alsoCancel?.length ?? 0) > 0 ? { endOnCancelFail: true } : {}),
     // Item 2 of 2026-11-13: such a try waits half a second for Alpaca's cancel (a cancel usually lands in about 0.2 s), so a whole try (at
     // most about 13 requests) fits; after that the stop's status checks take over (timedOutWait).
@@ -1664,6 +1670,13 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
   // A pair seen broken for the first time by this sale's own read held the shares, so nothing was sold: looked at again in half a second (once
   // per pair, since it is now remembered), when the missing-exit sale cancels its rest and sells.
   if (newlyBroken && soldQty === 0 && !r.freshStop && !r.freshStopUnclear) return { attempted: true, stuck: false, recheckAt: now + 500 };
+  // Michael's decision 1 of 2026-11-24 (the SUNB false alert): the sale found every share of the symbol under another bracket's working stop,
+  // or the entry's own recount by its id found none of its shares left. Nothing was sent; not stuck, no alert (a stuck record from an earlier
+  // try gets its one resolution line).
+  if (soldQty === 0 && (r.fullyProtected?.includes(s.symbol) || r.ownNoneLeft?.symbol === s.symbol)) {
+    await resolveStuck(d, mem, s.clientOrderId, r.ownNoneLeft ? "its own exit orders sold the shares" : "every share held is under another position's protective stop");
+    return { attempted: false, stuck: false };
+  }
   // Ruling B, group 2 round 3 (logging only): the outcome of the cancel of a timed-out fresh stop, logged after the sale tried it
   // (`cancelFailed`: a cancel this sale sent was not accepted, by Alpaca's answer or for lack of one).
   // Group 2, round 4: by what the sale really did with each such cancel (sent and answered, sent and not accepted, or never sent, for
