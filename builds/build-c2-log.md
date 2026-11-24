@@ -9418,3 +9418,16 @@ Michael's written yes, in the builder's session at about 11:00 AM CT: "Yes, depl
 - **Rollback: v38** (`faa5c65`, image `deployment-01M7ZREBCCNJS27NF6Y4Y0BMSR`), by branch `rollback-v38` (`949068a`: `faa5c65` plus only `stacks/cyrus/tools/` from `cc20384`; the diff touches `tools/pair-trials.mjs` only; `src/midday.ts` equal to `main`'s), through the reviewed checker. Note: that one branch commit was made in a temporary worktree of the repo, not the primary checkout; its secret scan ran with pattern checks only (no local key values there). Its only content is `tools/pair-trials.mjs`, identical to `cc20384`'s, which passed the full scan in the primary checkout.
 
 Paper only; research input for a human decision, never an instruction to act.
+
+## Michael's decisions from Monday's end-of-day review and Tuesday's mid-day review (2026-11-24, about 11:50 AM CT), saved verbatim
+
+"Decisions from Monday's end-of-day review and today's mid-day review:
+1. Fix the SUNB false alert: the leftover-share step matches positions by the entry's own id, never by symbol alone, and skips any position that is fully protected. Group 1 review.
+2. When the bid is below the stop but the latest trade (from the same snapshot) is above it, price the move from the latest trade minus 1 cent; today's fallback still applies if it does not fill. Group 1 review.
+3. Close-out time: set it back to 2:45 PM permanently.
+4. Logging: record why a partly filled pair waits before its cancel and sale (GAP, UMC, MOS on Monday), and check whether the worker holds a stale pair record (Monday's UMC named today).
+5. Any failed overnight check posts an alert (Monday's 2:11 AM timeout posted none).
+6. Correct the brief's claim that a moved position is never without a stop: a take-profit that fills in pieces makes Alpaca cancel the stop at the first piece.
+7. Messaging backlog, not tonight: clearer wording for the partly filled pair's market-sale alert; exclude test orders (ptest-) from the 5-minute lines and the daily summary.
+Build 1 to 6 tonight, group 1 and group 2, up to 8 rounds; deploy after the close, before 8:00 AM, only if both pass.
+Never print any token or key."
