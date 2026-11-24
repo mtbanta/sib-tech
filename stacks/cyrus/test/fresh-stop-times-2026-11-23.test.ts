@@ -403,7 +403,7 @@ test("round 1 (group 2, finding 3): a wait row is found by the entry after its f
   assert.equal(w.events.filter((e) => e.event === "exit_pair_broken_wait").length, 1);
 });
 
-test("round 1 (group 2, finding 4): a pair the order sync's list shows broken is stamped when that read returned, with its entry", async () => {
+test("round 1 (group 2, finding 4): a pair the order sync's list shows broken is stamped when that read returned (after the reads, not at the sync's start), with its entry", async () => {
   const w = world();
   const dd = await day(w, "on");
   const a = await pairRemainder(w, dd, "QXO", 11);
@@ -411,11 +411,39 @@ test("round 1 (group 2, finding 4): a pair the order sync's list shows broken is
   w.sim.advance(2_000);
   w.sim.fillPairTakeProfit("QXO", 2);
   w.sim.advance(300);
-  const before = w.sim.simMs;
+  // Every read of the order list or positions takes 70 ms from here.
+  const lo = w.sim.listOrdersPaged.bind(w.sim);
+  const lp = w.sim.listPositions.bind(w.sim);
+  (w.sim as any).listOrdersPaged = async (...x: any[]) => (w.sim.advance(70), (lo as any)(...x));
+  (w.sim as any).listPositions = async () => (w.sim.advance(70), lp());
+  const syncStart = w.sim.simMs;
   await syncOrders(w.risk, dd, { protect: true });
-  const b = w.memory.brokenPairIds.get(f.stopClientOrderId);
-  assert.ok(b === undefined || (b.entry === a && b.notedAt! >= before), "stamped after the reads, with the entry (or already forgotten once its rest was cancelled)");
+  const b = w.memory.brokenPairIds.get(f.stopClientOrderId)!;
+  assert.ok(b, "remembered (its rest cancel answered: kept, marked cancelled)");
+  assert.equal(b.entry, a);
+  assert.ok(b.notedAt! >= syncStart + 140, `stamped after the order list and positions reads (${b.notedAt! - syncStart} ms after the sync began)`);
   assert.ok(w.events.some((e) => e.event === "exit_pair_broken" && e.data.by === "order list"));
+});
+
+test("round 2 (group 2, finding 2): a pair first seen broken by the sale's own read is stamped at the sale's start, with the entry", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "QXO", 10, 13.5, 21);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 3, 13.58);
+  w.sim.advance(300);
+  const saleStart = new Date(w.sim.simMs + 5).toISOString();
+  // The sale's result as the Liquidator reports a broken pair its own read found (nothing sold, the pair holding the shares).
+  w.risk.liquidator = { isLiquidatingOthers: () => false, flatten: async () => (w.sim.advance(900), { flat: false, remaining: ["QXO"], sold: [], errors: [], startedAt: saleStart, brokenPairsSeen: [{ symbol: "QXO", clientOrderId: "cyrus-p-20261102-QXO-x-s1", orderId: "px", status: "partially_filled", filledQty: 2 }] }) };
+  await syncOrders(w.risk, dd, { protect: true });
+  const b = w.memory.brokenPairIds.get("cyrus-p-20261102-QXO-x-s1")!;
+  assert.deepEqual([b.entry, b.notedAt], [id, Date.parse(saleStart)], "the sale's start, not its end 0.9 s later");
+  assert.ok(w.events.some((e) => e.event === "exit_pair_broken" && e.data.by === "sale"));
+});
+
+test("round 2 (group 2, finding 1): cleanup_cover_disagrees is stored with the other new rows", async () => {
+  const { STORED_INFO_EVENTS } = await import("../src/run-log.ts");
+  for (const e of ["cleanup_cover_disagrees", "cleanup_fully_protected", "cleanup_own_none_left", "exit_pair_broken_wait", "exit_pair_sale_start", "exit_pair_forgotten"]) assert.ok(STORED_INFO_EVENTS.has(e), e);
 });
 
 test("round 1 (group 2, finding 5): the order sync forgets the remembered broken pairs of an earlier day; a pair noted again keeps its cancelled flag", async () => {

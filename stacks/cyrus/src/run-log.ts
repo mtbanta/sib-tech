@@ -42,6 +42,7 @@ export const STORED_INFO_EVENTS = new Set([
   "exit_pair_forgotten",
   "cleanup_fully_protected",
   "cleanup_own_none_left",
+  "cleanup_cover_disagrees",
   "startup_exit_pair_broken",
   "exit_pair_switch",
   "move_phase_skipped",
