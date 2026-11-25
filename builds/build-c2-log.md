@@ -9959,3 +9959,14 @@ To the close-out's post (10:30:20): `commands` 5 (the 7:30 morning post, Michael
 **Next steps (for Michael; research input, not instructions):** (1) Whether to keep the pause as built, or to ask the builder for a proposal on what follows an early end (for example a shorter first poll), is your call; any change touches the sell path, so it needs your request and group 1 review. (2) A logging-only proposal could store the missing-exit sale's looks and pause (as `times.pause` does for fresh stops), so a case like AMBA-57 and the close-out's 6.4 s flat record can be split next time. (3) Whether a pair whose stop leg triggered should be recognised as a stop exit, not as an unprotected position (AMBA-3, NTNX-36), is a question for you; no share was at risk today. (4) Whether the move step should use a fresh trade when the quote is over 30 s old (AMBA-99's pair today) is likewise a question for you. (5) The morning's -275.98 is 55 percent of the daily loss stop before any afternoon trading; the afternoon starts only on your `go`. Today's regular close-out is due at 2:45 PM CT.
 
 Research input for a human decision, never an instruction to act. Paper only.
+
+## Michael's decisions from Wednesday's mid-day review (2026-11-25, about 11:30 AM CT), saved verbatim
+
+"Decisions from the mid-day review:
+1. No change to what follows an early end of the pause.
+2. Yes: the missing-exit sale records its checks (logging only), so cases like AMBA-57 can be split.
+3. When an exit pair's stop leg triggers and fills, that exit is correct. Fix how the stack reads it: recognise the pair as closed by its stop, with no false gap logged and no extra sale attempted. Group 1 review.
+4. Yes: if the quote is older than 30 s but the latest trade is at most 10 s old, price the move from the latest trade minus 1 cent (same checks and fallback). Group 1 review.
+Build tonight, group 1 and group 2, up to 8 rounds; deploy after the close, before 8:00 AM, only if both pass.
+Also confirm the holiday: Thursday the market is closed; Friday closes early. Check that Friday's close-out runs well before the early close, the mid-day cycle is skipped, and the evening and morning limits flow handles both days. Set Friday's waits accordingly.
+Never print any token or key."
