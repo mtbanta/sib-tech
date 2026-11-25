@@ -567,7 +567,7 @@ test("instant wake: the fill report closes it at once: a look runs at the last f
   w.sim.advance(626 - 2 * READ_MS);
   const r = await syncOrders(w.risk, dd, { protect: true });
   const looksAt = await followUp(w, dd, r, t0 + 15_000);
-  assert.deepEqual(looksAt.map((x) => x - t0), [856, 1_996, 2_538], "woken at each fill report (the recheck at 1,996 between them)");
+  assert.deepEqual(looksAt.map((x) => x - t0), [856, 1_126, 2_266, 2_538], "woken at each fill report; the rechecks keep their own times (0.5 s, then a second after the last), since group 1's round 3 a fill-report look does not move them");
   const closed = (await w.store.listOrders(D)).find((x) => x.clientOrderId === id)!.closedAt;
   assert.equal(Date.parse(closed!) - t0, 2_538 + 2 * READ_MS, "closed by the look the last fill woke");
   assert.deepEqual(gapRows(w), []);
@@ -835,7 +835,7 @@ function loopWorld(remaining: number) {
 }
 const inAny = (xs: Array<{ at: number; n: number }>, ms: number) => Math.max(0, ...xs.map((l) => xs.filter((x) => x.at > l.at - ms && x.at <= l.at).reduce((n, x) => n + x.n, 0)));
 
-test("round 3, group 1 A and finding 3: ten positions' rechecks are routine looks bounded across positions (at most 45 requests in any 60 s, 20 in any 5 s, counted as asked for), and nothing at the entry gate changes", async () => {
+test("round 3, group 1 A and finding 3: ten positions' rechecks are routine looks bounded across positions (at most 66 requests in any 60 s, 36 in any 5 s, counted as asked for), and nothing at the entry gate changes", async () => {
   const L = loopWorld(200);
   const dd = await day(L.w);
   L.setDay(dd);
@@ -853,20 +853,20 @@ test("round 3, group 1 A and finding 3: ten positions' rechecks are routine look
   }
   await L.run(t0 + 20_000);
   const asked = L.w.memory.pairRechecks;
-  assert.equal(PAIR_RECHECK_PER_MINUTE, 45);
-  assert.equal(PAIR_RECHECK_PER_5S, 20);
-  assert.ok(inAny(asked, 60_000) <= 45 && inAny(asked, 5_000) <= 20, `asked: ${inAny(asked, 60_000)} in 60 s, ${inAny(asked, 5_000)} in 5 s`);
+  assert.equal(PAIR_RECHECK_PER_MINUTE, 66);
+  assert.equal(PAIR_RECHECK_PER_5S, 36);
+  assert.ok(inAny(asked, 60_000) <= 66 && inAny(asked, 5_000) <= 36, `asked: ${inAny(asked, 60_000)} in 60 s, ${inAny(asked, 5_000)} in 5 s`);
   // What the looks really sent, less the ten first-sight looks the limit's cancel updates woke (one each, as before item 3).
   const recheckLooks = L.looks.slice(syms.length);
   const sent = recheckLooks.reduce((n, l) => n + l.n, 0);
   if (process.env.PRINT_BOUND) console.log("LOOKS", JSON.stringify(L.looks.map((l) => [l.at - t0, l.n, l.ids])), "EV", JSON.stringify(L.w.events.filter((e) => e.event.startsWith("exit_pair_stop") || GAP_ROWS.includes(e.event)).map((e) => [e.event, e.data.symbol, e.data.why ?? ""])), "ASKED", JSON.stringify(L.w.memory.pairRechecks.map((x) => x.at - t0)));
   if (process.env.PRINT_BOUND) console.log(JSON.stringify({ looks: L.looks.length, recheckLooks: recheckLooks.length, sent, asked: asked.reduce((n, x) => n + x.n, 0), max60: inAny(recheckLooks, 60_000), max5: inAny(recheckLooks, 5_000), withdrawn: ev(L.w, "exit_pair_stop_exit_withdrawn").map((e) => e.data.why) }));
-  assert.ok(inAny(recheckLooks, 60_000) <= 45 && inAny(recheckLooks, 5_000) <= 20, "sent within the same bound (a shared look is sent once)");
+  assert.ok(inAny(recheckLooks, 60_000) <= 66 && inAny(recheckLooks, 5_000) <= 36, "sent within the same bound (a shared look is sent once)");
   assert.ok(L.giveWay.every((x) => x === false), "entries never give way (no P2 wait, no stuck-sale wait)");
   assert.ok(L.kinds.length > 0 && L.kinds.every((k) => k === "protect"), "every look a routine one, never a budgeted list-lag look");
   // Every position is either read as a stop exit, or given up for lack of room (then today's path, in the same look).
   for (const id of ids) {
-    const gaveUp = ev(L.w, "exit_pair_stop_exit_withdrawn").some((e) => e.data.clientOrderId === id && e.data.why === "no room for rechecks");
+    const gaveUp = ev(L.w, "exit_pair_stop_exit_withdrawn").some((e) => e.data.clientOrderId === id && e.data.why.startsWith("no room for rechecks"));
     const gap = L.w.events.some((e) => GAP_ROWS.includes(e.event) && e.data.clientOrderId === id);
     assert.ok(gaveUp || !gap, `${id}: no gap row unless it gave up`);
   }
@@ -901,7 +901,7 @@ test("round 3, group 1 B: with the budget held at the floor (Alpaca's remaining 
       await followUp(w, dd, r, t0 + 40_000);
       saleAt[String(on)] = sells[0];
       if (on) {
-        assert.deepEqual(ev(w, "exit_pair_stop_exit_withdrawn").map((e) => e.data.why), ["no room for rechecks"]);
+        assert.deepEqual(ev(w, "exit_pair_stop_exit_withdrawn").map((e) => e.data.why), ["no room for rechecks (P2 room)"]);
         assert.equal(w.memory.pairRechecks.length, 0, "no recheck asked for");
         assert.equal((w.memory.budget as RequestBudget).givingWay(), false);
       }
@@ -923,7 +923,7 @@ test("round 3, group 1 B: with the budget held at the floor (Alpaca's remaining 
   for (let i = 0; i < syms.length; i++) L.w.at(i * 300, () => (stageStopExit(L.w, syms[i]!, 28, []), L.loop.wake(ids[i]!, L.w.sim.simMs, "protect")));
   await L.run(t0 + 3_000);
   assert.equal(ev(L.w, "exit_pair_stop_exit_timeout").length, 0, "no 10 s wait");
-  assert.deepEqual(ev(L.w, "exit_pair_stop_exit_withdrawn").map((e) => e.data.why), syms.map(() => "no room for rechecks"));
+  assert.deepEqual(ev(L.w, "exit_pair_stop_exit_withdrawn").map((e) => e.data.why), syms.map(() => "no room for rechecks (P2 room)"));
   for (const id of ids) assert.ok(L.w.events.some((e) => e.event === "unprotected_position" && e.data.clientOrderId === id), `${id}: today's path at its first sight`);
   assert.equal(L.w.memory.pairRechecks.length, 0);
   assert.ok(L.giveWay.every((x) => x === false));
@@ -999,15 +999,75 @@ test("round 3: pairRecheckRoom counts what it lets through and refuses past eith
   let now = 1_000_000;
   const d = { now: () => new Date(now), budget: new RequestBudget({ now: () => now, remaining: () => 200 }) } as any;
   let n = 0;
-  for (let i = 0; i < 100 && pairRecheckRoom(d, mem, 2, now); i++) n++;
-  assert.equal(n, 10, "20 in any 5 s");
+  for (let i = 0; i < 100 && pairRecheckRoom(d, mem, 2, now) === "ok"; i++) n++;
+  assert.equal(n, 18, "36 in any 5 s");
+  assert.equal(pairRecheckRoom(d, mem, 2, now), "the stack's own bound");
   now += 5_000;
-  for (let i = 0; i < 100 && pairRecheckRoom(d, mem, 2, now); i++) n++;
+  for (let i = 0; i < 100 && pairRecheckRoom(d, mem, 2, now) === "ok"; i++) n++;
   now += 5_000;
-  for (let i = 0; i < 100 && pairRecheckRoom(d, mem, 2, now); i++) n++;
-  assert.equal(n, 22, "45 in any 60 s (22 of 2)");
+  for (let i = 0; i < 100 && pairRecheckRoom(d, mem, 2, now) === "ok"; i++) n++;
+  assert.equal(n, 33, "66 in any 60 s (33 of 2)");
   now += 60_000;
-  assert.equal(pairRecheckRoom(d, mem, 2, now), true, "room again a minute later");
+  assert.equal(pairRecheckRoom(d, mem, 2, now), "ok", "room again a minute later");
   const floor = { now: () => new Date(now), budget: new RequestBudget({ now: () => now, remaining: () => 81 }) } as any;
-  assert.equal(pairRecheckRoom(floor, new SyncMemory(), 2, now), false, "no P2 room at the floor of 80");
+  assert.equal(pairRecheckRoom(floor, new SyncMemory(), 2, now), "P2 room", "no P2 room at the floor of 80");
+});
+
+// ------------------------------------------------- round 4 (group 1 round 3, group 2 notes) -------------------------------------------
+import { PAIR_RECHECK_MAX_COST } from "../src/risk.ts";
+
+test("round 4, group 1: one position at the highest cost (an old entry, an old pair, 3 list pages) with three fill reports and a regular sync finishes its whole 10 s window when the budget has room; only its own rechecks are counted", async () => {
+  const w = world({ liveWake: true });
+  const dd = await day(w);
+  const { id, f } = await pairRemainder(w, dd, "AMBA", 7, 4, 33.17, 3);
+  w.sim.advance(11 * 60_000); // the entry and the pair older than the order list
+  const lo = w.sim.listOrdersPaged.bind(w.sim);
+  (w.sim as any).listOrdersPaged = async (...a: any[]) => ({ ...(await (lo as any)(...a)), pages: 3 }); // a busy day's 3 pages
+  w.reads(true);
+  const t0 = w.sim.simMs;
+  stageStopExit(w, "AMBA", 28, [[3_000, 1], [6_000, 1], [9_000, 1]]); // three pieces reported live; one share left at the limit
+  f.status = "canceled"; // the worker's live update of the limit's cancel
+  w.memory.mustLook.add(id);
+  w.sim.advance(300);
+  const opts = { streamLive: true };
+  const r = await syncOrders(w.risk, dd, { protect: true, ...opts });
+  const firstSight = w.sim.simMs;
+  const a = await followUp(w, dd, r, t0 + 5_000, opts);
+  if (w.sim.simMs < t0 + 5_000) w.sim.advance(t0 + 5_000 - w.sim.simMs);
+  const reg = await syncOrders(w.risk, dd, { protect: true, ...opts }); // the regular sync, in the middle of the window
+  const b = await followUp(w, dd, reg, t0 + 12_000, opts);
+  assert.equal(PAIR_RECHECK_MAX_COST, 6);
+  assert.deepEqual(ev(w, "exit_pair_stop_exit_withdrawn"), [], "never given up");
+  const to = ev(w, "exit_pair_stop_exit_timeout");
+  assert.equal(to.length, 1, "the whole window ran to its limit");
+  assert.ok(Math.abs(to[0]!.data.msFromFirstSeen - PAIR_STOP_EXIT_MAX_MS) <= 2 * 3 * READ_MS, `limit reached at ${to[0]!.data.msFromFirstSeen} ms`);
+  const costs = w.memory.pairRechecks.map((x) => x.n);
+  assert.ok(costs.length >= 7 && costs.length <= 11 && costs.every((c) => c === 6), `${costs.length} rechecks counted, each at 6: ${JSON.stringify(costs)}`);
+  assert.ok(a.length + b.length > costs.length, "more looks than counted rechecks (the fill-report looks and the regular sync count nothing)");
+  assert.ok(costs.reduce((n, c) => n + c, 0) <= 66);
+  void firstSight;
+});
+
+test("round 4, group 2 notes: the withdrawn why labels 'no longer covers the holding', 'stop leg not shown' and 'leg being cancelled (pending_replace)' are pinned", async () => {
+  // no longer covers the holding: in a look, more shares held than the pair protects.
+  const w = world();
+  const dd = await day(w);
+  const { id } = await pairRemainder(w, dd, "QXO", 10, 4, 13.5, 11);
+  w.sim.advance(10_000);
+  stageStopExit(w, "QXO", 0, []);
+  w.sim.advance(10);
+  await syncOrders(w.risk, dd, { protect: true }); // recognised
+  assert.equal(ev(w, "exit_pair_stop_exit").length, 1);
+  (w.sim as any).positionsMap.get("QXO").qty += 2; // 6 held, the pair covers 4
+  w.sim.advance(500);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.deepEqual(ev(w, "exit_pair_stop_exit_withdrawn").map((e) => [e.data.clientOrderId, e.data.why]), [[id, "no longer covers the holding"]]);
+  // stop leg not shown, and pending_replace.
+  const mem = new SyncMemory();
+  const base = { symbol: "QXO", entryClientOrderId: "e", stopClientOrderId: "cyrus-p-x", orderId: "p", qty: 4, stopPrice: 13.37, placedAt: 0, status: "canceled", lookedAt: 0, takeProfitPrice: 13.58, stopLegId: "leg" } as any;
+  const leg = (status: string, id = "leg") => ({ id, clientOrderId: "a", symbol: "QXO", side: "sell", type: "stop", orderClass: "oco", status, qty: 4, filledQty: 0, filledAvgPrice: null, limitPrice: null, stopPrice: 13.37, groupId: "g", legs: [], replaces: null, createdAt: null, updatedAt: null, submittedAt: null, filledAt: null, canceledAt: null }) as any;
+  const parent = (legs: any[]) => ({ ...leg("canceled", "p"), clientOrderId: "cyrus-p-x", type: "limit", stopPrice: null, limitPrice: 13.58, legs }) as any;
+  assert.equal((pairStopReading(mem, base, [parent([])]) as any).why, "stop leg not shown");
+  assert.equal((pairStopReading(mem, base, [parent([leg("new", "another")])]) as any).why, "stop leg not shown", "a leg that is not its own");
+  assert.equal((pairStopReading(mem, base, [parent([leg("pending_replace")])]) as any).why, "leg being cancelled (pending_replace)");
 });

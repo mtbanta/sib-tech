@@ -494,6 +494,8 @@ export interface FreshStop {
   stopExitLogged?: boolean;
   // Round 2 (logging only): `exit_pair_stop_exit_withdrawn` already written (a recognised stop exit whose leg then ended other than by a fill).
   stopExitWithdrawn?: boolean;
+  // Group 1, round 3 of item 3: when this pair's next recheck is asked for (its only counted look until then).
+  stopExitNextAt?: number;
 }
 
 // Michael's decision 3 of 2026-11-25: "When an exit pair's stop leg triggers and fills, that exit is correct. Fix how the stack reads it:
@@ -530,26 +532,35 @@ export const PAIR_STOP_EXIT_MAX_MS = 10_000;
 // PAIR_RECHECK_PER_MINUTE requests in any 60 s and PAIR_RECHECK_PER_5S in any 5 s (pairRecheckRoom, counted per position when asked for,
 // so a look several positions share is counted more than once), and the shared request budget must say a P2 try of that size would have room
 // (a local check, no request: Alpaca's remaining at least the floor of 80 after it, and the budgeted minute and 5 seconds). If not, the stack
-// gives up reading that pair as closing by its stop at once (`exit_pair_stop_exit_withdrawn`, why "no room for rechecks") and today's path
-// runs in that same look: no wait, no extra look, so a refused budget falls back to today's timing. A live update for the leg itself wakes a
-// routine look at once (notePairStopLegUpdate), as the pair's own cancel update already does.
+// gives up reading that pair as closing by its stop at once (`exit_pair_stop_exit_withdrawn`, why "no room for rechecks (...)", naming which
+// of the two refused) and today's path runs in that same look: no wait, no extra look, so a refused budget falls back to today's timing.
+// Group 1, round 3 of item 3: only the position's own rechecks are counted, one at a time: a look that is not its recheck (an instant-wake
+// look, the regular sync, another entry's look) while its next recheck is already asked for counts nothing and asks for nothing more. A
+// live update for the leg itself wakes a routine look at once (notePairStopLegUpdate), as the pair's own cancel update already does.
 export const PAIR_STOP_EXIT_RECHECK_FIRST_MS = 500;
 export const PAIR_STOP_EXIT_RECHECK_MAX_MS = 1_000;
-// Sized so one position at the usual cost (2: one page and the positions) can finish its window (11 rechecks, 22 requests, at most 6 in any
-// 5 s, 12 requests) and an entry older than the list (cost 3) too; two positions at once fit the minute, not always the 5 seconds (one then
-// gives up). Across every position: at most 45 requests in any 60 s and 20 in any 5 s from these rechecks.
-export const PAIR_RECHECK_PER_MINUTE = 45;
-export const PAIR_RECHECK_PER_5S = 20;
-// Whether one more pair recheck of `cost` requests fits (and, if so, counts it). Bounded memory: entries older than 60 s are dropped.
-export function pairRecheckRoom(d: Pick<RiskDeps, "budget" | "now" | "governor">, mem: SyncMemory, cost: number, nowMs: number): boolean {
+// Group 1, round 3 of item 3: sized so ONE position at the highest cost the code can produce finishes its whole window when the shared budget
+// has room. The highest cost of one recheck: the order list's most pages with the live updates on (RECENT_MAX_PAGES, 3), the positions, the
+// lookup of an entry older than the list and the lookup of a pair older than it: 6. One window asks for at most 11 rechecks (0.5 s, then
+// every second, to the 10 s limit), at most 6 of them in any 5 s. So, across every position together: at most 66 requests in any 60 s and
+// 36 in any 5 s from these rechecks, and none unless a P2 try of that size would fit the shared budget. At the usual cost (2, one page and the
+// positions) that is up to 3 positions' whole windows at once; at the highest, one.
+export const PAIR_RECHECK_MAX_COST = RECENT_MAX_PAGES + 3;
+export const PAIR_RECHECKS_PER_WINDOW = 11;
+export const PAIR_RECHECKS_IN_5S = 6;
+export const PAIR_RECHECK_PER_MINUTE = PAIR_RECHECKS_PER_WINDOW * PAIR_RECHECK_MAX_COST;
+export const PAIR_RECHECK_PER_5S = PAIR_RECHECKS_IN_5S * PAIR_RECHECK_MAX_COST;
+// Whether one more pair recheck of `cost` requests fits (and, if so, counts it): "ok", or which bound refused it ("the stack's own bound",
+// or "P2 room" in the shared budget). Bounded memory: entries older than 60 s are dropped.
+export function pairRecheckRoom(d: Pick<RiskDeps, "budget" | "now" | "governor">, mem: SyncMemory, cost: number, nowMs: number): "ok" | "the stack's own bound" | "P2 room" {
   const log = mem.pairRechecks;
   while (log.length > 0 && nowMs - log[0]!.at >= 60_000) log.shift();
   const minute = log.reduce((n, x) => n + x.n, 0);
   const five = log.filter((x) => nowMs - x.at < 5_000).reduce((n, x) => n + x.n, 0);
-  if (minute + cost > PAIR_RECHECK_PER_MINUTE || five + cost > PAIR_RECHECK_PER_5S) return false;
-  if (!budgetOf(d, mem).roomFor("P2", cost).ok) return false;
+  if (minute + cost > PAIR_RECHECK_PER_MINUTE || five + cost > PAIR_RECHECK_PER_5S) return "the stack's own bound";
+  if (!budgetOf(d, mem).roomFor("P2", cost).ok) return "P2 room";
   log.push({ at: nowMs, n: cost });
-  return true;
+  return "ok";
 }
 // Group 1, round 1 of item 3: a pair older than the order list's window (RECENT_WINDOW_MS) is not in the list, so its parent and stop leg are
 // read by one lookup by the pair's Alpaca id (getOrderById, which asks for the nested legs), a P1 try of the shared request budget (1 request),
@@ -1284,17 +1295,26 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
         }
         // The next recheck (see PAIR_STOP_EXIT_RECHECK_FIRST_MS): a routine look, asked for only if its cost fits (pairRecheckRoom). An entry
         // older than the order list's window is looked up by its id at that look, and a pair older than it by its own lookup: 1 more each.
+        // Group 1, round 3: its next recheck is already asked for (and counted): this look (an instant-wake look, the regular sync, another
+        // entry's) counts nothing; the same wake is asked again (the loop keeps one per entry, the earliest), so a sync run on its own keeps it.
+        if (fresh.stopExitNextAt !== undefined && t < fresh.stopExitNextAt) {
+          wake(fresh.stopExitNextAt);
+          mem.mustLook.add(s.clientOrderId);
+          return;
+        }
         const oldEntry = createdMs(s) < fromMs;
         const cost = Math.max(1, listed.pages) + 1 + (oldEntry ? 1 : 0) + (pairOld ? 1 : 0);
-        if (pairRecheckRoom(d, mem, cost, t)) {
+        const room = pairRecheckRoom(d, mem, cost, t);
+        if (room === "ok") {
           const looks = (fresh.stopExitLooks = (fresh.stopExitLooks ?? 0) + 1);
           const gap = Math.min(PAIR_STOP_EXIT_RECHECK_FIRST_MS * 2 ** (looks - 1), PAIR_STOP_EXIT_RECHECK_MAX_MS);
-          wake(Math.min(t + gap, since + PAIR_STOP_EXIT_MAX_MS));
+          fresh.stopExitNextAt = Math.min(t + gap, since + PAIR_STOP_EXIT_MAX_MS);
+          wake(fresh.stopExitNextAt);
           mem.mustLook.add(s.clientOrderId);
           return;
         }
         // No room for the recheck: give up at once; today's path runs below, in this look.
-        withdraw("no room for rechecks");
+        withdraw(`no room for rechecks (${room})`);
         byStop = null;
       }
       if (byStop && !fresh.stopExitTimedOut) {
