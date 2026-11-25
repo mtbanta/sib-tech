@@ -550,6 +550,12 @@ export const PAIR_RECHECKS_PER_WINDOW = 11;
 export const PAIR_RECHECKS_IN_5S = 6;
 export const PAIR_RECHECK_PER_MINUTE = PAIR_RECHECKS_PER_WINDOW * PAIR_RECHECK_MAX_COST;
 export const PAIR_RECHECK_PER_5S = PAIR_RECHECKS_IN_5S * PAIR_RECHECK_MAX_COST;
+// Group 1, round 4 of item 3: an entry whose pair is being read as closing by its stop, inside its window (first seen, not timed out, not
+// withdrawn), with the switch on.
+export function pairWindowOpen(mem: Pick<SyncMemory, "freshStops">, entryClientOrderId: string): boolean {
+  const f = mem.freshStops.get(entryClientOrderId);
+  return PAIR_STOP_EXIT.on && !!f && f.takeProfitPrice !== undefined && f.stopExitSince !== undefined && !f.stopExitTimedOut && !f.stopExitWithdrawn;
+}
 // Whether one more pair recheck of `cost` requests fits (and, if so, counts it): "ok", or which bound refused it ("the stack's own bound",
 // or "P2 room" in the shared budget). Bounded memory: entries older than 60 s are dropped.
 export function pairRecheckRoom(d: Pick<RiskDeps, "budget" | "now" | "governor">, mem: SyncMemory, cost: number, nowMs: number): "ok" | "the stack's own bound" | "P2 room" {
@@ -1075,7 +1081,14 @@ export async function syncOrders(d: RiskDeps, day: DayRecord, opts: SyncOptions 
   mem.lastListPages = Math.max(1, listed.pages);
   for (const s of walk) {
     if (opts.only && !opts.only.has(s.clientOrderId)) continue;
-    const o = byClientId.get(s.clientOrderId);
+    // Group 1, round 4 of item 3 (finding 2): an entry with an open pair window (pairWindowOpen) that this look could not read (older than the
+    // order list, and its lookup by id failed, found nothing, or was not made) is walked from the order sync's last copy of it, so a failed
+    // read never stretches the window or the sale after its leg ends: its rechecks go on (and ask for the lookup again), its time limit
+    // holds, and today's path (whose sale makes its own lookup and falls back to this copy) runs on time. Only for such entries; every other
+    // entry keeps the usual old-entry lookups. Its exits, the bracket's legs, ended before its pair was placed, so the copy is still true.
+    const fromMemory = !byClientId.has(s.clientOrderId) && pairWindowOpen(mem, s.clientOrderId) ? mem.lastSeen.get(s.clientOrderId) : undefined;
+    if (fromMemory) d.log?.("exit_pair_entry_from_memory", { symbol: s.symbol, clientOrderId: s.clientOrderId }); // Fly's log
+    const o = byClientId.get(s.clientOrderId) ?? fromMemory;
     if (!o) {
       // Decision 4 of 2026-11-24 (logging only): an entry with a broken pair that this look could not see (older than the order list's window
       // and not looked up in this look) is left for a later look.

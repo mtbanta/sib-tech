@@ -1071,3 +1071,122 @@ test("round 4, group 2 notes: the withdrawn why labels 'no longer covers the hol
   assert.equal((pairStopReading(mem, base, [parent([leg("new", "another")])]) as any).why, "stop leg not shown", "a leg that is not its own");
   assert.equal((pairStopReading(mem, base, [parent([leg("pending_replace")])]) as any).why, "leg being cancelled (pending_replace)");
 });
+
+// --------------------------------------------- round 5 (group 1 round 4, finding 2): a failed read ---------------------------------
+// An entry older than the order list whose lookup by id fails during its pair window. `fail`: "once" (one throw at `throwAt`), "always"
+// (every lookup of the entry throws from `throwAt`, through the window and after it), "always+pair" (the pair is older than the list too, and
+// its lookup by id throws as well). `legEnd`: when Alpaca cancels the triggered leg, with no live report (null: it keeps working). Looks: each
+// recheck the stack asks for, and the regular sync every 10 s (at most 6). Returns the first sale's time from the trigger, and the rows.
+async function failedRead(o: { on: boolean; fail: "once" | "always" | "always+pair"; throwAt: number; legEnd: number | null }) {
+  const was = PAIR_STOP_EXIT.on;
+  PAIR_STOP_EXIT.on = o.on;
+  try {
+    const w = world();
+    const dd = await day(w);
+    const id = await hold(w, "AMBA", 7, 33.17, 3);
+    w.sim.advance(11 * 60_000); // the entry is older than the order list's 10 minute window
+    w.sim.partialTakeProfit(id, 5, 33.25);
+    w.sim.advance(300);
+    await syncOrders(w.risk, dd, { protect: true, streamLive: true }); // the remainder gets its exit pair
+    w.sim.advance(o.fail === "always+pair" ? 11 * 60_000 : 31_000); // past the periodic lookup; with "always+pair" the pair is old too
+    const f = w.memory.freshStops.get(id)!;
+    const t0 = w.sim.simMs;
+    w.reads(true);
+    let throws = 0;
+    const failing = (ms: number) => ms - t0 >= o.throwAt && (o.fail !== "once" || throws === 0);
+    const f0 = (w.sim as any).findOrderByClientId.bind(w.sim);
+    (w.sim as any).findOrderByClientId = async (cid: string) => {
+      if (cid === id && failing(w.sim.simMs)) {
+        throws++;
+        throw new Error("network (test)");
+      }
+      return f0(cid);
+    };
+    const g0 = (w.sim as any).getOrderById.bind(w.sim);
+    (w.sim as any).getOrderById = async (oid: string) => {
+      if (o.fail === "always+pair" && oid === f.orderId && w.sim.simMs - t0 >= o.throwAt) throw new Error("network (test)");
+      return g0(oid);
+    };
+    const sells: number[] = [];
+    const s0 = (w.sim as any).submitSell.bind(w.sim);
+    (w.sim as any).submitSell = async (...a: any[]) => (sells.push(w.sim.simMs - t0), s0(...a));
+    const { leg } = stageStopExit(w, "AMBA", 28, []);
+    if (o.fail === "always+pair") f.status = "canceled"; // the worker's live update of the limit's cancel (the old pair is not in the list)
+    if (o.legEnd !== null) w.at(o.legEnd, () => {
+      leg.status = "canceled";
+      leg.canceledAt = new Date(w.sim.simMs).toISOString();
+    });
+    w.sim.advance(300);
+    let r = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+    const every = 10_000;
+    for (let k = 0; k < 6; k++) {
+      await followUp(w, dd, r, t0 + every * (k + 1), { streamLive: true });
+      if (sells.length || ev(w, "unprotected_position").length && o.legEnd === null) break;
+      if (w.sim.simMs < t0 + every * (k + 1)) w.sim.advance(t0 + every * (k + 1) - w.sim.simMs);
+      r = await syncOrders(w.risk, dd, { protect: true, streamLive: true }); // the regular sync
+      if (sells.length) break;
+    }
+    const at = (e: string) => w.events.findIndex((x) => x.event === e);
+    return { w, t0, throws, firstSale: sells[0] ?? null, rows: w.events.filter((e) => e.event.startsWith("exit_pair") || e.event === "unprotected_position").map((e) => e.event + (e.data?.why ? `(${e.data.why})` : "")), at };
+  } finally {
+    PAIR_STOP_EXIT.on = was;
+  }
+}
+
+// The bound (group 1, round 4, finding 2): with the entry's lookup failing, the window and the sale after a leg's end go on as when it
+// succeeds: the sale starts at the next recheck after the leg's end (at most 1 s, plus the look's reads; at once on the leg's live report),
+// and the time limit holds at 10 s from the first sight. With the old pair's lookup failing too, the stack gives up at the first look that
+// cannot read the pair ("pair not read") and today's path runs in that look. Measured below with 70 ms reads: the leg cancelled at 3 s sells
+// at 3.85 to 4.06 s (today's code: 3.63 s; before this fix, after one failed read: 40.63 s).
+test("round 5, group 1 finding 2: one failed lookup of an old entry during its pair window (at 1.2 or 2.4 s) neither stretches the window nor delays the sale after its leg ends", { timeout: 60_000 }, async () => {
+  for (const throwAt of [1_200, 2_400]) {
+    const on = await failedRead({ on: true, fail: "once", throwAt, legEnd: 3_000 });
+    const off = await failedRead({ on: false, fail: "once", throwAt, legEnd: 3_000 });
+    assert.equal(on.throws, 1, `${throwAt}: the lookup failed once`);
+    assert.ok(on.rows.includes("exit_pair_entry_from_memory"), "walked from the last copy");
+    assert.equal(on.firstSale, 3_850, `${throwAt}: sold at ${on.firstSale} ms`);
+    assert.ok(on.firstSale! - off.firstSale! <= 500, `within half a second of today's ${off.firstSale} ms`);
+  }
+});
+
+test("round 5, group 1 finding 2: every lookup of the entry failing through the window and after it: the sale after the leg's end, and the time-limit path, on time", { timeout: 60_000 }, async () => {
+  const ended = await failedRead({ on: true, fail: "always", throwAt: 1_200, legEnd: 3_000 });
+  assert.ok(ended.throws >= 2);
+  assert.equal(ended.firstSale, 3_850, "the leg cancelled at 3 s: sold at the next recheck");
+  const working = await failedRead({ on: true, fail: "always", throwAt: 1_200, legEnd: null });
+  assert.ok(working.throws >= 8, `${working.throws} lookups failed`);
+  const to = ev(working.w, "exit_pair_stop_exit_timeout");
+  assert.equal(to.length, 1);
+  assert.ok(to[0]!.data.msFromFirstSeen >= PAIR_STOP_EXIT_MAX_MS && to[0]!.data.msFromFirstSeen <= PAIR_STOP_EXIT_MAX_MS + 2 * READ_MS, `the time limit held at 10 s (${to[0]!.data.msFromFirstSeen} ms: the last look's two reads)`);
+  assert.ok(working.at("unprotected_position") > working.at("exit_pair_stop_exit_timeout"), "today's path ran at the limit");
+});
+
+test("round 5, group 1 finding 2: the old pair's lookup failing too: the stack gives up at the first look that cannot read the pair and today's path runs then", { timeout: 60_000 }, async () => {
+  for (const legEnd of [3_000, null]) {
+    const r = await failedRead({ on: true, fail: "always+pair", throwAt: 1_200, legEnd });
+    const wd = ev(r.w, "exit_pair_stop_exit_withdrawn");
+    assert.deepEqual(wd.map((e) => e.data.why), ["pair not read"], String(legEnd));
+    assert.ok(wd[0]!.data.msFromFirstSeen <= 2_000, `given up ${wd[0]!.data.msFromFirstSeen} ms after the first sight`);
+    assert.ok(r.at("unprotected_position") > r.at("exit_pair_stop_exit_withdrawn"), "today's path in that look");
+    if (legEnd !== null) assert.ok(r.firstSale !== null && r.firstSale <= 4_100, `sold at ${r.firstSale} ms`);
+  }
+});
+
+test("round 5, group 1 finding 2: confined to an open pair window: an old entry with no pair window whose lookup fails is not walked from memory (the usual old-entry lookups)", { timeout: 60_000 }, async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "KSS", 4, 26.5, 3);
+  w.sim.advance(11 * 60_000);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true }); // looked up once (old), remembered with its live exits
+  assert.ok(w.memory.lastSeen.has(id));
+  const f0 = (w.sim as any).findOrderByClientId.bind(w.sim);
+  (w.sim as any).findOrderByClientId = async (cid: string) => {
+    if (cid === id) throw new Error("network (test)");
+    return f0(cid);
+  };
+  w.memory.mustLook.add(id);
+  w.sim.advance(500);
+  await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.equal(ev(w, "exit_pair_entry_from_memory").length, 0, "not walked from its last copy");
+  assert.equal(ev(w, "order_lookup_failed").length, 1);
+});
