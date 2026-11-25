@@ -9698,3 +9698,11 @@ Never print any token or key."
 **Item 2:** proposal written, `builds/c2-proposal-2026-11-24-fresh-stop-pause.md` (recommended: A, read only after the pause, and B, end it early on Alpaca's live confirmation of the exact orders cancelled, for one position's own sale only; about 0.5 s saved per fresh stop, estimated).
 
 **Item 3:** Wednesday's two waits are set as wall-clock waits (10:31 AM and 3:07 PM CT, each ending on its own; fired late, never early, if the Mac sleeps).
+
+## Michael's decisions on the evening report (2026-11-24, about 6:45 PM CT), saved verbatim
+
+"1. No change: the existing entry check covers it. Drop the entry-id version.
+2. The fresh-stop pause proposal is approved as recommended (drop the discarded reads; end the pause on Alpaca's live cancel confirmation; single-position sales only, close-outs unchanged). Group 1 and group 2; deploy after the close, before 8:00 AM, only if both pass.
+Never print any token or key."
+
+Builder's reading: item 1 closes with no code change. Item 2 is options A and B of `builds/c2-proposal-2026-11-24-fresh-stop-pause.md`, for one position's own sale only (`ownEntryOnly`); every whole-account sale (close-outs, `flatten`, the loss stop, the carried-position sale, close-out retries) keeps today's reads, then the plain half second. Deploy by `tools/offhours-deploy.mjs` from a clean clone of the reviewed commit, after the close and before 8:00 AM CT, only if group 1 and group 2 both pass.
