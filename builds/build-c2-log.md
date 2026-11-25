@@ -10123,3 +10123,20 @@ No `not_flat_check_failed` row since 5:00 UTC (11 PM CT Tuesday), so no overnigh
 - Nothing needs action from today's afternoon: no trading after 10:30, the 2:45 close-out flat, the summary exact to the cent, no alert mentioned you.
 
 Research input for a human decision, never an instruction to act. Paper only.
+
+## Michael's answers on Friday's half day (2026-11-25, about 3:30 PM CT), saved verbatim
+
+"Friday: one consistent schedule, tied to the market's actual close, no special review schedule for short days.
+1. Mid-day cycle at 10:30: yes.
+2. Market hours for the deploy rule end at the actual close (12:00 Friday, per Alpaca's clock).
+3. Confirm the close-out runs 15 minutes before the actual close (11:45 Friday) and the last entry is relative to the close too. If either is fixed to 2:45 or 2:00, fix it before Friday with group 1 and group 2.
+4. Waits: the mid-day review once the 10:30 close-out is flat; the end-of-day review once the daily summary posts, whatever time that is.
+5. Messaging backlog: the limits post names an upcoming holiday or early close.
+Never print any token or key."
+
+**Done (builder, 3:35 PM CT):**
+- 1: nothing to change (the cycle runs at 10:30 on a half day, as ruled on 2026-11-09).
+- 2: CLAUDE.md's deploy rule now says market hours end at the actual close per Alpaca's clock on an early-close day. The deploy tools already use the day record's close (from Alpaca's calendar).
+- 3: confirmed in the code, no fix needed. The regular close-out is the close less `CLOSEOUT_MINUTES_BEFORE_CLOSE` (15 in `fly.toml`; `closeoutAt` in `src/worker.ts`, `addMinutes(closeAt, -closeoutMinutesBeforeClose)`), so 11:45 AM CT Friday; tested in `test/closeout-setting` ("15 on a half day starts the close-out at 11:45 AM CT"). The last entry is the gate's "too close to the close" rule, minutes to the close under `MIN_MINUTES_BEFORE_CLOSE` (60, `src/limits.ts`), so 11:00 AM CT Friday; `middayTimes` (`src/midday.ts`) derives the mid-day pause's last entry from the same close. No time in `src/` is fixed to 2:45 or 2:00 (grep of the source for fixed clock times); the only fixed time is the 1:30 PM end of the automatic resume and of `load afternoon`, already capped at the last entry (so 11:00 on Friday).
+- 4: Friday's waits: the mid-day review from 10:31 AM CT once the 10:30 close-out is flat; the end-of-day review wakes at 12:07 PM CT and starts once the day phase `summary` is set, whatever time that is (polled, with a limit).
+- 5: backlog: the evening limits post (and the morning line) name an upcoming holiday or early close (messaging only, group 2 review when built).
