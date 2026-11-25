@@ -9706,3 +9706,24 @@ Never print any token or key."
 Never print any token or key."
 
 Builder's reading: item 1 closes with no code change. Item 2 is options A and B of `builds/c2-proposal-2026-11-24-fresh-stop-pause.md`, for one position's own sale only (`ownEntryOnly`); every whole-account sale (close-outs, `flatten`, the loss stop, the carried-position sale, close-out retries) keeps today's reads, then the plain half second. Deploy by `tools/offhours-deploy.mjs` from a clean clone of the reviewed commit, after the close and before 8:00 AM CT, only if group 1 and group 2 both pass.
+
+
+## The fresh-stop pause: build, reviews and release v41 (2026-11-24, evening)
+
+**Built** on branch `night-2026-11-24-pause` from the primary checkout: `ac5b07c` (round 1), `abf7c0f` (round 2 fixes).
+- `src/cancel-seen.ts` (new): Alpaca's `canceled` live updates remembered by exact order id (60 s, at most 2,000, oldest dropped first); a wait confirms at once or when the last id is reported, else ends at its own time limit; a plain pause when the live updates are not connected. It sends nothing and never retries.
+- `src/sells.ts`, `Liquidator.run` step 2: in one position's own sale (`ownEntryOnly`) that cancelled something in the round, the half-second pause comes before the first look (option A) and ends once every order that round asked to cancel is reported cancelled (option B). It counts as the full half second toward the sale's waiting limit whatever ended it, so the looks and polls after it are the old ones; only the clock time is shorter. Every whole-account sale (both close-outs, `flatten`, the loss stop, the carried-position sale, close-out retries) is unchanged.
+- `src/worker.ts`: every live update fed to the watcher; the sell path's wait.
+- **Builder's addition, not asked for by Michael (logging only):** `times.pause` `{ms, endedBy}` on `fresh_stop`, `fresh_stop_unclear` and `fresh_stop_refused` rows, so the reviews can tell a live confirmation from a full pause or a stream outage; and `pause_wait_failed` in Fly's log when the wait throws. Neither can send, cancel, size, block or protect an order.
+- Tests: `test/pause-2026-11-24.test.ts`, 18 (11 fail on the old code). The close-out test pins the old code's read times, sale times and request counts (`bd24705`), and fails if the single-position guard is removed. Full suite 1,151 pass (the known flaky `test/midday.test.ts` "at most 20 lookups" failed once under load and passed alone, 33 of 33). `tsc` clean.
+- Briefs: "The fresh-stop pause" clause in both review briefs.
+
+**Measured beforehand (2026-11-24, 33 fresh stops):** every fresh stop's sale sent exactly one cancel (the take-profit rest).
+
+**Group 1 (money-touching):** round 1 PASS with non-blocking findings; finding 1 (a confirmed early end could add looks to a timed-out stop's try, beyond its request reservation) fixed by counting the pause as the full half second; finding 5 (log when the wait throws) fixed. Round 2 PASS. Its note for Michael, no code change asked: in a timed-out stop's try (one look), the look now comes about 140 ms earlier, so a cancel landing roughly 500 to 640 ms after its answer is caught by the next try instead of this one (on 2026-11-24 the slowest cancel landed 174 ms after its answer). Also noted: the early end is not gated by the 2026-11-06 early-wake rule (it never adds a look on the normal path); a rejected sleep, impossible with today's `setTimeout`, would end the wait without the top-up.
+
+**Group 2 (logging, tests, briefs):** round 1 CHANGES REQUIRED, one blocking: the close-outs-unchanged test compared the new code with itself; now pinned to the old code's timeline and mutation-checked. Non-blocking fixes: `pause.ms` measured in every case, the watcher's timer ends on rejection, wording, four more tests. Round 2 PASS; its brief-wording notes are applied in the docs commit after the deploy (not deployed code).
+
+**Release v41 deployed** at 7:20 PM CT, outside market hours, under Michael's words "deploy after the close, before 8:00 AM, only if both pass" (group 1 and group 2 PASS in round 2 on `abf7c0f`). `main` fast-forwarded to `abf7c0f`. From a clean clone at exactly `abf7c0f` (no key file), by the repo's `tools/offhours-deploy.mjs` from that clone: `tool: offhours-deploy.mjs blob 4fbd02c12f64 (committed at HEAD: 4fbd02c12f64)`; Alpaca's clock closed (next open Wednesday 9:30 AM ET), 0 positions, 0 open orders, Wednesday's limits approved, stop flag off; Healthchecks paused (200), then `fly deploy`. Fly machine version 41, `worker_started` at 01:21:01Z (`deploy: true`, `closeoutMinutesBeforeClose: 15`), Healthchecks up. Rollback: v40 (`6b058f4`) by branch `rollback-v40` (tools unchanged since v40), through the reviewed checker.
+
+Paper only. Research input for a human decision, never an instruction to act.
