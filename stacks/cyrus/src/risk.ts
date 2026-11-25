@@ -1646,7 +1646,9 @@ export function learnedGone(mem: Pick<SyncMemory, "liveStopCancelSeenAt">, clien
 
 // Michael's decision 2 of 2026-11-25 (logging only): "the missing-exit sale records its checks (logging only), so cases like AMBA-57 can be
 // split." One `missing_exit_sale_checks` row at the end of each missing-exit sale (the order sync's sale of a position found without its
-// exits, or of a broken exit pair's rest; not the fast sale, which stores its own rows): when it started and ended, its rounds, its timed
+// exits, or of a broken exit pair's rest, its stuck retries, a timed-out stop's tries, and ruling B's 15 second limit route,
+// freshStopTimeout; not the fast sale, which stores its own rows, and not a try that ends before its sale, `cleanup_skipped`): when it
+// started and ended, its rounds, its timed
 // reads (SaleRead, at most 40, `readsMore`), its looks, pauses, polls and market sales (SaleChecks, sells.ts), its cancels sent and answered,
 // and what it sold. Built only from what the sale returned: no request, no wait; never throws.
 function logMissingExitChecks(d: Pick<RiskDeps, "log" | "now">, s: Pick<OrderRecord, "symbol" | "clientOrderId">, r: LiquidateResult, alsoCancel: readonly string[]): void {

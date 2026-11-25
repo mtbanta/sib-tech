@@ -1377,16 +1377,16 @@ export class Liquidator {
         const stillHolding = own
           ? [...symbols].some((sym) => leftNow(sym) > EPS && freeNow(sym) < leftNow(sym) - EPS)
           : [...symbols].some((sym) => openSellQty(openOrders, sym) > EPS) || held.some((p) => p.qtyAvailable != null && p.qtyAvailable < p.qty - EPS);
+        // Whether the wait goes on (the same condition as before, written once so the record below and the loop share it).
+        const goesOn = stillHolding && !(waited >= waitMs) && !(own && !cancelledInAttempt);
         try {
-          // Decision 2 of 2026-11-25 (logging only): what this look showed, and whether the wait goes on.
-          if (checks) {
-            const goesOn = stillHolding && !(waited >= waitMs) && !(own && !cancelledInAttempt);
-            for (const sym of symbols) noteLook(lookOf(round, "wait", lookAt, openReadAt - lookAt, this.d.now().getTime() - openReadAt, sym, held, openOrders, freeNow(sym), leftNow(sym), goesOn));
-          }
+          // Decision 2 of 2026-11-25 (logging only): what this look showed, and whether the wait goes on. The cheap retry's look reuses the
+          // sell gate's one read (made, untimed, before the wait), so its read times are null, not 0.
+          if (checks) for (const sym of symbols) noteLook(lookOf(round, "wait", lookAt, cheapOk ? null : openReadAt - lookAt, cheapOk ? null : this.d.now().getTime() - openReadAt, sym, held, openOrders, freeNow(sym), leftNow(sym), goesOn));
         } catch {
           // logging only
         }
-        if (!stillHolding || waited >= waitMs || (own && !cancelledInAttempt)) break;
+        if (!goesOn) break;
         // Poll gently: a cancel usually finishes in a fraction of a second, and every look costs one of Alpaca's 200 requests a minute.
         const pause = [250, 400, 600, 800][Math.min(polls++, 3)]!;
         const pollAt = this.d.now().getTime(); // decision 2 of 2026-11-25 (logging only)
@@ -1421,7 +1421,7 @@ export class Liquidator {
         }
         try {
           // Decision 2 of 2026-11-25 (logging only): the positions the step acts on, with the open orders of the wait's last look.
-          if (checks) for (const sym of symbols) noteLook(lookOf(round, "step", stepAt, null, Math.max(0, this.d.now().getTime() - stepAt), sym, result.lastLookOk ? freshPositions : null, openOrders, null, null, null));
+          if (checks) for (const sym of symbols) noteLook(lookOf(round, "step", stepAt, null, cheapOk ? null : Math.max(0, this.d.now().getTime() - stepAt), sym, result.lastLookOk ? freshPositions : null, openOrders, null, null, null));
         } catch {
           // logging only
         }

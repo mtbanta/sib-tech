@@ -42,7 +42,9 @@ export class AlpacaData {
   // The moved take-profit (Michael's decision of 2026-11-18): the latest bid and ask of several symbols in ONE request (market data, not the
   // trading bucket of 200 a minute), with a short time limit: a sale must not wait on it. A symbol without a usable quote is left out.
   // Michael's request of 2026-11-19: one multi-symbol snapshot request (`/v2/stocks/snapshots`), which also carries each symbol's latest
-  // trade; the trade is kept for the record only (the stored skip reasons and move rows), never for the price. Measured on paper on
+  // trade; the trade is kept for the record (the stored skip reasons and move rows) and, since Michael's decision 2 of 2026-11-24 and his
+  // decision 4 of 2026-11-25, is also the price of a move when the bid is below the stop or the quote is over 30 s old (pricedMoves in
+  // moved-take-profit.ts, `priceFrom` "trade" or "trade_stale_quote"). Measured on paper on
   // 2026-11-19 with 20 symbols: 54 to 82 ms, 316 ms on the first call, against 49 to 60 ms for the latest-quotes request.
   async latestQuotes(symbols: readonly string[], timeoutMs = 1_000): Promise<Map<string, MoveQuote>> {
     const out = new Map<string, MoveQuote>();

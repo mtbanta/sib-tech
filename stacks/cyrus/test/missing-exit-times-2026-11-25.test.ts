@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Liquidator, SellGate } from "../src/sells.ts";
-import { SyncMemory, syncOrders } from "../src/risk.ts";
+import { SyncMemory, fastLostExitSale, syncOrders } from "../src/risk.ts";
 import { MemoryStore, setPhase } from "../src/store.ts";
 import { ensureDay } from "../src/morning.ts";
 import { clientOrderIdFor } from "../src/gate.ts";
@@ -20,7 +20,7 @@ import { STORED_INFO_EVENTS } from "../src/run-log.ts";
 const MID = Date.UTC(2026, 10, 2, 15, 0); // 9:00 AM Central on the rig's day, in the session
 const READ_MS = 70; // every read takes 70 ms (about the measured reads)
 
-type Opts = { waitCancelled?: (w: World) => (ids: readonly string[], ms: number) => Promise<PauseEnd>; waitEvent?: (w: World) => (symbols: ReadonlySet<string>, ms: number) => Promise<boolean> };
+type Opts = { ordersMs?: number; positionsMs?: number; sleepExtraMs?: number; waitCancelled?: (w: World) => (ids: readonly string[], ms: number) => Promise<PauseEnd>; waitEvent?: (w: World) => (symbols: ReadonlySet<string>, ms: number) => Promise<boolean> };
 
 function world(o: Opts = {}) {
   const sim = new SimBroker(MID);
@@ -36,7 +36,7 @@ function world(o: Opts = {}) {
     broker: sim,
     gate,
     now: () => new Date(sim.simMs),
-    sleep: sim.sleep,
+    sleep: o.sleepExtraMs ? async (ms: number) => sim.sleep(ms + o.sleepExtraMs!) : sim.sleep,
     log,
     ...(o.waitCancelled ? { waitCancelled: (ids: readonly string[], ms: number) => (recording && calls.push(`waitCancelled@${sim.simMs - t0}`), o.waitCancelled!(ref.w!)(ids, ms)) } : {}),
     ...(o.waitEvent ? { waitEvent: (symbols: ReadonlySet<string>, ms: number) => (recording && calls.push(`waitEvent(${ms})@${sim.simMs - t0}`), o.waitEvent!(ref.w!)(symbols, ms)) } : {}),
@@ -54,8 +54,8 @@ function world(o: Opts = {}) {
       return f(...a);
     };
   };
-  wrap("listOrdersPaged", READ_MS, (s: string) => s);
-  wrap("listPositions", READ_MS);
+  wrap("listOrdersPaged", o.ordersMs ?? READ_MS, (s: string) => s);
+  wrap("listPositions", o.positionsMs ?? READ_MS);
   wrap("getClock", READ_MS);
   wrap("findOrderByClientId", READ_MS);
   wrap("getOrderById", READ_MS);
@@ -335,6 +335,8 @@ test("decision 2: a cheap stuck retry stores its one look and its sale (its read
   assert.deepEqual(r.looks.filter((l: any) => l.by === "wait").map((l: any) => [l.held, l.free, l.holding]), [[4, 4, false]]);
   assert.deepEqual(r.sales.map((x: any) => [x.qty, x.status]), [[4, "sent"]]);
   assert.equal(r.rounds, 1);
+  assert.ok(r.looks.every((l: any) => l.openMs === null && l.positionsMs === null), "read times null: the look reused the sell gate's one read, made untimed before the wait");
+  assert.deepEqual(r.reads.map((x: any) => x.what), ["clock"], "the only timed read of a cheap retry is the clock");
 });
 
 test("decision 2: the row's size (logging only; for the reader of the run log): one ordinary sale, and a sale at the caps", async () => {
@@ -350,4 +352,66 @@ test("decision 2: the row's size (logging only; for the reader of the run log): 
   if (process.env.PRINT_SIZES) console.log(JSON.stringify({ typical, capped }));
   assert.ok(typical < 8_000, `${typical}`);
   assert.ok(capped < 32_000, `${capped}`);
+});
+
+// ------------------------------------------- round 2 of the reviews (group 2, round 1): timing gaps -------------------------------
+// These change the rig's timing, so they are kept apart from the pins above (which keep every read at 70 ms and an exact sleep).
+
+test("decision 2 (round 2): the open orders and the positions reads are timed apart (orders 90 ms, positions 50 ms here)", async () => {
+  const { w } = await brokenPair({ ordersMs: 90, positionsMs: 50 });
+  const [first, , step] = checks(w)[0].looks;
+  assert.deepEqual([first.by, first.openMs, first.positionsMs], ["wait", 90, 50]);
+  assert.deepEqual([step.by, step.openMs, step.positionsMs], ["step", null, 50]);
+});
+
+test("decision 2 (round 2): a poll's real time is stored apart from the time it counted (a worker sleep 30 ms longer than asked); the pause too", async () => {
+  const { w } = await brokenPair({ sleepExtraMs: 30 });
+  const r = checks(w)[0];
+  assert.deepEqual(r.polls.map((p: any) => [p.askedMs, p.countedMs, p.ms]), [[250, 250, 280]], "250 counted toward the waiting limit, 280 really taken");
+  assert.deepEqual(r.pauses.map((p: any) => [p.ms, p.endedBy]), [[530, "timer"]]);
+});
+
+test("decision 2 (round 2): a failed re-read of the positions before the sale's step is stored as a step look that is not ok; the sale goes on in round 2", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = await hold(w, "AMBA", 7, 35.6, 57);
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 4, 35.68);
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  w.sim.advance(2_000);
+  w.sim.fillPairTakeProfit("AMBA", 2);
+  w.sim.advance(300);
+  w.sim.cancelMs = 700;
+  const lp = w.sim.listPositions.bind(w.sim);
+  let reads = 0;
+  (w.sim as any).listPositions = async () => {
+    const p = await lp();
+    if (++reads === 5) throw new Error("positions read failed (test)"); // the step's re-read in round 1 (the sync's, round 1's, two looks', then this)
+    return p;
+  };
+  w.start();
+  await syncOrders(w.risk, dd, { protect: true });
+  w.sim.advance(3_000);
+  const r = checks(w)[0];
+  const step = r.looks.find((l: any) => l.by === "step" && l.round === 1);
+  assert.deepEqual([step.ok, step.held, step.positionsMs], [false, null, 70]);
+  assert.ok(r.errors.some((e: string) => e.includes("could not re-read positions")));
+  assert.deepEqual(r.sales.map((x: any) => [x.round, x.qty]), [[2, 1]]);
+});
+
+test("decision 2 (round 2): the fast sale (A5) stores no missing_exit_sale_checks row (it stores its own rows)", async () => {
+  const w = world();
+  const dd = await day(w);
+  const id = clientOrderIdFor(D, "APLD", 81);
+  await w.sim.submitEntry({ symbol: "APLD", qty: 1, stopPrice: 16.44, takeProfitPrice: 16.47, limitPrice: 16.46, referencePrice: 16.46, clientOrderId: id });
+  w.sim.fillEntry(id, 16.46);
+  await w.store.insertOrder({ clientOrderId: id, tradeDate: D, symbol: "APLD", qty: 1, referencePrice: 16.46, stopPrice: 16.44, takeProfitPrice: 16.47, status: "filled", alpacaOrderId: null, filledQty: 1, filledAvgPrice: 16.46, note: null, createdAt: new Date(w.sim.simMs - 5000).toISOString() });
+  const fillAt = w.sim.simMs;
+  for (const l of w.sim.orders.find((o) => o.clientOrderId === id)!.legs) await w.sim.cancelOrder(l.id);
+  const row = (await w.store.listOrders(D)).find((r) => r.clientOrderId === id)!;
+  await fastLostExitSale(w.risk, dd, w.memory, row, fillAt);
+  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["APLD", 1]], "the fast sale sold");
+  assert.ok(w.events.some((e) => e.event === "lost_exit_fast"));
+  assert.equal(checks(w).length, 0);
 });
