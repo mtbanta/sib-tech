@@ -462,7 +462,9 @@ export interface LiquidateResult {
   // A4: the fresh stop placed (with `protectWithStop`), when one was.
   // `sentAtMs`: when the fresh stop was sent (Michael's ruling B of 2026-11-12: its time to confirm is stored, and an unclear one is
   // timed from it). `times`: Michael's decision 2 of 2026-11-23 (logging only, FreshStopTimes).
-  freshStop?: { symbol: string; qty: number; stopPrice: number; clientOrderId: string; orderId: string; sentAtMs: number; answerMs: number; pair?: { takeProfitPrice: number }; afterPairRefusedMs?: number; times?: FreshStopTimes };
+  // `stopLegId` (Michael's decision 3 of 2026-11-25, identity only): an exit pair's own stop leg, by its Alpaca id, when Alpaca's answer to the
+  // pair listed it.
+  freshStop?: { symbol: string; qty: number; stopPrice: number; clientOrderId: string; orderId: string; sentAtMs: number; answerMs: number; pair?: { takeProfitPrice: number }; afterPairRefusedMs?: number; times?: FreshStopTimes; stopLegId?: string };
   // The exit pair: Alpaca refused the pair outright (its reason); the plain stop was then tried (answer 2).
   pairRefused?: string;
   // A4: Alpaca refused the fresh stop and the shares were sold at market instead (the reason Alpaca gave).
@@ -1487,7 +1489,8 @@ export class Liquidator {
               const answeredAtMs = this.d.now().getTime();
               if (st.status === "sent") {
                 const times = freshStopTimes(p.symbol, sentAtMs, answeredAtMs, true, round);
-                result.freshStop = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, orderId: st.order.id, sentAtMs, answerMs: answeredAtMs - sentAtMs, ...(asPair ? { pair: { takeProfitPrice: pairAsk.takeProfitPrice } } : {}), ...(!asPair && pairSentAt !== null ? { afterPairRefusedMs: sentAtMs - pairSentAt } : {}), ...(times ? { times } : {}) };
+                const legId = asPair ? pairStopLeg(st.order)?.id : undefined; // decision 3 of 2026-11-25 (identity only)
+                result.freshStop = { symbol: p.symbol, qty: free, stopPrice, clientOrderId: sid, orderId: st.order.id, sentAtMs, answerMs: answeredAtMs - sentAtMs, ...(asPair ? { pair: { takeProfitPrice: pairAsk.takeProfitPrice } } : {}), ...(legId ? { stopLegId: legId } : {}), ...(!asPair && pairSentAt !== null ? { afterPairRefusedMs: sentAtMs - pairSentAt } : {}), ...(times ? { times } : {}) };
                 steps.sells.push({ symbol: p.symbol, qty: free, at: stamp() });
                 try {
                   result.heldAfter = Object.fromEntries((await heldNow()).map((x) => [x.symbol, x.qty]));

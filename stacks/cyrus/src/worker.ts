@@ -27,7 +27,7 @@ import { closeOut, type CloseoutOptions } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
 import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
 import { ProgressGap, RetryBackoff } from "./retry-backoff.ts";
-import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, notePairBroken, noteTimedOutStopEnded, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
+import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, notePairBroken, notePairStopLegUpdate, noteTimedOutStopEnded, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import { isExitPair } from "./exit-pair.ts";
 import type { SelfMonitor } from "./self-monitor.ts";
 import { SCREEN_MINUTES_BEFORE_OPEN, AFTERNOON_FLAT_PHASE, AFTERNOON_PAUSE_REASON, LOAD_ENTRY_WAIT_MS, LOAD_NOTE_PHASE, afternoonCloseoutPending, afternoonLoadStart, afternoonLoadWindow, inLoadWindow, isLoadDay, loadExitsAt, loadLine, loadWindow, type LoadExits } from "./load-mode.ts";
@@ -2071,6 +2071,24 @@ export class Worker {
     this.cancelSeen.note(u); // item 2 of 2026-11-24 (evening); never throws
     for (const w of [...this.waiters]) if (w.symbols.has(o.symbol)) w.wake();
     const nowMs = this.d.now().getTime();
+    // Michael's decision 3 of 2026-11-25 and his answer to question 1 ("add the instant wake"): a live update for an exit pair's own stop leg
+    // (exact Alpaca id) is recorded on the pair (risk.ts notePairStopLegUpdate) and wakes that entry's look at once: one routine look of the
+    // protection loop, as the pair's own cancel update already does (onFreshStopUpdate); a burst of updates before the look makes one look
+    // (the loop keeps one wake per entry). Not while a close-out or another sale owns selling (as onFreshStopUpdate). Never sends anything.
+    if (o.side === "sell") {
+      try {
+        const leg = notePairStopLegUpdate(this.syncMemory, { orderId: o.id, event: u.event, filledQty: o.filledQty, atMs: u.atMs }, nowMs);
+        if (leg) {
+          if (leg.log) this.d.log?.("info", "exit_pair_stop_exit", leg.log);
+          if (!(this.closingOut || this.liquidator.isLiquidatingOthers() || this.middayOwnsSelling)) {
+            this.syncMemory.mustLook.add(leg.entry);
+            this.loop.wake(leg.entry, nowMs, "protect");
+          }
+        }
+      } catch {
+        /* a live update's bookkeeping never breaks the stream */
+      }
+    }
     // Michael's decision 4 of 2026-11-24: a remembered broken pair that Alpaca reports filled is forgotten (its shares are sold; nothing is
     // left to cancel). Other ends are forgotten when the sync's order list shows them (forgetEndedBrokenPairs).
     if (o.side === "sell" && u.event === "fill" && this.syncMemory.brokenPairIds.delete(o.clientOrderId)) this.d.log?.("info", "exit_pair_forgotten", { pairClientOrderIds: [o.clientOrderId], by: "live update" });
