@@ -490,6 +490,8 @@ export interface FreshStop {
   stopLegFilled?: { atMs: number; filledQty: number };
   stopLegEnded?: { event: string; atMs: number };
   stopExitLogged?: boolean;
+  // Round 2 (logging only): `exit_pair_stop_exit_withdrawn` already written (a recognised stop exit whose leg then ended other than by a fill).
+  stopExitWithdrawn?: boolean;
 }
 
 // Michael's decision 3 of 2026-11-25: "When an exit pair's stop leg triggers and fills, that exit is correct. Fix how the stack reads it:
@@ -516,8 +518,21 @@ export const PAIR_STOP_EXIT_MAX_MS = 10_000;
 // The looks in that window: 0.5 s after the first sight, then every second (a backoff to a cap, within the limit above; each look is the
 // same look a live update wakes: the order list and the positions, plus a lookup by id for an entry older than the list). A live update
 // for the leg itself wakes a look at once (notePairStopLegUpdate).
+// Each position's rechecks go 0.5 s after its first sight, then every second (the wait grows once, then stays at its cap).
+// Group 1, round 1 of item 3: they are list-lag looks of the protection loop ("lag" wakes), so each runs only inside a P2 reservation of the
+// shared request budget (the worker's `look`, as the list-lag rechecks): with every position together they take at most P2's share of the
+// minute (BUDGET_PER_MINUTE less P1_KEEP, 40 requests) and the shared 15 in any 5 seconds, and only while Alpaca's remaining stays at or above
+// the floor of 80; several positions due at once share one look. A recheck that finds no room waits for it, at most until
+// PAIR_STOP_EXIT_RECHECK_UNTIL_MS past the time limit; then the regular 10 second sync carries on. A live update for the leg itself wakes a
+// routine look at once (notePairStopLegUpdate), as the pair's own cancel update already does.
 export const PAIR_STOP_EXIT_RECHECK_FIRST_MS = 500;
 export const PAIR_STOP_EXIT_RECHECK_MAX_MS = 1_000;
+export const PAIR_STOP_EXIT_RECHECK_UNTIL_MS = 1_000;
+// Group 1, round 1 of item 3: a pair older than the order list's window (RECENT_WINDOW_MS) is not in the list, so its parent and stop leg are
+// read by one lookup by the pair's Alpaca id (getOrderById, which asks for the nested legs), a P1 try of the shared request budget (1 request),
+// at most one per look per pair: at its first sight and at each of its window's rechecks (so at most about 12 in a window, spaced 0.5 s then
+// 1 s), and only while the pair's own record says Alpaca cancelled its limit. With no room, or if the lookup fails, it is not recognised and
+// today's path runs (no wait, no retry).
 // THE ONE PLACE that says which statuses of the pair's own stop leg count as working or filled (the pair then closes by its stop). Michael's
 // question 2 of 2026-11-25 is open: whether an untriggered leg ("held") counts. Not counted until he answers; to count it, add "held" to this
 // set (one line); the tests read this set and follow it. Never "pending_cancel" or an ended status.
@@ -539,8 +554,11 @@ export function pairClosingByStop(mem: Pick<SyncMemory, "brokenPairIds" | "timed
     ? (nested.find((l) => l.id === f.stopLegId) ?? listed.flatMap((x) => [x, ...flattenLegs(x)]).find((x) => x.id === f.stopLegId))
     : pairStopLeg(parent);
   if (!leg || leg.side !== "sell" || leg.symbol !== f.symbol || !(leg.type === "stop" || leg.type === "stop_limit" || (leg.stopPrice !== null && leg.stopPrice > 0))) return null;
-  // Working or filled as the list shows it (PAIR_STOP_LEG_WORKING), or reported filled by the live updates for this exact leg (the list lags).
-  if (!PAIR_STOP_LEG_WORKING.has(leg.status) && !(f.stopLegFilled && f.stopLegId !== undefined && leg.id === f.stopLegId)) return null;
+  // Working or filled as the list shows it (PAIR_STOP_LEG_WORKING), or reported filled by the live updates for this exact leg while the list
+  // still shows it open (lagging: "held" or another open status). Group 1, round 1 of item 3: never when the list shows it ended or being
+  // cancelled (a partial fill reported live, then the rest cancelled with that report missed, must not hold up the sale of the rest).
+  const listOpen = OPEN_STATUSES.has(leg.status) && leg.status !== "pending_cancel" && leg.status !== "pending_replace";
+  if (!PAIR_STOP_LEG_WORKING.has(leg.status) && !(listOpen && f.stopLegFilled && f.stopLegId !== undefined && leg.id === f.stopLegId)) return null;
   return { parent, leg };
 }
 
@@ -555,6 +573,8 @@ export function pairClosingByStop(mem: Pick<SyncMemory, "brokenPairIds" | "timed
 // Returns the entry to wake, or null when the update is not about a pair's recorded stop leg. Never throws, never sends anything.
 export function notePairStopLegUpdate(mem: Pick<SyncMemory, "freshStops">, u: { orderId: string; event: string; filledQty: number; atMs: number | null }, nowMs: number): { entry: string; kind: "filled" | "ended"; log?: Record<string, unknown> } | null {
   try {
+    // Group 1, round 1 of item 3: with the switch off, nothing is recorded and nothing is woken (v41's behaviour).
+    if (!PAIR_STOP_EXIT.on) return null;
     const filled = u.event === "fill" || u.event === "partial_fill";
     if (!filled && !PAIR_STOP_LEG_ENDED_EVENTS.has(u.event)) return null;
     for (const f of mem.freshStops.values()) {
@@ -1185,7 +1205,31 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
     }
     // Michael's decision 3 of 2026-11-25: the pair is closing by its own stop (pairClosingByStop): a stop exit, not a gap. No row of a gap,
     // no sale; looked at again soon, within PAIR_STOP_EXIT_MAX_MS of the first sight; after that, today's path below.
-    const byStop = PAIR_STOP_EXIT.on && covering ? pairClosingByStop(mem, fresh, listed.orders) : null;
+    // Group 1, round 1 of item 3: a pair older than the order list's window is read by one budgeted lookup (PAIR_STOP_EXIT_RECHECK_UNTIL_MS's
+    // note above), only while its record says Alpaca cancelled its limit.
+    let seenOrders: readonly Order[] = listed.orders;
+    if (PAIR_STOP_EXIT.on && covering && fresh.takeProfitPrice !== undefined && !fresh.pairBroken && !fresh.stopLegEnded && fresh.status === "canceled" && fresh.orderId && !listed.orders.some((x) => x.clientOrderId === fresh.stopClientOrderId)) {
+      const pairId = fresh.orderId;
+      const pr = budgetOf(d, mem).tryReserve("P1", 1, { label: "exit pair stop lookup" });
+      if (pr instanceof Reservation) {
+        await withReservation(pr, async () => {
+          try {
+            const x = await d.broker.getOrderById(pairId);
+            if (x) seenOrders = [...listed.orders, x];
+          } catch (err) {
+            d.log?.("exit_pair_lookup_failed", { symbol: s.symbol, clientOrderId: s.clientOrderId, pairClientOrderId: fresh.stopClientOrderId, error: (err as Error).message.slice(0, 120) }); // Fly's log
+          }
+        });
+      } else d.log?.("exit_pair_lookup_skipped", { symbol: s.symbol, clientOrderId: s.clientOrderId, pairClientOrderId: fresh.stopClientOrderId, why: pr.why }); // Fly's log
+    }
+    const byStop = PAIR_STOP_EXIT.on && covering ? pairClosingByStop(mem, fresh, seenOrders) : null;
+    // Round 2 (logging only): a stop exit recognised earlier that no longer is (its leg ended other than by a fill, or the list shows it so),
+    // before its time limit: today's path runs below; stored once, so the rows after it read as a real gap from the leg's end.
+    if (!byStop && PAIR_STOP_EXIT.on && fresh.stopExitLogged && !fresh.stopExitTimedOut && !fresh.stopExitWithdrawn && held.has(s.symbol)) {
+      fresh.stopExitWithdrawn = true;
+      const shownLeg = fresh.stopLegId !== undefined ? seenOrders.flatMap((x) => [x, ...flattenLegs(x)]).find((x) => x.id === fresh.stopLegId) : undefined;
+      d.log?.("exit_pair_stop_exit_withdrawn", { symbol: s.symbol, clientOrderId: s.clientOrderId, pairClientOrderId: fresh.stopClientOrderId, stopLegId: fresh.stopLegId ?? null, legStatus: shownLeg?.status ?? null, liveEnded: fresh.stopLegEnded?.event ?? null, held: heldQty.get(s.symbol) ?? null, msFromFirstSeen: fresh.stopExitSince !== undefined ? d.now().getTime() - fresh.stopExitSince : null });
+    }
     if (byStop) {
       const t = d.now().getTime();
       const first = fresh.stopExitSince === undefined;
@@ -1200,9 +1244,10 @@ async function protectEntry(ctx: WalkCtx, s: OrderRecord, o: Order): Promise<voi
         }
         const looks = (fresh.stopExitLooks = (fresh.stopExitLooks ?? 0) + 1);
         const gap = Math.min(PAIR_STOP_EXIT_RECHECK_FIRST_MS * 2 ** (looks - 1), PAIR_STOP_EXIT_RECHECK_MAX_MS);
-        wake(Math.min(t + gap, since + PAIR_STOP_EXIT_MAX_MS));
-        // An entry older than the order list's 10 minute window is looked up by its id at that look (one request, as for an unclear fresh stop),
-        // so the look reaches it; a newer entry is in the list and costs nothing more.
+        // A list-lag look (P2 in the shared request budget; see PAIR_STOP_EXIT_RECHECK_FIRST_MS). An entry older than the order list's window
+        // is looked up by its id at that look (one request, counted in the reservation as the list-lag rechecks count theirs).
+        const oldEntry = createdMs(s) < fromMs;
+        ctx.loop.wake(id, Math.min(t + gap, since + PAIR_STOP_EXIT_MAX_MS), "lag", { extraRequests: oldEntry ? 1 : 0, untilMs: since + PAIR_STOP_EXIT_MAX_MS + PAIR_STOP_EXIT_RECHECK_UNTIL_MS });
         mem.mustLook.add(s.clientOrderId);
         return;
       }

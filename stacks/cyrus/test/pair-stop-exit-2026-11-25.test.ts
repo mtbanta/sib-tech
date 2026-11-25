@@ -135,7 +135,10 @@ async function followUp(w: World, dd: Awaited<ReturnType<typeof day>>, first: { 
   w.wake.at = null; // a wake asked for during the first look is served by it (as the loop does for a look already running)
   for (let i = 0; i < 60; i++) {
     // The next look: the earlier of the recheck asked for and a live wake (staged events are run in time order on the way).
-    const recheck = r.recheckAt !== undefined && r.recheckAt <= untilMs ? r.recheckAt : null;
+    // A protection recheck (`recheckAt`) or a list-lag recheck (the window's rechecks since round 2: `lagRecheck`, within its own window).
+    const lag = w.memory.lagRecheck && w.memory.lagRecheck.dueAt <= w.memory.lagRecheck.until ? w.memory.lagRecheck.dueAt : undefined;
+    const due = [r.recheckAt, lag].filter((x): x is number => x !== undefined && x <= untilMs);
+    const recheck = due.length > 0 ? Math.min(...due) : null;
     let next: number | null = recheck;
     for (;;) {
       if (w.wake.at !== null) break;
@@ -436,16 +439,7 @@ test("decision 3, with the live updates connected and an entry older than the or
   w.sim.advance(300);
   const r = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
   assert.equal(ev(w, "exit_pair_stop_exit").length, 1, "recognised at the first look");
-  const looksAt = await (async () => {
-    const out: number[] = [];
-    let x = r;
-    for (let i = 0; i < 40 && x.recheckAt !== undefined && x.recheckAt <= t0 + 300 + PAIR_STOP_EXIT_MAX_MS; i++) {
-      if (x.recheckAt > w.sim.simMs) w.sim.advance(x.recheckAt - w.sim.simMs);
-      out.push(w.sim.simMs);
-      x = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
-    }
-    return out;
-  })();
+  const looksAt = await followUp(w, dd, r, t0 + 300 + PAIR_STOP_EXIT_MAX_MS, { streamLive: true });
   assert.equal(looksAt.length, 11);
   assert.ok(looksAt.every((t) => lookups.includes(t)), "each look looked the old entry up by its id");
   assert.equal(ev(w, "exit_pair_stop_exit_timeout").length, 1, "the time limit ran out at the last look");
@@ -525,8 +519,11 @@ test("decision 3, residual (not changed): the shares gone within 10 s of the ent
 // ------------------------------------------------- the trade-off, measured (for Michael) ---------------------------------------------
 // Alpaca cancels the triggered stop leg itself and the shares are left without a stop. The code before the fix had a sale running (blocked
 // by the working leg) that sold as soon as its next look saw the shares free; the fix starts today's path only at its next look, and that
-// sale then makes its own reads first. Simulator, 70 ms reads, a leg cancelled 0.1 to 11 s after the limit (220 runs, both list modes):
-// the fix sold later in 87 runs (by up to 1.36 s), earlier in 127 (median 0.71 s earlier), the same in 6. Two of them pinned here.
+// sale then makes its own reads first. Simulator, 70 ms reads, a leg cancelled 0.1 to 11 s after the limit (220 runs, both list modes).
+// Without the instant wake (pinned in this test, the cancel report not used): the fix sold later in 87 runs (by up to 1.36 s), earlier in 127.
+// With the instant wake on Alpaca's live report (Michael's answer to question 1; the later tests): later in 33 runs (by up to 0.51 s),
+// earlier in 177 (median 0.92 s earlier, at best 4.84 s), the same in 10. Each position's rechecks go 0.5 s after its first sight, then
+// every second (the wait grows once, then stays at its cap).
 test("decision 3, the trade-off: a triggered leg Alpaca cancels at 0.4 s is sold at 1.57 s (the code before the fix: 0.93 s); one cancelled at 3.4 s at 4.99 s (before: 7.19 s)", async () => {
   for (const [endMs, expected] of [[400, 1_570], [3_400, 4_990]] as const) {
     const w = world();
@@ -633,8 +630,8 @@ test("instant wake: a report for a different order id, or an event that is not a
 
 test("instant wake, in the worker: one routine look per report through the protection loop; a burst of reports for the same leg makes one wake; none while a close-out owns selling; a different id none", async () => {
   const { rig } = await import("./rig.ts");
-  const logs: Array<{ event: string; data: any }> = [];
-  const r = rig({ orderStream: true, log: (_level: string, event: string, data?: Record<string, unknown>) => void logs.push({ event, data }) });
+  const logs: Array<{ level: string; event: string; data: any }> = [];
+  const r = rig({ orderStream: true, log: (level: string, event: string, data?: Record<string, unknown>) => void logs.push({ level, event, data }) });
   const wk: any = r.worker;
   wk.startOrderStream(D);
   const woke: string[] = [];
@@ -650,7 +647,7 @@ test("instant wake, in the worker: one routine look per report through the prote
   assert.equal([...wk.loop.pendingWakes().keys()].filter((k: string) => k === entry).length, 1, "the loop keeps one wake for the entry: one look");
   assert.equal(wk.loop.pendingWakes().get(entry).kind, "protect", "a routine look (the same kind the pair's own cancel update wakes)");
   assert.ok(wk.syncMemory.mustLook.has(entry), "looked up by its id at that look if it is older than the list");
-  assert.ok(logs.some((l: any) => l.event === "exit_pair_stop_exit" && l.data.by === "live update"));
+  assert.ok(logs.some((l: any) => l.event === "exit_pair_stop_exit" && l.data.by === "live update" && l.level === "info"), "stored at level info (the run log keeps info rows of its list)");
   wk.closingOut = true;
   woke.length = 0;
   wk.afterOrderUpdate(legUpd("fill", 2));
@@ -670,4 +667,190 @@ test("instant wake: a live report that the leg was cancelled vetoes the stop exi
   await syncOrders(w.risk, dd, { protect: true });
   assert.equal(ev(w, "exit_pair_stop_exit").length, 0);
   assert.ok(gapRows(w).includes("unprotected_position"));
+});
+
+// --------------------------------------------- round 2 (group 1 round 1 and group 2 round 1) ----------------------------------------
+import { RequestBudget, Reservation, withReservation } from "../src/request-budget.ts";
+import { ProtectionLoop } from "../src/protection.ts";
+
+test("round 2, finding 1: a pair older than the order list's window (resting 11 minutes) is read by one budgeted lookup by its id at each look: a stop exit, no gap, no sale; the entry closes when the stop has sold", async () => {
+  const w = world();
+  const dd = await day(w);
+  const { id, f } = await pairRemainder(w, dd, "AMBA", 7, 2, 33.17, 3);
+  w.sim.advance(11 * 60_000); // the pair rests 11 minutes: older than the sync's 10 minute order list
+  const lookups: string[] = [];
+  const g0 = (w.sim as any).getOrderById.bind(w.sim);
+  (w.sim as any).getOrderById = async (oid: string) => (lookups.push(oid), g0(oid));
+  const t0 = w.sim.simMs;
+  stageStopExit(w, "AMBA", 28, [[2_000, 2]]);
+  f.status = "canceled"; // what the worker's live update of the limit's cancel records (onFreshStopUpdate)
+  w.memory.mustLook.add(id);
+  w.sim.advance(300);
+  const r = await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+  assert.equal(ev(w, "exit_pair_stop_exit").length, 1);
+  assert.deepEqual(lookups, [f.orderId], "one lookup of the pair by its id");
+  const looksAt = await followUp(w, dd, r, t0 + 15_000, { streamLive: true });
+  assert.deepEqual(gapRows(w), []);
+  assert.equal(w.sim.sellLog.length, 0);
+  assert.ok(lookups.length <= 1 + looksAt.length && lookups.every((x) => x === f.orderId), "at most one per look, only the pair");
+  assert.ok((await w.store.listOrders(D)).find((x) => x.clientOrderId === id)!.closedAt, "closed once the stop sold the shares");
+});
+
+test("round 2, finding 1: the old pair's lookup is a P1 try of the shared budget: with no room it is not made and today's path runs (as the code before the fix); the switch off makes no lookup either", async () => {
+  for (const how of ["no room", "switch off"] as const) {
+    const was = PAIR_STOP_EXIT.on;
+    if (how === "switch off") PAIR_STOP_EXIT.on = false;
+    try {
+      const w = world();
+      const dd = await day(w);
+      const { id, f } = await pairRemainder(w, dd, "AMBA", 7, 2, 33.17, 3);
+      w.sim.advance(11 * 60_000);
+      if (how === "no room") w.memory.budget = new RequestBudget({ now: () => w.sim.simMs, remaining: () => 10 }); // below the P1 floor of 20
+      const lookups: string[] = [];
+      const g0 = (w.sim as any).getOrderById.bind(w.sim);
+      (w.sim as any).getOrderById = async (oid: string) => (lookups.push(oid), g0(oid));
+      stageStopExit(w, "AMBA", 28, []);
+      f.status = "canceled";
+      w.memory.mustLook.add(id);
+      w.sim.advance(300);
+      await syncOrders(w.risk, dd, { protect: true, streamLive: true });
+      assert.deepEqual(lookups.filter((x) => x === f.orderId), [], how);
+      assert.equal(ev(w, "exit_pair_stop_exit").length, 0, how);
+      assert.ok(gapRows(w).includes("unprotected_position"), `${how}: today's path`);
+    } finally {
+      PAIR_STOP_EXIT.on = was;
+    }
+  }
+});
+
+test("round 2, finding 2: a live partial fill does not override a list that shows the leg cancelled (the rest cancelled, its report missed): the next look withdraws the stop exit and sells the last share at once", async () => {
+  const w = world({ liveWake: true });
+  const dd = await day(w);
+  await pairRemainder(w, dd, "AMBA", 7, 2, 33.17, 3);
+  const sells: number[] = [];
+  let t0 = 0;
+  const f0 = (w.sim as any).submitSell.bind(w.sim);
+  (w.sim as any).submitSell = async (...a: any[]) => (sells.push(w.sim.simMs - t0), f0(...a));
+  w.sim.advance(10_000);
+  t0 = w.sim.simMs;
+  w.reads(true);
+  const { leg } = stageStopExit(w, "AMBA", 28, [[600, 1]]); // 1 of 2 filled, reported live
+  w.at(1_200, () => {
+    leg.status = "canceled"; // Alpaca cancels the rest; its live report is missed
+    leg.canceledAt = new Date(w.sim.simMs).toISOString();
+  });
+  w.sim.advance(300);
+  const r = await syncOrders(w.risk, dd, { protect: true });
+  await followUp(w, dd, r, t0 + 20_000);
+  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["AMBA", 1]], "the last share sold");
+  assert.ok(sells[0]! < 3_000, `sold at ${sells[0]} ms (the first look after the list showed the cancel), not at the time limit`);
+  const wd = ev(w, "exit_pair_stop_exit_withdrawn");
+  assert.equal(wd.length, 1);
+  assert.deepEqual([wd[0]!.data.legStatus, wd[0]!.data.liveEnded], ["canceled", null]);
+  assert.equal(ev(w, "exit_pair_stop_exit_timeout").length, 0);
+});
+
+test("round 2, finding 4: with the switch off a live report for the pair's stop leg records nothing, wakes nothing and writes no row (v41)", async () => {
+  const was = PAIR_STOP_EXIT.on;
+  PAIR_STOP_EXIT.on = false;
+  try {
+    const logs: Array<{ level: string; event: string }> = [];
+    const { rig } = await import("./rig.ts");
+    const r = rig({ orderStream: true, log: (level: string, event: string) => void logs.push({ level, event }) });
+    const wk: any = r.worker;
+    wk.startOrderStream(D);
+    const woke: string[] = [];
+    wk.loop.wake = (id: string) => void woke.push(id);
+    const entry = "cyrus-20261102-AMBA-3";
+    wk.syncMemory.freshStops.set(entry, { symbol: "AMBA", entryClientOrderId: entry, stopClientOrderId: "cyrus-p-20261102-AMBA-x-s1", orderId: "p1", qty: 2, stopPrice: 33.04, placedAt: 0, status: "canceled", lookedAt: 0, takeProfitPrice: 33.26, stopLegId: "leg-1" });
+    for (const event of ["partial_fill", "fill", "canceled"]) wk.afterOrderUpdate({ event, order: { id: "leg-1", clientOrderId: "alpaca-own-id", symbol: "AMBA", side: "sell", type: "stop", orderClass: "oco", status: "filled", qty: 2, filledQty: 1, filledAvgPrice: 33, limitPrice: null, stopPrice: 33.04, groupId: "g", legs: [], replaces: null, createdAt: null, updatedAt: null, submittedAt: null, filledAt: null, canceledAt: null }, positionQty: 1, atMs: wk.d.now().getTime() });
+    assert.deepEqual(woke, []);
+    assert.equal(logs.filter((l) => l.event === "exit_pair_stop_exit").length, 0);
+    const f = wk.syncMemory.freshStops.get(entry);
+    assert.deepEqual([f.stopLegFilled, f.stopLegEnded, f.stopExitLogged], [undefined, undefined, undefined]);
+  } finally {
+    PAIR_STOP_EXIT.on = was;
+  }
+});
+
+// Finding 3: the window's rechecks across many positions, through the real protection loop and the real shared request budget, with the
+// worker's look rule (a "lag" look runs inside a P2 reservation of its cost; Worker.look). Ten positions' stop legs trigger 300 ms apart and
+// fill 6 s later; every read takes 150 ms.
+test("round 2, finding 3: ten positions' rechecks stay inside P2's share of the shared budget (at most 40 requests in any 60 s, 15 in any 5 s) and share looks", async () => {
+  const w = world();
+  const dd = await day(w);
+  const syms = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG", "HHH", "III", "JJJ"];
+  const ids: string[] = [];
+  for (let i = 0; i < syms.length; i++) ids.push((await pairRemainder(w, dd, syms[i]!, 7, 2, 20 + i, i + 1)).id);
+  w.sim.advance(5_000);
+  const budget = new RequestBudget({ now: () => w.sim.simMs, remaining: () => 200 });
+  w.memory.budget = budget;
+  const timers: Array<{ at: number; fn: () => void }> = [];
+  const lagLooks: Array<{ at: number; n: number; ids: number }> = [];
+  let protectLooks = 0;
+  const loop: ProtectionLoop = new ProtectionLoop({
+    now: () => w.sim.simMs,
+    setTimer: (fn, ms) => {
+      const h = { at: w.sim.simMs + ms, fn };
+      timers.push(h);
+      return h;
+    },
+    clearTimer: (h) => {
+      const i = timers.indexOf(h as any);
+      if (i >= 0) timers.splice(i, 1);
+    },
+    look: async (lookIds, kind, extra) => {
+      let res: Reservation | null = null;
+      if (kind === "lag") {
+        const rr = budget.tryReserve("P2", w.memory.lastListPages + 1 + extra, { label: "list lag recheck", waitKey: "list lag recheck" });
+        if (!(rr instanceof Reservation)) return { outcome: "wait", retryAt: rr.at };
+        res = rr;
+      }
+      const before = w.sim.requests;
+      const run = () => syncOrders(w.risk, dd, { protect: true, loop, only: lookIds });
+      if (res) await withReservation(res, run);
+      else await run();
+      if (kind === "lag") lagLooks.push({ at: w.sim.simMs, n: w.sim.requests - before, ids: lookIds.size });
+      else protectLooks++;
+      return { outcome: "done" };
+    },
+  });
+  // Every read takes 150 ms from here.
+  const lo = w.sim.listOrdersPaged.bind(w.sim);
+  const lp = w.sim.listPositions.bind(w.sim);
+  (w.sim as any).listOrdersPaged = async (...a: any[]) => (w.sim.advance(150), (lo as any)(...a));
+  (w.sim as any).listPositions = async () => (w.sim.advance(150), lp());
+  const t0 = w.sim.simMs;
+  for (let i = 0; i < syms.length; i++) {
+    w.at(i * 300, () => {
+      stageStopExit(w, syms[i]!, 28, [[6_000, 2]]);
+      loop.wake(ids[i]!, w.sim.simMs, "protect"); // the worker's wake on the limit's cancel update
+    });
+  }
+  const settle = async () => {
+    for (let k = 0; k < 200; k++) await new Promise((r) => setImmediate(r));
+  };
+  const end = t0 + 20_000;
+  for (let guard = 0; guard < 2_000; guard++) {
+    const staged = w.plan.map((p) => p.at).sort((a, b) => a - b)[0];
+    const timer = timers.slice().sort((a, b) => a.at - b.at)[0];
+    const next = Math.min(staged ?? Infinity, timer?.at ?? Infinity);
+    if (!(next <= end)) break;
+    w.sim.advance(Math.max(0, next - w.sim.simMs)); // also runs staged events due now
+    if (timer && timer.at <= w.sim.simMs) {
+      timers.splice(timers.indexOf(timer), 1);
+      timer.fn();
+      await settle();
+    }
+  }
+  loop.stop?.();
+  const inWindow = (ms: number) => Math.max(...lagLooks.map((l) => lagLooks.filter((x) => x.at > l.at - ms && x.at <= l.at).reduce((n, x) => n + x.n, 0)), 0);
+  const total = lagLooks.reduce((n, x) => n + x.n, 0);
+  if (process.env.PRINT_BOUND) console.log(JSON.stringify({ lagLooks: lagLooks.length, total, max60: inWindow(60_000), max5: inWindow(5_000), shared: lagLooks.filter((l) => l.ids > 1).length, protectLooks }));
+  assert.ok(lagLooks.length > 0, "the window's rechecks ran as list-lag looks");
+  assert.ok(inWindow(60_000) <= 40, `${inWindow(60_000)} requests in 60 s`);
+  assert.ok(inWindow(5_000) <= 15, `${inWindow(5_000)} requests in 5 s`);
+  assert.ok(lagLooks.some((l) => l.ids > 1), "positions due together share one look");
+  assert.deepEqual(gapRows(w), [], "every one read as a stop exit");
+  assert.equal(w.sim.sellLog.length, 0);
 });

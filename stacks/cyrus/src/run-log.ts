@@ -79,6 +79,8 @@ export const STORED_INFO_EVENTS = new Set([
   // Michael's decision 3 of 2026-11-25: an exit pair recognised as closing by its own stop (no gap, no sale), and one whose time limit ran out.
   "exit_pair_stop_exit",
   "exit_pair_stop_exit_timeout",
+  // Round 2 of item 3 (logging only): a recognised stop exit withdrawn before its time limit (the leg ended other than by a fill).
+  "exit_pair_stop_exit_withdrawn",
   "fresh_stop_recovered",
   "fresh_stop_unclear",
   "fresh_stop_refused",
