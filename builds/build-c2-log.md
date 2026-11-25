@@ -9970,3 +9970,156 @@ Research input for a human decision, never an instruction to act. Paper only.
 Build tonight, group 1 and group 2, up to 8 rounds; deploy after the close, before 8:00 AM, only if both pass.
 Also confirm the holiday: Thursday the market is closed; Friday closes early. Check that Friday's close-out runs well before the early close, the mid-day cycle is skipped, and the evening and morning limits flow handles both days. Set Friday's waits accordingly.
 Never print any token or key."
+
+## The holiday check (Michael's request of 2026-11-25): Thursday closed, Friday a half day
+
+Read only (a subagent, about 11:45 AM to 12:00 PM CT): Alpaca's paper calendar (one request), the code, the tests and the run log. Nothing changed.
+
+- **Alpaca's calendar (measured):** Thursday 2026-11-26 has no session; Friday 2026-11-27 opens 8:30 AM CT and closes 12:00 PM CT (13:00 ET); Monday 2026-11-30 is a normal day.
+- **Thursday (inferred from the code; the same path held on 8 weekend days, measured):** the day record is `not_trading_day`; the pass returns before any screen, Armed, entry, sync, loss stop, close-out or summary; the Healthchecks ping and the flatness check run (flat, so nothing posts); `pair on` is refused.
+- **Friday's times (from the calendar, never hard-coded; tested):** screen 8:15, Armed 8:25, open 8:30, the mid-day pause and close-out 10:30, last entry and the end of the automatic resume and of `load afternoon` 11:00, the regular close-out 11:45 (close minus 15, `closeout-setting` test), close 12:00, summary 12:05, the evening post for Monday 12:10 PM CT. The mid-day close-out and the regular one are 75 minutes apart.
+- **The mid-day cycle is NOT skipped on a half day.** Michael ruled on 2026-11-09 for early-close days: "Run it at 10:30" (no half-day skip; release 2's log, his answer (b)). `middayTimes` in `src/midday.ts` returns no cycle only when 10:30 falls in the last 5 minutes before the close; `test/midday.test.ts` asserts the half-day cycle. Skipping it would be a money-touching change needing his ask; the builder recommended keeping it (no answer yet).
+- **The limits flow:** the 3:10 PM Wednesday post targets Friday (the `limits-flow` test "the next session skips Thanksgiving and finds the half day"; measured at 3:10:03 PM, see the end-of-day review); approvals made Wednesday evening or Thursday apply to Friday and do not expire over the holiday; exit pairs are off on Friday until `pair on` that day; remembered broken pairs are forgotten at Friday's first sync.
+- **Deploys:** the off-hours tool allows deploys through Thursday and refuses from 8:00 AM CT Friday until the open. Open question to Michael: do Friday's market hours for the deploy rule end at the 12:00 close or at 3:00 PM?
+- **Friday's waits (this session only):** the mid-day review from 10:31 AM CT once the 10:30 close-out is flat; the end-of-day review from 12:07 PM CT after the 12:05 summary. The Mac must stay open.
+
+## Items 2 and 4: reviews and release v42 (2026-11-25, afternoon)
+
+Built by a builder subagent in a scratchpad clone (no key file), applied as patches on branch `night-2026-11-25` in the primary checkout, one commit per item.
+
+- **Item 4 (`e298a4e`):** in `pricedMoves` (`src/moved-take-profit.ts`), a quote over 30,000 ms old with the same snapshot's trade at most 10,000 ms old prices the move from the trade less 1 cent (`priceFrom: "trade_stale_quote"`); the same margin and below-the-old-take-profit checks and the same fallback; the bid not compared with the stop in that branch; a stale quote with no or a stale trade still skips ("quote N s old"). Tests: AMBA-99's numbers (moves at 35.60), both boundaries.
+- **Item 2 (`8a7ae34`):** one `missing_exit_sale_checks` row ends each missing-exit sale (looks, pauses, polls, the market sale, rounds, the timed reads; at most 40 looks, 40 polls, 10 sales, 3 errors). Logging only: 8 scenarios' request sequence and timing pinned to the old code's numbers (both reviewers ran the pins against `a8d2555`: 8 of 8). Unasked additions (logging only): the row itself, the "step" looks, 8-character ids.
+- **Group 1 round 1: PASS.** Group 2 round 1: CHANGES REQUIRED (blocking: the briefs still said the missing-exit sale's pause is not stored, and gave no reading guide; non-blocking: four test gaps found by mutation).
+- **Round 2 (`a5fde43`):** the briefs' reading guide for the row, the stale sentences fixed, four tests added, a cheap retry's read times null, comments, and the wait loop's end condition (`goesOn`) shared with the look record (group 1: exactly equivalent, term by term, no side effects). **Group 1 round 2: PASS. Group 2 round 2: PASS.** Group 2's optional wording (an "error" sale can also mean the gate could not read the position, nothing sent; no leftover sale, kind "bare", stores a row) is left for the next brief edit.
+- **Deployed 3:22 PM CT** (Michael's approval: "Item 2 and 4 deploy plan: approved (about 3:45 PM as v42)") from a clean clone of `a5fde43` through `tools/offhours-deploy.mjs` (tool blob `4fbd02c12f64`; checks: outside market hours, 0 positions, 0 open orders). Fly machine version 42; `worker_started` 21:22:48.798Z, `deploy: true`, `closeoutMinutesBeforeClose: 15`; Healthchecks up. `main` fast-forwarded to `a5fde43`. **Rollback: v41 (`abf7c0f`) by branch `rollback-v41`** (tools unchanged since v41).
+- **Item 3** (a pair closed by its stop) is in review on the same branch, not deployed (next section).
+
+## Item 3: built, Michael's answers, in review (2026-11-25, afternoon)
+
+- **Diagnosis (builder, from the mid-day review's saved records):** Alpaca cancels the pair's limit first; the stop leg shows submitted 7 to 147 ms later and fills 0.33 to 3.95 s after the limit's cancel. AMBA-3's and NTNX-36's woken looks fell in that window, saw the limit cancelled and read the pair as ended; the three HPE ones were quiet by luck of what the lagging list showed (inferred).
+- **First build (held for Michael under the stop rule):** in the rare case of Alpaca cancelling a triggered leg itself, the fix sold later than today's code in 87 of 220 simulator runs (up to 1.36 s). Questions to Michael: (1) ship, add an instant wake, or drop; (2) whether a leg shown `held` counts as working.
+- **Michael's answers on item 3 (2026-11-25, about 3:15 PM CT), verbatim:**
+- "Question 2: held does not count as working, as built. The extra end states (done_for_day, replaced) treated like a cancel: approved. Group 2's note: make switching item 3 off also turn off the instant wake, so off fully restores today's behaviour. Deploy item 3 before 8:00 AM Friday only if both groups pass."
+- Earlier (about 2:45 PM CT), verbatim: "Item 2 and 4 deploy plan: approved (about 3:45 PM as v42). ... Question 1: add the instant wake, if it means the stack reacts at once to Alpaca's live report that the stop leg filled."
+- **With the instant wake (`a7ab3d6`):** later in 33 of 220 runs (up to 0.51 s), earlier in 177 (median 0.92 s). Group 1 round 1: CHANGES REQUIRED (an old pair still read as a gap; a live partial fill overriding a list showing the leg ended; the window's rechecks unbounded across positions; switch off not v41). Group 2 round 1: CHANGES REQUIRED (the briefs' reading guide; the row marks recognition, not a finished exit).
+- **Round 2 (`e287df4`):** an old pair read by one budgeted lookup (P1, 1 request); a live fill never counts against an ended leg; the window's rechecks as P2-reserved list-lag looks shared across positions (P2 at most 40 requests in any 60 s and 15 in any 5 s, only while remaining is at least 80); switch off stops the wake too; the briefs' guide; a withdrawn row (logging only). Both groups reviewing round 2. Deploy only if both pass, before 8:00 AM CT Friday.
+
+## Wednesday 2026-11-25 end-of-day review (v41, normal day; exit pairs on all day; no trading after the 10:30 pause, no `go`; the 2:45 close-out found the account already flat)
+
+Read only, per `builds/daily-review-brief.md` (normal-day sections), its exit pair paragraph, its "Fresh-stop times" clause, its clause "Tonight's build of 2026-11-24" and its clause "The fresh-stop pause", all of which apply all day (v41 started 7:21 PM CT Tuesday). The morning, the 10:30 mid-day close-out and the morning's safety work are in "Wednesday 2026-11-25 mid-day session review (v41, normal morning; exit pairs on all morning; the first morning of the fresh-stop pause; the first exit pair open at a close-out)" and are not repeated. Records read about 3:08 to 3:16 PM CT, after the close and after the 3:10 PM evening post: Alpaca (paper, 29 requests paced at one every 2.1 s; account read at 3:10:35 PM CT), Supabase (read-only transaction), Discord, Healthchecks and Fly's metrics; nothing changed, deployed, sent, posted or ordered by the review. Fly's log holds only its last 100 lines, which began at 2:43:37 PM (signals, refusals and the summary's order listing), so the review rests on the run log, Alpaca's order records and fills, Discord and Prometheus. Times are Central. "Measured" means read from a timestamp or counter; "inferred" means worked out from the code and those times; "guess" means neither. Scripts and data: scratchpad `eod-1125/`.
+
+**Release:** Fly v41 (`abf7c0f`) all day; the latest stored `worker_started` is 01:21:01.523 UTC on 2026-11-25 (7:21 PM CT Tuesday; `deploy: true`, `closeoutMinutesBeforeClose: 15`), and no later one, so no restart today and the regular close-out was due at 2:45 PM. Limits all day: largest position 250 dollars, daily loss stop 500, 100 orders a minute, cap 1. Exit pairs on all day (`exit_pair_switch` on: true at 8:00:57; day phase `exitPair` "on"). Michael's decisions 2 to 4 of 2026-11-25 (the missing-exit sale's checks logged, a pair closed by its stop read correctly, a stale quote with a fresh trade) are decided, not deployed: none of them ran today.
+
+**Verdict: the day as a whole stays inconclusive on one criterion, as the mid-day review found, because of AMBA-57's broken-pair sale at 9:33 (8.1 s without a stop, the stack's part not shown either way).** The afternoon adds nothing against any criterion, because there was no trading after the 10:30 pause: Michael sent no `go` and no `load afternoon`, so the stack stayed paused and flat from 10:30:20 AM to the close. Whole day (measured): highest accepted orders a minute **17** (morning); **no rate-limit answers** (`rateLimitAnswers` 0 in all 380 rows); **Alpaca's remaining never below 127** (9:31:47 AM; reserve 80); the mid-day close-out flat at 10:30:20.4; **the 2:45 close-out flat** at 2:45:00.555, because the account was already flat.
+
+**Day's result: -275.98 dollars** (16,535.81 to 16,259.83), all of it in the morning, before about 2.65 of fees that Alpaca posts this evening. The day's low is that same figure (the account was flat from 10:30:20; Alpaca's one-minute history shows 16,259.83 from 10:31 to the close): 55 percent of the 500 dollar loss stop; the loss stop did not fire.
+
+### What happened at the mid-day pause (measured)
+
+- Paused and flat at 10:30:20.4 (mid-day review). No deploy, no `go`, no `load afternoon`, no `hold`, `stop`, `flatten` or `resume`: the only command Michael sent all day was `Pair on` at 8:00:52 AM (`commands`, and the one stored `command` row).
+- **1:30 PM note:** day phase `midday1330` written at 1:30:01.731 PM, and the post at 1:30:02 PM in `commands`: "1:30 PM CT: nothing was deployed, so I stay paused. Send `go` to trade until 2:00 PM CT (the last entry), or nothing." True and as designed.
+- No entry after the pause: Alpaca shows no order created after 10:30:09.8 AM (the last of the close-out's sales) and no fill after 10:30:13.97 AM. Refusals after 10:30 (each "(many)" row counted by its count): "paused for the mid-day cycle" 5,400 (last at 2:44:59.8 PM; after 2:00 PM the refusals still read "paused for the mid-day cycle", not "too close to the close", because the pause is checked first) and "already holding this symbol" 12 (10:30:00 to 10:30:20, before the close-out finished).
+
+### 3. The afternoon (normal day)
+
+- **No trading.** 0 entries, 0 fills, 0 orders at Alpaca after 10:30:09.8 AM (Alpaca's order listing from 10:30:30 AM returned none). So no remainders, no exit pairs, no broken pairs, no fresh stops, no lost exits, no stuck sale, no `sale_blocked`, no `late_notice` after the pause. The daily loss stop did not fire.
+- Run log after 10:30:20.4 AM: apart from the per-minute rows, only the 2:45 `closeout_result` (below). No warning or error, no `order_stream` row (the live updates stayed up from 8:25:09 AM), no `sync_slow`, no `not_flat_check_failed` all day.
+- **Requests (governor rows 10:32 AM to 2:59:07 PM, 261 rows): 20 to 30 a minute (median 26), routine syncs and reads only; lowest remaining 196** (10:33:11 AM); governor holds 0; `mostBudgetedInMinute` 0 (no budgeted try ran); rate-limit answers 0. The row covering the 10:30 close-out (to 10:31:02) shows 96 requests and a lowest of 177; it belongs to the mid-day review's window.
+- Total time without a stop, afternoon: none (no position). The day's worst stays AMBA-57, 8.1 s at 9:33 (mid-day review).
+- Cost: 0.00 dollars in the afternoon (equity 16,259.83 from 10:31 to the close).
+
+### 4. The regular close-out (2:45 PM, the setting of 15)
+
+**Nothing to sell; flat.** `closeout_result` (path `close-out`, stored 2:45:00.555): due 14:45:00.000; **triggered 14:45:00.000 by the timer** (`triggeredBy` "timer", 0 ms late); started 00.002; sale's turn 00.071; reads: clock 73 ms, positions 88 ms, open orders 312 ms (1 page; `readsMore` 0); no move phase (`movePhaseStartedAt` null); `steps` null, `sold` [], `waitedMs` 0, `remaining` []. The `not_flat` state written off at 00.877; day phase `closeout` 00.899 and `flat` yes; "Close-out done: the account is flat." posted at 2:45:00 PM in `trading`. No retry, no NOT FLAT of any kind (`closeout_waiting_alert` 0). Cap 1 all day (never raised). The loss stop never fired, so its retry had nothing to go quiet for.
+
+**Per-move rows: none at 2:45.** No `take_profit_moved`, `move_phase_skips` or `move_phase_*` row after 10:30:20.4 AM. Today's only move rows are the mid-day close-out's nine moves (including DAR, priced from the trade) and one skip row, in the mid-day review. No pair moved (no `take_profit_moved` with `pair: true` all day), so the first live pair move is still to come.
+
+**Alpaca after the close (measured, 3:10:35 PM):** 0 positions, 0 open orders, equity 16,259.83, cash 16,259.83, long market value 0.
+
+**Alpaca's hold at 2:45:** no market sale, so nothing new for the hold comparison (still Monday's single 2:30 sale against 33 at 2:45 last week).
+
+### 5. Alerts that mentioned Michael
+
+**None all day.** `alerts` 23 posts and `commands` 8 posts, 0 with his mention (the mid-day review's alerts were all morning). **None in the afternoon:** `alerts` had no post after 10:30. Nothing without a mention reads as a problem in the afternoon.
+
+### 6. Blocked sales and late notices
+
+No `sale_blocked` and no `late_notice` after the pause. The day's two `sale_blocked` and nine `late_notice` rows are the morning's (mid-day review).
+
+### 7. The daily summary against the account, to the cent (3:05:14 PM, `trading`)
+
+- **Profit or loss -275.98:** matches the fills' cash flow (sells 127,305.20 less buys 127,581.18 = -275.98) and Alpaca's equity, 16,535.81 to 16,259.83, to the cent. Matched.
+- **"597 entry orders sent (597 filled); Alpaca refused 5 more":** stored orders 597 filled and 5 failed; Alpaca's fills show 597 distinct buy orders, all `cyrus-20261125-` brackets. No test orders today. Matched.
+- **"687 sells filled":** 687 distinct sell orders in the fills (3,018 shares, equal to the shares bought). **"Closed trades: 355 won, 327 lost, 5 broke even":** re-measured today by pairing each sell order with the last filled buy of its symbol before it (one position per symbol): 355 / 327 / 5. Matched.
+- **Per-symbol lines** (AMBA 645 / 645 / -75.97, KYMR -29.43, NTNX -23.32, URBN -20.76, DAR -18.92, BSP -16.78, ANF -15.18, KSS -14.78; "...and 11 more symbols", 19 in all) match the fills to the cent.
+- **Fees:** estimate 2.65 (SEC 2.63, TAF 0.00, CAT 0.02). Formula: sells 127,305.20 times 0.0000206 = 2.622, rounded up to 2.63; CAT on buys and sells (`src/fees.ts`), 6,036 shares times 0.000003 = 0.018, rounded up to 0.02. Exact. Today's fees are not posted yet; **Tuesday's, posted this evening, were REG 3.20 and CAT 0.02 = 3.22, exactly Tuesday's estimate.** The running total (51.18) was not re-measured.
+- **"Fresh stops after a partial take-profit: 71 placed (186 shares); no remainder sold at market at that step":** matches the run log (71 `fresh_stop`, all exit pairs, 186 shares) and the stored `stop_gap:2026-11-25`. True of that step, but 25 broken pairs' shares were sold at market later in the morning (25 `exit_pair_rest_cancel`, 29 `cyrus-x-` market sales in all, mid-day review), which the line does not mention (as on Tuesday).
+- **"Peak exposure 4498 dollars, 0.28 times equity":** matches the stored `peak_exposure:2026-11-25` (4,498.27, ratio 0.276, written 10:15:37 AM). Tuesday's open question on what this figure counts (section 7 and fix C of Tuesday's review) is not re-examined here.
+- **Requests line** ("about 13 in the minute before this summary; lowest budget seen 127 of 200; busiest minute 17 orders; held back by the governor 0 times; rate-limit answers 0"): lowest 127, busiest 17, governor 0 and rate-limit 0 match the stored rows. "About 13 in the minute before this summary" has no stored row to match: the per-minute rows stop at 2:59:07 PM, the end of the session (not matched, not contradicted).
+- **"Refused entries: 7841"** matches the day's refusal rows, grouped and counted (paused for the mid-day cycle 5,400, already holding 2,046, position limit smaller than one share 221, first minutes 140, still working 24, plus 10 "Alpaca refused this symbol a moment ago", not listed in the line).
+- **Speed** (597 orders: typical 164 ms, 95th percentile 319, slowest 648) matches the stored `accept_ms` of all 597.
+- **"Mid-day cycle: paused at 10:30 AM CT, flat at 10:30 AM CT, stayed paused for the rest of the day."** True. No restart note, and there was no restart: correct. "Stop flag: off. End of day: flat." True (stored `stop_flag` off since Michael's `resume` of 2026-11-23; Alpaca flat).
+- Fly's log: the summary's order listing (`summary_listing` at 3:05:10.794 PM) read 87 windows in 87 requests, 823 orders, 0 failed windows, `complete: true`.
+
+### 8. The shadow loss-stop book
+
+Whole day: largest difference 4.14 dollars at 8:36:57 AM (the row ending 8:37:22), mean -0.12; 0 in the afternoon (flat). The loss never came near the stop (low 55 percent), so it would not have fired at a different time.
+
+### 9. Discord and Healthchecks
+
+Wednesday: `alerts` 23 (0 after the pause), `trading` 28 (3 after the pause: the 10:27 to 10:32 five-minute line, the close-out line, the summary), `commands` 8 (3 after the pause: the mid-day review line at 10:58, the 1:30 PM note, Friday's limits post at 3:10 PM). 0 mentions of Michael. Healthchecks: up, last ping 3:08:52 PM, no flips today.
+
+**The evening limits post names Friday (checked).** Posted 3:10:03 PM in `commands`; Friday's day record (`trading_days` 2026-11-27) was created `pending` with phase `request` 21:10:03.249 UTC and the suggested limits; no record for Thursday 2026-11-26. Alpaca's calendar (one request) has no row for 2026-11-26 and gives 2026-11-27 a 1:00 PM Eastern close (12:00 PM CT). The post, quoted (no secrets in it):
+
+> **Suggested limits for Friday 2026-11-27 (market opens at 8:30 AM CT).** Nothing is approved until you reply.
+> 1. position: largest single position 250 dollars (waiting for you) [suggested from your approval on 2026-11-25]
+> 2. loss: daily loss stop 500 dollars (waiting for you) [suggested from your approval on 2026-11-25]
+> 3. trades: at most 100 orders a minute, no daily total; the ceiling is 100 (150 on a load day) (waiting for you) [suggested from your approval on 2026-11-25]
+> 4. cap: borrowing cap 1, where 1 means no borrowing (waiting for you) [suggested from your approval on 2026-11-25]
+> 5. mode: normal (`load on` makes it a load day)
+>
+> **Checklist**
+> - Stop flag: off.
+> - Account: flat, no open positions.
+> - Borrowing cap at Alpaca right now: 1, long only. The approved cap is set at Alpaca 5 minutes before the open, not before.
+> - Price feed: iex (one exchange only, so prices are rough; the strategy is a placeholder to test the plumbing).
+>
+> Reply here: `approve` accepts every limit as shown, `approve cap` accepts one, or change one with `position 1500`, `loss 150`, `trades 20`, `cap 2` (that also counts as your decision). You can send several commands in one message, one per line.
+> Until the `Armed` message 5 minutes before the open you can change any limit. After it, a limit can only be lowered (tightened), until the next evening post. Loosening is locked.
+> `trades` is the most orders I will send in any 60 seconds to open positions; there is no daily total. The loss stop is the main safety net.
+> **If any limit is still undecided at the open, I will not trade that day.**
+> Paper trading only. Research input for a human decision, never an instruction to act.
+
+**Observation, not a fault:** the post says only "market opens at 8:30 AM CT". It does not say that Thursday is closed or that Friday closes early at 12:00 PM CT (so the last entry moves to 11:00 AM and the close-out to 11:45 AM; the mid-day cycle still runs at 10:30 AM). Whether the worker handles Friday's half day as designed (close-out at 11:45 AM, last entry at 11:00 AM) is the builder's holiday check for Michael's request of 2026-11-25, not measured here; that check found the mid-day cycle is not skipped on a half day: it runs at 10:30 AM, as Michael ruled on 2026-11-09 (builder's note added to this review).
+
+### 10. The Fly machine (Prometheus, 8:30 AM to 3:15 PM; the worker's rows)
+
+- **No throttling in any minute; the CPU burst balance stayed full all day** (lowest 49,997 at 8:38 AM; 50,000 from 10:30 on). No restart today, so no restart drop (Tuesday's 11:45 and 3:09 drops to about 5,000).
+- CPU in use 0.73 to 1.60 cores at the 10-minute points (highest minutes 2.18 at 9:02, 2.13 at 9:31, both morning; at most 1.50 after 10:35); steal at most 0.77 (8:54 AM) and 0.73 at 3:09 PM, 0.45 at 12:32 (Tuesday afternoon 3.78); 1 minute load at most 0.23; memory available at least 348 MB.
+- Worker rows (379 per-minute rows plus one long window): afternoon (261 rows) process CPU 0.8 to 1.2 percent, machine busy at most 1.5 percent, steal at most 0.5 percent (12:31), memory available at least 350.5 MB, **event-loop delay at most 41.5 ms (11:15 AM; also 40.9 at 1:26 PM and 38.7 at 2:10 PM), 99th percentile at most 1.2 ms**, no decisions (no entries). Morning (118 rows): event-loop delay at most 45.5 ms (8:39), decision figures in the mid-day review. The day's one long window (8:30:02 AM row, covering the 13 hours since the previous evening) had an event-loop maximum of 117.1 ms. Idle afternoon spikes of about 40 ms with the worker doing only routine syncs are a measurement; their cause is not shown (a guess: garbage collection or a sync's parse).
+
+### Overnight
+
+No `not_flat_check_failed` row since 5:00 UTC (11 PM CT Tuesday), so no overnight alert was due. Flat after the close by a live read (above). No event after the summary other than per-minute rows (none after 2:59 PM).
+
+### 11. Anything that did not behave as designed
+
+- Nothing in the afternoon: the stack stayed paused as designed without `go`, posted the 1:30 PM note, ran the 2:45 close-out on its timer, found the account flat, and posted a summary that matches the account to the cent.
+- The open morning case stays open: AMBA-57's 6.05 s inside its own sale (mid-day review); decision 2 of 2026-11-25 (log the missing-exit sale's checks) is meant to split such cases next time.
+- Note: Friday's limits post does not mention the half day (section 9).
+- By design, not faults: the 2:45 close-out had nothing to sell; refusals after 2:00 PM read "paused for the mid-day cycle".
+
+### 12. Recommended fixes, a proposal only (no code)
+
+- **A. Friday's limits post (messaging, group 2 review if changed):** on a day before a holiday or before an early close, add one line naming it, for example "Thursday 2026-11-26: market closed. Friday 2026-11-27 closes early at 12:00 PM CT: last entry 11:00 AM, close-out 11:45 AM." What it would have changed today: one more line in the 3:10 PM post. Cost: none in trading requests (the calendar read is already made, inferred; not checked in the code). Does not touch money. A question for Michael: does he want it, and should the morning post say it too?
+- **B. Carried (Tuesday's C and D):** the peak exposure line's meaning, and the broken pair's market-sale wording; no new evidence today.
+- **C. Note only, no fix proposed:** with no `go`, a normal afternoon gives no paper test of the afternoon paths (the pair move at a close-out, the 2:45 hold). That is Michael's choice each day, not a fault.
+- **Friday's limits (Michael's decision):** the 3:10 PM post suggests the same four (250 dollars, 500 loss stop, 100 a minute, cap 1); nothing is approved until he replies, and any limit undecided at the open means no trading on Friday. Today cost 275.98 dollars on 597 entries (about 0.46 dollars an entry), 55 percent of the loss stop. Friday is a half day (close 12:00 PM CT), so the session is about 3.5 hours. Lowering a limit is a tightening he can make; raising the loss stop or a ceiling is a hard stop, his alone.
+
+### For Michael
+
+- **Decide Friday's limits** (posted 3:10 PM in `commands`); Thursday is Thanksgiving, market closed; Friday closes at 12:00 PM CT.
+- **Exit pairs start each day off:** send `pair on` on Friday if you want them.
+- Nothing needs action from today's afternoon: no trading after 10:30, the 2:45 close-out flat, the summary exact to the cent, no alert mentioned you.
+
+Research input for a human decision, never an instruction to act. Paper only.
