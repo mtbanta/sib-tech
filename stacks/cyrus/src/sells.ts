@@ -360,6 +360,45 @@ export interface FreshStopTimes {
   pause?: { ms: number; endedBy: PauseEnd };
 }
 
+// Michael's decision 2 of 2026-11-25 (logging only): "the missing-exit sale records its checks (logging only), so cases like AMBA-57 can be
+// split." In one position's own sale (`ownEntryOnly`), what each look showed and how long each wait took, beside the timed reads (SaleRead):
+//   - `looks`: each look of the wait for the shares to come free (`by: "wait"`: the open orders, then the positions) and the positions read
+//     before the sale's step (`by: "step"`), with when it was asked (`at`) and how long the reads took (`openMs`, `positionsMs`; null when
+//     not made), and what it showed for the symbol: shares held, Alpaca's free count (`qtyAvailable`), shares open sells hold (`openSellQty`)
+//     and those sells (at most 3: the first 8 characters of the id, type, status, shares, filled), what the sale counted free (`free`) and
+//     still its own to sell (`left`), and whether the wait went on (`holding`; null for a step read);
+//   - `pauses`: each round's pause after its cancels (the worker's clock: its start, the time it took, how it ended, cancel-seen.ts);
+//   - `polls`: each poll's wait (asked, counted toward the waiting limit, and the time it really took);
+//   - `sales`: each market sale asked of the sell gate (its shares, when asked and answered, and the gate's answer).
+// At most SALE_LOOKS_STORED looks and polls are kept (the rest counted in `looksMore`, `pollsMore`), SALE_SALES_STORED sales. Recording
+// never throws and adds no request, no wait and no step: what the sale sends, and when, is unchanged.
+export interface SaleLook {
+  round: number;
+  by: "wait" | "step";
+  at: string;
+  openMs: number | null;
+  positionsMs: number | null;
+  ok: boolean;
+  held: number | null;
+  qtyAvailable: number | null;
+  openSellQty: number | null;
+  openSells?: Array<{ id: string; type: string; status: string; qty: number; filledQty: number }>;
+  free: number | null;
+  left: number | null;
+  holding: boolean | null;
+}
+export interface SaleChecks {
+  rounds: number;
+  looks: SaleLook[];
+  looksMore: number;
+  pauses: Array<{ round: number; at: string; ms: number; endedBy: PauseEnd }>;
+  polls: Array<{ round: number; at: string; askedMs: number; countedMs: number; ms: number }>;
+  pollsMore: number;
+  sales: Array<{ round: number; qty: number; askedAt: string; answeredAt: string; status: string }>;
+}
+export const SALE_LOOKS_STORED = 40;
+export const SALE_SALES_STORED = 10;
+
 export interface LiquidateSteps {
   cancelsSentAt: string[];
   cancelsAnsweredAt: string[];
@@ -383,6 +422,8 @@ export interface LiquidateResult {
   // Michael's approval of 2026-11-21, item 1 (logging only): the sale's reads from Alpaca (SaleRead), and how many more were not kept.
   reads?: SaleRead[];
   readsMore?: number;
+  // Michael's decision 2 of 2026-11-25 (logging only), with `ownEntryOnly` only: what the sale's looks showed and its waits (SaleChecks).
+  checks?: SaleChecks;
   // Only with yieldToPriority: the sale stopped early because the daily loss stop's sale goes first, or (with `ownEntryOnly`) it stood
   // aside at its turn, before any request (`stoodAside`): a sale of the whole account was asked for ("whole account"), or a close-out step
   // owns selling or the close-out time has come ("close-out").
@@ -667,6 +708,25 @@ export class Liquidator {
       return v;
     };
     const gateTimer: GateReadTimer = (what, f, pagesOf) => timedRead(what, f, pagesOf, "gate");
+    // Michael's decision 2 of 2026-11-25 (logging only): one position's own sale records its checks (SaleChecks). Each helper never throws.
+    const checks: SaleChecks | null = o.ownEntryOnly ? { rounds: 0, looks: [], looksMore: 0, pauses: [], polls: [], pollsMore: 0, sales: [] } : null;
+    const iso = (ms: number): string => new Date(ms).toISOString();
+    const noteLook = (look: SaleLook): void => {
+      try {
+        if (!checks) return;
+        if (checks.looks.length >= SALE_LOOKS_STORED) checks.looksMore++;
+        else checks.looks.push(look);
+      } catch {
+        // logging only
+      }
+    };
+    // What a look showed for one symbol, from the reads it made (no request). `free` and `left` are the sale's own counts, given by the caller.
+    const lookOf = (round: number, by: SaleLook["by"], at: number, openMs: number | null, positionsMs: number | null, sym: string, held: Position[] | null, open: Order[] | null, free: number | null, left: number | null, holding: boolean | null): SaleLook => {
+      const p = held?.find((x) => x.symbol === sym);
+      const sells = open ? openSellOrdersFor(open, sym) : [];
+      const fin = (x: number | null): number | null => (x === null || !Number.isFinite(x) ? null : x);
+      return { round, by, at: iso(at), openMs, positionsMs, ok: held !== null, held: held ? (p?.qty ?? 0) : null, qtyAvailable: p?.qtyAvailable ?? null, openSellQty: open ? openSellQty(open, sym) : null, ...(sells.length > 0 ? { openSells: sells.slice(0, 3).map((x) => ({ id: x.id.slice(0, 8), type: x.type, status: x.status, qty: x.qty, filledQty: x.filledQty })) } : {}), free: fin(free), left: fin(left), holding };
+    };
     // Michael's decision 2 of 2026-11-23 (logging only): the fresh stop's times (FreshStopTimes). Never throws; never changes the sale.
     const freshStopTimes = (symbol: string, askedAtMs: number, answeredAtMs: number, accepted: boolean, round: number): FreshStopTimes | undefined => {
       try {
@@ -979,6 +1039,7 @@ export class Liquidator {
       writeMoveRows();
       if (reads.length > 0) result.reads = reads; // item 1 of 2026-11-21 (logging only)
       if (readsMore > 0) result.readsMore = readsMore;
+      if (checks) result.checks = checks; // decision 2 of 2026-11-25 (logging only)
       if (steps.cancelsSentAt.length > 0 || steps.sells.length > 0 || (steps.replaces?.length ?? 0) > 0) result.steps = steps;
       // Michael's decision of 2026-11-09 (logging only): an attempt that sold nothing and met no error but left shares held is logged
       // too (on 2026-11-09 such attempts left no trace), with how many times a symbol was skipped because its shares were not free.
@@ -1005,6 +1066,7 @@ export class Liquidator {
     }
     for (let round = 1; round <= rounds; round++) {
       readRound = round; // item 1 of 2026-11-21 (logging only); a round started again after the moves keeps its number
+      if (checks) checks.rounds = round; // decision 2 of 2026-11-25 (logging only)
       result.lastLookOk = false; // set true below only by this round's successful look (reported only)
       if (yieldNow()) return yielded();
       // Nothing is sent while the market is closed: a market sell then queues for the next open (and cancelling the
@@ -1271,9 +1333,15 @@ export class Liquidator {
           // stays inside its request reservation); only the time is shorter.
           waited += 500;
           pauseNote = { round, ms: Math.max(0, this.d.now().getTime() - pt), endedBy };
+          try {
+            if (checks) checks.pauses.push({ round, at: iso(pt), ms: pauseNote.ms, endedBy }); // decision 2 of 2026-11-25 (logging only)
+          } catch {
+            // logging only
+          }
           continue;
         }
         let held: Position[] = [];
+        const lookAt = this.d.now().getTime(); // decision 2 of 2026-11-25 (logging only)
         try {
           openOrders = await openOrdersR();
           openReadAt = this.d.now().getTime();
@@ -1281,6 +1349,11 @@ export class Liquidator {
         } catch (err) {
           result.errors.push(`round ${round}: could not read open orders or positions: ${(err as Error).message.slice(0, 100)}`);
           readOk = false;
+          try {
+            if (checks) for (const sym of symbols) noteLook(lookOf(round, "wait", lookAt, openReadAt >= lookAt ? openReadAt - lookAt : null, null, sym, null, openReadAt >= lookAt ? openOrders : null, null, null, null));
+          } catch {
+            // logging only
+          }
           break;
         }
         // If cancels were just asked for and nothing visible shows what they were holding, give them half a second once: a cancel
@@ -1304,10 +1377,29 @@ export class Liquidator {
         const stillHolding = own
           ? [...symbols].some((sym) => leftNow(sym) > EPS && freeNow(sym) < leftNow(sym) - EPS)
           : [...symbols].some((sym) => openSellQty(openOrders, sym) > EPS) || held.some((p) => p.qtyAvailable != null && p.qtyAvailable < p.qty - EPS);
+        try {
+          // Decision 2 of 2026-11-25 (logging only): what this look showed, and whether the wait goes on.
+          if (checks) {
+            const goesOn = stillHolding && !(waited >= waitMs) && !(own && !cancelledInAttempt);
+            for (const sym of symbols) noteLook(lookOf(round, "wait", lookAt, openReadAt - lookAt, this.d.now().getTime() - openReadAt, sym, held, openOrders, freeNow(sym), leftNow(sym), goesOn));
+          }
+        } catch {
+          // logging only
+        }
         if (!stillHolding || waited >= waitMs || (own && !cancelledInAttempt)) break;
         // Poll gently: a cancel usually finishes in a fraction of a second, and every look costs one of Alpaca's 200 requests a minute.
         const pause = [250, 400, 600, 800][Math.min(polls++, 3)]!;
-        waited += await pauseFor(symbols, pause);
+        const pollAt = this.d.now().getTime(); // decision 2 of 2026-11-25 (logging only)
+        const counted = await pauseFor(symbols, pause);
+        waited += counted;
+        try {
+          if (checks) {
+            if (checks.polls.length >= SALE_LOOKS_STORED) checks.pollsMore++;
+            else checks.polls.push({ round, at: iso(pollAt), askedMs: pause, countedMs: counted, ms: Math.max(0, this.d.now().getTime() - pollAt) });
+          }
+        } catch {
+          // logging only
+        }
         if (this.d.now().getTime() - t0 > waitMs * 3) break; // a clock that moves much faster than the loop
       }
 
@@ -1319,12 +1411,19 @@ export class Liquidator {
         result.freshStopStillOpen = undefined; // what the last round's look saw (group 2, round 4 of the night release)
         if (!cheapOk) this.d.gate.invalidate(); // the cheap retry keeps the gate's one read (nothing was cancelled this round)
         let freshPositions: Position[] = [];
+        const stepAt = this.d.now().getTime(); // decision 2 of 2026-11-25 (logging only)
         try {
           freshPositions = await heldNow();
           // Group 1 and group 2, round 7: only now has this round's look read the open orders AND the positions it acts on (reported only).
           result.lastLookOk = true;
         } catch (err) {
           result.errors.push(`round ${round}: could not re-read positions: ${(err as Error).message.slice(0, 100)}`);
+        }
+        try {
+          // Decision 2 of 2026-11-25 (logging only): the positions the step acts on, with the open orders of the wait's last look.
+          if (checks) for (const sym of symbols) noteLook(lookOf(round, "step", stepAt, null, Math.max(0, this.d.now().getTime() - stepAt), sym, result.lastLookOk ? freshPositions : null, openOrders, null, null, null));
+        } catch {
+          // logging only
         }
         for (const p of freshPositions) {
           if (yieldNow()) return yielded();
@@ -1484,7 +1583,13 @@ export class Liquidator {
             continue;
           }
           const id = `cyrus-x-${o.tradeDate.replaceAll("-", "")}-${p.symbol}-${this.d.now().getTime().toString(36)}-${round}`;
+          const saleAskedAt = this.d.now().getTime(); // decision 2 of 2026-11-25 (logging only)
           const r = await this.d.gate.sell({ symbol: p.symbol, qty: free, clientOrderId: id, reason: o.reason }, gateTimer);
+          try {
+            if (checks && checks.sales.length < SALE_SALES_STORED) checks.sales.push({ round, qty: free, askedAt: iso(saleAskedAt), answeredAt: iso(this.d.now().getTime()), status: r.status });
+          } catch {
+            // logging only
+          }
           if (r.status === "sent") {
             if (own) (result.ownTarget ??= {})[p.symbol] = (soldBy.get(p.symbol) ?? 0) + cap; // fix A: the recount at this sale
             soldBy.set(p.symbol, (soldBy.get(p.symbol) ?? 0) + free);

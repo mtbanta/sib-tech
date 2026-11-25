@@ -62,6 +62,8 @@ export const STORED_INFO_EVENTS = new Set([
   // more shares while its cancel landed (fix A).
   "late_notice",
   "remainder_recount",
+  // Michael's decision 2 of 2026-11-25 (logging only): the missing-exit sale's checks (its looks, pauses, polls and market sale).
+  "missing_exit_sale_checks",
   // Group 2 review, round 1: a "not filled yet" sale whose closing line was dropped (ended unfilled, or not seen filled in 2 minutes).
   "awaiting_fill_dropped",
   // Michael, 2026-11-12 (afternoon, logging only): the fast sale for lost exits (A5) and the fresh stop for remainders (A4), so their

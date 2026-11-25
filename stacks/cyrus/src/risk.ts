@@ -9,7 +9,7 @@ import type { Broker } from "./broker.ts";
 import { centralClock, etInstant } from "./time.ts";
 import { DEFAULT_CLOSEOUT_MINUTES_BEFORE_CLOSE } from "./config.ts";
 import { CONTROL_STOP, type DayRecord, type OrderRecord, type StopFlag, type Store } from "./store.ts";
-import { OPEN_STATUSES, flattenLegs, openOrderIds, openSellQty, type Liquidator, type Say } from "./sells.ts";
+import { OPEN_STATUSES, flattenLegs, openOrderIds, openSellQty, type LiquidateResult, type Liquidator, type Say } from "./sells.ts";
 import { exitPairOn, isExitPair, pairBroken, pairStopLeg, pairTakeProfitFor } from "./exit-pair.ts";
 
 export interface RiskDeps {
@@ -1644,6 +1644,41 @@ export function learnedGone(mem: Pick<SyncMemory, "liveStopCancelSeenAt">, clien
   return seenMs !== undefined && Number.isFinite(seenMs) ? { atMs: seenMs, by: "order sync" } : undefined;
 }
 
+// Michael's decision 2 of 2026-11-25 (logging only): "the missing-exit sale records its checks (logging only), so cases like AMBA-57 can be
+// split." One `missing_exit_sale_checks` row at the end of each missing-exit sale (the order sync's sale of a position found without its
+// exits, or of a broken exit pair's rest; not the fast sale, which stores its own rows): when it started and ended, its rounds, its timed
+// reads (SaleRead, at most 40, `readsMore`), its looks, pauses, polls and market sales (SaleChecks, sells.ts), its cancels sent and answered,
+// and what it sold. Built only from what the sale returned: no request, no wait; never throws.
+function logMissingExitChecks(d: Pick<RiskDeps, "log" | "now">, s: Pick<OrderRecord, "symbol" | "clientOrderId">, r: LiquidateResult, alsoCancel: readonly string[]): void {
+  try {
+    const c = r.checks;
+    d.log?.("missing_exit_sale_checks", {
+      symbol: s.symbol,
+      clientOrderId: s.clientOrderId,
+      ...(alsoCancel.length > 0 ? { alsoCancel: alsoCancel.slice(0, 5).map((x) => x.slice(0, 8)) } : {}),
+      startedAt: r.startedAt ?? null,
+      endedAt: d.now().toISOString(),
+      rounds: c?.rounds ?? null,
+      cancelsSentAt: r.steps?.cancelsSentAt.slice(0, 6) ?? [],
+      cancelsAnsweredAt: r.steps?.cancelsAnsweredAt.slice(0, 6) ?? [],
+      reads: r.reads ?? [],
+      ...(r.readsMore ? { readsMore: r.readsMore } : {}),
+      looks: c?.looks ?? [],
+      ...(c?.looksMore ? { looksMore: c.looksMore } : {}),
+      pauses: c?.pauses ?? [],
+      polls: c?.polls ?? [],
+      ...(c?.pollsMore ? { pollsMore: c.pollsMore } : {}),
+      sales: c?.sales ?? [],
+      sold: r.sold.filter((x) => x.symbol === s.symbol).reduce((n, x) => n + x.qty, 0),
+      flat: r.flat,
+      ...(r.yielded ? { yielded: true, stoodAside: r.stoodAside ?? null } : {}),
+      errors: r.errors.slice(0, 3).map((e) => e.slice(0, 160)),
+    });
+  } catch {
+    /* logging only */
+  }
+}
+
 async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: OrderRecord, listedCopy: Order, kind: "missing" | "bare", onSellSent?: (x: { symbol: string; qty: number; clientOrderId: string; atMs: number }) => void, extra: { stopPrice?: number | null; stopCancelledAt?: string | null; fast?: { fillAtMs: number }; alsoCancel?: string[]; alsoCancelStops?: string[]; alsoCancelBy?: string; learned?: LearnedGone } = {}): Promise<{ attempted: boolean; stuck: boolean; recheckAt?: number }> {
   let o = listedCopy;
   // Group 1, round 5: a live update during this try that the entry's timed-out stop ended overrides any backoff this try would set.
@@ -1738,6 +1773,7 @@ async function cleanupSale(d: RiskDeps, day: DayRecord, mem: SyncMemory, s: Orde
     ...(timedOutTry ? { waitCancelMs: 500 } : {}),
     ...(extra.fast ? { waitForAlpacaCancel: true, waitCancelMs: FAST_LOST_EXIT_WAIT_MS } : {}),
   });
+  if (kind === "missing" && !extra.fast) logMissingExitChecks(d, s, r, extra.alsoCancel ?? []);
   const soldQty = r.sold.filter((x) => x.symbol === s.symbol).reduce((n, x) => n + x.qty, 0);
   const now = d.now().getTime();
   if (r.pairRefused) notePairRefused(mem, s.clientOrderId); // one pair try per position (Michael, 2026-11-21)
