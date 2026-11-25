@@ -19,6 +19,7 @@ import { addToRunning, CONTROL_FEES, estimateFees, type FeesRunning } from "./fe
 import type { Governor } from "./governor.ts";
 import { Liquidator, OPEN_STATUSES, SellGate, flattenLegs } from "./sells.ts";
 import { MoveWatch } from "./moved-take-profit.ts";
+import { CancelSeen } from "./cancel-seen.ts";
 import type { Order } from "./alpaca-trading.ts";
 import { formatLiveList } from "./universe.ts";
 import type { Settings } from "./config.ts";
@@ -371,8 +372,12 @@ export class Worker {
     this.budget.p2GivesWay = () => this.protectFirst.p2GivesWay();
     this.sellGate = new SellGate({ broker: deps.broker, say: (c, t, o) => this.say(c, t, o), log: (e, data) => deps.log?.("info", e, data), nowMs: () => deps.now().getTime() });
     this.moveWatch = new MoveWatch(() => deps.now().getTime());
+    // Michael's approval of 2026-11-24 (evening), item 2: the live cancel confirmations by exact order id (never sends anything).
+    this.cancelSeen = new CancelSeen({ now: () => deps.now().getTime(), live: () => this.orderStreamLive(), sleep: deps.sleep ?? ((t: number) => new Promise<void>((r) => setTimeout(r, t))) });
     const latestQuotes = deps.latestQuotes;
     this.liquidator = new Liquidator({ broker: deps.broker, gate: this.sellGate, now: deps.now, sleep: deps.sleep, log: (e, data) => deps.log?.("info", e, data), waitEvent: (symbols, ms) => this.waitEvent(symbols, ms),
+      // Item 2 of 2026-11-24 (evening): one position's own sale ends its half-second pause once every order it cancelled is reported cancelled.
+      waitCancelled: (ids, ms) => this.cancelSeen.wait(ids, ms),
       // The moved take-profit (Michael's decision of 2026-11-18): each replace only with room for one more request above the urgent floor.
       ...(latestQuotes ? { moves: { quotes: (symbols: string[]) => latestQuotes(symbols), stopsFor: (legs: Array<{ legId: string; groupId: string; symbol: string }>) => this.stopsForMoves(legs), watch: this.moveWatch, room: () => this.budget.urgentRoom(1), live: () => this.orderStreamLive() } } : {}),
       ownSalesMayRun: () => {
@@ -421,6 +426,8 @@ export class Worker {
 
   // The moved take-profit (Michael's decision of 2026-11-18): the live updates about the running sale's moves (never sends anything).
   readonly moveWatch: MoveWatch;
+  // Item 2 of 2026-11-24 (evening): orders the live updates reported cancelled, by exact id (cancel-seen.ts).
+  readonly cancelSeen: CancelSeen;
 
   // The moved take-profit: the stop price of each take-profit leg's bracket, from what the worker already holds (no request). First the order
   // sync's copy of the entry (its stop leg, exactly as Alpaca holds it); else the entry's stored row, its stop rounded down to the cent as it
@@ -2061,6 +2068,7 @@ export class Worker {
   // of our own sells, and keep one raw update a minute for the statistics (item 10).
   private afterOrderUpdate(u: TradeUpdate): void {
     const o = u.order;
+    this.cancelSeen.note(u); // item 2 of 2026-11-24 (evening); never throws
     for (const w of [...this.waiters]) if (w.symbols.has(o.symbol)) w.wake();
     const nowMs = this.d.now().getTime();
     // Michael's decision 4 of 2026-11-24: a remembered broken pair that Alpaca reports filled is forgotten (its shares are sold; nothing is

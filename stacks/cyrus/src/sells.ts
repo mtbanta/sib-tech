@@ -15,6 +15,7 @@ import type { Order, Position } from "./alpaca-trading.ts";
 import { AlpacaError } from "./alpaca-trading.ts";
 import type { SellBroker } from "./broker.ts";
 import { MAX_EARLY_WAKES } from "./early-wake.ts";
+import type { PauseEnd } from "./cancel-seen.ts";
 import { MOVED_TAKE_PROFIT, MOVE_CLIENT_ID_PREFIX, MOVE_FILL_WAIT_MS, MOVE_MAX_PER_SALE, MOVE_SEND_WINDOW_MS, MOVE_SETS_CLIENT_ID, type MoveRow, type MoveWatch, MOVE_REPLACE_TIMEOUT_MS, MOVE_STOPS_TIMEOUT_MS, MOVE_VIEW_MAX_AGE_MS, pricedMoves, type QuoteIn, type Skip, stopVerdict, structuralCandidates, withStops } from "./moved-take-profit.ts";
 import { isExitPair, pairBroken, pairStopLeg } from "./exit-pair.ts";
 
@@ -353,6 +354,9 @@ export interface FreshStopTimes {
   acceptedAt?: string;
   answeredAt?: string;
   round: number;
+  // Builder's addition to Michael's approval of 2026-11-24 (evening), item 2 (logging only): in one position's own sale, how the round's
+  // half-second pause after its cancels ended (cancel-seen.ts), and the time it took. Absent when the round did not pause.
+  pause?: { ms: number; endedBy: PauseEnd };
 }
 
 export interface LiquidateSteps {
@@ -478,6 +482,9 @@ export interface LiquidatorDeps {
   // wait for a cancel or a fill ends at the event; the timed look stays as the backstop. Without it (or with the stream down) this is
   // a plain pause.
   waitEvent?: (symbols: ReadonlySet<string>, ms: number) => Promise<boolean>;
+  // Michael's approval of 2026-11-24 (evening), item 2, option B: in one position's own sale only, the half-second pause after its cancels
+  // ends as soon as Alpaca's live updates have reported every order it cancelled (exact ids) cancelled (cancel-seen.ts). Unset: the full pause.
+  waitCancelled?: (ids: readonly string[], ms: number) => Promise<PauseEnd>;
   // The redesign of 2026-11-14, part 2 (group 1, round 3; design 4.3, "from the close-out time, and while the 2:55 close-out, the mid-day
   // close-out or the afternoon close-out owns selling: no selling action"): the worker's own stand-aside rule (false from the close-out
   // time, and while a close-out, mid-day or carried step owns selling), asked when a one-entry cleanup sale's turn comes.
@@ -666,7 +673,8 @@ export class Liquidator {
         const gateEnds = reads.filter((x) => x.by === "gate" && Date.parse(x.at) >= askedAtMs).map((x) => Date.parse(x.at) + x.ms).filter((t) => Number.isFinite(t) && t <= answeredAtMs);
         const sentAtMs = gateEnds.length > 0 ? Math.max(...gateEnds) : askedAtMs;
         const given = o.protectTimes?.[symbol];
-        return { stopGoneAt: given?.stopGoneAt ?? null, learnedAt: given?.learnedAt ?? null, learnedBy: given?.learnedBy ?? null, saleStartedAt: result.startedAt ?? null, cancelsSentAt: steps.cancelsSentAt.slice(0, 3), cancelsAnsweredAt: steps.cancelsAnsweredAt.slice(0, 3), askedAt: iso(askedAtMs), sentAt: iso(sentAtMs), ...(accepted ? { acceptedAt: iso(answeredAtMs) } : { answeredAt: iso(answeredAtMs) }), round };
+        const pause = pauseNote && pauseNote.round === round ? { ms: pauseNote.ms, endedBy: pauseNote.endedBy } : undefined;
+        return { stopGoneAt: given?.stopGoneAt ?? null, learnedAt: given?.learnedAt ?? null, learnedBy: given?.learnedBy ?? null, saleStartedAt: result.startedAt ?? null, cancelsSentAt: steps.cancelsSentAt.slice(0, 3), cancelsAnsweredAt: steps.cancelsAnsweredAt.slice(0, 3), askedAt: iso(askedAtMs), sentAt: iso(sentAtMs), ...(accepted ? { acceptedAt: iso(answeredAtMs) } : { answeredAt: iso(answeredAtMs) }), round, ...(pause ? { pause } : {}) };
       } catch {
         return undefined;
       }
@@ -700,6 +708,8 @@ export class Liquidator {
       return done();
     };
     let earlyWakes = 0;
+    // Item 2 of 2026-11-24 (evening), logging only: how the current round's pause ended (FreshStopTimes.pause).
+    let pauseNote: { round: number; ms: number; endedBy: PauseEnd } | null = null;
     let blocked = 0; // logging only: symbols skipped in step 3 because their shares were not free
     // Release 1 of 2026-11-09, part B: shares sold per symbol in this liquidation, and what is still to sell under `ownEntryOnly`.
     const soldBy = new Map<string, number>();
@@ -1052,6 +1062,8 @@ export class Liquidator {
       //    it would only start the same sale again.
       let cancelled = false;
       let onlyOwn = false;
+      // Item 2 of 2026-11-24 (evening): the orders one position's own sale asked Alpaca to cancel in this round (whatever the answer).
+      const ownCancelAsked: string[] = [];
       // Item 1 of the night build: a round in which 20ba5bd would have cancelled again (orders still shown, pending cancel included, or
       // shares held by orders the list does not show) keeps 20ba5bd's timing, its blind half second and then the same looks, without the
       // cancel, so no sale goes out later than on 20ba5bd.
@@ -1195,6 +1207,7 @@ export class Liquidator {
           for (const id of ids) {
             cancelled = true;
             cancelledInAttempt = true;
+            ownCancelAsked.push(id);
             steps.cancelsSentAt.push(stamp());
             (result.cancelsTried ??= []).push(id);
             await this.d.broker.cancelOrder(id);
@@ -1226,8 +1239,36 @@ export class Liquidator {
       let waited = 0;
       let polls = 0;
       let blindWaitDone = false;
+      pauseNote = null;
       for (;;) {
         if (yieldNow()) return yielded();
+        // Michael's approval of 2026-11-24 (evening), item 2 ("drop the discarded reads; end the pause on Alpaca's live cancel confirmation;
+        // single-position sales only, close-outs unchanged"). One position's own sale (`ownEntryOnly`) that cancelled something pauses BEFORE
+        // its first look (option A: the reads made before the pause were never used), and the pause ends as soon as the live updates have
+        // reported every order this round asked to cancel cancelled, by exact id (option B, `waitCancelled`); without that, the full half
+        // second as before. If the look after it still shows the shares held, the polls below wait 250 ms, then 400 ms, as before.
+        // Every other sale (the close-outs, `flatten`, the loss stop, the carried-position sale, close-out retries) is unchanged: it reads,
+        // then pauses the plain half second, below.
+        if (own && cancelled && polls === 0 && !blindWaitDone) {
+          blindWaitDone = true;
+          const pt = this.d.now().getTime();
+          let endedBy: PauseEnd = "timer";
+          if (this.d.waitCancelled && ownCancelAsked.length > 0) {
+            try {
+              endedBy = await this.d.waitCancelled(ownCancelAsked, 500);
+            } catch {
+              endedBy = "timer";
+              const left = 500 - Math.max(0, this.d.now().getTime() - pt);
+              if (left > 0) await this.sleep(left);
+            }
+          } else {
+            await this.sleep(500);
+          }
+          const ms = endedBy === "confirmed" ? Math.min(500, Math.max(0, this.d.now().getTime() - pt)) : 500;
+          waited += ms;
+          pauseNote = { round, ms, endedBy };
+          continue;
+        }
         let held: Position[] = [];
         try {
           openOrders = await openOrdersR();
