@@ -7,8 +7,9 @@
 // symbol"). A take-profit rest that filled instead of cancelling is never confirmed here, so its sale waits the full half second, as today.
 //
 // The memory is kept because the confirmation often arrives before the pause starts: on 2026-11-24 Alpaca's cancel landed before its answer
-// in 32 of 33 fresh stops, and the live update follows Alpaca's cancel by about 40 to 100 ms. It also covers a stop leg Alpaca cancelled
-// itself shortly before the sale (its update arrived before the sale existed).
+// in 32 of 33 fresh stops, and the live update of a stop leg Alpaca cancelled itself reached the worker 38 to 100 ms after Alpaca's cancel
+// time (measured that day for stop legs, on two clocks; not yet measured for the take-profit rest a sale cancels). It also covers a stop leg
+// Alpaca cancelled itself shortly before the sale (its update arrived before the sale existed).
 //
 // It never sends anything and never retries. Bounds: entries older than CANCEL_SEEN_MEMORY_MS are dropped, and at most CANCEL_SEEN_MAX are
 // kept (oldest dropped first); every wait ends at its own time limit; with the live updates not connected, a wait is a plain pause.
@@ -85,16 +86,17 @@ export class CancelSeen {
         },
       };
       this.waiters.add(w);
-      void this.d.sleep(ms).then(() => {
+      const end = () => {
         if (done) return;
         done = true;
         this.waiters.delete(w);
         resolve("timer");
-      });
+      };
+      void this.d.sleep(ms).then(end, end);
     });
   }
 
-  // For tests and the statistics: how many ids are remembered, and how many waits are open.
+  // For tests: how many ids are remembered, and how many waits are open.
   size(): { seen: number; waiting: number } {
     return { seen: this.seen.size, waiting: this.waiters.size };
   }

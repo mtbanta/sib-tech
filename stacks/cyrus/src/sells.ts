@@ -355,7 +355,8 @@ export interface FreshStopTimes {
   answeredAt?: string;
   round: number;
   // Builder's addition to Michael's approval of 2026-11-24 (evening), item 2 (logging only): in one position's own sale, how the round's
-  // half-second pause after its cancels ended (cancel-seen.ts), and the time it took. Absent when the round did not pause.
+  // half-second pause after its cancels ended (cancel-seen.ts), and the time it really took on the worker's clock (whatever ended it).
+  // Absent when the round that placed the stop did not pause.
   pause?: { ms: number; endedBy: PauseEnd };
 }
 
@@ -1256,17 +1257,20 @@ export class Liquidator {
           if (this.d.waitCancelled && ownCancelAsked.length > 0) {
             try {
               endedBy = await this.d.waitCancelled(ownCancelAsked, 500);
-            } catch {
+            } catch (err) {
               endedBy = "timer";
+              this.d.log?.("pause_wait_failed", { reason: o.reason, round, error: (err as Error)?.message?.slice(0, 100) ?? null }); // Fly's log
               const left = 500 - Math.max(0, this.d.now().getTime() - pt);
               if (left > 0) await this.sleep(left);
             }
           } else {
             await this.sleep(500);
           }
-          const ms = endedBy === "confirmed" ? Math.min(500, Math.max(0, this.d.now().getTime() - pt)) : 500;
-          waited += ms;
-          pauseNote = { round, ms, endedBy };
+          // Counted as the full half second toward `waitMs` whatever ended it (group 1, round 1 of 2026-11-24 evening, finding 1): the looks
+          // and polls that follow are exactly those of the old order (so a timed-out stop's try, `waitCancelMs` 500, still makes one look and
+          // stays inside its request reservation); only the time is shorter.
+          waited += 500;
+          pauseNote = { round, ms: Math.max(0, this.d.now().getTime() - pt), endedBy };
           continue;
         }
         let held: Position[] = [];

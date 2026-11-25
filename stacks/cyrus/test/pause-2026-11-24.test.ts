@@ -165,18 +165,96 @@ async function closeoutRun(withStub: boolean, shape: "all" | "retry") {
   return { calls, sells: w.sim.sellLog.map((x) => [x.symbol, x.qty, x.at]), reads: w.reads.map((x) => [x.what, x.at]), requests: w.sim.requests, flat: r.flat };
 }
 
-test("item 2: close-outs unchanged: a whole-account sale and a close-out retry of named symbols never ask for the confirmation, and read, pause and sell at exactly the same moments as without it", async () => {
+// The old code's timelines (bd24705, measured in this rig before the change; group 2, round 1: the test must pin them, not compare the new
+// code with itself). Times are ms from the start; "o" an open-orders read, "p" a positions read. Both start with a full look (positions, then
+// orders, orders, positions) and only then the plain half second (280 -> 850).
+const OLD = {
+  all: { requests: 27, reads: [["p", 70], ["o", 140], ["o", 210], ["p", 280], ["o", 850], ["p", 920], ["p", 990], ["o", 1060], ["p", 1130], ["p", 2200], ["o", 2270], ["o", 2340], ["p", 2410], ["o", 2730], ["p", 2800], ["p", 2870], ["p", 3940]], sells: [["AAA", 4, 1130], ["BBB", 3, 1130]] },
+  retry: { requests: 29, reads: [["p", 70], ["o", 140], ["o", 210], ["p", 280], ["o", 850], ["p", 920], ["p", 990], ["o", 1060], ["p", 1130], ["p", 2200], ["o", 2270], ["o", 2340], ["p", 2410], ["o", 2980], ["p", 3050], ["p", 3120], ["p", 4190]], sells: [["AAA", 4, 1130]] },
+};
+
+test("item 2: close-outs unchanged: a whole-account sale and a close-out retry of named symbols never ask for the confirmation, and read, pause and sell at exactly the old code's moments, with or without it", async () => {
   for (const shape of ["all", "retry"] as const) {
-    const without = await closeoutRun(false, shape);
-    const withIt = await closeoutRun(true, shape);
-    assert.deepEqual(withIt.calls, [], `${shape}: never asked`);
-    assert.deepEqual(withIt.sells, without.sells, `${shape}: the same sales at the same moments`);
-    assert.deepEqual(withIt.reads, without.reads, `${shape}: the same reads at the same moments`);
-    assert.equal(withIt.requests, without.requests);
-    assert.ok(without.sells.length > 0, `${shape}: it sold`);
-    // The plain half second still comes after a first look: two reads, then 500 ms with no read, then the next look.
-    const at = without.reads.map((x) => x[1] as number);
-    assert.ok(at.some((t, i) => i > 0 && t - at[i - 1]! >= 500 + READ_MS), `${shape}: a 500 ms gap between looks`);
+    for (const withStub of [false, true]) {
+      const r = await closeoutRun(withStub, shape);
+      const label = `${shape}, ${withStub ? "with" : "without"} the confirmation`;
+      assert.deepEqual(r.calls, [], `${label}: never asked`);
+      assert.ok(r.flat, label);
+      assert.deepEqual(r.reads.map(([w, t]) => [(w as string)[0], (t as number) - MID]), OLD[shape].reads, `${label}: the old reads at the old moments`);
+      assert.deepEqual(r.sells.map(([sym, q, t]) => [sym, q, (t as number) - MID]), OLD[shape].sells, `${label}: the old sales at the old moments`);
+      assert.equal(r.requests, OLD[shape].requests, label);
+    }
+  }
+});
+
+test("item 2 (group 1, round 1, finding 1): a timed-out stop's try (waitCancelMs 500, one round) keeps its one look after the pause, confirmed early or not, so it stays inside its request reservation", async () => {
+  const run = async (end: PauseEnd) => {
+    const w = world(async (_ids, m) => (w.sim.advance(end === "confirmed" ? 20 : m), end));
+    await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
+    const id = await hold(w, "LUNR", 5, 12, 1);
+    w.sim.cancelMs = 700; // Alpaca's cancel lands after the pause and the look
+    const legs = w.sim.orders.find((o) => o.clientOrderId === id)!.legs.map((l) => l.id);
+    const before = w.sim.requests;
+    const r0 = w.reads.length;
+    await w.liquidator.flatten({ reason: "timed-out stop", tradeDate: D, only: ["LUNR"], ownEntryOnly: { maxQty: { LUNR: 5 } }, cancelIds: legs, maxRounds: 1, waitCancelMs: 500 } as any);
+    return { requests: w.sim.requests - before, reads: w.reads.slice(r0).map((x) => x.what), sold: w.sim.sellLog.length };
+  };
+  const timer = await run("timer");
+  const confirmed = await run("confirmed");
+  assert.deepEqual(confirmed.reads, timer.reads, "the same looks");
+  assert.equal(confirmed.requests, timer.requests, "the same requests");
+  assert.equal(confirmed.sold, 0, "nothing sold while the take-profit still holds the shares");
+});
+
+test("item 2: the refused fresh stop's row carries the pause too; a stop placed by a round that cancelled nothing carries none", async () => {
+  // Refused: the market sale follows, as before; its row has the pause.
+  const w = world(async () => (w.sim.advance(40), "confirmed"));
+  await ensureDay({ store: w.store, broker: w.sim, now: w.now }, D);
+  const dd = (await w.store.getDay(D))!;
+  const id = await hold(w, "HDB", 4, 60, 1);
+  w.sim.refuseStops = true;
+  w.sim.cancelMs = 30;
+  w.sim.advance(5_000);
+  w.sim.partialTakeProfit(id, 1, 60.08);
+  w.sim.advance(300);
+  await syncOrders(w.risk, dd, { protect: true });
+  assert.deepEqual(w.events.find((e) => e.event === "fresh_stop_refused")!.data.times.pause, { ms: 40, endedBy: "confirmed" });
+  assert.deepEqual(w.sim.sellLog.map((x) => [x.symbol, x.qty]), [["HDB", 3]]);
+  // Nothing to cancel (the exits already ended): no pause, so no `pause` on the stop's times.
+  const v = world(async () => "confirmed");
+  await ensureDay({ store: v.store, broker: v.sim, now: v.now }, D);
+  const id2 = await hold(v, "LUNR", 5, 12, 1);
+  for (const l of v.sim.orders.find((o) => o.clientOrderId === id2)!.legs) await v.sim.cancelOrder(l.id);
+  v.sim.advance(1_000);
+  const r = await v.liquidator.flatten({ reason: "fresh stop", tradeDate: D, only: ["LUNR"], ownEntryOnly: { maxQty: { LUNR: 5 } }, cancelIds: [], protectWithStop: { LUNR: 11.87 }, maxRounds: 1 } as any);
+  assert.ok(r.freshStop?.times, "the stop is placed with its times");
+  assert.equal("pause" in r.freshStop!.times!, false);
+});
+
+test("item 2: a real watcher through a sale: the take-profit rest's live cancel arriving with Alpaca's answer means no pause; a cancel of another order on the symbol means the full half second", async () => {
+  for (const exact of [true, false]) {
+    let cs: CancelSeen | null = null;
+    let w: World | null = null;
+    w = world((ids, m) => cs!.wait(ids, m));
+    const ww = w;
+    cs = new CancelSeen({ now: () => ww.sim.simMs, live: () => true, sleep: ww.sim.sleep });
+    const co = ww.sim.cancelOrder.bind(ww.sim);
+    (ww.sim as any).cancelOrder = async (oid: string) => {
+      const r = await co(oid);
+      cs!.note({ event: "canceled", order: { id: exact ? oid : `${oid}-other`, symbol: "SNDK" } as any, positionQty: null, atMs: ww.sim.simMs });
+      return r;
+    };
+    await ensureDay({ store: ww.store, broker: ww.sim, now: ww.now }, D);
+    const dd = (await ww.store.getDay(D))!;
+    const id = await hold(ww, "SNDK", 3, 94.06, 1);
+    ww.sim.advance(5_000);
+    ww.sim.partialTakeProfit(id, 1, 94.14);
+    ww.sim.cancelMs = 30;
+    ww.sim.advance(300);
+    await syncOrders(ww.risk, dd, { protect: true });
+    const t = ww.events.find((e) => e.event === "fresh_stop")!.data.times;
+    assert.deepEqual(t.pause, exact ? { ms: 0, endedBy: "confirmed" } : { ms: 500, endedBy: "timer" });
+    assert.deepEqual(ww.sim.stopLog.map((x) => [x.symbol, x.qty]), [["SNDK", 2]]);
   }
 });
 
@@ -290,7 +368,10 @@ test("item 2: the worker feeds every live update to the watcher and gives the se
   const { rig } = await import("./rig.ts");
   const r = rig({ orderStream: true });
   const wk: any = r.worker;
-  assert.equal(typeof wk.liquidator.d.waitCancelled, "function");
+  const asked: Array<[string[], number]> = [];
+  wk.cancelSeen.wait = (ids: string[], m: number) => (asked.push([ids, m]), Promise.resolve("timer"));
+  assert.equal(await wk.liquidator.d.waitCancelled(["tp-1"], 500), "timer");
+  assert.deepEqual(asked, [[["tp-1"], 500]], "the sell path's wait is the watcher's");
   wk.afterOrderUpdate({ event: "canceled", order: { id: "tp-x", symbol: "LUNR", side: "sell", clientOrderId: "c1", filledQty: 0 }, positionQty: null, atMs: null });
   wk.afterOrderUpdate({ event: "fill", order: { id: "tp-y", symbol: "LUNR", side: "sell", clientOrderId: "c2", filledQty: 1 }, positionQty: null, atMs: null, fillQty: 1, price: 1 });
   assert.equal(wk.cancelSeen.size().seen, 1, "only the cancel is remembered");
