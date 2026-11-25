@@ -63,7 +63,7 @@ async function hold(w: ReturnType<typeof world>, symbol: string, qty: number, pr
 const normal = (w: ReturnType<typeof world>, s: string, qty = 10, p = 20) => hold(w, s, qty, p, 19.92, 20.05);
 const loadDay = (w: ReturnType<typeof world>, s: string, p = 5) => hold(w, s, 1, p, p - 0.02, p + 0.01);
 
-test("the stale limit is 30 s: a quote 29 s old moves, one 31 s old is skipped with its prices and the snapshot's last trade", () => {
+test("the stale limit is 30 s: a quote 29 s old moves from the bid; one 31 s old is skipped with its prices and the snapshot's last trade when that trade is over 10 s old, and priced from a trade at most 10 s old (Michael's decision 4 of 2026-11-25)", () => {
   assert.equal(MOVE_QUOTE_MAX_AGE_MS, 30_000);
   const c = [{ symbol: "AAA", qty: 1, legId: "tp", groupId: "g", oldLimit: 20.05, stopPrice: 19.95 }];
   const now = 1_000_000;
@@ -71,9 +71,13 @@ test("the stale limit is 30 s: a quote 29 s old moves, one 31 s old is skipped w
   const m = pricedMoves(c, q(29_000), now).moves[0]!;
   assert.deepEqual([m.limit, m.quoteAgeMs, m.tradePrice, m.tradeAgeMs], [19.98, 29_000, 19.995, 4_000]);
   assert.equal(pricedMoves(c, q(6_000), now).moves.length, 1, "6 s: skipped under the old 5 s limit, moves now (TGT and WPM's 3.3 and 3.5 s, AU's 5.9 s on 2026-11-19)");
-  const s = pricedMoves(c, q(31_000), now);
+  const qOld = (ageMs: number, tradeAgeMs: number) => new Map([["AAA", { bid: 19.99, ask: 20, atMs: now - ageMs, tradePrice: 19.995, tradeAtMs: now - tradeAgeMs }]]);
+  const s = pricedMoves(c, qOld(31_000, 11_000), now);
   assert.equal(s.moves.length, 0);
-  assert.deepEqual(s.skipped[0], { symbol: "AAA", why: "quote 31 s old", stopPrice: 19.95, oldLimit: 20.05, bid: 19.99, quoteAgeMs: 31_000, tradePrice: 19.995, tradeAgeMs: 4_000 });
+  assert.deepEqual(s.skipped[0], { symbol: "AAA", why: "quote 31 s old", stopPrice: 19.95, oldLimit: 20.05, bid: 19.99, quoteAgeMs: 31_000, tradePrice: 19.995, tradeAgeMs: 11_000 });
+  // Decision 4 of 2026-11-25: the same stale quote with its trade 4 s old is priced from the trade (19.995 less 1 cent, floored: 19.98).
+  const fromTrade = pricedMoves(c, q(31_000), now).moves[0]!;
+  assert.deepEqual([fromTrade.limit, fromTrade.priceFrom, fromTrade.quoteAgeMs], [19.98, "trade_stale_quote", 31_000]);
   const noTrade = pricedMoves(c, new Map([["AAA", { bid: 19.9, ask: 20, atMs: now }]]), now).skipped[0]!;
   assert.deepEqual([noTrade.why, noTrade.tradePrice, noTrade.tradeAgeMs], ["price within 2 cents of the stop", null, null]);
 });

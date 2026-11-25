@@ -13,7 +13,8 @@
 //   - its stop price is known (the order sync's copy of the entry, or the stored entry rounded as it was sent);
 //   - a quote read at the move (one snapshot request) gives a selling limit (bid less 1 cent) at least 2 cents above the stop (3 cents until
 //     Michael's decision A of 2026-11-19), and below the
-//     take-profit's own limit; the quote may be up to MOVE_QUOTE_MAX_AGE_MS old (30 s, Michael's decision of 2026-11-19).
+//     take-profit's own limit; the quote may be up to MOVE_QUOTE_MAX_AGE_MS old (30 s, Michael's decision of 2026-11-19); an older quote
+//     is used only through its snapshot's latest trade, when that is at most MOVE_TRADE_MAX_AGE_MS old (Michael's decision 4 of 2026-11-25).
 // Everything else keeps today's path. The order of a sale with moves (his answer "moves first"): the replaces are sent, the sale waits up to
 // MOVE_FILL_WAIT_MS for them (ending early when the live updates report every one filled), then today's path runs unchanged for whatever is
 // still held: its cancel of every order (or, in a close-out's retry of named symbols, the single cancels from a fresh open list) also
@@ -49,7 +50,9 @@ export const MOVE_QUOTE_MAX_AGE_MS = 30_000;
 // move from the latest trade minus 1 cent; today's fallback still applies if it does not fill." With his answer on the trade's age: "10 s
 // limit on the latest trade's age." On the free IEX feed a thin name's bid can sit far below the market (BIP, SJM, SNDK and SUNB at the
 // 10:30 close-out of 2026-11-24, by up to 6.6 dollars; their market sales then filled above their stops). The trade-priced limit must
-// still pass every other rule (the quote's own age first, the 2 cent margin above the stop, below the old take-profit).
+// still pass every other rule (the 2 cent margin above the stop, below the old take-profit). The quote's own age was checked first until
+// Michael's decision 4 of 2026-11-25: since then a quote over MOVE_QUOTE_MAX_AGE_MS old with a trade at most this old is priced from the
+// trade (`priceFrom` "trade_stale_quote", see pricedMoves), and with no such trade it is still skipped.
 export const MOVE_TRADE_MAX_AGE_MS = 10_000;
 // Bounds on the phase (the advisor's point: one hung replace is 10 s): at most this many replaces in one sale, and none sent once this
 // long has passed since the phase began. What is not moved takes today's path.
@@ -92,11 +95,13 @@ export interface MovePlan extends MoveCandidate {
   bid: number;
   ask: number;
   quoteAgeMs: number;
-  // The snapshot's latest trade (null when it carried none): for the record, and the price itself when `priceFrom` is "trade".
+  // The snapshot's latest trade (null when it carried none): for the record, and the price itself when `priceFrom` is "trade" or
+  // "trade_stale_quote".
   tradePrice: number | null;
   tradeAgeMs: number | null;
-  // Michael's decision 2 of 2026-11-24: which price the limit came from, the bid (as before) or the latest trade.
-  priceFrom: "bid" | "trade";
+  // Michael's decision 2 of 2026-11-24: which price the limit came from, the bid (as before) or the latest trade ("trade": the bid was
+  // below the stop). Michael's decision 4 of 2026-11-25: "trade_stale_quote", the latest trade because the quote was over 30 s old.
+  priceFrom: "bid" | "trade" | "trade_stale_quote";
 }
 // Why a position was not moved (Michael's request of 2026-11-19: stored for every position skipped, in every move phase). The prices are
 // given where the step that skipped it knew them.
@@ -207,24 +212,38 @@ export function pricedMoves(candidates: MoveCandidate[], quotes: ReadonlyMap<str
     const tradePrice = typeof q.tradePrice === "number" ? q.tradePrice : null;
     const tradeAgeMs = tradePrice !== null && typeof q.tradeAtMs === "number" ? Math.max(0, nowMs - q.tradeAtMs) : null;
     const seen = { ...known, bid: q.bid, quoteAgeMs: Math.max(0, age), tradePrice, tradeAgeMs };
-    if (age > MOVE_QUOTE_MAX_AGE_MS) {
-      skipped.push({ symbol: c.symbol, why: `quote ${Math.round(age / 1000)} s old`, ...seen });
-      continue;
-    }
-    let limit = floorCents(q.bid - MOVE_BELOW_BID);
+    const tradeFresh = tradePrice !== null && tradeAgeMs !== null && tradeAgeMs <= MOVE_TRADE_MAX_AGE_MS;
+    let limit: number;
     let priceFrom: MovePlan["priceFrom"] = "bid";
-    // Decision 2 of 2026-11-24: only when the bid is below the stop, the same snapshot's latest trade is above it, and that trade is at most
-    // MOVE_TRADE_MAX_AGE_MS old; the trade less 1 cent then replaces the bid's price and must pass the same rules below.
-    if (!(limit >= c.stopPrice + MOVE_MIN_ABOVE_STOP - EPS) && q.bid < c.stopPrice - EPS && tradePrice !== null && tradePrice > c.stopPrice + EPS && tradeAgeMs !== null && tradeAgeMs <= MOVE_TRADE_MAX_AGE_MS) {
+    if (age > MOVE_QUOTE_MAX_AGE_MS) {
+      // Michael's decision 4 of 2026-11-25: "if the quote is older than 30 s but the latest trade is at most 10 s old, price the move from the
+      // latest trade minus 1 cent (same checks and fallback)." The bid is stale, so it is not compared with the stop here; the trade's price
+      // must pass the same rules below (the 2 cent margin above the stop, below the old take-profit). A stale quote with no trade, or with a
+      // trade over MOVE_TRADE_MAX_AGE_MS old, is skipped as before. AMBA-99's exit pair at the 10:30 close-out of 2026-11-25 (quote 32 s
+      // old, trade 35.61 230 ms old, stop 35.53) would have moved at 35.60.
+      if (!tradeFresh || tradePrice === null) {
+        skipped.push({ symbol: c.symbol, why: `quote ${Math.round(age / 1000)} s old`, ...seen });
+        continue;
+      }
       limit = floorCents(tradePrice - MOVE_BELOW_BID);
-      priceFrom = "trade";
+      priceFrom = "trade_stale_quote";
+    } else {
+      limit = floorCents(q.bid - MOVE_BELOW_BID);
+      // Decision 2 of 2026-11-24: only when the bid is below the stop, the same snapshot's latest trade is above it, and that trade is at most
+      // MOVE_TRADE_MAX_AGE_MS old; the trade less 1 cent then replaces the bid's price and must pass the same rules below.
+      if (!(limit >= c.stopPrice + MOVE_MIN_ABOVE_STOP - EPS) && q.bid < c.stopPrice - EPS && tradePrice !== null && tradePrice > c.stopPrice + EPS && tradeFresh) {
+        limit = floorCents(tradePrice - MOVE_BELOW_BID);
+        priceFrom = "trade";
+      }
     }
+    // Decision 4 of 2026-11-25: a skip of a trade-priced move from a stale quote says so (the quote's age, rounded as above).
+    const staleNote = priceFrom === "trade_stale_quote" ? ` (from the latest trade; the quote is ${Math.round(age / 1000)} s old)` : "";
     if (!(limit >= c.stopPrice + MOVE_MIN_ABOVE_STOP - EPS)) {
-      skipped.push({ symbol: c.symbol, why: priceFrom === "trade" ? `price within ${MOVE_MIN_ABOVE_STOP_CENTS} cents of the stop (from the latest trade; the bid is below the stop)` : `price within ${MOVE_MIN_ABOVE_STOP_CENTS} cents of the stop`, ...seen });
+      skipped.push({ symbol: c.symbol, why: priceFrom === "trade" ? `price within ${MOVE_MIN_ABOVE_STOP_CENTS} cents of the stop (from the latest trade; the bid is below the stop)` : `price within ${MOVE_MIN_ABOVE_STOP_CENTS} cents of the stop${staleNote}`, ...seen });
       continue;
     }
     if (!(limit < c.oldLimit - EPS)) {
-      skipped.push({ symbol: c.symbol, why: "take-profit already at or below the price", ...seen });
+      skipped.push({ symbol: c.symbol, why: `take-profit already at or below the price${staleNote}`, ...seen });
       continue;
     }
     moves.push({ ...c, limit, bid: q.bid, ask: q.ask, quoteAgeMs: Math.max(0, age), tradePrice, tradeAgeMs, priceFrom });
@@ -251,8 +270,9 @@ export interface MoveRow {
   // The snapshot's latest trade at the move, for the record (Michael's request of 2026-11-19); null when it carried none.
   tradePrice: number | null;
   tradeAgeMs: number | null;
-  // Michael's decision 2 of 2026-11-24: the price the limit came from ("bid", or "trade" when the bid was below the stop).
-  priceFrom: "bid" | "trade";
+  // Michael's decision 2 of 2026-11-24: the price the limit came from ("bid", or "trade" when the bid was below the stop); Michael's
+  // decision 4 of 2026-11-25: "trade_stale_quote" when the quote was over 30 s old and the trade at most 10 s old.
+  priceFrom: "bid" | "trade" | "trade_stale_quote";
   sentAtMs: number;
   answerMs: number;
   accepted: boolean;

@@ -87,14 +87,17 @@ test("item 2: only when the bid is BELOW the stop: a bid at or just above the st
   assert.equal(atStop.moves.length, 0, "a bid exactly at the stop is not below it");
 });
 
-test("item 2: the trade-priced limit must pass the same rules: the 2 cent margin above the stop (worded as from the trade), below the old take-profit, and the quote's own age first", () => {
+test("item 2: the trade-priced limit must pass the same rules: the 2 cent margin above the stop (worded as from the trade), below the old take-profit; a stale quote with a fresh trade is priced from the trade since Michael's decision 4 of 2026-11-25", () => {
   const thin = pricedMoves(cand(44.68, 44.97), quote(43.13, 44.7, 1_000), now); // 44.69 is 1 cent above the stop
   assert.equal(thin.moves.length, 0);
   assert.equal(thin.skipped[0]!.why, "price within 2 cents of the stop (from the latest trade; the bid is below the stop)");
   const high = pricedMoves(cand(44.68, 44.97), quote(43.13, 45.1, 1_000), now); // 45.09 is above the old take-profit
   assert.equal(high.skipped[0]!.why, "take-profit already at or below the price");
+  // Until Michael's decision 4 of 2026-11-25 the quote's own age came first ("quote 31 s old"); now a trade at most 10 s old prices it.
   const stale = pricedMoves(cand(44.68, 44.97), quote(43.13, 44.72, 1_000, 31_000), now);
-  assert.equal(stale.skipped[0]!.why, "quote 31 s old");
+  assert.deepEqual([stale.moves[0]?.limit, stale.moves[0]?.priceFrom], [44.71, "trade_stale_quote"]);
+  const staleOldTrade = pricedMoves(cand(44.68, 44.97), quote(43.13, 44.72, 10_001, 31_000), now);
+  assert.equal(staleOldTrade.skipped[0]!.why, "quote 31 s old");
   const below = pricedMoves(cand(44.68, 44.97), quote(43.13, 44.6, 1_000), now); // the trade is below the stop too
   assert.equal(below.skipped[0]!.why, "price within 2 cents of the stop");
   const none = pricedMoves(cand(44.68, 44.97), quote(43.13, null, 0), now);
