@@ -401,23 +401,30 @@ export const NUDGES = [
 ] as const;
 // A failed post is tried again at most NUDGE_MAX_TRIES times in all, waiting 30 s, then 60 s (the bot itself retries a rate limit once);
 // after the last failure the phase is stored as "failed <time>" so it is not tried again. The tries are counted in memory (a restart
-// starts the count again, still bounded by the window).
+// starts the count again, still bounded by the window). A nudge posted (or given up) is also remembered in memory before its phase
+// is stored, so a failed database write cannot make it post again in the same process (group 2, round 1, finding 1).
 export const NUDGE_MAX_TRIES = 3;
 export const NUDGE_RETRY_WAITS_MS = [30_000, 60_000] as const;
 export class NudgeTries {
   private readonly tries = new Map<string, { n: number; nextAt: number }>();
+  private readonly finished = new Set<string>();
   due(key: string, t: number): boolean {
+    if (this.finished.has(key)) return false;
     const s = this.tries.get(key);
     return !s || t >= s.nextAt;
+  }
+  // Posted, or given up: never tried again in this process.
+  finish(key: string): void {
+    this.tries.delete(key);
+    this.finished.add(key);
+    if (this.finished.size > 20) this.finished.delete(this.finished.values().next().value!);
   }
   // Records a failed try; returns true when no try is left.
   failed(key: string, t: number): boolean {
     const n = (this.tries.get(key)?.n ?? 0) + 1;
     this.tries.set(key, { n, nextAt: t + (NUDGE_RETRY_WAITS_MS[n - 1] ?? 0) });
+    if (n >= NUDGE_MAX_TRIES) this.finish(key);
     return n >= NUDGE_MAX_TRIES;
-  }
-  forget(key: string): void {
-    this.tries.delete(key);
   }
 }
 
@@ -426,7 +433,7 @@ const LIMIT_WORDS: Record<LimitName, string> = { position: "largest position (`p
 export function formatUndecidedNudge(day: DayRecord): string {
   const open = day.openAt ? centralClock(day.openAt) : "?";
   const waiting = LIMIT_NAMES.filter((n) => !day.decided[n]).map((n) => LIMIT_WORDS[n]);
-  return `**Michael: the limits for ${dayWord(day.tradeDate)} are still not all decided** (waiting for you: ${waiting.length > 0 ? waiting.join(", ") : "see `limits`"}). The market opens at ${open}; if any limit is undecided then, I will not trade that day. Reply \`approve\` to accept them all as shown, or type \`limits\` to see them.`;
+  return `**Michael: the limits for ${dayWord(day.tradeDate)} are still not all decided** (waiting for you: ${waiting.length > 0 ? waiting.join(", ") : "see `limits`"}). The market opens at ${open}; if any limit is still undecided then, I will not trade today. Type \`limits\` to see the suggested values, then reply \`approve\` to accept them all, or change one (for example \`position 250\`).`;
 }
 
 export async function postUndecidedNudges(steps: MorningSteps, day: DayRecord, tries: NudgeTries): Promise<DayRecord> {
@@ -440,7 +447,7 @@ export async function postUndecidedNudges(steps: MorningSteps, day: DayRecord, t
     if (!tries.due(key, t.getTime())) continue;
     const posted = await steps.say("commands", formatUndecidedNudge(day), { mentionOwner: true }).catch(() => false);
     if (posted) {
-      tries.forget(key);
+      tries.finish(key);
       day = await setPhase(steps.store, day.tradeDate, n.phase, t.toISOString());
     } else if (tries.failed(key, t.getTime())) {
       day = await setPhase(steps.store, day.tradeDate, n.phase, `failed ${t.toISOString()}`);

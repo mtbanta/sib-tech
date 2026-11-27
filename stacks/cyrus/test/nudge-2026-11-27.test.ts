@@ -180,3 +180,47 @@ test("the worker runs the mentions in the limits flow, between the review and th
   assert.ok(i > 0 && j > i && k > j);
   assert.ok(src.includes("say: (c, t, o) => this.say(c, t, o), now: this.d.now, feed: this.d.settings.alpaca.dataFeed };"));
 });
+
+test("round 2 (group 2 finding 1): a database write that fails after a post never makes the same mention post again", async () => {
+  const r = rig();
+  const tries = new NudgeTries();
+  await ensureDay(r.steps, D);
+  await flow(r, tries);
+  r.set("2026-11-02T13:31:00Z");
+  await flow(r, tries); // the 7:30 review, stored
+  const realUpdate = r.store.updateDay.bind(r.store);
+  r.store.updateDay = async () => {
+    throw new Error("db down (test)");
+  };
+  for (let s = 0; s < 46 * 60; s += 5) {
+    r.set(new Date(Date.parse("2026-11-02T13:44:00Z") + s * 1000).toISOString()); // 7:44 to 8:30, a pass every 5 s
+    await flow(r, tries).catch(() => undefined);
+  }
+  assert.equal(nudges(r).length, 2, "one at 7:45, one at 8:15, despite every write failing");
+  r.store.updateDay = realUpdate;
+});
+
+test("round 2: a give-up whose write fails is not tried again; a post that throws counts as a try", async () => {
+  const r = rig();
+  const tries = new NudgeTries();
+  await ensureDay(r.steps, D);
+  await flow(r, tries);
+  r.set("2026-11-02T13:31:00Z");
+  await flow(r, tries);
+  let calls = 0;
+  r.steps.say = async (_c: any, t: string) => {
+    if (t.startsWith("**Michael: the limits for")) {
+      calls++;
+      throw new Error("discord down (test)");
+    }
+    return true;
+  };
+  r.store.updateDay = async () => {
+    throw new Error("db down (test)");
+  };
+  for (let s = 0; s < 29 * 60; s += 5) {
+    r.set(new Date(Date.parse("2026-11-02T13:45:00Z") + s * 1000).toISOString());
+    await flow(r, tries).catch(() => undefined);
+  }
+  assert.equal(calls, NUDGE_MAX_TRIES, "three throwing tries, then never again in the window");
+});

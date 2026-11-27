@@ -10175,3 +10175,7 @@ Checked at 12:07 to 12:10 PM CT. Research input for a human decision, never an i
   - Bounds: a failed post is tried at most 3 times in all, 30 s then 60 s apart (the bot itself retries a rate limit once), then stored as `failed <time>`; a post that throws counts as a failed try.
   - No footer (a short line in `commands`, under decision 6's rule for one-line posts). It changes no limit and no day status. The existing 8:20 reminder (no mention) is unchanged.
   - Tests: 6 new, full suite 1,186 of 1,186 pass; typecheck clean.
+- **Group 2 round 1: PASS** (no blocking findings). Taken before the deploy, round 2:
+  - Finding 1 (recommended): a nudge posted, or given up, is now remembered in memory before its phase is stored, so a failed database write cannot repost it (round 1's probe of a database outage from 7:44 to 8:30 gave 48 mentions; now 2). Two new tests.
+  - Finding 3: wording ("I will not trade today"; "Type `limits` to see the suggested values, then reply `approve` to accept them all, or change one").
+  - Not changed: finding 2 (no footer, following the one-line `commands` posts `formatMorningLine` and the lapse line; for Michael to overrule if he wants "Paper trading only." on it), finding 4 (no event row when a nudge gives up; the phase value `failed <time>` is the record), 5 to 8 (noted).
