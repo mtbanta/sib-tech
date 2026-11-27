@@ -4,6 +4,7 @@
 // A day, in New York time (Michael sees Central time in messages):
 //   close + 10 min  request for the NEXT trading day's limits, with a checklist (Michael answers that evening)
 //   open - 60 min   review of that day's limits (he can change them again)   open - 10 min  reminder if undecided
+//   open - 45, open - 15 min (7:45, 8:15 AM Central)  a mention in commands if any limit is still undecided (Michael, 2026-11-27)
 //   open - 45 min   daily screen builds the live list      open - 5 min   arming (cap and long only set at Alpaca), live prices
 //   open            undecided limits lapse: no trading     open to close  entries (gate), order sync, loss stop
 //   close - 5 min   close-out: flat                        close + 5 min  daily summary
@@ -25,7 +26,7 @@ import { formatLiveList } from "./universe.ts";
 import type { Settings } from "./config.ts";
 import { closeOut, type CloseoutOptions } from "./closeout.ts";
 import { OrderGate, peakKey } from "./gate.ts";
-import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, postLimitsRequest, postMorningReview, postReminderIfNeeded, suggestedFromHistory, type MorningSteps } from "./morning.ts";
+import { resetOldShapeFutureDays, armDay, ensureDay, lapseIfUndecided, NextSessionFinder, NudgeTries, postLimitsRequest, postMorningReview, postReminderIfNeeded, postUndecidedNudges, suggestedFromHistory, type MorningSteps } from "./morning.ts";
 import { ProgressGap, RetryBackoff } from "./retry-backoff.ts";
 import { BARE_GRACE_MS, enforceDailyLoss, fastLostExitSale, LossStopMemory, notePairBroken, noteTimedOutStopEnded, settleFreshStop, SyncMemory, sweepEntriesWhileStopped, syncOrders } from "./risk.ts";
 import { isExitPair } from "./exit-pair.ts";
@@ -228,6 +229,8 @@ export class Worker {
   // Close-out tries since the close (their own count: the tries before the close do not lengthen the first wait after it).
   private closeoutAttemptsAfterClose = 0;
   private lastArmAttempt = 0;
+  // Michael's request of 2026-11-27: failed tries of the 7:45 and 8:15 AM undecided-limits mentions (morning.ts, at most 3 each).
+  private readonly nudgeTries = new NudgeTries();
   private lastArmAlert = 0;
   // True while any close-out (regular, carried-over or emergency) is running, so two never overlap.
   private closingOut = false;
@@ -1127,7 +1130,7 @@ export class Worker {
         /* an alert must never break the pass */
       }
     }
-    const steps: MorningSteps = { store: this.d.store, broker: this.d.broker, say: (c, t) => this.say(c, t), now: this.d.now, feed: this.d.settings.alpaca.dataFeed };
+    const steps: MorningSteps = { store: this.d.store, broker: this.d.broker, say: (c, t, o) => this.say(c, t, o), now: this.d.now, feed: this.d.settings.alpaca.dataFeed };
 
     // The limits flow for the next session (it may be a later day) runs at any hour, even on a weekend.
     // A failure here (the calendar, Discord) must not skip the order sync, the loss stop or the close-out below.
@@ -1722,6 +1725,8 @@ export class Worker {
     let cur = await postLimitsRequest(steps, today);
     cur = await this.loadNoteIfNeeded(steps, cur, now);
     cur = await postMorningReview(steps, cur);
+    // Michael's request of 2026-11-27: a mention at 7:45 and 8:15 AM Central while any limit is undecided (messaging only).
+    cur = await postUndecidedNudges(steps, cur, this.nudgeTries);
     cur = await postReminderIfNeeded(steps, cur);
     return cur;
   }

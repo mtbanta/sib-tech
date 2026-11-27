@@ -10161,3 +10161,17 @@ Checked at 12:07 to 12:10 PM CT. Research input for a human decision, never an i
 - **Monday 2026-11-30:** status `pending`; suggested limits borrowing cap 1, largest position 250 dollars, loss stop 500 dollars, 100 orders a minute, the same as Wednesday's. They need Michael's approval before the 8:30 AM CT open, or Monday lapses too. Exit pairs are off each morning until `pair on`.
 - **Fly:** release v42, unchanged since 2026-11-25 3:22 PM CT. Item 3 not deployed (awaits Michael's choice).
 - **Session timing note:** the 10:31 AM wait fired at 11:25 AM because the Mac was asleep; the 12:07 PM wait fired on time.
+
+## Michael's answers of 2026-11-27 (afternoon), saved verbatim
+
+> Item 3: option (d), hold it; revisit in the strategy phase if live data shows the need.
+> New, small: if the day's limits are still undecided at 7:45 AM Central, the bot posts a mention in commands asking me to approve; again at 8:15 AM if still undecided. Messaging only, group 2 review; deploy before 8:00 AM Monday if it passes.
+> Never print any token or key.
+
+- **Item 3 is held.** Branch `night-2026-11-25` (last commit `8dc17b1`) stays as it is, not merged and not deployed; it is to be revisited in the strategy phase if live data shows the need.
+- **The undecided-limits mention** is built on branch `nudge-2026-11-27` (`src/morning.ts`, `postUndecidedNudges`; called from `limitsFlow` in `src/worker.ts` between the 7:30 review and the 8:20 reminder; test `test/nudge-2026-11-27.test.ts`):
+  - At the open less 45 minutes and less 15 minutes (7:45 and 8:15 AM Central, since the open is 8:30 on every trading day, early-close days included), while the day is still pending (any limit undecided) and the evening request went out, one post in `commands` that mentions Michael and names the limits still waiting, with `approve` and `limits`.
+  - Each at most once (day phases `nudge745`, `nudge815`), only inside its own window (7:45 to 8:15, and 8:15 to the open); a worker started after a window does not post it late. A lapsed day gets none.
+  - Bounds: a failed post is tried at most 3 times in all, 30 s then 60 s apart (the bot itself retries a rate limit once), then stored as `failed <time>`; a post that throws counts as a failed try.
+  - No footer (a short line in `commands`, under decision 6's rule for one-line posts). It changes no limit and no day status. The existing 8:20 reminder (no mention) is unchanged.
+  - Tests: 6 new, full suite 1,186 of 1,186 pass; typecheck clean.

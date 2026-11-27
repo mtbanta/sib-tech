@@ -1,6 +1,7 @@
 // The limits flow. After each close the stack posts the NEXT trading day's suggested limits and a checklist to
 // the command channel. Michael approves or overrules each limit there that evening, and can review and change
-// them again before the open (the stack posts a review at 60 minutes before the open and a reminder at 10).
+// them again before the open (the stack posts a review at 60 minutes before the open, a mention at 45 and at 15 while any limit is
+// undecided, and a reminder at 10).
 // If any limit is undecided when the market opens, the stack does not trade that day. The borrowing cap is
 // set at Alpaca, and the day's starting equity read, only at 5 minutes before the open ("arming"), so the
 // account is never left at a raised cap overnight. This file builds the day record, the messages and the
@@ -348,7 +349,7 @@ export function decideLoad(day: DayRecord, on: boolean, now: Date, messageAt: Da
 // ---- the steps the scheduler runs ----
 
 export interface MorningSteps extends MorningDeps {
-  say: (channel: "commands" | "trading" | "alerts", text: string) => Promise<boolean>;
+  say: (channel: "commands" | "trading" | "alerts", text: string, opts?: { mentionOwner?: boolean }) => Promise<boolean>;
   now: () => Date;
   feed: string;
 }
@@ -386,6 +387,66 @@ export async function postReminderIfNeeded(steps: MorningSteps, day: DayRecord):
   if (t < addMinutes(day.openAt, -10) || t >= day.openAt) return day;
   if (!(await steps.say("commands", formatLimitsRequest(day, "reminder")))) return day; // not posted: try again next tick
   return setPhase(steps.store, day.tradeDate, "reminder", t.toISOString());
+}
+
+// Michael's request of 2026-11-27 (messaging only): "if the day's limits are still undecided at 7:45 AM Central, the bot posts a
+// mention in commands asking me to approve; again at 8:15 AM if still undecided." The times are the open less 45 and less 15 minutes
+// (7:45 and 8:15 AM Central with the open at 8:30, which is every trading day, early-close days included). Each nudge is posted at most
+// once (its day phase), only while the day is still pending (any limit undecided) and the evening request went out, and only inside its
+// own window: the first from open - 45 until open - 15, the second from open - 15 until the open. A worker started after a window has
+// passed does not post that nudge late (the next one, or the reminder at open - 10, follows). It never changes a limit or the day.
+export const NUDGES = [
+  { phase: "nudge745", fromMin: -45, untilMin: -15 },
+  { phase: "nudge815", fromMin: -15, untilMin: 0 },
+] as const;
+// A failed post is tried again at most NUDGE_MAX_TRIES times in all, waiting 30 s, then 60 s (the bot itself retries a rate limit once);
+// after the last failure the phase is stored as "failed <time>" so it is not tried again. The tries are counted in memory (a restart
+// starts the count again, still bounded by the window).
+export const NUDGE_MAX_TRIES = 3;
+export const NUDGE_RETRY_WAITS_MS = [30_000, 60_000] as const;
+export class NudgeTries {
+  private readonly tries = new Map<string, { n: number; nextAt: number }>();
+  due(key: string, t: number): boolean {
+    const s = this.tries.get(key);
+    return !s || t >= s.nextAt;
+  }
+  // Records a failed try; returns true when no try is left.
+  failed(key: string, t: number): boolean {
+    const n = (this.tries.get(key)?.n ?? 0) + 1;
+    this.tries.set(key, { n, nextAt: t + (NUDGE_RETRY_WAITS_MS[n - 1] ?? 0) });
+    return n >= NUDGE_MAX_TRIES;
+  }
+  forget(key: string): void {
+    this.tries.delete(key);
+  }
+}
+
+const LIMIT_WORDS: Record<LimitName, string> = { position: "largest position (`position`)", loss: "daily loss stop (`loss`)", trades: "orders a minute (`trades`)", cap: "borrowing cap (`cap`)" };
+
+export function formatUndecidedNudge(day: DayRecord): string {
+  const open = day.openAt ? centralClock(day.openAt) : "?";
+  const waiting = LIMIT_NAMES.filter((n) => !day.decided[n]).map((n) => LIMIT_WORDS[n]);
+  return `**Michael: the limits for ${dayWord(day.tradeDate)} are still not all decided** (waiting for you: ${waiting.length > 0 ? waiting.join(", ") : "see `limits`"}). The market opens at ${open}; if any limit is undecided then, I will not trade that day. Reply \`approve\` to accept them all as shown, or type \`limits\` to see them.`;
+}
+
+export async function postUndecidedNudges(steps: MorningSteps, day: DayRecord, tries: NudgeTries): Promise<DayRecord> {
+  const openAt = day.openAt;
+  if (!day.isTradingDay || day.status !== "pending" || !openAt || !day.phases.request) return day;
+  const t = steps.now();
+  for (const n of NUDGES) {
+    if (day.phases[n.phase] || day.status !== "pending") continue;
+    if (t < addMinutes(openAt, n.fromMin) || t >= addMinutes(openAt, n.untilMin)) continue;
+    const key = `${day.tradeDate}:${n.phase}`;
+    if (!tries.due(key, t.getTime())) continue;
+    const posted = await steps.say("commands", formatUndecidedNudge(day), { mentionOwner: true }).catch(() => false);
+    if (posted) {
+      tries.forget(key);
+      day = await setPhase(steps.store, day.tradeDate, n.phase, t.toISOString());
+    } else if (tries.failed(key, t.getTime())) {
+      day = await setPhase(steps.store, day.tradeDate, n.phase, `failed ${t.toISOString()}`);
+    }
+  }
+  return day;
 }
 
 // At the open, a day that is not fully approved becomes lapsed: no trading. Michael is told only if the session
