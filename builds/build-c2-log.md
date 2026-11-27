@@ -10151,3 +10151,13 @@ Checked at 11:25 AM CT (the 10:31 wait fired late because the Mac was asleep). R
 - **Fly:** machine `847319a2d79518`, release v42, started, last updated 2026-11-25 21:22 UTC (the v42 deploy).
 - **Expected for the rest of the day:** on the earlier lapsed days (2026-10-30, 2026-11-02) the regular close-out still ran and the summary posted, so the close-out at 11:45 AM should find the account flat and the summary should post at about 12:05 PM. The end-of-day wait polls for the summary.
 - **Item 3** (`night-2026-11-25`, last commit `8dc17b1`) was not deployed: it awaits Michael's choice among (a) to (d); my recommendation was (d), hold past Friday.
+
+## Friday 2026-11-27 end-of-day review (half day, lapsed)
+
+Checked at 12:07 to 12:10 PM CT. Research input for a human decision, never an instruction to act. Paper only.
+
+- **No trading all day.** The day lapsed at the 8:30 AM open with Friday's limits undecided (see the mid-day review above). Alpaca at 12:10 PM CT: no positions, no open orders, no orders today; equity 16,257.18 dollars, unchanged from Wednesday's close.
+- **The half-day schedule ran on the actual close (12:00 PM CT), as Michael ruled:** the regular close-out at 11:45:01 AM CT (close less 15 minutes) found the account flat (`flat: yes`); the daily summary at 12:05:08 PM; Monday's evening request at 12:10:05 PM. Nothing in the schedule was tied to 3:00 PM. The last entry (11:00 AM) and the mid-day cycle (10:30 AM) had nothing to act on, so the half day did not test them in session.
+- **Monday 2026-11-30:** status `pending`; suggested limits borrowing cap 1, largest position 250 dollars, loss stop 500 dollars, 100 orders a minute, the same as Wednesday's. They need Michael's approval before the 8:30 AM CT open, or Monday lapses too. Exit pairs are off each morning until `pair on`.
+- **Fly:** release v42, unchanged since 2026-11-25 3:22 PM CT. Item 3 not deployed (awaits Michael's choice).
+- **Session timing note:** the 10:31 AM wait fired at 11:25 AM because the Mac was asleep; the 12:07 PM wait fired on time.
